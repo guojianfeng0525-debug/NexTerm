@@ -1,0 +1,863 @@
+//! SQLite storage backend, organized per module with proper normalized tables.
+//!
+//! Every application domain owns a dedicated table with typed columns
+//! (e.g. `connections` has one row per saved connection with `id`, `host`,
+//! `port`, `username`, ...). Sensitive values are encrypted by the frontend
+//! (AES-GCM with the app-password-derived key) before they are written, so
+//! password columns only ever hold ciphertext blobs. Only `preferences` and
+//! `workspace` remain generic key-value tables (their data is inherently a
+//! key-value map / a serialized layout tree).
+//!
+//! The old single-value-per-key layout (each module table was `key`/`value`)
+//! is detected on startup and renamed to `<name>_legacy` so the frontend can
+//! migrate its data into the normalized tables before `drop_legacy_tables`
+//! removes them.
+
+use rusqlite::{params_from_iter, Connection, Row};
+use rusqlite::types::{Value as SqlValue, ValueRef};
+use serde_json::{Map as JsonMap, Value as JsonValue};
+use std::sync::Mutex;
+use tauri::State;
+
+/// Allow-listed normalized tables. Table names are validated against this
+/// list before being interpolated into SQL, so no injection is possible.
+pub const TABLES: [&str; 23] = [
+    "connections",
+    "folders",
+    "active_connections",
+    "profiles",
+    "vault_records",
+    "app_lock",
+    "command_usage",
+    "command_history",
+    "command_stats",
+    "toolbox_apps",
+    "tunnels",
+    "services",
+    "notes",
+    "api_collections",
+    "api_environments",
+    // Preferences — normalized single-row tables (no JSON blob columns).
+    "app_settings",
+    "layout_config",
+    "terminal_appearance",
+    "editor_config",
+    // Workspace layout — groups / tabs / grid tree / meta.
+    "workspace_meta",
+    "workspace_groups",
+    "workspace_tabs",
+    "workspace_grid_nodes",
+];
+
+/// Tables whose legacy key-value layout collides with a new normalized table
+/// name and therefore must be renamed before creating the new schema.
+const LEGACY_RENAME: [&str; 6] = [
+    "connections",
+    "profiles",
+    "app_lock",
+    "command_history",
+    "preferences",
+    "workspace",
+];
+
+/// Legacy key-value tables kept until the frontend migrates their data.
+const LEGACY_TABLES: [&str; 9] = [
+    "connections_legacy",
+    "profiles_legacy",
+    "app_lock_legacy",
+    "command_history_legacy",
+    "preferences_legacy",
+    "workspace_legacy",
+    "vault",
+    "toolbox",
+    "api_debug",
+];
+
+pub struct DbState {
+    conn: Mutex<Connection>,
+}
+
+impl DbState {
+    pub fn open(path: &std::path::Path) -> Result<Self, String> {
+        let conn = Connection::open(path).map_err(|e| format!("Failed to open database: {}", e))?;
+        rename_legacy_kv_tables(&conn)?;
+        conn.execute_batch(CREATE_SQL)
+            .map_err(|e| format!("Failed to init tables: {}", e))?;
+        // Drop the very first single-table layout if it somehow still exists.
+        let _ = conn.execute_batch("DROP TABLE IF EXISTS kv_store;");
+        // Schema evolution for databases created before a column existed.
+        // `CREATE TABLE IF NOT EXISTS` never alters existing tables, so any
+        // column added after a release must be back-filled here.
+        for (table, column, ddl) in [
+            ("connections", "jump_host", "jump_host TEXT"),
+            ("connections", "jump_port", "jump_port INTEGER"),
+            ("connections", "jump_username", "jump_username TEXT"),
+            ("connections", "jump_password", "jump_password TEXT"),
+            ("connections", "jump_use_key", "jump_use_key INTEGER NOT NULL DEFAULT 0"),
+            ("connections", "default_directory", "default_directory TEXT"),
+            ("toolbox_apps", "args", "args TEXT"),
+            ("toolbox_apps", "work_dir", "work_dir TEXT"),
+            ("tunnels", "jump_host", "jump_host TEXT"),
+            ("tunnels", "jump_port", "jump_port INTEGER"),
+            ("tunnels", "jump_username", "jump_username TEXT"),
+            ("tunnels", "jump_password", "jump_password TEXT"),
+            (
+                "app_settings",
+                "command_suggestions",
+                "command_suggestions INTEGER NOT NULL DEFAULT 1",
+            ),
+        ] {
+            ensure_column(&conn, table, column, ddl)?;
+        }
+        Ok(DbState {
+            conn: Mutex::new(conn),
+        })
+    }
+}
+
+/// Detect legacy `key`/`value` tables whose name collides with a normalized
+/// table and rename them to `<name>_legacy` so the new schema can be created
+/// and the old data preserved for frontend migration.
+fn rename_legacy_kv_tables(conn: &Connection) -> Result<(), String> {
+    for table in LEGACY_RENAME {
+        let exists: bool = conn
+            .prepare(&format!(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = '{}'",
+                table
+            ))
+            .map_err(|e| e.to_string())?
+            .exists([])
+            .map_err(|e| e.to_string())?;
+        if !exists {
+            continue;
+        }
+        let columns = table_columns(conn, table)?;
+        // Legacy layout starts with a `key` column; the new one never does.
+        if columns.first().map(String::as_str) != Some("key") {
+            continue;
+        }
+        let legacy = format!("{}_legacy", table);
+        let legacy_exists: bool = conn
+            .prepare(&format!(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = '{}'",
+                legacy
+            ))
+            .map_err(|e| e.to_string())?
+            .exists([])
+            .map_err(|e| e.to_string())?;
+        if legacy_exists {
+            // Already renamed on a previous launch — drop any stale duplicate.
+            let _ = conn.execute_batch(&format!("DROP TABLE IF EXISTS \"{}\";", table));
+        } else {
+            conn.execute_batch(&format!(
+                "ALTER TABLE \"{}\" RENAME TO \"{}\";",
+                table, legacy
+            ))
+            .map_err(|e| format!("Failed to rename legacy table {}: {}", table, e))?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_table(table: &str) -> Result<(), String> {
+    if TABLES.contains(&table) {
+        Ok(())
+    } else {
+        Err(format!("unknown table: {}", table))
+    }
+}
+
+fn pk_column(table: &str) -> Result<&'static str, String> {
+    Ok(match table {
+        "connections" => "id",
+        "folders" => "id",
+        "active_connections" => "tab_id",
+        "profiles" => "id",
+        "vault_records" => "id",
+        "app_lock" => "id",
+        "command_usage" => "command",
+        "command_history" => "command",
+        "command_stats" => "command",
+        "toolbox_apps" => "id",
+        "tunnels" => "id",
+        "services" => "id",
+        "notes" => "id",
+        "api_collections" => "id",
+        "api_environments" => "id",
+        "app_settings" => "id",
+        "layout_config" => "id",
+        "terminal_appearance" => "id",
+        "editor_config" => "id",
+        "workspace_meta" => "id",
+        "workspace_groups" => "group_id",
+        "workspace_tabs" => "tab_id",
+        "workspace_grid_nodes" => "node_id",
+        _ => return Err(format!("unknown table: {}", table)),
+    })
+}
+
+fn table_columns(conn: &Connection, table: &str) -> Result<Vec<String>, String> {
+    let mut stmt = conn
+        .prepare(&format!("PRAGMA table_info(\"{}\")", table))
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |r| r.get::<_, String>(1))
+        .map_err(|e| e.to_string())?;
+    rows.collect::<Result<_, _>>().map_err(|e| e.to_string())
+}
+
+/// Add a column to an existing table when it is missing. Used for schema
+/// evolution on databases created before a column existed.
+fn ensure_column(conn: &Connection, table: &str, column: &str, ddl: &str) -> Result<(), String> {
+    let columns = table_columns(conn, table)?;
+    if !columns.iter().any(|c| c == column) {
+        conn.execute_batch(&format!(
+            "ALTER TABLE \"{}\" ADD COLUMN {};",
+            table, ddl
+        ))
+        .map_err(|e| format!("Failed to add column {} to {}: {}", column, table, e))?;
+    }
+    Ok(())
+}
+
+fn json_to_sql(v: &JsonValue) -> SqlValue {
+    match v {
+        JsonValue::Null => SqlValue::Null,
+        JsonValue::Bool(b) => SqlValue::Integer(*b as i64),
+        JsonValue::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                SqlValue::Integer(i)
+            } else if let Some(f) = n.as_f64() {
+                SqlValue::Real(f)
+            } else {
+                SqlValue::Null
+            }
+        }
+        JsonValue::String(s) => SqlValue::Text(s.clone()),
+        // Nested arrays/objects are stored as JSON text.
+        JsonValue::Array(_) | JsonValue::Object(_) => SqlValue::Text(v.to_string()),
+    }
+}
+
+fn row_to_json(row: &Row, names: &[String]) -> rusqlite::Result<JsonMap<String, JsonValue>> {
+    let mut map = JsonMap::new();
+    for (i, name) in names.iter().enumerate() {
+        let value = match row.get_ref(i)? {
+            ValueRef::Null => JsonValue::Null,
+            ValueRef::Integer(n) => JsonValue::Number(n.into()),
+            ValueRef::Real(r) => serde_json::Number::from_f64(r)
+                .map(JsonValue::Number)
+                .unwrap_or(JsonValue::Null),
+            ValueRef::Text(t) => JsonValue::String(String::from_utf8_lossy(t).into_owned()),
+            ValueRef::Blob(_) => JsonValue::Null,
+        };
+        map.insert(name.clone(), value);
+    }
+    Ok(map)
+}
+
+/// Upsert one row into a normalized table. `row` must contain the primary key
+/// column with a non-empty value; other columns are validated against the
+/// actual table schema.
+#[tauri::command]
+pub fn row_upsert(
+    table: String,
+    row: JsonMap<String, JsonValue>,
+    state: State<'_, DbState>,
+) -> Result<(), String> {
+    validate_table(&table)?;
+    let pk = pk_column(&table)?.to_string();
+    let conn = state.conn.lock().map_err(|_| "db lock poisoned".to_string())?;
+    let columns = table_columns(&conn, &table)?;
+
+    let mut names: Vec<String> = Vec::new();
+    let mut params: Vec<SqlValue> = Vec::new();
+    let mut has_pk = false;
+    for col in &columns {
+        if let Some(v) = row.get(col) {
+            if *col == pk {
+                has_pk = true;
+                // Primary keys may be numeric (e.g. `id: 1` for single-row
+                // tables) or strings. Only null / empty strings are invalid.
+                let pk_invalid =
+                    v.is_null() || v.as_str().map_or(false, |s| s.is_empty());
+                if pk_invalid {
+                    return Err(format!("primary key '{}' must be non-empty", pk));
+                }
+            }
+            names.push(col.clone());
+            params.push(json_to_sql(v));
+        }
+    }
+    if !has_pk {
+        return Err(format!("row is missing the primary key column '{}'", pk));
+    }
+    if names.is_empty() {
+        return Err("row has no known columns".to_string());
+    }
+
+    let quoted: Vec<String> = names.iter().map(|c| format!("\"{}\"", c)).collect();
+    let placeholders: Vec<String> = (1..=names.len()).map(|i| format!("?{}", i)).collect();
+    let assigns: Vec<String> = names
+        .iter()
+        .map(|c| format!("\"{}\" = excluded.\"{}\"", c, c))
+        .collect();
+    // `command_stats` uses a composite PRIMARY KEY (command, scope) — the
+    // single-column ON CONFLICT(pk) clause would not match any unique index.
+    let conflict_clause = if table == "command_stats" {
+        "ON CONFLICT(\"command\",\"scope\") DO UPDATE SET".to_string()
+    } else {
+        format!("ON CONFLICT(\"{}\") DO UPDATE SET", pk)
+    };
+    let sql = format!(
+        "INSERT INTO \"{}\" ({}) VALUES ({}) {} {}",
+        table,
+        quoted.join(", "),
+        placeholders.join(", "),
+        conflict_clause,
+        assigns.join(", ")
+    );
+    conn.execute(&sql, params_from_iter(params.iter()))
+        .map_err(|e| {
+            tracing::error!(
+                "row_upsert failed for {} ({} cols: {}) -> {}",
+                table,
+                names.len(),
+                names.join(","),
+                e
+            );
+            format!("upsert: {}", e)
+        })?;
+    Ok(())
+}
+
+/// Read one row by primary key.
+#[tauri::command]
+pub fn row_get(
+    table: String,
+    key: String,
+    state: State<'_, DbState>,
+) -> Result<Option<JsonMap<String, JsonValue>>, String> {
+    validate_table(&table)?;
+    let pk = pk_column(&table)?.to_string();
+    let conn = state.conn.lock().map_err(|_| "db lock poisoned".to_string())?;
+    let sql = format!("SELECT * FROM \"{}\" WHERE \"{}\" = ?1", table, pk);
+    let mut stmt = conn.prepare(&sql).map_err(|e| format!("prepare: {}", e))?;
+    let names: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
+    let mut rows = stmt
+        .query_map([&key], |row| row_to_json(row, &names))
+        .map_err(|e| format!("query: {}", e))?;
+    if let Some(row) = rows.next() {
+        return Ok(Some(row.map_err(|e| format!("row: {}", e))?));
+    }
+    Ok(None)
+}
+
+/// List every row in a normalized table.
+#[tauri::command]
+pub fn row_list(
+    table: String,
+    state: State<'_, DbState>,
+) -> Result<Vec<JsonMap<String, JsonValue>>, String> {
+    validate_table(&table)?;
+    let conn = state.conn.lock().map_err(|_| "db lock poisoned".to_string())?;
+    let sql = format!("SELECT * FROM \"{}\"", table);
+    let mut stmt = conn.prepare(&sql).map_err(|e| format!("prepare: {}", e))?;
+    let names: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
+    let rows = stmt
+        .query_map([], |row| row_to_json(row, &names))
+        .map_err(|e| format!("query: {}", e))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("rows: {}", e))?;
+    Ok(rows)
+}
+
+/// Delete one row by primary key.
+#[tauri::command]
+pub fn row_delete(
+    table: String,
+    key: String,
+    state: State<'_, DbState>,
+) -> Result<(), String> {
+    validate_table(&table)?;
+    let pk = pk_column(&table)?.to_string();
+    let conn = state.conn.lock().map_err(|_| "db lock poisoned".to_string())?;
+    let sql = format!("DELETE FROM \"{}\" WHERE \"{}\" = ?1", table, pk);
+    conn.execute(&sql, [&key]).map_err(|e| format!("delete: {}", e))?;
+    Ok(())
+}
+
+/// Delete every row in a normalized table (used for full-state rewrites).
+#[tauri::command]
+pub fn row_clear(table: String, state: State<'_, DbState>) -> Result<(), String> {
+    validate_table(&table)?;
+    let conn = state.conn.lock().map_err(|_| "db lock poisoned".to_string())?;
+    let sql = format!("DELETE FROM \"{}\"", table);
+    conn.execute_batch(&sql).map_err(|e| format!("clear: {}", e))?;
+    Ok(())
+}
+
+/// Read a value from a legacy key-value table (migration only).
+#[tauri::command]
+pub fn legacy_db_get(
+    table: String,
+    key: String,
+    state: State<'_, DbState>,
+) -> Result<Option<String>, String> {
+    if !LEGACY_TABLES.contains(&table.as_str()) {
+        return Err(format!("not a legacy table: {}", table));
+    }
+    let conn = state.conn.lock().map_err(|_| "db lock poisoned".to_string())?;
+    let sql = format!("SELECT value FROM \"{}\" WHERE key = ?1", table);
+    let mut stmt = conn.prepare(&sql).map_err(|e| format!("prepare: {}", e))?;
+    let mut rows = stmt
+        .query_map([&key], |row| row.get::<_, String>(0))
+        .map_err(|e| format!("query: {}", e))?;
+    if let Some(row) = rows.next() {
+        return Ok(Some(row.map_err(|e| format!("row: {}", e))?));
+    }
+    Ok(None)
+}
+
+/// Drop the legacy key-value tables after the frontend migrated their data
+/// into the normalized tables.
+#[tauri::command]
+pub fn drop_legacy_tables(state: State<'_, DbState>) -> Result<(), String> {
+    let conn = state.conn.lock().map_err(|_| "db lock poisoned".to_string())?;
+    conn.execute_batch(
+        "DROP TABLE IF EXISTS connections_legacy; \
+         DROP TABLE IF EXISTS profiles_legacy; \
+         DROP TABLE IF EXISTS app_lock_legacy; \
+         DROP TABLE IF EXISTS command_history_legacy; \
+         DROP TABLE IF EXISTS preferences_legacy; \
+         DROP TABLE IF EXISTS workspace_legacy; \
+         DROP TABLE IF EXISTS vault; \
+         DROP TABLE IF EXISTS toolbox; \
+         DROP TABLE IF EXISTS api_debug;",
+    )
+    .map_err(|e| format!("drop legacy tables: {}", e))?;
+    Ok(())
+}
+
+const CREATE_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS "connections" (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL DEFAULT '',
+  host TEXT NOT NULL DEFAULT '',
+  port INTEGER NOT NULL DEFAULT 22,
+  username TEXT NOT NULL DEFAULT '',
+  protocol TEXT NOT NULL DEFAULT 'SSH',
+  folder TEXT,
+  profile_id TEXT,
+  created_at TEXT NOT NULL,
+  last_connected TEXT,
+  favorite INTEGER NOT NULL DEFAULT 0,
+  color TEXT,
+  tags TEXT,
+  description TEXT,
+  auth_method TEXT,
+  password TEXT,
+  private_key_path TEXT,
+  passphrase TEXT,
+  ftps_enabled INTEGER NOT NULL DEFAULT 0,
+  proxy_type TEXT,
+  proxy_host TEXT,
+  proxy_port INTEGER,
+  proxy_username TEXT,
+  proxy_password TEXT,
+  jump_host TEXT,
+  jump_port INTEGER,
+  jump_username TEXT,
+  jump_password TEXT,
+  jump_use_key INTEGER NOT NULL DEFAULT 0,
+  default_directory TEXT,
+  compression INTEGER NOT NULL DEFAULT 0,
+  keep_alive INTEGER NOT NULL DEFAULT 0,
+  keep_alive_interval INTEGER,
+  server_alive_count_max INTEGER,
+  domain TEXT,
+  rdp_resolution TEXT,
+  vnc_color_depth TEXT,
+  vnc_password TEXT,
+  sort_order INTEGER
+);
+CREATE TABLE IF NOT EXISTS "folders" (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL DEFAULT '',
+  path TEXT NOT NULL UNIQUE,
+  parent_path TEXT,
+  created_at TEXT NOT NULL,
+  sort_order INTEGER
+);
+CREATE TABLE IF NOT EXISTS "active_connections" (
+  tab_id TEXT PRIMARY KEY,
+  connection_id TEXT NOT NULL,
+  order_num INTEGER NOT NULL DEFAULT 0,
+  original_connection_id TEXT,
+  tab_type TEXT,
+  protocol TEXT
+);
+CREATE TABLE IF NOT EXISTS "profiles" (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL DEFAULT '',
+  host TEXT NOT NULL DEFAULT '',
+  port INTEGER NOT NULL DEFAULT 22,
+  username TEXT NOT NULL DEFAULT '',
+  auth_method TEXT NOT NULL DEFAULT 'password',
+  password TEXT,
+  private_key TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  favorite INTEGER NOT NULL DEFAULT 0,
+  color TEXT,
+  tags TEXT
+);
+CREATE TABLE IF NOT EXISTS "vault_records" (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL DEFAULT '',
+  address TEXT,
+  username TEXT,
+  password TEXT,
+  category TEXT,
+  notes TEXT,
+  favorite INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS "app_lock" (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  salt TEXT NOT NULL,
+  iterations INTEGER NOT NULL,
+  verifier TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS "command_usage" (
+  command TEXT PRIMARY KEY,
+  count INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS "command_history" (
+  command TEXT PRIMARY KEY,
+  count INTEGER NOT NULL DEFAULT 0,
+  last_used INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS "command_stats" (
+  command TEXT NOT NULL,
+  scope TEXT NOT NULL,
+  use_count INTEGER NOT NULL DEFAULT 0,
+  selection_count INTEGER NOT NULL DEFAULT 0,
+  rejection_count INTEGER NOT NULL DEFAULT 0,
+  last_used INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (command, scope)
+);
+CREATE TABLE IF NOT EXISTS "toolbox_apps" (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL DEFAULT '',
+  path TEXT NOT NULL DEFAULT '',
+  args TEXT,
+  work_dir TEXT,
+  icon_path TEXT,
+  category TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS "tunnels" (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL DEFAULT '',
+  bind_address TEXT NOT NULL DEFAULT '127.0.0.1',
+  listen_port INTEGER NOT NULL,
+  remote_host TEXT NOT NULL DEFAULT '',
+  remote_port INTEGER NOT NULL,
+  jump_host TEXT,
+  jump_port INTEGER,
+  jump_username TEXT,
+  jump_password TEXT,
+  group_name TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS "services" (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL DEFAULT '',
+  command TEXT NOT NULL DEFAULT '',
+  work_dir TEXT,
+  args TEXT,
+  env TEXT,
+  group_name TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS "notes" (
+  id TEXT PRIMARY KEY,
+  title TEXT NOT NULL DEFAULT '',
+  language TEXT NOT NULL DEFAULT 'text',
+  content TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS "api_collections" (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL DEFAULT '',
+  group_name TEXT,
+  request TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS "api_environments" (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL DEFAULT '',
+  variables TEXT NOT NULL DEFAULT '[]',
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS "app_settings" (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  language TEXT NOT NULL DEFAULT 'auto',
+  theme TEXT NOT NULL DEFAULT 'dark',
+  auto_reconnect INTEGER NOT NULL DEFAULT 1,
+  log_level TEXT NOT NULL DEFAULT 'info',
+  max_log_size INTEGER NOT NULL DEFAULT 100,
+  save_passwords INTEGER NOT NULL DEFAULT 0,
+  auto_lock_timeout INTEGER NOT NULL DEFAULT 30,
+  host_key_verification INTEGER NOT NULL DEFAULT 1,
+  enable_notifications INTEGER NOT NULL DEFAULT 1,
+  show_connection_manager INTEGER NOT NULL DEFAULT 1,
+  show_system_monitor INTEGER NOT NULL DEFAULT 1,
+  show_status_bar INTEGER NOT NULL DEFAULT 1,
+  connection_timeout INTEGER NOT NULL DEFAULT 30,
+  keep_alive_interval INTEGER NOT NULL DEFAULT 60,
+  default_protocol TEXT NOT NULL DEFAULT 'SSH',
+  new_session_shortcut TEXT,
+  close_session_shortcut TEXT,
+  next_tab_shortcut TEXT,
+  previous_tab_shortcut TEXT,
+  follow_terminal_directory INTEGER NOT NULL DEFAULT 1,
+  show_resources INTEGER NOT NULL DEFAULT 0,
+  command_suggestions INTEGER NOT NULL DEFAULT 1,
+  api_active_env TEXT NOT NULL DEFAULT '',
+  vault_salt TEXT,
+  vault_iterations INTEGER,
+  vault_verifier TEXT,
+  vault_created_at INTEGER,
+  vault_updated_at INTEGER,
+  updated_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS "layout_config" (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  left_sidebar_visible INTEGER NOT NULL DEFAULT 1,
+  left_sidebar_size REAL NOT NULL DEFAULT 15,
+  right_sidebar_visible INTEGER NOT NULL DEFAULT 1,
+  right_sidebar_size REAL NOT NULL DEFAULT 20,
+  bottom_panel_visible INTEGER NOT NULL DEFAULT 1,
+  bottom_panel_size REAL NOT NULL DEFAULT 30,
+  zen_mode INTEGER NOT NULL DEFAULT 0,
+  updated_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS "terminal_appearance" (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  font_size REAL NOT NULL DEFAULT 14,
+  font_family TEXT NOT NULL DEFAULT 'Menlo, Monaco, monospace',
+  line_height REAL NOT NULL DEFAULT 1.2,
+  letter_spacing REAL NOT NULL DEFAULT 0,
+  cursor_style TEXT NOT NULL DEFAULT 'block',
+  cursor_blink INTEGER NOT NULL DEFAULT 1,
+  theme TEXT NOT NULL DEFAULT 'default',
+  scrollback INTEGER NOT NULL DEFAULT 10000,
+  allow_transparency INTEGER NOT NULL DEFAULT 0,
+  opacity REAL NOT NULL DEFAULT 1,
+  background_image TEXT NOT NULL DEFAULT '',
+  background_image_opacity INTEGER NOT NULL DEFAULT 100,
+  background_image_blur INTEGER NOT NULL DEFAULT 0,
+  background_image_position TEXT NOT NULL DEFAULT 'cover',
+  updated_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS "editor_config" (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  theme TEXT NOT NULL DEFAULT 'oneDark',
+  font_size INTEGER NOT NULL DEFAULT 14,
+  font_family TEXT NOT NULL DEFAULT "'JetBrains Mono', 'Fira Code', Menlo, Monaco, 'Courier New', monospace",
+  line_numbers INTEGER NOT NULL DEFAULT 1,
+  word_wrap INTEGER NOT NULL DEFAULT 1,
+  tab_size INTEGER NOT NULL DEFAULT 2,
+  highlight_active_line INTEGER NOT NULL DEFAULT 1,
+  fold_gutter INTEGER NOT NULL DEFAULT 1,
+  bracket_matching INTEGER NOT NULL DEFAULT 1,
+  match_brackets INTEGER NOT NULL DEFAULT 1,
+  updated_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS "workspace_meta" (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  active_group_id TEXT NOT NULL DEFAULT '',
+  next_group_id INTEGER NOT NULL DEFAULT 1,
+  updated_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS "workspace_groups" (
+  group_id TEXT PRIMARY KEY,
+  position INTEGER NOT NULL DEFAULT 0,
+  active_tab_id TEXT,
+  direction TEXT,
+  size REAL NOT NULL DEFAULT 1,
+  parent_id TEXT
+);
+CREATE TABLE IF NOT EXISTS "workspace_tabs" (
+  tab_id TEXT PRIMARY KEY,
+  group_id TEXT NOT NULL,
+  position INTEGER NOT NULL DEFAULT 0,
+  name TEXT NOT NULL DEFAULT '',
+  tab_type TEXT,
+  protocol TEXT,
+  host TEXT,
+  username TEXT,
+  original_connection_id TEXT,
+  connection_status TEXT NOT NULL DEFAULT 'disconnected',
+  reconnect_count INTEGER NOT NULL DEFAULT 0,
+  editor_file_path TEXT,
+  editor_connection_id TEXT,
+  tools_tab_view TEXT
+);
+CREATE TABLE IF NOT EXISTS "workspace_grid_nodes" (
+  node_id TEXT PRIMARY KEY,
+  type TEXT NOT NULL,
+  direction TEXT,
+  parent_id TEXT,
+  position INTEGER NOT NULL DEFAULT 0,
+  size REAL NOT NULL DEFAULT 1,
+  group_id TEXT
+);
+"#;
+
+#[cfg(test)]
+mod upsert_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn open_test_db() -> DbState {
+        // Unique file per invocation: tests run in parallel threads and a
+        // shared path caused "disk I/O error" / "readonly database" races.
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "nexterm-db-test-{}-{}.db",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed),
+        ));
+        let _ = std::fs::remove_file(&path);
+        let state = DbState::open(&path).expect("open test db");
+        state
+    }
+
+    fn upsert_raw(state: &DbState, table: &str, row: JsonMap<String, JsonValue>) -> Result<(), String> {
+        let pk = pk_column(table)?.to_string();
+        let conn = state.conn.lock().map_err(|_| "lock".to_string())?;
+        let columns = table_columns(&conn, table)?;
+        let mut names: Vec<String> = Vec::new();
+        let mut params: Vec<SqlValue> = Vec::new();
+        for col in &columns {
+            if let Some(v) = row.get(col) {
+                names.push(col.clone());
+                params.push(json_to_sql(v));
+            }
+        }
+        let quoted: Vec<String> = names.iter().map(|c| format!("\"{}\"", c)).collect();
+        let placeholders: Vec<String> = (1..=names.len()).map(|i| format!("?{}", i)).collect();
+        let assigns: Vec<String> = names
+            .iter()
+            .map(|c| format!("\"{}\" = excluded.\"{}\"", c, c))
+            .collect();
+        let sql = format!(
+            "INSERT INTO \"{}\" ({}) VALUES ({}) ON CONFLICT(\"{}\") DO UPDATE SET {}",
+            table,
+            quoted.join(", "),
+            placeholders.join(", "),
+            pk,
+            assigns.join(", ")
+        );
+        conn.execute(&sql, params_from_iter(params.iter()))
+            .map_err(|e| format!("upsert: {}", e))?;
+        Ok(())
+    }
+
+    #[test]
+    fn upsert_connection_row_with_all_columns() {
+        let state = open_test_db();
+        let mut row = serde_json::Map::new();
+        row.insert("id".into(), json!("conn-1"));
+        row.insert("name".into(), json!("Test Server"));
+        row.insert("host".into(), json!("192.168.1.1"));
+        row.insert("port".into(), json!(22));
+        row.insert("username".into(), json!("root"));
+        row.insert("protocol".into(), json!("SSH"));
+        row.insert("folder".into(), json!("All Connections/Personal"));
+        row.insert("created_at".into(), json!("2026-01-01T00:00:00Z"));
+        row.insert("last_connected".into(), json!("2026-01-01T00:00:00Z"));
+        row.insert("auth_method".into(), json!("password"));
+        row.insert("password".into(), json!("encrypted-blob"));
+        row.insert("proxy_type".into(), json!("http"));
+        row.insert("proxy_host".into(), json!("proxy.local"));
+        row.insert("jump_host".into(), json!("bastion.local"));
+        row.insert("jump_port".into(), json!(22));
+        row.insert("jump_username".into(), json!("jumpuser"));
+        row.insert("jump_password".into(), json!("encrypted-jump"));
+        row.insert("jump_use_key".into(), json!(0));
+        row.insert("sort_order".into(), json!(3));
+        upsert_raw(&state, "connections", row).expect("upsert must succeed");
+
+        let conn = state.conn.lock().unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM connections WHERE id='conn-1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1, "connection row must be persisted");
+    }
+
+    /// Mirrors the frontend `connToRow` + `persistConnection` output (every
+    /// column of the connections table, encrypted fields as opaque strings).
+    #[test]
+    fn upsert_full_connection_row_mirroring_frontend() {
+        let state = open_test_db();
+        let mut row = serde_json::Map::new();
+        row.insert("id".into(), json!("conn-full"));
+        row.insert("name".into(), json!("Full"));
+        row.insert("host".into(), json!("h"));
+        row.insert("port".into(), json!(2222));
+        row.insert("username".into(), json!("u"));
+        row.insert("protocol".into(), json!("SSH"));
+        row.insert("folder".into(), json!("All Connections/Work"));
+        row.insert("profile_id".into(), JsonValue::Null);
+        row.insert("created_at".into(), json!("2026-01-01T00:00:00.000Z"));
+        row.insert("last_connected".into(), json!("2026-01-02T00:00:00.000Z"));
+        row.insert("favorite".into(), json!(0));
+        row.insert("color".into(), JsonValue::Null);
+        row.insert("tags".into(), JsonValue::Null);
+        row.insert("description".into(), JsonValue::Null);
+        row.insert("auth_method".into(), json!("password"));
+        row.insert("password".into(), json!("cipher"));
+        row.insert("private_key_path".into(), JsonValue::Null);
+        row.insert("passphrase".into(), json!("cipher2"));
+        row.insert("ftps_enabled".into(), json!(0));
+        row.insert("proxy_type".into(), json!("http"));
+        row.insert("proxy_host".into(), json!("proxy.local"));
+        row.insert("proxy_port".into(), json!(8080));
+        row.insert("proxy_username".into(), JsonValue::Null);
+        row.insert("proxy_password".into(), json!("cipher3"));
+        row.insert("jump_host".into(), json!("bastion.local"));
+        row.insert("jump_port".into(), json!(22));
+        row.insert("jump_username".into(), json!("ju"));
+        row.insert("jump_password".into(), json!("cipher4"));
+        row.insert("jump_use_key".into(), json!(0));
+        row.insert("compression".into(), json!(1));
+        row.insert("keep_alive".into(), json!(1));
+        row.insert("keep_alive_interval".into(), json!(60));
+        row.insert("server_alive_count_max".into(), json!(3));
+        row.insert("domain".into(), JsonValue::Null);
+        row.insert("rdp_resolution".into(), JsonValue::Null);
+        row.insert("vnc_color_depth".into(), JsonValue::Null);
+        row.insert("vnc_password".into(), json!("cipher5"));
+        row.insert("sort_order".into(), JsonValue::Null);
+        upsert_raw(&state, "connections", row).expect("full-row upsert must succeed");
+
+        let conn = state.conn.lock().unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM connections WHERE id='conn-full'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+}

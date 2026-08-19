@@ -1,0 +1,139 @@
+import React from 'react';
+import { useTranslation } from 'react-i18next';
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuSeparator,
+  ContextMenuShortcut,
+  ContextMenuTrigger,
+} from '@/components/ui/context-menu';
+import {
+  Copy,
+  Clipboard,
+  Search,
+  Trash2,
+  FileText,
+  RefreshCw,
+} from 'lucide-react';
+
+interface TerminalContextMenuProps {
+  children: React.ReactNode;
+  onCopy: () => void;
+  onPaste: () => void;
+  onClear: () => void;
+  onClearScrollback: () => void;
+  onSearch: () => void;
+  onFindNext?: () => void;
+  onFindPrevious?: () => void;
+  onSelectAll: () => void;
+  onSaveToFile: () => void;
+  onReconnect?: () => void;
+  hasSelection: boolean;
+  searchActive?: boolean;
+}
+
+// Detect platform for keyboard shortcuts (using modern userAgentData with fallback)
+const isMac = typeof navigator !== 'undefined' && (
+  // Modern API (Chromium-based browsers)
+  (navigator as Navigator & { userAgentData?: { platform: string } }).userAgentData?.platform === 'macOS' ||
+  // Fallback for other browsers
+  navigator.platform?.toUpperCase().indexOf('MAC') >= 0 ||
+  // Additional fallback using userAgent
+  /Mac|iPhone|iPad|iPod/i.test(navigator.userAgent)
+);
+const modKey = isMac ? '⌘' : 'Ctrl';
+
+export function TerminalContextMenu({
+  children,
+  onCopy,
+  onPaste,
+  onClear,
+  onClearScrollback,
+  onSearch,
+  onFindNext,
+  onFindPrevious,
+  onSelectAll,
+  onSaveToFile,
+  onReconnect,
+  hasSelection,
+  searchActive = false,
+}: TerminalContextMenuProps) {
+  const { t } = useTranslation();
+  return (
+    <ContextMenu>
+      <ContextMenuTrigger asChild>
+        {children}
+      </ContextMenuTrigger>
+      <ContextMenuContent className="w-64">
+        <ContextMenuItem onClick={onCopy} disabled={!hasSelection}>
+          <Copy className="mr-2 h-4 w-4" />
+          <span>{t('contextMenu.copy')}</span>
+          <ContextMenuShortcut>{modKey}+C</ContextMenuShortcut>
+        </ContextMenuItem>
+        <ContextMenuItem onClick={onPaste}>
+          <Clipboard className="mr-2 h-4 w-4" />
+          <span>{t('contextMenu.paste')}</span>
+          <ContextMenuShortcut>{modKey}+V</ContextMenuShortcut>
+        </ContextMenuItem>
+        
+        <ContextMenuSeparator />
+        
+        <ContextMenuItem onClick={onSearch}>
+          <Search className="mr-2 h-4 w-4" />
+          <span>{t('contextMenu.search')}</span>
+          <ContextMenuShortcut>{modKey}+F</ContextMenuShortcut>
+        </ContextMenuItem>
+        
+        {searchActive && onFindNext && (
+          <ContextMenuItem onClick={onFindNext}>
+            <Search className="mr-2 h-4 w-4" />
+            <span>{t('contextMenu.findNext')}</span>
+            <ContextMenuShortcut>F3</ContextMenuShortcut>
+          </ContextMenuItem>
+        )}
+        
+        {searchActive && onFindPrevious && (
+          <ContextMenuItem onClick={onFindPrevious}>
+            <Search className="mr-2 h-4 w-4" />
+            <span>{t('contextMenu.findPrevious')}</span>
+            <ContextMenuShortcut>⇧F3</ContextMenuShortcut>
+          </ContextMenuItem>
+        )}
+        
+        <ContextMenuSeparator />
+        
+        <ContextMenuItem onClick={onClear}>
+          <Trash2 className="mr-2 h-4 w-4" />
+          <span>{t('contextMenu.clearTerminal')}</span>
+        </ContextMenuItem>
+        <ContextMenuItem onClick={onClearScrollback}>
+          <Trash2 className="mr-2 h-4 w-4" />
+          <span>{t('contextMenu.clearScrollback')}</span>
+        </ContextMenuItem>
+        
+        <ContextMenuSeparator />
+        
+        <ContextMenuItem onClick={onSelectAll}>
+          <FileText className="mr-2 h-4 w-4" />
+          <span>{t('contextMenu.selectAll')}</span>
+          <ContextMenuShortcut>{modKey}+A</ContextMenuShortcut>
+        </ContextMenuItem>
+        <ContextMenuItem onClick={onSaveToFile}>
+          <FileText className="mr-2 h-4 w-4" />
+          <span>{t('contextMenu.saveOutputToFile')}</span>
+        </ContextMenuItem>
+        
+        {onReconnect && (
+          <>
+            <ContextMenuSeparator />
+            <ContextMenuItem onClick={onReconnect}>
+              <RefreshCw className="mr-2 h-4 w-4" />
+              <span>{t('contextMenu.reconnect')}</span>
+            </ContextMenuItem>
+          </>
+        )}
+      </ContextMenuContent>
+    </ContextMenu>
+  );
+}

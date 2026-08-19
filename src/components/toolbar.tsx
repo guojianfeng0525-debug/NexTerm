@@ -1,0 +1,372 @@
+import React from 'react';
+import { useTranslation } from 'react-i18next';
+import { Button } from './ui/button';
+import { Separator } from './ui/separator';
+import { 
+  Plus, 
+  FolderOpen, 
+  Settings, 
+  PanelRightClose,
+  PanelRightOpen,
+  PanelLeftClose,
+  PanelLeftOpen,
+  PanelBottomClose,
+  PanelBottomOpen,
+  Maximize2,
+  LayoutGrid,
+  Clock,
+  Server,
+  Zap
+} from 'lucide-react';
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from './ui/tooltip';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from './ui/dropdown-menu';
+
+export interface RecentConnection {
+  id: string;
+  name: string;
+  host: string;
+  username: string;
+  port?: number;
+  lastConnected?: string;
+}
+
+interface ToolbarProps {
+  onNewConnection?: () => void;
+  onOpenConnection?: () => void;
+  onOpenSFTP?: () => void;
+  onOpenSettings?: () => void;
+  onToggleLeftSidebar?: () => void;
+  onToggleRightSidebar?: () => void;
+  onToggleBottomPanel?: () => void;
+  onToggleZenMode?: () => void;
+  onApplyPreset?: (preset: string) => void;
+  onQuickConnect?: (connectionId: string) => void;
+  recentConnections?: RecentConnection[];
+  leftSidebarVisible?: boolean;
+  rightSidebarVisible?: boolean;
+  bottomPanelVisible?: boolean;
+  zenMode?: boolean;
+}
+
+
+
+export function Toolbar({
+  onNewConnection,
+  onOpenConnection,
+  onOpenSFTP: _onOpenSFTP,
+  onOpenSettings,
+  onToggleLeftSidebar,
+  onToggleRightSidebar,
+  onToggleBottomPanel,
+  onToggleZenMode,
+  onApplyPreset,
+  onQuickConnect,
+  recentConnections = [],
+  leftSidebarVisible,
+  rightSidebarVisible,
+  bottomPanelVisible,
+  zenMode
+}: ToolbarProps) {
+  const { t } = useTranslation();
+
+  return (
+    <TooltipProvider>
+      <div className="border-b border-border bg-background px-2 py-1 flex items-center gap-1">
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button variant="ghost" size="sm" onClick={onNewConnection}>
+              <Plus className="w-4 h-4" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>{t('toolbar.newConnection')}</TooltipContent>
+        </Tooltip>
+
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button variant="ghost" size="sm" onClick={onOpenConnection}>
+              <FolderOpen className="w-4 h-4" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>{t('toolbar.openConnection')}</TooltipContent>
+        </Tooltip>
+
+        {/* Quick Connect Dropdown */}
+        <DropdownMenu>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <DropdownMenuTrigger asChild>
+                <Button variant="ghost" size="sm" className="gap-1">
+                  <Zap className="w-4 h-4" />
+                </Button>
+              </DropdownMenuTrigger>
+            </TooltipTrigger>
+            <TooltipContent>{t('toolbar.quickConnect')}</TooltipContent>
+          </Tooltip>
+          <DropdownMenuContent align="start" className="w-72">
+            <DropdownMenuLabel className="flex items-center gap-2">
+              <Clock className="w-4 h-4" />
+              {t('toolbar.recentConnections')}
+            </DropdownMenuLabel>
+            <DropdownMenuSeparator />
+            {recentConnections.length > 0 ? (
+              recentConnections.map((connection) => (
+                <DropdownMenuItem
+                  key={connection.id}
+                  onClick={() => onQuickConnect?.(connection.id)}
+                  className="flex items-start gap-3 py-2.5 cursor-pointer"
+                >
+                  <Server className="w-4 h-4 mt-0.5 text-muted-foreground flex-shrink-0" />
+                  <div className="flex-1 min-w-0">
+                    <div className="font-medium truncate">{connection.name}</div>
+                    <div className="text-xs text-muted-foreground truncate">
+                      {connection.username}@{connection.host}{connection.port && connection.port !== 22 ? `:${connection.port}` : ''}
+                    </div>
+                  </div>
+                  {connection.lastConnected && (
+                    <span className="text-xs text-muted-foreground flex-shrink-0">
+                      {(() => {
+                        const date = new Date(connection.lastConnected);
+                        const now = new Date();
+                        const diffMs = now.getTime() - date.getTime();
+                        const diffMins = Math.floor(diffMs / 60000);
+                        const diffHours = Math.floor(diffMs / 3600000);
+                        const diffDays = Math.floor(diffMs / 86400000);
+                        if (diffMins < 1) return t('toolbar.justNow');
+                        if (diffMins < 60) return t('toolbar.minutesAgo', { count: diffMins });
+                        if (diffHours < 24) return t('toolbar.hoursAgo', { count: diffHours });
+                        if (diffDays < 7) return t('toolbar.daysAgo', { count: diffDays });
+                        return date.toLocaleDateString();
+                      })()}
+                    </span>
+                  )}
+                </DropdownMenuItem>
+              ))
+            ) : (
+              <div className="px-2 py-4 text-center text-sm text-muted-foreground">
+                <Clock className="w-8 h-8 mx-auto mb-2 opacity-50" />
+                <p>{t('toolbar.noRecentConnections')}</p>
+                <p className="text-xs mt-1">{t('toolbar.noRecentConnectionsDesc')}</p>
+              </div>
+            )}
+            {recentConnections.length > 0 && (
+              <>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem onClick={onNewConnection} className="text-primary">
+                  <Plus className="w-4 h-4 mr-2" />
+                  {t('toolbar.newConnection')}
+                </DropdownMenuItem>
+              </>
+            )}
+          </DropdownMenuContent>
+        </DropdownMenu>
+{/* 
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button variant="ghost" size="sm">
+              <Save className="w-4 h-4" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>Save Session</TooltipContent>
+        </Tooltip>
+
+        <Separator orientation="vertical" className="h-4 mx-1" />
+
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button variant="ghost" size="sm">
+              <Copy className="w-4 h-4" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>Copy</TooltipContent>
+        </Tooltip>
+
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button variant="ghost" size="sm">
+              <Clipboard className="w-4 h-4" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>Paste</TooltipContent>
+        </Tooltip>
+
+        <Separator orientation="vertical" className="h-4 mx-1" />
+
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button variant="ghost" size="sm">
+              <Search className="w-4 h-4" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>Find</TooltipContent>
+        </Tooltip>
+
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button variant="ghost" size="sm">
+              <Lock className="w-4 h-4" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>Lock Session</TooltipContent>
+        </Tooltip>
+
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button variant="ghost" size="sm">
+              <Palette className="w-4 h-4" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>Color Scheme</TooltipContent>
+        </Tooltip>
+
+        <Separator orientation="vertical" className="h-4 mx-1" />
+
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button variant="ghost" size="sm">
+              <Globe className="w-4 h-4" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>SSH Tunneling</TooltipContent>
+        </Tooltip>
+
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button variant="ghost" size="sm" onClick={onOpenSFTP}>
+              <FileText className="w-4 h-4" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>File Transfer</TooltipContent>
+        </Tooltip>
+
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button variant="ghost" size="sm">
+              <RotateCcw className="w-4 h-4" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>Reconnect</TooltipContent>
+        </Tooltip> */}
+
+        <Separator orientation="vertical" className="h-4 mx-1" />
+
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button variant="ghost" size="sm" onClick={onOpenSettings}>
+              <Settings className="w-4 h-4" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>{t('toolbar.options')}</TooltipContent>
+        </Tooltip>
+
+        <Separator orientation="vertical" className="h-4 mx-1" />
+
+        {/* Layout Controls */}
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button 
+              variant="ghost" 
+              size="sm" 
+              onClick={onToggleLeftSidebar}
+              className={!leftSidebarVisible ? 'opacity-50' : ''}
+            >
+              {leftSidebarVisible ? <PanelLeftClose className="w-4 h-4" /> : <PanelLeftOpen className="w-4 h-4" />}
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>{t(leftSidebarVisible ? 'common.hide' : 'common.show')} {t('toolbar.toggleConnectionManager')}</TooltipContent>
+        </Tooltip>
+
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button 
+              variant="ghost" 
+              size="sm" 
+              onClick={onToggleBottomPanel}
+              className={!bottomPanelVisible ? 'opacity-50' : ''}
+            >
+              {bottomPanelVisible ? <PanelBottomClose className="w-4 h-4" /> : <PanelBottomOpen className="w-4 h-4" />}
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>{t(bottomPanelVisible ? 'common.hide' : 'common.show')} {t('toolbar.toggleFileBrowser')}</TooltipContent>
+        </Tooltip>
+
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button 
+              variant="ghost" 
+              size="sm" 
+              onClick={onToggleRightSidebar}
+              className={!rightSidebarVisible ? 'opacity-50' : ''}
+            >
+              {rightSidebarVisible ? <PanelRightClose className="w-4 h-4" /> : <PanelRightOpen className="w-4 h-4" />}
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>{t(rightSidebarVisible ? 'common.hide' : 'common.show')} {t('toolbar.toggleMonitorPanel')}</TooltipContent>
+        </Tooltip>
+
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button 
+              variant="ghost" 
+              size="sm" 
+              onClick={onToggleZenMode}
+              className={zenMode ? 'bg-accent' : ''}
+            >
+              <Maximize2 className="w-4 h-4" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>{t('toolbar.toggleZenMode')}</TooltipContent>
+        </Tooltip>
+
+        {/* Layout Presets Dropdown */}
+        <DropdownMenu>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <DropdownMenuTrigger asChild>
+                <Button variant="ghost" size="sm">
+                  <LayoutGrid className="w-4 h-4" />
+                </Button>
+              </DropdownMenuTrigger>
+            </TooltipTrigger>
+            <TooltipContent>{t('toolbar.layoutPresets')}</TooltipContent>
+          </Tooltip>
+          <DropdownMenuContent align="end">
+            <DropdownMenuLabel>{t('toolbar.layoutPresets')}</DropdownMenuLabel>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem onClick={() => onApplyPreset?.('Default')}>
+              {t('toolbar.defaultLayout')}
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={() => onApplyPreset?.('Minimal')}>
+              {t('toolbar.minimalTerminalOnly')}
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={() => onApplyPreset?.('Focus Mode')}>
+              {t('toolbar.focusMode')}
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={() => onApplyPreset?.('Full Stack')}>
+              {t('toolbar.fullStackAllPanels')}
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem onClick={() => onApplyPreset?.('Zen Mode')}>
+              {t('toolbar.zenMode')}
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+
+        {/* <Tooltip>
+          <TooltipTrigger asChild>
+            <Button variant="ghost" size="sm">
+              <MoreHorizontal className="w-4 h-4" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>More Tools</TooltipContent>
+        </Tooltip> */}
+      </div>
+    </TooltipProvider>
+  );
+}

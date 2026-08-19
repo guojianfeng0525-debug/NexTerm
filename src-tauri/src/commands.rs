@@ -1,0 +1,4070 @@
+use crate::connection_manager::ConnectionManager;
+use crate::ftp_client::FtpConfig;
+use crate::os_detect::{self, OsInfo};
+use crate::proxy::{ProxyConfig, ProxyType};
+use crate::sftp_client::{FileEntry, FileEntryType, SftpAuthMethod, SftpConfig};
+use crate::ssh::{AuthMethod, JumpConfig, SshConfig};
+use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use tauri::State;
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ConnectRequest {
+    pub connection_id: String,
+    pub host: String,
+    pub port: u16,
+    pub username: String,
+    pub auth_method: String,
+    pub password: Option<String>,
+    pub key_path: Option<String>,
+    pub passphrase: Option<String>,
+    /// Advanced SSH options — `Option` so legacy callers that omit them keep
+    /// the previous defaults (compression on, keepalive 60 s / 3).
+    pub compression: Option<bool>,
+    pub keepalive_enabled: Option<bool>,
+    pub keepalive_interval: Option<u64>,
+    pub keepalive_max: Option<u32>,
+    /// Proxy options — ignored when `proxy_type` is "none" or missing.
+    pub proxy_type: Option<String>,
+    pub proxy_host: Option<String>,
+    pub proxy_port: Option<u16>,
+    pub proxy_username: Option<String>,
+    pub proxy_password: Option<String>,
+    /// SSH jump host options — ignored when `jump_host` is empty/missing.
+    pub jump_host: Option<String>,
+    pub jump_port: Option<u16>,
+    pub jump_username: Option<String>,
+    pub jump_password: Option<String>,
+    /// When `true`, the jump host authenticates with the same public key
+    /// (and passphrase) used for the target host.
+    pub jump_use_key: Option<bool>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct MemoryStats {
+    pub total: u64,
+    pub used: u64,
+    pub free: u64,
+    pub available: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DiskStats {
+    pub total: String,
+    pub used: String,
+    pub available: String,
+    pub use_percent: f64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SystemStats {
+    pub cpu_percent: f64,
+    /// Number of CPU cores on the remote host.
+    pub cores: u32,
+    pub memory: MemoryStats,
+    pub swap: MemoryStats,
+    pub disk: DiskStats,
+    pub uptime: String,
+    pub load_average: Option<String>,
+    /// Aggregate network throughput in bytes/sec. Only filled by the offline
+    /// probe path (`probe_server_stats`); the connected path keeps it `None`
+    /// because the frontend fetches per-interface bandwidth separately.
+    pub bandwidth: Option<NetworkBandwidthAggregate>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CommandResponse {
+    pub success: bool,
+    pub output: Option<String>,
+    pub error: Option<String>,
+}
+
+#[tauri::command]
+pub async fn ssh_connect(
+    request: ConnectRequest,
+    state: State<'_, Arc<ConnectionManager>>,
+) -> Result<CommandResponse, String> {
+    let proxy = build_proxy(&request)?;
+    let jump = build_jump(&request)?;
+
+    // Keepalive defaults match the connection dialog UI: enabled at 60 s / 3.
+    let keepalive_enabled = request.keepalive_enabled.unwrap_or(true);
+    let keepalive_interval = if keepalive_enabled {
+        Some(request.keepalive_interval.unwrap_or(60))
+    } else {
+        None
+    };
+    let keepalive_max = if keepalive_enabled {
+        Some(request.keepalive_max.unwrap_or(3))
+    } else {
+        None
+    };
+
+    let auth_method = match request.auth_method.as_str() {
+        "password" => AuthMethod::Password {
+            password: request.password.ok_or("Password required")?,
+        },
+        "publickey" => AuthMethod::PublicKey {
+            key_path: request.key_path.ok_or("Key path required")?,
+            passphrase: request.passphrase,
+        },
+        _ => return Err("Invalid auth method".to_string()),
+    };
+
+    let config = SshConfig {
+        host: request.host,
+        port: request.port,
+        username: request.username,
+        auth_method,
+        compression: request.compression.unwrap_or(true),
+        keepalive_interval,
+        keepalive_max,
+        proxy,
+        jump,
+    };
+
+    match state
+        .create_connection(request.connection_id.clone(), config)
+        .await
+    {
+        Ok(_) => Ok(CommandResponse {
+            success: true,
+            output: Some(format!("Connected: {}", request.connection_id)),
+            error: None,
+        }),
+        Err(e) => Ok(CommandResponse {
+            success: false,
+            output: None,
+            error: Some(e.to_string()),
+        }),
+    }
+}
+
+/** Build a full `SshConfig` from a connect request (shared by ssh_connect and
+ *  the offline resource probe). */
+fn build_ssh_config_from_request(request: &ConnectRequest) -> Result<SshConfig, String> {
+    let proxy = build_proxy(request)?;
+    let jump = build_jump(request)?;
+
+    let keepalive_enabled = request.keepalive_enabled.unwrap_or(true);
+    let keepalive_interval = if keepalive_enabled {
+        Some(request.keepalive_interval.unwrap_or(60))
+    } else {
+        None
+    };
+    let keepalive_max = if keepalive_enabled {
+        Some(request.keepalive_max.unwrap_or(3))
+    } else {
+        None
+    };
+
+    let auth_method = match request.auth_method.as_str() {
+        "password" => AuthMethod::Password {
+            password: request.password.clone().ok_or("Password required")?,
+        },
+        "publickey" => AuthMethod::PublicKey {
+            key_path: request.key_path.clone().ok_or("Key path required")?,
+            passphrase: request.passphrase.clone(),
+        },
+        _ => return Err("Invalid auth method".to_string()),
+    };
+
+    Ok(SshConfig {
+        host: request.host.clone(),
+        port: request.port,
+        username: request.username.clone(),
+        auth_method,
+        compression: request.compression.unwrap_or(true),
+        keepalive_interval,
+        keepalive_max,
+        proxy,
+        jump,
+    })
+}
+
+/// Collect system stats over an existing SSH client (shared by the connected
+/// path and the offline probe path).
+async fn collect_system_stats(client: &crate::ssh::SshClient, os_info: &OsInfo) -> SystemStats {
+    // CPU usage (percentage)
+    let cpu_percent = client
+        .execute_command(os_info.cpu_cmd())
+        .await
+        .ok()
+        .and_then(|s| s.trim().parse::<f64>().ok())
+        .unwrap_or(0.0);
+
+    // Memory stats (in MB)
+    let mem_output = client.execute_command(os_info.memory_cmd()).await.unwrap_or_default();
+    let mem_parts: Vec<&str> = mem_output.split_whitespace().collect();
+    let memory = MemoryStats {
+        total: mem_parts.first().and_then(|s| s.parse().ok()).unwrap_or(0),
+        used: mem_parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0),
+        free: mem_parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0),
+        available: mem_parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(0),
+    };
+
+    // Swap stats (in MB)
+    let swap_output = client.execute_command(os_info.swap_cmd()).await.unwrap_or_default();
+    let swap_parts: Vec<&str> = swap_output.split_whitespace().collect();
+    let swap = MemoryStats {
+        total: swap_parts.first().and_then(|s| s.parse().ok()).unwrap_or(0),
+        used: swap_parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0),
+        free: swap_parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0),
+        available: 0, // Swap doesn't have 'available' concept
+    };
+
+    // Disk stats for root filesystem
+    let disk_output = client.execute_command(os_info.disk_cmd()).await.unwrap_or_default();
+    let disk_parts: Vec<&str> = disk_output.trim().split_whitespace().collect();
+    let disk = DiskStats {
+        total: disk_parts.get(0).unwrap_or(&"0").to_string(),
+        used: disk_parts.get(1).unwrap_or(&"0").to_string(),
+        available: disk_parts.get(2).unwrap_or(&"0").to_string(),
+        use_percent: disk_parts
+            .get(3)
+            .and_then(|s| s.trim_end_matches('%').parse().ok())
+            .unwrap_or(0.0),
+    };
+
+    // Uptime
+    let uptime = client
+        .execute_command(os_info.uptime_cmd())
+        .await
+        .unwrap_or_else(|_| "Unknown".to_string())
+        .trim()
+        .to_string();
+
+    // CPU core count
+    let cores = client
+        .execute_command("nproc 2>/dev/null || grep -c ^processor /proc/cpuinfo 2>/dev/null || echo 1")
+        .await
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok())
+        .unwrap_or(1)
+        .max(1);
+
+    // Load average
+    let load_average = client
+        .execute_command(os_info.load_average_cmd())
+        .await
+        .ok()
+        .map(|s| s.trim().to_string());
+
+    SystemStats {
+        cpu_percent,
+        cores,
+        memory,
+        swap,
+        disk,
+        uptime,
+        load_average,
+        bandwidth: None,
+    }
+}
+
+/// Offline resource probe: opens a temporary SSH connection using the saved
+/// credentials, collects system stats, then closes the connection. Lets the
+/// server list show resource usage without the user having connected first.
+#[tauri::command]
+pub async fn probe_server_stats(request: ConnectRequest) -> Result<SystemStats, String> {
+    let config = build_ssh_config_from_request(&request)?;
+    let mut client = crate::ssh::SshClient::new();
+    client.connect(&config).await.map_err(|e| e.to_string())?;
+    let os_info = os_detect::detect_os(&client).await;
+    let mut stats = collect_system_stats(&client, &os_info).await;
+    // Network throughput needs its own ~1s double-sampling window on the same
+    // session, so the offline probe reports all four metrics.
+    if let Some(bw) = collect_network_bandwidth(&client, &os_info).await {
+        stats.bandwidth = Some(bw);
+    }
+    let _ = client.disconnect().await;
+    Ok(stats)
+}
+
+/// Map the proxy request fields into a `ProxyConfig`, or `None` when the
+/// connection should go direct.
+fn build_proxy(request: &ConnectRequest) -> Result<Option<ProxyConfig>, String> {
+    match request.proxy_type.as_deref() {
+        None | Some("none") | Some("") => Ok(None),
+        Some(kind) => {
+            let host = request
+                .proxy_host
+                .clone()
+                .filter(|h| !h.trim().is_empty())
+                .ok_or("Proxy host is required")?;
+            let proxy_type = match kind {
+                "http" => ProxyType::Http,
+                "socks4" => ProxyType::Socks4,
+                "socks5" => ProxyType::Socks5,
+                other => return Err(format!("Invalid proxy type: {other}")),
+            };
+            Ok(Some(ProxyConfig {
+                proxy_type,
+                host,
+                port: request.proxy_port.unwrap_or(8080),
+                username: request.proxy_username.clone(),
+                password: request.proxy_password.clone(),
+            }))
+        }
+    }
+}
+
+/// Map the jump-host request fields into a `JumpConfig`, or `None` when the
+/// connection should not go through a jump host.
+fn build_jump(request: &ConnectRequest) -> Result<Option<JumpConfig>, String> {
+    build_jump_fields(
+        &request.jump_host,
+        request.jump_port,
+        &request.jump_username,
+        &request.jump_password,
+        request.jump_use_key.unwrap_or(false),
+        &request.key_path,
+        &request.passphrase,
+    )
+}
+
+/// Shared jump-host builder used by both the SSH and SFTP connect paths.
+fn build_jump_fields(
+    jump_host: &Option<String>,
+    jump_port: Option<u16>,
+    jump_username: &Option<String>,
+    jump_password: &Option<String>,
+    jump_use_key: bool,
+    key_path: &Option<String>,
+    passphrase: &Option<String>,
+) -> Result<Option<JumpConfig>, String> {
+    let host = jump_host.clone().filter(|h| !h.trim().is_empty());
+    let Some(host) = host else {
+        return Ok(None);
+    };
+    let port = jump_port.unwrap_or(22);
+    let username = jump_username
+        .clone()
+        .filter(|u| !u.trim().is_empty())
+        .ok_or("Jump host username is required")?;
+
+    let auth_method = if jump_use_key {
+        let key_path = key_path
+            .clone()
+            .filter(|k| !k.trim().is_empty())
+            .ok_or("Jump host uses the public key, but no key path is set for this connection")?;
+        AuthMethod::PublicKey {
+            key_path,
+            passphrase: passphrase.clone(),
+        }
+    } else {
+        AuthMethod::Password {
+            password: jump_password
+                .clone()
+                .ok_or("Jump host password is required")?,
+        }
+    };
+
+    Ok(Some(JumpConfig {
+        host,
+        port,
+        username,
+        auth_method,
+    }))
+}
+
+/// Map the SFTP request's jump fields into a `JumpConfig`, or `None` when no
+/// jump host is configured.
+fn build_jump_sftp(request: &SftpConnectRequest) -> Result<Option<JumpConfig>, String> {
+    build_jump_fields(
+        &request.jump_host,
+        request.jump_port,
+        &request.jump_username,
+        &request.jump_password,
+        request.jump_use_key.unwrap_or(false),
+        &request.key_path,
+        &request.passphrase,
+    )
+}
+
+#[tauri::command]
+pub async fn ssh_cancel_connect(
+    connection_id: String,
+    state: State<'_, Arc<ConnectionManager>>,
+) -> Result<CommandResponse, String> {
+    if state.cancel_pending_connection(&connection_id).await {
+        Ok(CommandResponse {
+            success: true,
+            output: Some("Connection cancelled".to_string()),
+            error: None,
+        })
+    } else {
+        Ok(CommandResponse {
+            success: false,
+            output: None,
+            error: Some("No pending connection to cancel".to_string()),
+        })
+    }
+}
+
+#[tauri::command]
+pub async fn ssh_disconnect(
+    connection_id: String,
+    state: State<'_, Arc<ConnectionManager>>,
+) -> Result<CommandResponse, String> {
+    match state.close_connection(&connection_id).await {
+        Ok(_) => Ok(CommandResponse {
+            success: true,
+            output: Some("Disconnected".to_string()),
+            error: None,
+        }),
+        Err(e) => Ok(CommandResponse {
+            success: false,
+            output: None,
+            error: Some(e.to_string()),
+        }),
+    }
+}
+
+#[tauri::command]
+pub async fn ssh_execute_command(
+    connection_id: String,
+    command: String,
+    state: State<'_, Arc<ConnectionManager>>,
+) -> Result<CommandResponse, String> {
+    let connection = state
+        .get_connection(&connection_id)
+        .await
+        .ok_or("Connection not found")?;
+
+    let client = connection.read().await;
+
+    // Transform interactive commands to batch mode
+    let transformed_command = transform_interactive_command(&command);
+
+    match client.execute_command(&transformed_command).await {
+        Ok(output) => Ok(CommandResponse {
+            success: true,
+            output: Some(output),
+            error: None,
+        }),
+        Err(e) => {
+            // Check if it's an interactive command that failed
+            let error_msg = if is_interactive_command(&command) {
+                format!("{}\n\nNote: Interactive commands like '{}' may not work in this terminal. Try using batch mode alternatives.",
+                    e,
+                    get_command_name(&command))
+            } else {
+                e.to_string()
+            };
+
+            Ok(CommandResponse {
+                success: false,
+                output: None,
+                error: Some(error_msg),
+            })
+        }
+    }
+}
+
+// Helper function to transform interactive commands to batch mode
+fn transform_interactive_command(command: &str) -> String {
+    let cmd = command.trim();
+
+    // Handle 'top' - convert to batch mode with 1 iteration
+    if cmd == "top" || cmd.starts_with("top ") {
+        return format!("{} -bn1", cmd);
+    }
+
+    // Handle 'htop' - suggest alternative
+    if cmd == "htop" || cmd.starts_with("htop ") {
+        return "top -bn1".to_string();
+    }
+
+    // Return original command if no transformation needed
+    command.to_string()
+}
+
+// Helper function to check if a command is interactive
+fn is_interactive_command(command: &str) -> bool {
+    let cmd_name = get_command_name(command);
+    matches!(
+        cmd_name.as_str(),
+        "top"
+            | "htop"
+            | "vim"
+            | "vi"
+            | "nano"
+            | "emacs"
+            | "less"
+            | "more"
+            | "man"
+            | "tmux"
+            | "screen"
+    )
+}
+
+// Helper function to extract command name
+fn get_command_name(command: &str) -> String {
+    command.split_whitespace().next().unwrap_or("").to_string()
+}
+
+/// Get or detect OS info for a connection (cached after first call).
+///
+/// Concurrent callers for the same connection share a single in-flight
+/// detection via `OnceCell`; only the first caller runs `detect_os`.
+async fn get_os_info(
+    connection_id: &str,
+    client: &crate::ssh::SshClient,
+    state: &Arc<ConnectionManager>,
+) -> OsInfo {
+    state
+        .os_info_cache()
+        .get_or_init(connection_id, || async {
+            let info = os_detect::detect_os(client).await;
+            tracing::info!(
+                "Detected OS for {}: {} ({})",
+                connection_id,
+                info.pretty_name,
+                info.id
+            );
+            info
+        })
+        .await
+}
+
+#[tauri::command]
+pub async fn get_system_stats(
+    connection_id: String,
+    state: State<'_, Arc<ConnectionManager>>,
+) -> Result<SystemStats, String> {
+    let connection = state
+        .get_connection(&connection_id)
+        .await
+        .ok_or("Connection not found")?;
+
+    let client = connection.read().await;
+
+    // Detect OS for distro-aware commands
+    let os_info = get_os_info(&connection_id, &client, state.inner()).await;
+
+    Ok(collect_system_stats(&client, &os_info).await)
+
+}
+
+#[tauri::command]
+pub async fn list_files(
+    connection_id: String,
+    path: String,
+    state: State<'_, Arc<ConnectionManager>>,
+) -> Result<Vec<FileEntry>, String> {
+    let connection = state
+        .get_connection(&connection_id)
+        .await
+        .ok_or("Connection not found")?;
+
+    let client = connection.read().await;
+    let os_info = get_os_info(&connection_id, &client, state.inner()).await;
+    let command = os_info.list_files_cmd(&path);
+
+    let output = client
+        .execute_command(&command)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // Parse the `ls -l` output on the backend so the frontend never has to
+    // guess the column layout. Supports GNU `--time-style=long-iso` (used when
+    // GNU coreutils are detected) and the BusyBox/BSD default layout, plus
+    // ACL/SELinux/no-group variants. See `ls_parser` for details.
+    let entries = output
+        .lines()
+        .filter_map(crate::ls_parser::parse_ls_long_line)
+        .collect::<Vec<_>>();
+
+    Ok(entries)
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct FileTransferRequest {
+    pub connection_id: String,
+    pub local_path: String,
+    pub remote_path: String,
+    pub data: Option<Vec<u8>>, // For upload: file contents
+}
+
+#[derive(Debug, Serialize)]
+pub struct FileTransferResponse {
+    pub success: bool,
+    pub bytes_transferred: Option<u64>,
+    pub data: Option<Vec<u8>>, // For download: file contents
+    pub error: Option<String>,
+}
+
+/// @deprecated Use `download_remote_file` instead. Kept for backward compatibility.
+#[tauri::command]
+pub async fn sftp_download_file(
+    request: FileTransferRequest,
+    state: State<'_, Arc<ConnectionManager>>,
+) -> Result<FileTransferResponse, String> {
+    let connection = state
+        .get_connection(&request.connection_id)
+        .await
+        .ok_or("Connection not found")?;
+
+    let client = connection.read().await;
+
+    // If local_path is empty, download to memory (for browser download)
+    if request.local_path.is_empty() {
+        match client.download_file_to_memory(&request.remote_path).await {
+            Ok(data) => {
+                let bytes = data.len() as u64;
+                Ok(FileTransferResponse {
+                    success: true,
+                    bytes_transferred: Some(bytes),
+                    data: Some(data),
+                    error: None,
+                })
+            }
+            Err(e) => Ok(FileTransferResponse {
+                success: false,
+                bytes_transferred: None,
+                data: None,
+                error: Some(e.to_string()),
+            }),
+        }
+    } else {
+        // Download to local file
+        match client
+            .download_file(&request.remote_path, &request.local_path)
+            .await
+        {
+            Ok(bytes) => Ok(FileTransferResponse {
+                success: true,
+                bytes_transferred: Some(bytes),
+                data: None,
+                error: None,
+            }),
+            Err(e) => Ok(FileTransferResponse {
+                success: false,
+                bytes_transferred: None,
+                data: None,
+                error: Some(e.to_string()),
+            }),
+        }
+    }
+}
+
+/// @deprecated Use `upload_remote_file` instead. Kept for backward compatibility.
+#[tauri::command]
+pub async fn sftp_upload_file(
+    request: FileTransferRequest,
+    state: State<'_, Arc<ConnectionManager>>,
+) -> Result<FileTransferResponse, String> {
+    let connection = state
+        .get_connection(&request.connection_id)
+        .await
+        .ok_or("Connection not found")?;
+
+    let client = connection.read().await;
+
+    // If data is provided, write directly; otherwise read from local_path
+    let result = if let Some(data) = &request.data {
+        client
+            .upload_file_from_bytes(data, &request.remote_path)
+            .await
+    } else {
+        client
+            .upload_file(&request.local_path, &request.remote_path)
+            .await
+    };
+
+    match result {
+        Ok(bytes) => Ok(FileTransferResponse {
+            success: true,
+            bytes_transferred: Some(bytes),
+            data: None,
+            error: None,
+        }),
+        Err(e) => Ok(FileTransferResponse {
+            success: false,
+            bytes_transferred: None,
+            data: None,
+            error: Some(e.to_string()),
+        }),
+    }
+}
+
+// File operation commands
+
+/// Escape a path for use inside a POSIX single-quoted shell argument.
+/// Single quotes cannot appear inside a single-quoted string, so we end the
+/// quote, emit the escaped quote, and reopen the quote: `'` → `'\''`.
+fn shell_escape_single_quoted(path: &str) -> String {
+    path.replace('\'', "'\\''")
+}
+
+#[tauri::command]
+pub async fn create_directory(
+    connection_id: String,
+    path: String,
+    state: State<'_, Arc<ConnectionManager>>,
+) -> Result<bool, String> {
+    let connection = state
+        .get_connection(&connection_id)
+        .await
+        .ok_or("Connection not found")?;
+
+    let client = connection.read().await;
+    let command = format!("mkdir -p '{}'", shell_escape_single_quoted(&path));
+
+    match client.execute_command(&command).await {
+        Ok(_) => Ok(true),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+#[tauri::command]
+pub async fn delete_file(
+    connection_id: String,
+    path: String,
+    is_directory: bool,
+    state: State<'_, Arc<ConnectionManager>>,
+) -> Result<bool, String> {
+    let connection = state
+        .get_connection(&connection_id)
+        .await
+        .ok_or("Connection not found")?;
+
+    let client = connection.read().await;
+    let command = if is_directory {
+        format!("rm -rf '{}'", shell_escape_single_quoted(&path))
+    } else {
+        format!("rm -f '{}'", shell_escape_single_quoted(&path))
+    };
+
+    match client.execute_command(&command).await {
+        Ok(_) => Ok(true),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+#[tauri::command]
+pub async fn rename_file(
+    connection_id: String,
+    old_path: String,
+    new_path: String,
+    state: State<'_, Arc<ConnectionManager>>,
+) -> Result<bool, String> {
+    let connection = state
+        .get_connection(&connection_id)
+        .await
+        .ok_or("Connection not found")?;
+
+    let client = connection.read().await;
+    let command = format!(
+        "mv '{}' '{}'",
+        shell_escape_single_quoted(&old_path),
+        shell_escape_single_quoted(&new_path)
+    );
+
+    match client.execute_command(&command).await {
+        Ok(_) => Ok(true),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+#[tauri::command]
+pub async fn create_file(
+    connection_id: String,
+    path: String,
+    content: String,
+    state: State<'_, Arc<ConnectionManager>>,
+) -> Result<bool, String> {
+    let connection = state
+        .get_connection(&connection_id)
+        .await
+        .ok_or("Connection not found")?;
+
+    let client = connection.read().await;
+
+    // Upload the content as bytes
+    match client
+        .upload_file_from_bytes(content.as_bytes(), &path)
+        .await
+    {
+        Ok(_) => Ok(true),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+#[tauri::command]
+pub async fn read_file_content(
+    connection_id: String,
+    path: String,
+    state: State<'_, Arc<ConnectionManager>>,
+) -> Result<String, String> {
+    let connection = state
+        .get_connection(&connection_id)
+        .await
+        .ok_or("Connection not found")?;
+
+    let client = connection.read().await;
+    let command = format!("cat '{}'", shell_escape_single_quoted(&path));
+
+    match client.execute_command(&command).await {
+        Ok(output) => Ok(output),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// Response for `read_remote_file_base64`.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Base64FileResponse {
+    pub data: String,
+    pub size: u64,
+    pub mime_type: String,
+}
+
+/// Read a remote file and return its content as base64 with an inferred MIME type.
+/// Used for image previews in the embedded file viewer. Refuses files > 20 MB.
+#[tauri::command]
+pub async fn read_remote_file_base64(
+    connection_id: String,
+    path: String,
+    state: State<'_, Arc<ConnectionManager>>,
+) -> Result<Base64FileResponse, String> {
+    let connection = state
+        .get_connection(&connection_id)
+        .await
+        .ok_or("Connection not found")?;
+
+    let client = connection.read().await;
+
+    // Refuse very large files to avoid memory / performance issues
+    let size_cmd = format!(
+        "stat -c '%s' '{}' 2>/dev/null || stat -f '%z' '{}'",
+        shell_escape_single_quoted(&path),
+        shell_escape_single_quoted(&path)
+    );
+    let size_str = client
+        .execute_command(&size_cmd)
+        .await
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let file_size: u64 = size_str.parse().unwrap_or(0);
+    if file_size > 20 * 1024 * 1024 {
+        return Err(format!(
+            "File too large for preview ({} MB). Download it first to open with your local application.",
+            file_size / (1024 * 1024)
+        ));
+    }
+
+    // Read raw bytes via `cat` then base64-encode on the remote side.
+    // `base64 -w0` (GNU) disables line wrapping; on macOS `base64` wraps by default,
+    // so we pipe through `tr -d '\n'` as a portable fallback.
+    let b64_cmd = format!(
+        "base64 -w0 '{}' 2>/dev/null || base64 '{}' | tr -d '\\n'",
+        shell_escape_single_quoted(&path),
+        shell_escape_single_quoted(&path)
+    );
+    let b64_data = client
+        .execute_command(&b64_cmd)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // Infer MIME type from extension
+    let ext = path.rsplit('.').next().unwrap_or("").to_lowercase();
+    let mime = match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "bmp" => "image/bmp",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        "ico" => "image/x-icon",
+        "tiff" | "tif" => "image/tiff",
+        "avif" => "image/avif",
+        _ => "application/octet-stream",
+    };
+
+    Ok(Base64FileResponse {
+        data: b64_data.trim().to_string(),
+        size: file_size,
+        mime_type: mime.to_string(),
+    })
+}
+
+#[tauri::command]
+pub async fn copy_file(
+    connection_id: String,
+    source_path: String,
+    dest_path: String,
+    state: State<'_, Arc<ConnectionManager>>,
+) -> Result<bool, String> {
+    let connection = state
+        .get_connection(&connection_id)
+        .await
+        .ok_or("Connection not found")?;
+
+    let client = connection.read().await;
+    let command = format!(
+        "cp -r '{}' '{}'",
+        shell_escape_single_quoted(&source_path),
+        shell_escape_single_quoted(&dest_path)
+    );
+
+    match client.execute_command(&command).await {
+        Ok(_) => Ok(true),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ProcessInfo {
+    pub pid: String,
+    pub user: String,
+    pub cpu: String,
+    pub mem: String,
+    pub command: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ProcessListResponse {
+    pub success: bool,
+    pub processes: Option<Vec<ProcessInfo>>,
+    pub error: Option<String>,
+}
+
+#[tauri::command]
+pub async fn get_processes(
+    connection_id: String,
+    sort_by: Option<String>,
+    state: State<'_, Arc<ConnectionManager>>,
+) -> Result<ProcessListResponse, String> {
+    let connection = state
+        .get_connection(&connection_id)
+        .await
+        .ok_or("Connection not found")?;
+
+    let client = connection.read().await;
+
+    // Use OS-aware process listing command
+    let os_info = get_os_info(&connection_id, &client, state.inner()).await;
+    let sort_option = match sort_by.as_deref() {
+        Some("mem") => "mem",
+        _ => "cpu",
+    };
+    let command = os_info.process_cmd(sort_option);
+
+    match client.execute_command(&command).await {
+        Ok(output) => {
+            let mut processes = Vec::new();
+
+            // Parse ps output (skip header line). Column layout differs per
+            // platform: GNU `ps aux` has 11+ fields (command starts at index
+            // 10); macOS `ps -o user=,pid=,pcpu=,pmem=,command=` has 5 fields
+            // (command starts at index 4).
+            let is_macos = matches!(os_info.family, crate::os_detect::OsFamily::MacOS);
+            let cmd_start = if is_macos { 4 } else { 10 };
+            let min_len = if is_macos { 5 } else { 11 };
+            for line in output.lines().skip(1) {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() >= min_len {
+                    processes.push(ProcessInfo {
+                        user: parts[0].to_string(),
+                        pid: parts[1].to_string(),
+                        cpu: parts[2].to_string(),
+                        mem: parts[3].to_string(),
+                        command: parts[cmd_start..].join(" "),
+                    });
+                }
+            }
+
+            Ok(ProcessListResponse {
+                success: true,
+                processes: Some(processes),
+                error: None,
+            })
+        }
+        Err(e) => Ok(ProcessListResponse {
+            success: false,
+            processes: None,
+            error: Some(e.to_string()),
+        }),
+    }
+}
+
+#[tauri::command]
+pub async fn kill_process(
+    connection_id: String,
+    pid: String,
+    signal: Option<String>,
+    state: State<'_, Arc<ConnectionManager>>,
+) -> Result<CommandResponse, String> {
+    let connection = state
+        .get_connection(&connection_id)
+        .await
+        .ok_or("Connection not found")?;
+
+    let client = connection.read().await;
+
+    // Default to SIGTERM (15), can also use SIGKILL (9). Signal and pid must
+    // be numeric — anything else is rejected (never interpolated into shell).
+    let sig = signal.unwrap_or_else(|| "15".to_string());
+    if !sig.chars().all(|c| c.is_ascii_digit()) || !pid.chars().all(|c| c.is_ascii_digit()) {
+        return Err("Invalid signal or pid: must be numeric".into());
+    }
+    let command = format!("kill -{} {}", sig, pid);
+
+    match client.execute_command(&command).await {
+        Ok(output) => Ok(CommandResponse {
+            success: true,
+            output: Some(output),
+            error: None,
+        }),
+        Err(e) => Ok(CommandResponse {
+            success: false,
+            output: None,
+            error: Some(e.to_string()),
+        }),
+    }
+}
+
+#[tauri::command]
+pub async fn list_connections(
+    state: State<'_, Arc<ConnectionManager>>,
+) -> Result<Vec<String>, String> {
+    Ok(state.list_connections().await)
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TailLogRequest {
+    pub connection_id: String,
+    pub log_path: String,
+    pub lines: Option<u32>, // Number of lines to show (default 50)
+}
+
+#[tauri::command]
+pub async fn tail_log(
+    connection_id: String,
+    log_path: String,
+    lines: Option<u32>,
+    state: State<'_, Arc<ConnectionManager>>,
+) -> Result<CommandResponse, String> {
+    let connection = state
+        .get_connection(&connection_id)
+        .await
+        .ok_or("Connection not found")?;
+
+    let client = connection.read().await;
+
+    let line_count = lines.unwrap_or(50);
+    let command = format!(
+        "tail -n {} '{}'",
+        line_count,
+        shell_escape_single_quoted(&log_path)
+    );
+
+    match client.execute_command(&command).await {
+        Ok(output) => Ok(CommandResponse {
+            success: true,
+            output: Some(output),
+            error: None,
+        }),
+        Err(e) => Ok(CommandResponse {
+            success: false,
+            output: None,
+            error: Some(e.to_string()),
+        }),
+    }
+}
+
+#[tauri::command]
+pub async fn list_log_files(
+    connection_id: String,
+    state: State<'_, Arc<ConnectionManager>>,
+) -> Result<CommandResponse, String> {
+    let connection = state
+        .get_connection(&connection_id)
+        .await
+        .ok_or("Connection not found")?;
+
+    let client = connection.read().await;
+
+    // Common log directories
+    let command = "find /var/log -type f -name '*.log' 2>/dev/null | head -50";
+
+    match client.execute_command(command).await {
+        Ok(output) => Ok(CommandResponse {
+            success: true,
+            output: Some(output),
+            error: None,
+        }),
+        Err(e) => Ok(CommandResponse {
+            success: false,
+            output: None,
+            error: Some(e.to_string()),
+        }),
+    }
+}
+
+// ── Enhanced Log Monitor Commands ──
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct LogSource {
+    pub id: String,
+    pub name: String,
+    pub source_type: String, // "file" | "journal" | "docker"
+    pub path: String,
+    pub category: String, // "system" | "auth" | "kernel" | "service" | "container" | "application" | ...
+    pub size_human: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct LogSourcesResponse {
+    pub success: bool,
+    pub sources: Vec<LogSource>,
+    pub error: Option<String>,
+}
+
+fn categorize_log_file(name: &str) -> String {
+    let lower = name.to_lowercase();
+    if lower.contains("auth") || lower.contains("secure") || lower.contains("faillog") {
+        "auth".into()
+    } else if lower.contains("kern") || lower.contains("dmesg") {
+        "kernel".into()
+    } else if lower.contains("syslog") || lower.contains("messages") || lower.contains("boot") {
+        "system".into()
+    } else if lower.contains("cron") {
+        "cron".into()
+    } else if lower.contains("mail") {
+        "mail".into()
+    } else if lower.contains("dpkg") || lower.contains("yum") || lower.contains("apt") {
+        "package".into()
+    } else if lower.contains("nginx") || lower.contains("apache") || lower.contains("httpd") {
+        "web".into()
+    } else {
+        "application".into()
+    }
+}
+
+#[tauri::command]
+pub async fn discover_log_sources(
+    connection_id: String,
+    state: State<'_, Arc<ConnectionManager>>,
+) -> Result<LogSourcesResponse, String> {
+    let connection = state
+        .get_connection(&connection_id)
+        .await
+        .ok_or("Connection not found")?;
+    let client = connection.read().await;
+
+    let mut sources: Vec<LogSource> = Vec::new();
+
+    // 1. Discover log files in /var/log (broad search)
+    let file_cmd = concat!(
+        "find /var/log -maxdepth 3 -type f \\( ",
+        "-name '*.log' -o -name '*.log.*' -o ",
+        "-name 'syslog' -o -name 'syslog.*' -o ",
+        "-name 'messages' -o -name 'messages.*' -o ",
+        "-name 'auth.log' -o -name 'auth.log.*' -o ",
+        "-name 'secure' -o -name 'secure.*' -o ",
+        "-name 'kern.log' -o -name 'daemon.log' -o ",
+        "-name 'dmesg' -o -name 'mail.log' -o ",
+        "-name 'cron' -o -name 'cron.log' -o ",
+        "-name 'boot.log' -o -name 'dpkg.log' -o ",
+        "-name 'yum.log' -o -name 'alternatives.log' ",
+        "\\) -readable 2>/dev/null | head -80"
+    );
+
+    if let Ok(output) = client.execute_command(file_cmd).await {
+        for line in output.lines() {
+            let path = line.trim().to_string();
+            if path.is_empty() {
+                continue;
+            }
+            let name = path.rsplit('/').next().unwrap_or(&path).to_string();
+            let category = categorize_log_file(&name);
+            sources.push(LogSource {
+                id: format!("file:{}", path),
+                name,
+                source_type: "file".into(),
+                path,
+                category,
+                size_human: None,
+            });
+        }
+    }
+
+    // Get file sizes using du -h
+    if !sources.is_empty() {
+        let file_paths: Vec<String> = sources
+            .iter()
+            .filter(|s| s.source_type == "file")
+            .map(|s| format!("'{}'", shell_escape_single_quoted(&s.path)))
+            .collect();
+
+        if !file_paths.is_empty() {
+            let size_cmd = format!("du -h {} 2>/dev/null", file_paths.join(" "));
+            if let Ok(output) = client.execute_command(&size_cmd).await {
+                for line in output.lines() {
+                    let parts: Vec<&str> = line.trim().split('\t').collect();
+                    if parts.len() >= 2 {
+                        let size = parts[0].trim();
+                        let path = parts[1].trim();
+                        if let Some(src) = sources.iter_mut().find(|s| s.path == path) {
+                            src.size_human = Some(size.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. Discover journalctl services
+    let journal_cmd = "systemctl list-units --type=service --state=running --no-pager --no-legend 2>/dev/null | awk '{print $1}' | head -30";
+    if let Ok(output) = client.execute_command(journal_cmd).await {
+        for line in output.lines() {
+            let unit = line.trim().to_string();
+            if unit.is_empty() || unit.starts_with("UNIT") {
+                continue;
+            }
+            let name = unit.strip_suffix(".service").unwrap_or(&unit).to_string();
+            sources.push(LogSource {
+                id: format!("journal:{}", unit),
+                name,
+                source_type: "journal".into(),
+                path: unit,
+                category: "service".to_string(),
+                size_human: None,
+            });
+        }
+    }
+
+    // 3. Discover docker containers
+    let docker_cmd = r#"docker ps --format '{{.Names}}\t{{.Status}}' 2>/dev/null | head -20"#;
+    if let Ok(output) = client.execute_command(docker_cmd).await {
+        if !output.contains("command not found") && !output.contains("Cannot connect") {
+            for line in output.lines() {
+                let parts: Vec<&str> = line.trim().splitn(2, '\t').collect();
+                if parts.is_empty() || parts[0].is_empty() {
+                    continue;
+                }
+                let container = parts[0].to_string();
+                let status = parts.get(1).map(|s| s.to_string());
+                sources.push(LogSource {
+                    id: format!("docker:{}", container),
+                    name: container.clone(),
+                    source_type: "docker".into(),
+                    path: container,
+                    category: "container".to_string(),
+                    size_human: status,
+                });
+            }
+        }
+    }
+
+    // Sort: files first (by category), then journals, then docker
+    sources.sort_by(|a, b| {
+        let type_order = |t: &str| match t {
+            "file" => 0,
+            "journal" => 1,
+            "docker" => 2,
+            _ => 3,
+        };
+        type_order(&a.source_type)
+            .cmp(&type_order(&b.source_type))
+            .then(a.category.cmp(&b.category))
+            .then(a.name.cmp(&b.name))
+    });
+
+    Ok(LogSourcesResponse {
+        success: true,
+        sources,
+        error: None,
+    })
+}
+
+#[tauri::command]
+pub async fn read_log(
+    connection_id: String,
+    source_type: String, // "file" | "journal" | "docker" | "custom"
+    path: String,
+    lines: Option<u32>,
+    state: State<'_, Arc<ConnectionManager>>,
+) -> Result<CommandResponse, String> {
+    let connection = state
+        .get_connection(&connection_id)
+        .await
+        .ok_or("Connection not found")?;
+    let client = connection.read().await;
+
+    let line_count = lines.unwrap_or(200);
+
+    let cmd = match source_type.as_str() {
+        "journal" => format!(
+            "journalctl -u '{}' -n {} --no-pager 2>/dev/null",
+            shell_escape_single_quoted(&path),
+            line_count
+        ),
+        "docker" => format!(
+            "docker logs --tail {} '{}' 2>&1",
+            line_count,
+            shell_escape_single_quoted(&path)
+        ),
+        _ => format!(
+            "tail -n {} '{}' 2>/dev/null",
+            line_count,
+            shell_escape_single_quoted(&path)
+        ),
+    };
+
+    match client.execute_command(&cmd).await {
+        Ok(output) => Ok(CommandResponse {
+            success: true,
+            output: Some(output),
+            error: None,
+        }),
+        Err(e) => Ok(CommandResponse {
+            success: false,
+            output: None,
+            error: Some(e.to_string()),
+        }),
+    }
+}
+
+#[tauri::command]
+pub async fn search_log(
+    connection_id: String,
+    source_type: String,
+    path: String,
+    pattern: String,
+    is_regex: Option<bool>,
+    max_results: Option<u32>,
+    state: State<'_, Arc<ConnectionManager>>,
+) -> Result<CommandResponse, String> {
+    let connection = state
+        .get_connection(&connection_id)
+        .await
+        .ok_or("Connection not found")?;
+    let client = connection.read().await;
+
+    let limit = max_results.unwrap_or(500);
+    let escaped = pattern.replace('\'', "'\\''");
+    let grep_flag = if is_regex.unwrap_or(false) {
+        "-nE"
+    } else {
+        "-nF"
+    };
+
+    let cmd = match source_type.as_str() {
+        "journal" => format!(
+            "journalctl -u '{}' --no-pager 2>/dev/null | grep {} -i '{}' | tail -n {}",
+            shell_escape_single_quoted(&path),
+            grep_flag,
+            shell_escape_single_quoted(&escaped),
+            limit
+        ),
+        "docker" => format!(
+            "docker logs '{}' 2>&1 | grep {} -i '{}' | tail -n {}",
+            shell_escape_single_quoted(&path),
+            grep_flag,
+            shell_escape_single_quoted(&escaped),
+            limit
+        ),
+        _ => format!(
+            "grep {} -i '{}' '{}' 2>/dev/null | tail -n {}",
+            grep_flag,
+            shell_escape_single_quoted(&escaped),
+            shell_escape_single_quoted(&path),
+            limit
+        ),
+    };
+
+    match client.execute_command(&cmd).await {
+        Ok(output) => Ok(CommandResponse {
+            success: true,
+            output: Some(output),
+            error: None,
+        }),
+        Err(e) => Ok(CommandResponse {
+            success: false,
+            output: None,
+            error: Some(e.to_string()),
+        }),
+    }
+}
+
+// Network interface statistics
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct NetworkInterface {
+    pub name: String,
+    pub rx_bytes: u64,
+    pub tx_bytes: u64,
+    pub rx_packets: u64,
+    pub tx_packets: u64,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct NetworkStatsResponse {
+    pub success: bool,
+    pub interfaces: Vec<NetworkInterface>,
+    pub error: Option<String>,
+}
+
+#[tauri::command]
+pub async fn get_network_stats(
+    connection_id: String,
+    state: State<'_, Arc<ConnectionManager>>,
+) -> Result<NetworkStatsResponse, String> {
+    let connection = state
+        .get_connection(&connection_id)
+        .await
+        .ok_or("Connection not found")?;
+
+    let client = connection.read().await;
+
+    // Use OS-aware network stats command
+    let os_info = get_os_info(&connection_id, &client, state.inner()).await;
+    let command = os_info.network_stats_cmd();
+
+    match client.execute_command(command).await {
+        Ok(output) => {
+            let mut interfaces = Vec::new();
+
+            for line in output.lines() {
+                if line.trim().is_empty() {
+                    continue;
+                }
+
+                let parts: Vec<&str> = line.split(',').collect();
+                if parts.len() == 5 {
+                    if let (Ok(rx_bytes), Ok(tx_bytes), Ok(rx_packets), Ok(tx_packets)) = (
+                        parts[1].parse::<u64>(),
+                        parts[2].parse::<u64>(),
+                        parts[3].parse::<u64>(),
+                        parts[4].parse::<u64>(),
+                    ) {
+                        interfaces.push(NetworkInterface {
+                            name: parts[0].to_string(),
+                            rx_bytes,
+                            tx_bytes,
+                            rx_packets,
+                            tx_packets,
+                        });
+                    }
+                }
+            }
+
+            Ok(NetworkStatsResponse {
+                success: true,
+                interfaces,
+                error: None,
+            })
+        }
+        Err(e) => Ok(NetworkStatsResponse {
+            success: false,
+            interfaces: Vec::new(),
+            error: Some(e.to_string()),
+        }),
+    }
+}
+
+// Active network connections
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct NetworkConnection {
+    pub protocol: String,
+    pub local_address: String,
+    pub remote_address: String,
+    pub state: String,
+    pub pid_program: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct ConnectionsResponse {
+    pub success: bool,
+    pub connections: Vec<NetworkConnection>,
+    pub error: Option<String>,
+}
+
+#[tauri::command]
+pub async fn get_active_connections(
+    connection_id: String,
+    state: State<'_, Arc<ConnectionManager>>,
+) -> Result<ConnectionsResponse, String> {
+    let connection = state
+        .get_connection(&connection_id)
+        .await
+        .ok_or("Connection not found")?;
+
+    let client = connection.read().await;
+
+    // Use OS-aware command (ss on modern systems, netstat on older ones)
+    let os_info = get_os_info(&connection_id, &client, state.inner()).await;
+    let command = os_info.active_connections_cmd();
+
+    match client.execute_command(command).await {
+        Ok(output) => {
+            let mut connections = Vec::new();
+
+            for line in output.lines() {
+                if line.trim().is_empty() {
+                    continue;
+                }
+
+                // Column layout differs between `ss` and `netstat`:
+                //   ss:      Netid State Recv-Q Send-Q Local Peer Process
+                //   netstat: Proto Recv-Q Send-Q Local Foreign State PID/Program
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if os_info.has_ss {
+                    if parts.len() >= 6 {
+                        connections.push(NetworkConnection {
+                            protocol: parts[0].to_string(),
+                            local_address: parts[4].to_string(),
+                            remote_address: parts[5].to_string(),
+                            state: parts[1].to_string(),
+                            pid_program: parts.get(6).unwrap_or(&"").to_string(),
+                        });
+                    }
+                } else if parts.len() >= 6 {
+                    connections.push(NetworkConnection {
+                        protocol: parts[0].to_string(),
+                        local_address: parts[3].to_string(),
+                        remote_address: parts[4].to_string(),
+                        state: parts[5].to_string(),
+                        pid_program: parts.get(6).unwrap_or(&"").to_string(),
+                    });
+                } else if parts.len() >= 4 {
+                    // netstat without the -p column (permission denied) — 5 columns.
+                    connections.push(NetworkConnection {
+                        protocol: parts[0].to_string(),
+                        local_address: parts[2].to_string(),
+                        remote_address: parts[3].to_string(),
+                        state: parts.get(4).unwrap_or(&"").to_string(),
+                        pid_program: "".to_string(),
+                    });
+                }
+            }
+
+            Ok(ConnectionsResponse {
+                success: true,
+                connections,
+                error: None,
+            })
+        }
+        Err(e) => Ok(ConnectionsResponse {
+            success: false,
+            connections: Vec::new(),
+            error: Some(e.to_string()),
+        }),
+    }
+}
+
+// Network bandwidth monitoring (real-time)
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct NetworkBandwidth {
+    pub interface: String,
+    pub rx_bytes_per_sec: f64,
+    pub tx_bytes_per_sec: f64,
+}
+
+/// Sum of rx/tx throughput across every sampled (non-loopback) interface.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct NetworkBandwidthAggregate {
+    pub rx_bytes_per_sec: f64,
+    pub tx_bytes_per_sec: f64,
+}
+
+/// Parse the `network_bandwidth_cmd` output — two samplings of
+/// `iface,rx,tx` lines separated by a 1-second sleep — into per-interface
+/// byte-per-second rates.
+fn parse_bandwidth_output(output: &str) -> Vec<NetworkBandwidth> {
+    let lines: Vec<&str> = output.lines().collect();
+    let mut bandwidth = Vec::new();
+
+    // Split into before and after measurements
+    let mid = lines.len() / 2;
+    let before = &lines[0..mid];
+    let after = &lines[mid..];
+
+    for (before_line, after_line) in before.iter().zip(after.iter()) {
+        let before_parts: Vec<&str> = before_line.split(',').collect();
+        let after_parts: Vec<&str> = after_line.split(',').collect();
+
+        if before_parts.len() == 3
+            && after_parts.len() == 3
+            && before_parts[0] == after_parts[0]
+        {
+            if let (Ok(rx1), Ok(tx1), Ok(rx2), Ok(tx2)) = (
+                before_parts[1].parse::<f64>(),
+                before_parts[2].parse::<f64>(),
+                after_parts[1].parse::<f64>(),
+                after_parts[2].parse::<f64>(),
+            ) {
+                // Calculate bytes per second
+                bandwidth.push(NetworkBandwidth {
+                    interface: before_parts[0].to_string(),
+                    rx_bytes_per_sec: rx2 - rx1,
+                    tx_bytes_per_sec: tx2 - tx1,
+                });
+            }
+        }
+    }
+
+    bandwidth
+}
+
+/// Sample network throughput over a ~1-second window on an existing SSH
+/// session and return the summed rx/tx rates, or `None` when sampling fails
+/// or yields no usable interface.
+async fn collect_network_bandwidth(
+    client: &crate::ssh::SshClient,
+    os_info: &OsInfo,
+) -> Option<NetworkBandwidthAggregate> {
+    let output = client
+        .execute_command(os_info.network_bandwidth_cmd())
+        .await
+        .ok()?;
+    let ifaces = parse_bandwidth_output(&output);
+    if ifaces.is_empty() {
+        return None;
+    }
+    Some(NetworkBandwidthAggregate {
+        rx_bytes_per_sec: ifaces.iter().map(|i| i.rx_bytes_per_sec.max(0.0)).sum(),
+        tx_bytes_per_sec: ifaces.iter().map(|i| i.tx_bytes_per_sec.max(0.0)).sum(),
+    })
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct BandwidthResponse {
+    pub success: bool,
+    pub bandwidth: Vec<NetworkBandwidth>,
+    pub error: Option<String>,
+}
+
+#[tauri::command]
+pub async fn get_network_bandwidth(
+    connection_id: String,
+    state: State<'_, Arc<ConnectionManager>>,
+) -> Result<BandwidthResponse, String> {
+    let connection = state
+        .get_connection(&connection_id)
+        .await
+        .ok_or("Connection not found")?;
+
+    let client = connection.read().await;
+
+    // Use OS-aware bandwidth sampling command
+    let os_info = get_os_info(&connection_id, &client, state.inner()).await;
+    let command = os_info.network_bandwidth_cmd();
+
+    match client.execute_command(command).await {
+        Ok(output) => Ok(BandwidthResponse {
+            success: true,
+            bandwidth: parse_bandwidth_output(&output),
+            error: None,
+        }),
+        Err(e) => Ok(BandwidthResponse {
+            success: false,
+            bandwidth: Vec::new(),
+            error: Some(e.to_string()),
+        }),
+    }
+}
+
+// Network latency monitoring (SSH connection latency)
+#[derive(Debug, serde::Serialize)]
+pub struct LatencyResponse {
+    pub success: bool,
+    pub latency_ms: Option<f64>,
+    pub error: Option<String>,
+}
+
+#[tauri::command]
+pub async fn get_network_latency(
+    connection_id: String,
+    _target: Option<String>,
+    state: State<'_, Arc<ConnectionManager>>,
+) -> Result<LatencyResponse, String> {
+    let connection = state
+        .get_connection(&connection_id)
+        .await
+        .ok_or("Connection not found")?;
+
+    let client = connection.read().await;
+
+    // Measure SSH connection latency by timing a simple command execution
+    // This gives us the round-trip time between client and remote server
+    let start = std::time::Instant::now();
+
+    // Execute a lightweight command (echo) to measure latency
+    match client.execute_command("echo ping").await {
+        Ok(output) => {
+            let duration = start.elapsed();
+            let latency_ms = duration.as_secs_f64() * 1000.0;
+
+            // Verify the command executed successfully
+            if output.trim() == "ping" {
+                Ok(LatencyResponse {
+                    success: true,
+                    latency_ms: Some(latency_ms),
+                    error: None,
+                })
+            } else {
+                Ok(LatencyResponse {
+                    success: false,
+                    latency_ms: None,
+                    error: Some("Command verification failed".to_string()),
+                })
+            }
+        }
+        Err(e) => Ok(LatencyResponse {
+            success: false,
+            latency_ms: None,
+            error: Some(format!("SSH connection error: {}", e)),
+        }),
+    }
+}
+
+// Disk usage details
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct DiskInfo {
+    pub filesystem: String,
+    pub path: String,
+    pub total: String,
+    pub used: String,
+    pub available: String,
+    pub usage: u32,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct DiskUsageResponse {
+    pub success: bool,
+    pub disks: Vec<DiskInfo>,
+    pub error: Option<String>,
+}
+
+#[tauri::command]
+pub async fn get_disk_usage(
+    connection_id: String,
+    state: State<'_, Arc<ConnectionManager>>,
+) -> Result<DiskUsageResponse, String> {
+    let connection = state
+        .get_connection(&connection_id)
+        .await
+        .ok_or("Connection not found")?;
+
+    let client = connection.read().await;
+
+    // Use OS-aware disk usage command
+    let os_info = get_os_info(&connection_id, &client, state.inner()).await;
+    let command = os_info.disk_usage_cmd();
+
+    match client.execute_command(command).await {
+        Ok(output) => {
+            let mut disks = Vec::new();
+
+            for line in output.lines() {
+                if line.trim().is_empty() {
+                    continue;
+                }
+
+                // Parse format: filesystem|mountpoint|size|used|avail|use%
+                let parts: Vec<&str> = line.split('|').collect();
+                if parts.len() == 6 {
+                    // Parse usage percentage (remove % sign)
+                    let usage_str = parts[5].trim_end_matches('%');
+                    let usage = usage_str.parse::<u32>().unwrap_or(0);
+
+                    disks.push(DiskInfo {
+                        filesystem: parts[0].to_string(),
+                        path: parts[1].to_string(),
+                        total: parts[2].to_string(),
+                        used: parts[3].to_string(),
+                        available: parts[4].to_string(),
+                        usage,
+                    });
+                }
+            }
+
+            Ok(DiskUsageResponse {
+                success: true,
+                disks,
+                error: None,
+            })
+        }
+        Err(e) => Ok(DiskUsageResponse {
+            success: false,
+            disks: Vec::new(),
+            error: Some(e.to_string()),
+        }),
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TabCompletionRequest {
+    pub connection_id: String,
+    pub input: String,
+    pub cursor_position: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TabCompletionResponse {
+    pub success: bool,
+    pub completions: Vec<String>,
+    pub common_prefix: Option<String>,
+    pub error: Option<String>,
+}
+
+#[tauri::command]
+pub async fn ssh_tab_complete(
+    connection_id: String,
+    input: String,
+    cursor_position: usize,
+    state: State<'_, Arc<ConnectionManager>>,
+) -> Result<TabCompletionResponse, String> {
+    let connection = state
+        .get_connection(&connection_id)
+        .await
+        .ok_or("Connection not found")?;
+
+    let client = connection.read().await;
+
+    // Extract the word to complete (last word before cursor). The cursor is a
+    // JS UTF-16 code-unit index — clamp it to a UTF-8 char boundary so
+    // multi-byte input cannot panic on a non-boundary slice.
+    let byte_len = input.len();
+    let mut cut = cursor_position.min(byte_len);
+    while cut > 0 && !input.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    let text_before_cursor = &input[..cut];
+
+    // Smart context detection: find the segment after the last command
+    // separator (`|`, `&&`, `||`, `;`) — everything before it is an already
+    // finished command, so completion applies to the current segment only.
+    let after_sep = text_before_cursor
+        .rsplit(['|', ';'])
+        .next()
+        .unwrap_or("")
+        .rsplit("&&")
+        .next()
+        .unwrap_or("")
+        .rsplit("||")
+        .next()
+        .unwrap_or("");
+
+    let words: Vec<&str> = after_sep.split_whitespace().collect();
+    let word_to_complete = words.last().copied().unwrap_or("");
+
+    // Command position: beginning of the line or right after a pipe/`;`/`&&`.
+    let is_command_position = words.len() <= 1;
+    // `cd` (and `pushd`/`popd`) expect a directory.
+    let is_directory_cmd = matches!(
+        words.first().copied().unwrap_or(""),
+        "cd" | "pushd" | "popd" | "dirs"
+    );
+
+    // Build completion command based on context
+    let head = "| head -40";
+    let completion_cmd = if is_command_position {
+        // Command completion: compgen -c
+        if word_to_complete.is_empty() {
+            format!("compgen -c 2>/dev/null {} || echo", head)
+        } else {
+            format!("compgen -c {} 2>/dev/null {} || echo", word_to_complete, head)
+        }
+    } else if is_directory_cmd {
+        // Directory completion for cd/pushd/popd
+        format!("compgen -d {} 2>/dev/null {} || echo", word_to_complete, head)
+    } else {
+        // File/directory completion: use compgen -f for files
+        format!(
+            "compgen -f {} 2>/dev/null {} || ls -1ap {} 2>/dev/null | grep '^{}' {} || echo",
+            shell_escape_single_quoted(word_to_complete),
+            head,
+            if word_to_complete.is_empty() {
+                ".".to_string()
+            } else {
+                shell_escape_single_quoted(word_to_complete)
+            },
+            shell_escape_single_quoted(word_to_complete),
+            head,
+        )
+    };
+
+    match client.execute_command(&completion_cmd).await {
+        Ok(output) => {
+            let completions: Vec<String> = output
+                .lines()
+                .filter(|s| !s.is_empty() && s.starts_with(word_to_complete))
+                .map(|s| s.trim().to_string())
+                .take(50) // Limit to 50 completions
+                .collect();
+
+            // Find common prefix
+            let common_prefix = if completions.len() > 1 {
+                find_common_prefix(&completions)
+            } else {
+                None
+            };
+
+            Ok(TabCompletionResponse {
+                success: true,
+                completions,
+                common_prefix,
+                error: None,
+            })
+        }
+        Err(e) => Ok(TabCompletionResponse {
+            success: false,
+            completions: Vec::new(),
+            common_prefix: None,
+            error: Some(e.to_string()),
+        }),
+    }
+}
+
+// Helper function to find common prefix among strings
+fn find_common_prefix(strings: &[String]) -> Option<String> {
+    if strings.is_empty() {
+        return None;
+    }
+    if strings.len() == 1 {
+        return Some(strings[0].clone());
+    }
+
+    let first = &strings[0];
+    let mut prefix = String::new();
+
+    for (i, ch) in first.chars().enumerate() {
+        if strings.iter().all(|s| s.chars().nth(i) == Some(ch)) {
+            prefix.push(ch);
+        } else {
+            break;
+        }
+    }
+
+    if prefix.is_empty() || prefix == strings[0] {
+        None
+    } else {
+        Some(prefix)
+    }
+}
+
+// ========== GPU Monitoring ==========
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum GpuVendor {
+    Nvidia,
+    Amd,
+    Unknown,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct GpuInfo {
+    pub index: u32,
+    pub name: String,
+    pub vendor: GpuVendor,
+    pub driver_version: Option<String>,
+    pub cuda_version: Option<String>, // NVIDIA only
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct GpuStats {
+    pub index: u32,
+    pub name: String,
+    pub vendor: GpuVendor,
+    pub utilization: f64,          // GPU core usage %
+    pub memory_used: u64,          // MiB
+    pub memory_total: u64,         // MiB
+    pub memory_percent: f64,       // Calculated
+    pub temperature: Option<f64>,  // Celsius
+    pub power_draw: Option<f64>,   // Watts
+    pub power_limit: Option<f64>,  // Watts
+    pub fan_speed: Option<f64>,    // %
+    pub encoder_util: Option<f64>, // NVIDIA NVENC %
+    pub decoder_util: Option<f64>, // NVIDIA NVDEC %
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct GpuDetectionResult {
+    pub available: bool,
+    pub vendor: GpuVendor,
+    pub gpus: Vec<GpuInfo>,
+    pub detection_method: String, // "nvidia-smi", "rocm-smi", "sysfs", "none"
+}
+
+#[derive(Debug, Serialize)]
+pub struct GpuStatsResponse {
+    pub success: bool,
+    pub gpus: Vec<GpuStats>,
+    pub error: Option<String>,
+}
+
+#[tauri::command]
+pub async fn detect_gpu(
+    connection_id: String,
+    state: State<'_, Arc<ConnectionManager>>,
+) -> Result<GpuDetectionResult, String> {
+    let connection = state
+        .get_connection(&connection_id)
+        .await
+        .ok_or("Connection not found")?;
+
+    let client = connection.read().await;
+
+    // Check for NVIDIA GPU first (most common)
+    let nvidia_check = client
+        .execute_command("which nvidia-smi 2>/dev/null && nvidia-smi --query-gpu=index,name,driver_version --format=csv,noheader 2>/dev/null")
+        .await;
+
+    if let Ok(output) = nvidia_check {
+        let output = output.trim();
+        if !output.is_empty() && !output.contains("not found") && !output.contains("No such file") {
+            let mut gpus = Vec::new();
+            // Skip first line if it's the path to nvidia-smi
+            for line in output.lines() {
+                if line.contains("nvidia-smi") || line.trim().is_empty() {
+                    continue;
+                }
+                let parts: Vec<&str> = line.split(',').map(|s| s.trim()).collect();
+                if parts.len() >= 2 {
+                    let index = parts[0].parse::<u32>().unwrap_or(0);
+                    let name = parts[1].to_string();
+                    let driver_version = parts.get(2).map(|s| s.to_string());
+
+                    // Get CUDA version from nvidia-smi header (more reliable than query flag)
+                    let cuda_version = client
+                        .execute_command("nvidia-smi | sed -n 's/.*CUDA Version: \\([0-9.]*\\).*/\\1/p' | head -1")
+                        .await
+                        .ok()
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty());
+
+                    gpus.push(GpuInfo {
+                        index,
+                        name,
+                        vendor: GpuVendor::Nvidia,
+                        driver_version,
+                        cuda_version,
+                    });
+                }
+            }
+
+            if !gpus.is_empty() {
+                return Ok(GpuDetectionResult {
+                    available: true,
+                    vendor: GpuVendor::Nvidia,
+                    gpus,
+                    detection_method: "nvidia-smi".to_string(),
+                });
+            }
+        }
+    }
+
+    // Check for AMD GPU with rocm-smi
+    let amd_rocm_check = client
+        .execute_command(
+            "which rocm-smi 2>/dev/null && rocm-smi --showid --showproductname 2>/dev/null",
+        )
+        .await;
+
+    if let Ok(output) = amd_rocm_check {
+        let output = output.trim();
+        if !output.is_empty() && !output.contains("not found") && output.contains("GPU") {
+            let mut gpus = Vec::new();
+            let mut current_index = 0u32;
+            let mut current_name = String::new();
+
+            for line in output.lines() {
+                if line.contains("rocm-smi") || line.trim().is_empty() || line.starts_with("=") {
+                    continue;
+                }
+                // Parse rocm-smi output format
+                if line.contains("GPU[") {
+                    // Extract GPU index from GPU[X]
+                    if let Some(start) = line.find("GPU[") {
+                        if let Some(end) = line[start..].find(']') {
+                            let idx_str = &line[start + 4..start + end];
+                            current_index = idx_str.parse::<u32>().unwrap_or(current_index);
+                        }
+                    }
+                }
+                if line.contains("Card series:") || line.contains("Card model:") {
+                    if let Some(name) = line.split(':').nth(1) {
+                        current_name = name.trim().to_string();
+                    }
+                }
+            }
+
+            // If we couldn't parse properly, create a generic entry
+            if current_name.is_empty() {
+                current_name = "AMD GPU".to_string();
+            }
+
+            gpus.push(GpuInfo {
+                index: current_index,
+                name: current_name,
+                vendor: GpuVendor::Amd,
+                driver_version: None,
+                cuda_version: None,
+            });
+
+            if !gpus.is_empty() {
+                return Ok(GpuDetectionResult {
+                    available: true,
+                    vendor: GpuVendor::Amd,
+                    gpus,
+                    detection_method: "rocm-smi".to_string(),
+                });
+            }
+        }
+    }
+
+    // Fallback: Check for AMD GPU via sysfs
+    let amd_sysfs_check = client
+        .execute_command("ls /sys/class/drm/card*/device/gpu_busy_percent 2>/dev/null | head -1")
+        .await;
+
+    if let Ok(output) = amd_sysfs_check {
+        let output = output.trim();
+        if !output.is_empty() && output.contains("gpu_busy_percent") {
+            // Count available cards
+            let card_count = client
+                .execute_command(
+                    "ls -d /sys/class/drm/card[0-9]*/device/gpu_busy_percent 2>/dev/null | wc -l",
+                )
+                .await
+                .ok()
+                .and_then(|s| s.trim().parse::<u32>().ok())
+                .unwrap_or(1);
+
+            let gpus: Vec<GpuInfo> = (0..card_count)
+                .map(|i| GpuInfo {
+                    index: i,
+                    name: format!("AMD GPU {}", i),
+                    vendor: GpuVendor::Amd,
+                    driver_version: None,
+                    cuda_version: None,
+                })
+                .collect();
+
+            return Ok(GpuDetectionResult {
+                available: true,
+                vendor: GpuVendor::Amd,
+                gpus,
+                detection_method: "sysfs".to_string(),
+            });
+        }
+    }
+
+    // No GPU detected
+    Ok(GpuDetectionResult {
+        available: false,
+        vendor: GpuVendor::Unknown,
+        gpus: Vec::new(),
+        detection_method: "none".to_string(),
+    })
+}
+
+#[tauri::command]
+pub async fn get_gpu_stats(
+    connection_id: String,
+    state: State<'_, Arc<ConnectionManager>>,
+) -> Result<GpuStatsResponse, String> {
+    let connection = state
+        .get_connection(&connection_id)
+        .await
+        .ok_or("Connection not found")?;
+
+    let client = connection.read().await;
+
+    // Try NVIDIA first
+    let nvidia_cmd = "nvidia-smi --query-gpu=index,name,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw,power.limit,fan.speed,utilization.encoder,utilization.decoder --format=csv,noheader,nounits 2>/dev/null";
+
+    if let Ok(output) = client.execute_command(nvidia_cmd).await {
+        let output = output.trim();
+        if !output.is_empty() && !output.contains("not found") && !output.contains("Failed") {
+            let mut gpus = Vec::new();
+
+            for line in output.lines() {
+                if line.trim().is_empty() {
+                    continue;
+                }
+
+                let parts: Vec<&str> = line.split(',').map(|s| s.trim()).collect();
+                if parts.len() >= 5 {
+                    let index = parts[0].parse::<u32>().unwrap_or(0);
+                    let name = parts[1].to_string();
+                    let utilization = parts[2].parse::<f64>().unwrap_or(0.0);
+                    let memory_used = parts[3].parse::<u64>().unwrap_or(0);
+                    let memory_total = parts[4].parse::<u64>().unwrap_or(1);
+                    let memory_percent = if memory_total > 0 {
+                        (memory_used as f64 / memory_total as f64) * 100.0
+                    } else {
+                        0.0
+                    };
+
+                    let temperature = parts.get(5).and_then(|s| s.parse::<f64>().ok());
+                    let power_draw = parts.get(6).and_then(|s| s.parse::<f64>().ok());
+                    let power_limit = parts.get(7).and_then(|s| s.parse::<f64>().ok());
+                    let fan_speed = parts.get(8).and_then(|s| s.parse::<f64>().ok());
+                    let encoder_util = parts.get(9).and_then(|s| s.parse::<f64>().ok());
+                    let decoder_util = parts.get(10).and_then(|s| s.parse::<f64>().ok());
+
+                    gpus.push(GpuStats {
+                        index,
+                        name,
+                        vendor: GpuVendor::Nvidia,
+                        utilization,
+                        memory_used,
+                        memory_total,
+                        memory_percent,
+                        temperature,
+                        power_draw,
+                        power_limit,
+                        fan_speed,
+                        encoder_util,
+                        decoder_util,
+                    });
+                }
+            }
+
+            if !gpus.is_empty() {
+                return Ok(GpuStatsResponse {
+                    success: true,
+                    gpus,
+                    error: None,
+                });
+            }
+        }
+    }
+
+    // Try AMD rocm-smi with JSON output
+    let amd_rocm_cmd =
+        "rocm-smi --showuse --showmeminfo vram --showtemp --showpower --showfan --json 2>/dev/null";
+
+    if let Ok(output) = client.execute_command(amd_rocm_cmd).await {
+        let output = output.trim();
+        if !output.is_empty() && output.starts_with('{') {
+            // Parse JSON output from rocm-smi
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(output) {
+                let mut gpus = Vec::new();
+
+                // rocm-smi JSON format varies, try to extract data
+                if let Some(obj) = json.as_object() {
+                    for (key, value) in obj {
+                        if key.starts_with("card") {
+                            let index = key.trim_start_matches("card").parse::<u32>().unwrap_or(0);
+
+                            let utilization = value
+                                .get("GPU use (%)")
+                                .and_then(|v| v.as_str())
+                                .and_then(|s| s.trim_end_matches('%').parse::<f64>().ok())
+                                .unwrap_or(0.0);
+
+                            let memory_used = value
+                                .get("VRAM Total Used Memory (B)")
+                                .and_then(|v| v.as_str())
+                                .and_then(|s| s.parse::<u64>().ok())
+                                .map(|b| b / (1024 * 1024)) // Convert to MiB
+                                .unwrap_or(0);
+
+                            let memory_total = value
+                                .get("VRAM Total Memory (B)")
+                                .and_then(|v| v.as_str())
+                                .and_then(|s| s.parse::<u64>().ok())
+                                .map(|b| b / (1024 * 1024))
+                                .unwrap_or(1);
+
+                            let memory_percent = if memory_total > 0 {
+                                (memory_used as f64 / memory_total as f64) * 100.0
+                            } else {
+                                0.0
+                            };
+
+                            let temperature = value
+                                .get("Temperature (Sensor edge) (C)")
+                                .and_then(|v| v.as_str())
+                                .and_then(|s| s.parse::<f64>().ok());
+
+                            let power_draw = value
+                                .get("Average Graphics Package Power (W)")
+                                .and_then(|v| v.as_str())
+                                .and_then(|s| s.parse::<f64>().ok());
+
+                            let fan_speed = value
+                                .get("Fan speed (%)")
+                                .and_then(|v| v.as_str())
+                                .and_then(|s| s.trim_end_matches('%').parse::<f64>().ok());
+
+                            gpus.push(GpuStats {
+                                index,
+                                name: format!("AMD GPU {}", index),
+                                vendor: GpuVendor::Amd,
+                                utilization,
+                                memory_used,
+                                memory_total,
+                                memory_percent,
+                                temperature,
+                                power_draw,
+                                power_limit: None,
+                                fan_speed,
+                                encoder_util: None,
+                                decoder_util: None,
+                            });
+                        }
+                    }
+                }
+
+                if !gpus.is_empty() {
+                    return Ok(GpuStatsResponse {
+                        success: true,
+                        gpus,
+                        error: None,
+                    });
+                }
+            }
+        }
+    }
+
+    // Fallback: AMD sysfs
+    let amd_sysfs_cmd = r#"
+for card in /sys/class/drm/card[0-9]*; do
+    if [ -f "$card/device/gpu_busy_percent" ]; then
+        idx=$(basename $card | sed 's/card//')
+        util=$(cat "$card/device/gpu_busy_percent" 2>/dev/null || echo "0")
+        vram_used=$(cat "$card/device/mem_info_vram_used" 2>/dev/null || echo "0")
+        vram_total=$(cat "$card/device/mem_info_vram_total" 2>/dev/null || echo "0")
+        hwmon=$(ls -d "$card/device/hwmon/hwmon"* 2>/dev/null | head -1)
+        if [ -n "$hwmon" ]; then
+            temp=$(cat "$hwmon/temp1_input" 2>/dev/null || echo "0")
+            power=$(cat "$hwmon/power1_average" 2>/dev/null || echo "0")
+            fan=$(cat "$hwmon/fan1_input" 2>/dev/null || echo "0")
+            fan_max=$(cat "$hwmon/fan1_max" 2>/dev/null || echo "1")
+        else
+            temp="0"
+            power="0"
+            fan="0"
+            fan_max="1"
+        fi
+        echo "$idx|$util|$vram_used|$vram_total|$temp|$power|$fan|$fan_max"
+    fi
+done
+"#;
+
+    if let Ok(output) = client.execute_command(amd_sysfs_cmd).await {
+        let output = output.trim();
+        if !output.is_empty() {
+            let mut gpus = Vec::new();
+
+            for line in output.lines() {
+                if line.trim().is_empty() {
+                    continue;
+                }
+
+                let parts: Vec<&str> = line.split('|').collect();
+                if parts.len() >= 8 {
+                    let index = parts[0].parse::<u32>().unwrap_or(0);
+                    let utilization = parts[1].parse::<f64>().unwrap_or(0.0);
+                    let memory_used = parts[2].parse::<u64>().unwrap_or(0) / (1024 * 1024); // bytes to MiB
+                    let memory_total = parts[3].parse::<u64>().unwrap_or(1) / (1024 * 1024);
+                    let memory_percent = if memory_total > 0 {
+                        (memory_used as f64 / memory_total as f64) * 100.0
+                    } else {
+                        0.0
+                    };
+
+                    // Temperature is in millidegrees
+                    let temperature = parts[4].parse::<f64>().ok().map(|t| t / 1000.0);
+                    // Power is in microwatts
+                    let power_draw = parts[5].parse::<f64>().ok().map(|p| p / 1_000_000.0);
+                    // Fan speed as percentage of max
+                    let fan_speed = match (parts[6].parse::<f64>(), parts[7].parse::<f64>()) {
+                        (Ok(fan), Ok(max)) if max > 0.0 => Some((fan / max) * 100.0),
+                        _ => None,
+                    };
+
+                    gpus.push(GpuStats {
+                        index,
+                        name: format!("AMD GPU {}", index),
+                        vendor: GpuVendor::Amd,
+                        utilization,
+                        memory_used,
+                        memory_total,
+                        memory_percent,
+                        temperature,
+                        power_draw,
+                        power_limit: None,
+                        fan_speed,
+                        encoder_util: None,
+                        decoder_util: None,
+                    });
+                }
+            }
+
+            if !gpus.is_empty() {
+                return Ok(GpuStatsResponse {
+                    success: true,
+                    gpus,
+                    error: None,
+                });
+            }
+        }
+    }
+
+    // No GPU stats available
+    Ok(GpuStatsResponse {
+        success: false,
+        gpus: Vec::new(),
+        error: Some("No GPU detected or drivers not installed".to_string()),
+    })
+}
+
+// ========== WebSocket Port ==========
+
+/// Get the dynamically assigned WebSocket port for PTY terminal connections
+#[tauri::command]
+pub async fn get_websocket_port() -> Result<u16, String> {
+    use crate::WEBSOCKET_PORT;
+    use std::sync::atomic::Ordering;
+
+    let port = WEBSOCKET_PORT.load(Ordering::SeqCst);
+    if port == 0 {
+        Err("WebSocket server not yet started".to_string())
+    } else {
+        Ok(port)
+    }
+}
+
+// ========== PTY Connection ==========
+// PTY terminal I/O now uses WebSocket instead of IPC for better performance
+// WebSocket server runs on a dynamically assigned port (9001-9010)
+// Use get_websocket_port() command to get the actual port
+// See src/websocket_server.rs for implementation
+
+// ========== Standalone SFTP Connection ==========
+
+#[derive(Debug, Deserialize)]
+pub struct SftpConnectRequest {
+    pub connection_id: String,
+    pub host: String,
+    pub port: u16,
+    pub username: String,
+    pub auth_method: String,
+    pub password: Option<String>,
+    pub key_path: Option<String>,
+    pub passphrase: Option<String>,
+    /// SSH jump host options — ignored when `jump_host` is empty/missing.
+    pub jump_host: Option<String>,
+    pub jump_port: Option<u16>,
+    pub jump_username: Option<String>,
+    pub jump_password: Option<String>,
+    /// When `true`, the jump host authenticates with the same public key
+    /// (and passphrase) used for the target host.
+    pub jump_use_key: Option<bool>,
+}
+
+#[tauri::command]
+pub async fn sftp_connect(
+    request: SftpConnectRequest,
+    state: State<'_, Arc<ConnectionManager>>,
+) -> Result<CommandResponse, String> {
+    let jump = build_jump_sftp(&request)?;
+    let auth = match request.auth_method.as_str() {
+        "password" => SftpAuthMethod::Password {
+            password: request.password.unwrap_or_default(),
+        },
+        "publickey" => SftpAuthMethod::PublicKey {
+            key_path: request.key_path.ok_or("Key path required for SFTP")?,
+            passphrase: request.passphrase,
+        },
+        _ => return Err("Invalid SFTP auth method".to_string()),
+    };
+
+    let config = SftpConfig {
+        host: request.host,
+        port: request.port,
+        username: request.username,
+        auth_method: auth,
+        jump,
+    };
+
+    match state
+        .create_sftp_connection(request.connection_id.clone(), config)
+        .await
+    {
+        Ok(_) => Ok(CommandResponse {
+            success: true,
+            output: Some(format!("SFTP connected: {}", request.connection_id)),
+            error: None,
+        }),
+        Err(e) => Err(format!("SFTP connection failed: {}", e)),
+    }
+}
+
+#[tauri::command]
+pub async fn sftp_standalone_disconnect(
+    connection_id: String,
+    state: State<'_, Arc<ConnectionManager>>,
+) -> Result<CommandResponse, String> {
+    match state.close_sftp_connection(&connection_id).await {
+        Ok(_) => Ok(CommandResponse {
+            success: true,
+            output: Some("SFTP disconnected".to_string()),
+            error: None,
+        }),
+        Err(e) => Ok(CommandResponse {
+            success: false,
+            output: None,
+            error: Some(e.to_string()),
+        }),
+    }
+}
+
+// ========== FTP Connection ==========
+
+#[derive(Debug, Deserialize)]
+pub struct FtpConnectRequest {
+    pub connection_id: String,
+    pub host: String,
+    pub port: u16,
+    pub username: String,
+    pub password: Option<String>,
+    pub ftps_enabled: bool,
+    pub anonymous: bool,
+}
+
+#[tauri::command]
+pub async fn ftp_connect(
+    request: FtpConnectRequest,
+    state: State<'_, Arc<ConnectionManager>>,
+) -> Result<CommandResponse, String> {
+    tracing::info!(
+        "ftp_connect: id={}, host={}:{}, user={}, ftps={}, anon={}",
+        request.connection_id,
+        request.host,
+        request.port,
+        request.username,
+        request.ftps_enabled,
+        request.anonymous
+    );
+
+    let config = FtpConfig {
+        host: request.host,
+        port: request.port,
+        username: if request.anonymous {
+            "anonymous".to_string()
+        } else {
+            request.username
+        },
+        password: if request.anonymous {
+            "anonymous@".to_string()
+        } else {
+            request.password.unwrap_or_default()
+        },
+        ftps_enabled: request.ftps_enabled,
+        anonymous: request.anonymous,
+    };
+
+    match state
+        .create_ftp_connection(request.connection_id.clone(), config)
+        .await
+    {
+        Ok(_) => Ok(CommandResponse {
+            success: true,
+            output: Some(format!("FTP connected: {}", request.connection_id)),
+            error: None,
+        }),
+        Err(e) => Err(format!("FTP connection failed: {}", e)),
+    }
+}
+
+#[tauri::command]
+pub async fn ftp_disconnect(
+    connection_id: String,
+    state: State<'_, Arc<ConnectionManager>>,
+) -> Result<CommandResponse, String> {
+    match state.close_ftp_connection(&connection_id).await {
+        Ok(_) => Ok(CommandResponse {
+            success: true,
+            output: Some("FTP disconnected".to_string()),
+            error: None,
+        }),
+        Err(e) => Ok(CommandResponse {
+            success: false,
+            output: None,
+            error: Some(e.to_string()),
+        }),
+    }
+}
+
+// ========== Unified File Operations ==========
+
+#[tauri::command]
+pub async fn list_remote_files(
+    connection_id: String,
+    path: String,
+    state: State<'_, Arc<ConnectionManager>>,
+) -> Result<Vec<FileEntry>, String> {
+    let conn_type = state
+        .get_connection_type(&connection_id)
+        .await
+        .ok_or_else(|| format!("No file connection found for '{}'", connection_id))?;
+
+    match conn_type.as_str() {
+        "SFTP" => {
+            let sftp_map = state.get_sftp_connection().await;
+            let connections = sftp_map.read().await;
+            let client = connections
+                .get(&connection_id)
+                .ok_or("SFTP connection not found")?;
+            client.list_dir(&path).await.map_err(|e| e.to_string())
+        }
+        "FTP" => {
+            let ftp_map = state.get_ftp_connection().await;
+            let mut connections = ftp_map.write().await;
+            let client = connections
+                .get_mut(&connection_id)
+                .ok_or("FTP connection not found")?;
+            client.list_dir(&path).await.map_err(|e| e.to_string())
+        }
+        _ => Err(format!("Unsupported protocol: {}", conn_type)),
+    }
+}
+
+async fn download_remote_file_to_path(
+    connection_id: &str,
+    remote_path: &str,
+    local_path: &str,
+    state: &Arc<ConnectionManager>,
+) -> Result<FileTransferResponse, String> {
+    let conn_type = state.get_connection_type(connection_id).await;
+
+    let result = match conn_type.as_deref() {
+        Some("SFTP") => {
+            let sftp_map = state.get_sftp_connection().await;
+            let connections = sftp_map.read().await;
+            let client = connections
+                .get(connection_id)
+                .ok_or("SFTP connection not found".to_string())?;
+            client.download_file(remote_path, local_path).await
+        }
+        Some("FTP") => {
+            let ftp_map = state.get_ftp_connection().await;
+            let mut connections = ftp_map.write().await;
+            let client = connections
+                .get_mut(connection_id)
+                .ok_or("FTP connection not found".to_string())?;
+            client.download_file(remote_path, local_path).await
+        }
+        Some(other) => return Err(format!("Unsupported protocol: {}", other)),
+        None => {
+            // Fallback: try SSH connection (integrated file browser uses SSH connections
+            // which are not registered in connection_types)
+            let connection = state
+                .get_connection(connection_id)
+                .await
+                .ok_or_else(|| format!("No connection found for '{}'", connection_id))?;
+            let client = connection.read().await;
+            client.download_file(remote_path, local_path).await
+        }
+    };
+
+    match result {
+        Ok(bytes) => Ok(FileTransferResponse {
+            success: true,
+            bytes_transferred: Some(bytes),
+            data: None,
+            error: None,
+        }),
+        Err(e) => Ok(FileTransferResponse {
+            success: false,
+            bytes_transferred: None,
+            data: None,
+            error: Some(e.to_string()),
+        }),
+    }
+}
+
+#[tauri::command]
+pub async fn download_remote_file(
+    connection_id: String,
+    remote_path: String,
+    local_path: String,
+    state: State<'_, Arc<ConnectionManager>>,
+) -> Result<FileTransferResponse, String> {
+    download_remote_file_to_path(&connection_id, &remote_path, &local_path, state.inner()).await
+}
+
+#[tauri::command]
+pub async fn download_remote_file_confined(
+    connection_id: String,
+    remote_root: String,
+    destination_root: String,
+    remote_relative_path: String,
+    destination_relative_path: String,
+    state: State<'_, Arc<ConnectionManager>>,
+) -> Result<FileTransferResponse, String> {
+    validate_remote_relative_path(&remote_relative_path)?;
+    let local_path = resolve_confined_local_path(
+        std::path::Path::new(&destination_root),
+        &destination_relative_path,
+    )?;
+    let local_path = local_path
+        .to_str()
+        .ok_or_else(|| "Local destination path is not valid UTF-8".to_string())?;
+    let remote_path = if remote_root == "/" {
+        format!("/{}", remote_relative_path)
+    } else {
+        format!(
+            "{}/{}",
+            remote_root.trim_end_matches('/'),
+            remote_relative_path
+        )
+    };
+
+    download_remote_file_to_path(&connection_id, &remote_path, local_path, state.inner()).await
+}
+
+#[tauri::command]
+pub async fn upload_remote_file(
+    connection_id: String,
+    local_path: String,
+    remote_path: String,
+    state: State<'_, Arc<ConnectionManager>>,
+) -> Result<FileTransferResponse, String> {
+    let conn_type = state.get_connection_type(&connection_id).await;
+
+    let result = match conn_type.as_deref() {
+        Some("SFTP") => {
+            let sftp_map = state.get_sftp_connection().await;
+            let connections = sftp_map.read().await;
+            let client = connections
+                .get(&connection_id)
+                .ok_or("SFTP connection not found".to_string())?;
+            client.upload_file(&local_path, &remote_path).await
+        }
+        Some("FTP") => {
+            let ftp_map = state.get_ftp_connection().await;
+            let mut connections = ftp_map.write().await;
+            let client = connections
+                .get_mut(&connection_id)
+                .ok_or("FTP connection not found".to_string())?;
+            client.upload_file(&local_path, &remote_path).await
+        }
+        Some(other) => return Err(format!("Unsupported protocol: {}", other)),
+        None => {
+            // Fallback: try SSH connection (integrated file browser uses SSH connections
+            // which are not registered in connection_types)
+            let connection = state
+                .get_connection(&connection_id)
+                .await
+                .ok_or_else(|| format!("No connection found for '{}'", connection_id))?;
+            let client = connection.read().await;
+            client.upload_file(&local_path, &remote_path).await
+        }
+    };
+
+    match result {
+        Ok(bytes) => Ok(FileTransferResponse {
+            success: true,
+            bytes_transferred: Some(bytes),
+            data: None,
+            error: None,
+        }),
+        Err(e) => Ok(FileTransferResponse {
+            success: false,
+            bytes_transferred: None,
+            data: None,
+            error: Some(e.to_string()),
+        }),
+    }
+}
+
+#[tauri::command]
+pub async fn delete_remote_item(
+    connection_id: String,
+    path: String,
+    is_directory: bool,
+    state: State<'_, Arc<ConnectionManager>>,
+) -> Result<CommandResponse, String> {
+    let conn_type = state
+        .get_connection_type(&connection_id)
+        .await
+        .ok_or_else(|| format!("No file connection found for '{}'", connection_id))?;
+
+    let result = match conn_type.as_str() {
+        "SFTP" => {
+            let sftp_map = state.get_sftp_connection().await;
+            let connections = sftp_map.read().await;
+            let client = connections
+                .get(&connection_id)
+                .ok_or("SFTP connection not found".to_string())?;
+            if is_directory {
+                client.delete_dir(&path).await
+            } else {
+                client.delete_file(&path).await
+            }
+        }
+        "FTP" => {
+            let ftp_map = state.get_ftp_connection().await;
+            let mut connections = ftp_map.write().await;
+            let client = connections
+                .get_mut(&connection_id)
+                .ok_or("FTP connection not found".to_string())?;
+            if is_directory {
+                client.delete_dir(&path).await
+            } else {
+                client.delete_file(&path).await
+            }
+        }
+        _ => return Err(format!("Unsupported protocol: {}", conn_type)),
+    };
+
+    match result {
+        Ok(_) => Ok(CommandResponse {
+            success: true,
+            output: Some(format!("Deleted: {}", path)),
+            error: None,
+        }),
+        Err(e) => Ok(CommandResponse {
+            success: false,
+            output: None,
+            error: Some(e.to_string()),
+        }),
+    }
+}
+
+#[tauri::command]
+pub async fn create_remote_directory(
+    connection_id: String,
+    path: String,
+    state: State<'_, Arc<ConnectionManager>>,
+) -> Result<CommandResponse, String> {
+    let conn_type = state
+        .get_connection_type(&connection_id)
+        .await
+        .ok_or_else(|| format!("No file connection found for '{}'", connection_id))?;
+
+    let result = match conn_type.as_str() {
+        "SFTP" => {
+            let sftp_map = state.get_sftp_connection().await;
+            let connections = sftp_map.read().await;
+            let client = connections
+                .get(&connection_id)
+                .ok_or("SFTP connection not found".to_string())?;
+            client.create_dir(&path).await
+        }
+        "FTP" => {
+            let ftp_map = state.get_ftp_connection().await;
+            let mut connections = ftp_map.write().await;
+            let client = connections
+                .get_mut(&connection_id)
+                .ok_or("FTP connection not found".to_string())?;
+            client.create_dir(&path).await
+        }
+        _ => return Err(format!("Unsupported protocol: {}", conn_type)),
+    };
+
+    match result {
+        Ok(_) => Ok(CommandResponse {
+            success: true,
+            output: Some(format!("Created directory: {}", path)),
+            error: None,
+        }),
+        Err(e) => Ok(CommandResponse {
+            success: false,
+            output: None,
+            error: Some(e.to_string()),
+        }),
+    }
+}
+
+#[tauri::command]
+pub async fn rename_remote_item(
+    connection_id: String,
+    old_path: String,
+    new_path: String,
+    state: State<'_, Arc<ConnectionManager>>,
+) -> Result<CommandResponse, String> {
+    let conn_type = state
+        .get_connection_type(&connection_id)
+        .await
+        .ok_or_else(|| format!("No file connection found for '{}'", connection_id))?;
+
+    let result = match conn_type.as_str() {
+        "SFTP" => {
+            let sftp_map = state.get_sftp_connection().await;
+            let connections = sftp_map.read().await;
+            let client = connections
+                .get(&connection_id)
+                .ok_or("SFTP connection not found".to_string())?;
+            client.rename(&old_path, &new_path).await
+        }
+        "FTP" => {
+            let ftp_map = state.get_ftp_connection().await;
+            let mut connections = ftp_map.write().await;
+            let client = connections
+                .get_mut(&connection_id)
+                .ok_or("FTP connection not found".to_string())?;
+            client.rename(&old_path, &new_path).await
+        }
+        _ => return Err(format!("Unsupported protocol: {}", conn_type)),
+    };
+
+    match result {
+        Ok(_) => Ok(CommandResponse {
+            success: true,
+            output: Some(format!("Renamed '{}' to '{}'", old_path, new_path)),
+            error: None,
+        }),
+        Err(e) => Ok(CommandResponse {
+            success: false,
+            output: None,
+            error: Some(e.to_string()),
+        }),
+    }
+}
+
+// ========== Local Filesystem Commands ==========
+
+#[tauri::command]
+pub async fn list_local_files(path: String) -> Result<Vec<FileEntry>, String> {
+    use std::fs;
+
+    let dir_path = std::path::Path::new(&path);
+    if !dir_path.exists() {
+        return Err(format!("Path does not exist: {}", path));
+    }
+    if !dir_path.is_dir() {
+        return Err(format!("Path is not a directory: {}", path));
+    }
+
+    let read_dir = fs::read_dir(dir_path)
+        .map_err(|e| format!("Failed to read directory '{}': {}", path, e))?;
+
+    let mut entries: Vec<FileEntry> = Vec::new();
+    for item in read_dir {
+        let item = match item {
+            Ok(i) => i,
+            Err(_) => continue,
+        };
+
+        let name = item.file_name().to_string_lossy().to_string();
+        // Skip hidden files starting with . (optional, but common in FTP clients)
+        // Actually, let's show all files like FileZilla does
+
+        let metadata = match item.metadata() {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+
+        let file_type = if metadata.is_dir() {
+            FileEntryType::Directory
+        } else if metadata.file_type().is_symlink() {
+            FileEntryType::Symlink
+        } else {
+            FileEntryType::File
+        };
+
+        let size = metadata.len();
+
+        let modified = metadata.modified().ok().map(|t| {
+            let duration = t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+            let secs = duration.as_secs() as i64;
+            format_unix_timestamp(secs)
+        });
+
+        #[cfg(unix)]
+        let permissions = {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = metadata.permissions().mode();
+            Some(format_unix_permissions(mode))
+        };
+        #[cfg(not(unix))]
+        let permissions: Option<String> = None;
+
+        entries.push(FileEntry {
+            name,
+            size,
+            modified,
+            permissions,
+            file_type,
+        });
+    }
+
+    // Sort: directories first, then files, alphabetical within each group
+    entries.sort_by(|a, b| {
+        let a_is_dir = matches!(a.file_type, FileEntryType::Directory);
+        let b_is_dir = matches!(b.file_type, FileEntryType::Directory);
+        match (a_is_dir, b_is_dir) {
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+        }
+    });
+
+    Ok(entries)
+}
+
+/// Format a unix timestamp (seconds since epoch) into an ISO-like datetime string.
+fn format_unix_timestamp(secs: i64) -> String {
+    // Simple manual conversion for local display
+    // This avoids pulling in chrono — we just need a readable date string
+    let days = secs / 86400;
+    let time_of_day = secs % 86400;
+    let hours = time_of_day / 3600;
+    let minutes = (time_of_day % 3600) / 60;
+    let seconds = time_of_day % 60;
+
+    // Compute year, month, day from days since epoch (1970-01-01)
+    let mut y = 1970i64;
+    let mut remaining_days = days;
+
+    loop {
+        let days_in_year = if is_leap_year(y) { 366 } else { 365 };
+        if remaining_days < days_in_year {
+            break;
+        }
+        remaining_days -= days_in_year;
+        y += 1;
+    }
+
+    let month_days = if is_leap_year(y) {
+        [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    } else {
+        [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    };
+
+    let mut m = 0usize;
+    for (i, &md) in month_days.iter().enumerate() {
+        if remaining_days < md as i64 {
+            m = i;
+            break;
+        }
+        remaining_days -= md as i64;
+    }
+
+    let d = remaining_days + 1;
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+        y,
+        m + 1,
+        d,
+        hours,
+        minutes,
+        seconds
+    )
+}
+
+fn is_leap_year(y: i64) -> bool {
+    (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0)
+}
+
+/// Format Unix file mode bits into a human-readable rwx string.
+#[cfg(unix)]
+fn format_unix_permissions(mode: u32) -> String {
+    let mut s = String::with_capacity(10);
+    // File type
+    s.push(match mode & 0o170000 {
+        0o040000 => 'd',
+        0o120000 => 'l',
+        _ => '-',
+    });
+    // Owner
+    s.push(if mode & 0o400 != 0 { 'r' } else { '-' });
+    s.push(if mode & 0o200 != 0 { 'w' } else { '-' });
+    s.push(if mode & 0o100 != 0 { 'x' } else { '-' });
+    // Group
+    s.push(if mode & 0o040 != 0 { 'r' } else { '-' });
+    s.push(if mode & 0o020 != 0 { 'w' } else { '-' });
+    s.push(if mode & 0o010 != 0 { 'x' } else { '-' });
+    // Other
+    s.push(if mode & 0o004 != 0 { 'r' } else { '-' });
+    s.push(if mode & 0o002 != 0 { 'w' } else { '-' });
+    s.push(if mode & 0o001 != 0 { 'x' } else { '-' });
+    s
+}
+
+#[tauri::command]
+pub async fn get_home_directory() -> Result<String, String> {
+    dirs::home_dir()
+        .map(|p| p.to_string_lossy().to_string())
+        .ok_or_else(|| "Could not determine home directory".to_string())
+}
+
+#[tauri::command]
+pub async fn delete_local_item(path: String, is_directory: bool) -> Result<(), String> {
+    use std::fs;
+    let p = std::path::Path::new(&path);
+    if !p.exists() {
+        return Err(format!("Path does not exist: {}", path));
+    }
+    if is_directory {
+        fs::remove_dir_all(p).map_err(|e| format!("Failed to delete directory '{}': {}", path, e))
+    } else {
+        fs::remove_file(p).map_err(|e| format!("Failed to delete file '{}': {}", path, e))
+    }
+}
+
+#[tauri::command]
+pub async fn rename_local_item(old_path: String, new_path: String) -> Result<(), String> {
+    use std::fs;
+    let p = std::path::Path::new(&old_path);
+    if !p.exists() {
+        return Err(format!("Path does not exist: {}", old_path));
+    }
+    fs::rename(&old_path, &new_path)
+        .map_err(|e| format!("Failed to rename '{}' to '{}': {}", old_path, new_path, e))
+}
+
+fn validate_remote_relative_path(remote_relative_path: &str) -> Result<(), String> {
+    if remote_relative_path.is_empty()
+        || remote_relative_path.starts_with('/')
+        || remote_relative_path.starts_with('\\')
+        || remote_relative_path.contains('\\')
+    {
+        return Err(format!(
+            "Unsafe remote relative path: {}",
+            remote_relative_path
+        ));
+    }
+
+    for (index, component) in remote_relative_path.split('/').enumerate() {
+        let has_windows_prefix = index == 0
+            && component
+                .as_bytes()
+                .get(1)
+                .is_some_and(|separator| *separator == b':');
+        if component.is_empty()
+            || component == "."
+            || component == ".."
+            || component.contains('\0')
+            || has_windows_prefix
+        {
+            return Err(format!(
+                "Unsafe remote relative path: {}",
+                remote_relative_path
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn resolve_confined_local_path(
+    destination_root: &std::path::Path,
+    remote_relative_path: &str,
+) -> Result<std::path::PathBuf, String> {
+    if !destination_root.is_absolute() {
+        return Err("Destination root must be absolute".to_string());
+    }
+    validate_remote_relative_path(remote_relative_path)?;
+
+    let mut resolved = destination_root.to_path_buf();
+    for component in remote_relative_path.split('/') {
+        resolved.push(component);
+    }
+
+    if !resolved.starts_with(destination_root) {
+        return Err(format!(
+            "Remote path escapes destination root: {}",
+            remote_relative_path
+        ));
+    }
+    Ok(resolved)
+}
+
+#[tauri::command]
+pub async fn create_local_directory(path: String) -> Result<(), String> {
+    use std::fs;
+    fs::create_dir_all(&path).map_err(|e| format!("Failed to create directory '{}': {}", path, e))
+}
+
+#[tauri::command]
+pub async fn create_local_directory_confined(
+    destination_root: String,
+    relative_path: String,
+) -> Result<(), String> {
+    let path =
+        resolve_confined_local_path(std::path::Path::new(&destination_root), &relative_path)?;
+    std::fs::create_dir_all(&path)
+        .map_err(|e| format!("Failed to create directory '{}': {}", path.display(), e))
+}
+
+#[tauri::command]
+pub async fn open_in_os(path: String) -> Result<(), String> {
+    open::that(&path).map_err(|e| format!("Failed to open '{}': {}", path, e))
+}
+
+/// Metadata for a local path. Returned by `stat_local_path` so the frontend can
+/// cheaply decide (without recursing) whether a dropped filesystem entry is a
+/// file or a directory before building an upload plan.
+///
+/// `is_symlink` is true iff the path itself is a symlink (we read the link's own
+/// metadata). `is_directory` / `size` follow the link's target; if the target is
+/// missing (broken link or network share down) we fall back to the link's own
+/// metadata so `exists` stays true and the path is treated as a file (size 0).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct LocalPathStat {
+    pub exists: bool,
+    pub is_directory: bool,
+    pub is_symlink: bool,
+    pub size: u64,
+}
+
+#[tauri::command]
+pub async fn stat_local_path(path: String) -> Result<LocalPathStat, String> {
+    use std::fs;
+    let p = std::path::Path::new(&path);
+    // `symlink_metadata` never follows the link — works on Windows without the
+    // SE_CREATE_SYMBOLIC_LINK privilege.
+    let sym = match fs::symlink_metadata(p) {
+        Ok(m) => m,
+        Err(_) => {
+            return Ok(LocalPathStat {
+                exists: false,
+                is_directory: false,
+                is_symlink: false,
+                size: 0,
+            })
+        }
+    };
+    let is_symlink = sym.file_type().is_symlink();
+    // Follow the link; if the target is missing (broken link, unmounted share,
+    // etc.) fall back to the link's own metadata so `exists` stays true and we
+    // still surface the entry as a (zero-byte) file to the upload pipeline.
+    let md = match fs::metadata(p) {
+        Ok(m) => m,
+        Err(_) => sym,
+    };
+    Ok(LocalPathStat {
+        exists: true,
+        is_directory: md.is_dir(),
+        is_symlink,
+        size: if md.is_file() { md.len() } else { 0 },
+    })
+}
+
+// ========== Directory Synchronization ==========
+
+/// A file entry with a relative path (used for recursive listing comparisons).
+#[derive(Debug, Clone, Serialize)]
+pub struct SyncFileEntry {
+    pub relative_path: String,
+    pub name: String,
+    pub size: u64,
+    pub modified: Option<String>,
+    pub file_type: FileEntryType,
+}
+
+/// Recursively list all files/dirs under a local directory, returning relative paths.
+#[tauri::command]
+pub async fn list_local_files_recursive(
+    path: String,
+    exclude_patterns: Vec<String>,
+) -> Result<Vec<SyncFileEntry>, String> {
+    use std::fs;
+
+    fn relative_path_to_string(path: &std::path::Path) -> String {
+        path.components()
+            .map(|component| component.as_os_str().to_string_lossy())
+            .filter(|component| !component.is_empty())
+            .collect::<Vec<_>>()
+            .join("/")
+    }
+
+    fn walk_dir(
+        base: &std::path::Path,
+        current: &std::path::Path,
+        exclude: &[String],
+        results: &mut Vec<SyncFileEntry>,
+    ) -> Result<(), String> {
+        let read_dir = fs::read_dir(current)
+            .map_err(|e| format!("Failed to read '{}': {}", current.display(), e))?;
+
+        for item in read_dir {
+            let item = match item {
+                Ok(i) => i,
+                Err(_) => continue,
+            };
+            let name = item.file_name().to_string_lossy().to_string();
+
+            // Check exclude patterns
+            if matches_exclude(&name, exclude) {
+                continue;
+            }
+
+            // symlink_metadata: classify the link itself (not its target) so a
+            // symlink cycle (`ln -s .. loop`) cannot recurse forever.
+            let metadata = match std::fs::symlink_metadata(item.path()) {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+
+            let rel_path = item
+                .path()
+                .strip_prefix(base)
+                .unwrap_or(item.path().as_path())
+                .to_path_buf();
+            let rel_path = relative_path_to_string(&rel_path);
+
+            let is_symlink = metadata.file_type().is_symlink();
+            let file_type = if is_symlink {
+                FileEntryType::Symlink
+            } else if metadata.is_dir() {
+                FileEntryType::Directory
+            } else {
+                FileEntryType::File
+            };
+
+            let modified = metadata.modified().ok().map(|t| {
+                let duration = t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+                let secs = duration.as_secs() as i64;
+                format_unix_timestamp(secs)
+            });
+
+            results.push(SyncFileEntry {
+                relative_path: rel_path.clone(),
+                name: name.clone(),
+                size: metadata.len(),
+                modified,
+                file_type: file_type.clone(),
+            });
+
+            // Recurse into real directories only — never into symlinks (prevents
+            // infinite recursion on symlink cycles).
+            if metadata.is_dir() && !is_symlink {
+                walk_dir(base, &item.path(), exclude, results)?;
+            }
+        }
+        Ok(())
+    }
+
+    let base_path = std::path::Path::new(&path);
+    if !base_path.exists() || !base_path.is_dir() {
+        return Err(format!(
+            "Path does not exist or is not a directory: {}",
+            path
+        ));
+    }
+
+    let mut results = Vec::new();
+    walk_dir(base_path, base_path, &exclude_patterns, &mut results)?;
+
+    // Sort: directories first, then by relative path
+    results.sort_by(|a, b| {
+        let a_dir = matches!(a.file_type, FileEntryType::Directory);
+        let b_dir = matches!(b.file_type, FileEntryType::Directory);
+        match (a_dir, b_dir) {
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            _ => a.relative_path.cmp(&b.relative_path),
+        }
+    });
+
+    Ok(results)
+}
+
+fn walk_sftp<'a>(
+    sftp: &'a russh_sftp::client::SftpSession,
+    base: &'a str,
+    current: &'a str,
+    exclude: &'a [String],
+    results: &'a mut Vec<SyncFileEntry>,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>> {
+    Box::pin(async move {
+        let entries = crate::sftp_client::list_sftp_dir(sftp, current)
+            .await
+            .map_err(|e| e.to_string())?;
+        for entry in entries {
+            if matches_exclude(&entry.name, exclude) {
+                continue;
+            }
+            let full_path = if current == "/" {
+                format!("/{}", entry.name)
+            } else {
+                format!("{}/{}", current, entry.name)
+            };
+            let relative_path = full_path
+                .strip_prefix(base)
+                .unwrap_or(&full_path)
+                .trim_start_matches('/')
+                .to_string();
+            let is_dir = matches!(entry.file_type, FileEntryType::Directory);
+
+            results.push(SyncFileEntry {
+                relative_path,
+                name: entry.name,
+                size: entry.size,
+                modified: entry.modified,
+                file_type: entry.file_type,
+            });
+
+            if is_dir {
+                walk_sftp(sftp, base, &full_path, exclude, results).await?;
+            }
+        }
+        Ok(())
+    })
+}
+
+/// Recursively list all files/dirs under a remote directory (SSH/SFTP/FTP).
+#[tauri::command]
+pub async fn list_remote_files_recursive(
+    connection_id: String,
+    path: String,
+    exclude_patterns: Vec<String>,
+    state: State<'_, Arc<ConnectionManager>>,
+) -> Result<Vec<SyncFileEntry>, String> {
+    let conn_type = state.get_connection_type(&connection_id).await;
+
+    let mut results = Vec::new();
+
+    match conn_type.as_deref() {
+        Some("SFTP") => {
+            let sftp_map = state.get_sftp_connection().await;
+            let connections = sftp_map.read().await;
+            let client = connections
+                .get(&connection_id)
+                .ok_or("SFTP connection not found")?;
+            let sftp = client.sftp_session().map_err(|e| e.to_string())?;
+            walk_sftp(sftp, &path, &path, &exclude_patterns, &mut results).await?;
+        }
+        Some("FTP") => {
+            let ftp_map = state.get_ftp_connection().await;
+            let mut connections = ftp_map.write().await;
+            let client = connections
+                .get_mut(&connection_id)
+                .ok_or("FTP connection not found")?;
+
+            // FTP recursive walk — iterative with a queue since we need &mut
+            let mut dirs_to_visit: Vec<String> = vec![path.clone()];
+            while let Some(dir) = dirs_to_visit.pop() {
+                let entries = client.list_dir(&dir).await.map_err(|e| e.to_string())?;
+                for entry in entries {
+                    if matches_exclude(&entry.name, &exclude_patterns) {
+                        continue;
+                    }
+                    let full_path = if dir == "/" {
+                        format!("/{}", entry.name)
+                    } else {
+                        format!("{}/{}", dir, entry.name)
+                    };
+                    let rel = full_path
+                        .strip_prefix(&path)
+                        .unwrap_or(&full_path)
+                        .trim_start_matches('/')
+                        .to_string();
+
+                    let is_dir = matches!(entry.file_type, FileEntryType::Directory);
+
+                    results.push(SyncFileEntry {
+                        relative_path: rel.clone(),
+                        name: entry.name.clone(),
+                        size: entry.size,
+                        modified: entry.modified.clone(),
+                        file_type: entry.file_type.clone(),
+                    });
+
+                    if is_dir {
+                        dirs_to_visit.push(full_path);
+                    }
+                }
+            }
+        }
+        None | Some("SSH") => {
+            let connection = state
+                .get_connection(&connection_id)
+                .await
+                .ok_or("SSH connection not found")?;
+            let client = connection.read().await;
+            let sftp = client
+                .open_sftp_session()
+                .await
+                .map_err(|e| e.to_string())?;
+            walk_sftp(&sftp, &path, &path, &exclude_patterns, &mut results).await?;
+        }
+        Some(other) => return Err(format!("Unsupported protocol: {}", other)),
+    }
+
+    // Sort similarly
+    results.sort_by(|a, b| {
+        let a_dir = matches!(a.file_type, FileEntryType::Directory);
+        let b_dir = matches!(b.file_type, FileEntryType::Directory);
+        match (a_dir, b_dir) {
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            _ => a.relative_path.cmp(&b.relative_path),
+        }
+    });
+
+    Ok(results)
+}
+
+/// Simple glob-like pattern matching for exclude filter.
+fn matches_exclude(name: &str, patterns: &[String]) -> bool {
+    for pat in patterns {
+        if pat.starts_with("*.") {
+            // Extension match
+            let ext = &pat[1..]; // e.g., ".log"
+            if name.ends_with(ext) {
+                return true;
+            }
+        } else if name == pat {
+            return true;
+        }
+    }
+    false
+}
+
+// ========== Desktop (RDP/VNC) Commands ==========
+
+/// Connect to a remote desktop via RDP or VNC
+#[tauri::command]
+pub async fn desktop_connect(
+    connection_id: String,
+    request: crate::desktop_protocol::DesktopConnectRequest,
+    state: State<'_, Arc<ConnectionManager>>,
+) -> Result<crate::desktop_protocol::DesktopConnectResponse, String> {
+    tracing::info!(
+        "Desktop connect: {} ({}) to {}:{}",
+        connection_id,
+        request.protocol,
+        request.host,
+        request.port
+    );
+
+    let (width, height) = state
+        .create_desktop_connection(connection_id, &request)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    Ok(crate::desktop_protocol::DesktopConnectResponse { width, height })
+}
+
+/// Disconnect a remote desktop session
+#[tauri::command]
+pub async fn desktop_disconnect(
+    connection_id: String,
+    state: State<'_, Arc<ConnectionManager>>,
+) -> Result<(), String> {
+    tracing::info!("Desktop disconnect: {}", connection_id);
+    state
+        .close_desktop_connection(&connection_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Send a keyboard event to a remote desktop session
+#[tauri::command]
+pub async fn desktop_send_key(
+    connection_id: String,
+    key_code: u32,
+    down: bool,
+    state: State<'_, Arc<ConnectionManager>>,
+) -> Result<(), String> {
+    let client = state
+        .get_desktop_connection(&connection_id)
+        .await
+        .ok_or_else(|| format!("Desktop connection not found: {}", connection_id))?;
+    let c = client.read().await;
+    c.send_key(key_code, down).await.map_err(|e| e.to_string())
+}
+
+/// Send a mouse/pointer event to a remote desktop session
+#[tauri::command]
+pub async fn desktop_send_pointer(
+    connection_id: String,
+    x: u16,
+    y: u16,
+    button_mask: u8,
+    state: State<'_, Arc<ConnectionManager>>,
+) -> Result<(), String> {
+    let client = state
+        .get_desktop_connection(&connection_id)
+        .await
+        .ok_or_else(|| format!("Desktop connection not found: {}", connection_id))?;
+    let c = client.read().await;
+    c.send_pointer(x, y, button_mask)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Request a full framebuffer update from a remote desktop session
+#[tauri::command]
+pub async fn desktop_request_frame(
+    connection_id: String,
+    state: State<'_, Arc<ConnectionManager>>,
+) -> Result<(), String> {
+    let client = state
+        .get_desktop_connection(&connection_id)
+        .await
+        .ok_or_else(|| format!("Desktop connection not found: {}", connection_id))?;
+    let c = client.read().await;
+    c.request_full_frame().await.map_err(|e| e.to_string())
+}
+
+/// Send clipboard text to a remote desktop session
+#[tauri::command]
+pub async fn desktop_set_clipboard(
+    connection_id: String,
+    text: String,
+    state: State<'_, Arc<ConnectionManager>>,
+) -> Result<(), String> {
+    let client = state
+        .get_desktop_connection(&connection_id)
+        .await
+        .ok_or_else(|| format!("Desktop connection not found: {}", connection_id))?;
+    let c = client.read().await;
+    c.set_clipboard(text).await.map_err(|e| e.to_string())
+}
+
+/// Request a remote desktop session to resize to the given dimensions.
+/// For RDP: sends a display resize request to the remote server.
+/// For VNC: no-op (client-side scaling is used instead).
+#[tauri::command]
+pub async fn desktop_resize(
+    connection_id: String,
+    width: u16,
+    height: u16,
+    state: State<'_, Arc<ConnectionManager>>,
+) -> Result<(), String> {
+    let client = state
+        .get_desktop_connection(&connection_id)
+        .await
+        .ok_or_else(|| format!("Desktop connection not found: {}", connection_id))?;
+    let mut c = client.write().await;
+    c.resize(width, height).await.map_err(|e| e.to_string())
+}
+
+// ========== Native Menu i18n ==========
+
+/// Rebuild the native macOS menu bar with translated labels from the frontend.
+/// On non-macOS platforms this is a no-op.
+#[tauri::command]
+pub async fn update_menu_language(
+    app: tauri::AppHandle,
+    translations: std::collections::HashMap<String, String>,
+) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let menu = crate::build_app_menu(&app, move |key: &str| {
+            translations
+                .get(key)
+                .cloned()
+                .unwrap_or_else(|| crate::default_menu_text(key))
+        })
+        .map_err(|e| e.to_string())?;
+        app.set_menu(menu).map_err(|e| e.to_string())?;
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (app, translations);
+    }
+    Ok(())
+}
+
+/// Return the OS-level locale string (e.g. "en-US", "zh-CN").
+/// Used on first run to match the app language to the user's system preference.
+#[tauri::command]
+pub fn get_system_locale() -> Result<String, String> {
+    sys_locale::get_locale().ok_or_else(|| "Failed to detect system locale".to_string())
+}
+
+// ========== Local Filesystem Tests ==========
+
+#[cfg(test)]
+mod local_fs_tests {
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+
+    fn create_test_dir() -> TempDir {
+        let dir = TempDir::new().unwrap();
+        // Create some test files and directories
+        fs::write(dir.path().join("file1.txt"), "hello").unwrap();
+        fs::write(dir.path().join("file2.rs"), "fn main() {}").unwrap();
+        fs::create_dir(dir.path().join("subdir")).unwrap();
+        fs::write(dir.path().join("subdir").join("nested.txt"), "nested").unwrap();
+        dir
+    }
+
+    #[tokio::test]
+    async fn test_list_local_files() {
+        let dir = create_test_dir();
+        let path = dir.path().to_string_lossy().to_string();
+        let result = list_local_files(path).await;
+        assert!(result.is_ok());
+        let entries = result.unwrap();
+        // subdir should come first (directories first)
+        assert_eq!(entries[0].name, "subdir");
+        assert!(matches!(entries[0].file_type, FileEntryType::Directory));
+        // Then files alphabetically
+        let file_names: Vec<&str> = entries[1..].iter().map(|e| e.name.as_str()).collect();
+        assert!(file_names.contains(&"file1.txt"));
+        assert!(file_names.contains(&"file2.rs"));
+    }
+
+    #[tokio::test]
+    async fn test_list_local_files_nonexistent() {
+        let result = list_local_files("/nonexistent/path/xyz".to_string()).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("does not exist"));
+    }
+
+    #[tokio::test]
+    async fn test_get_home_directory() {
+        let result = get_home_directory().await;
+        assert!(result.is_ok());
+        let home = result.unwrap();
+        assert!(!home.is_empty());
+        assert!(std::path::Path::new(&home).exists());
+    }
+
+    #[tokio::test]
+    async fn test_delete_local_file() {
+        let dir = create_test_dir();
+        let file_path = dir.path().join("file1.txt").to_string_lossy().to_string();
+        assert!(std::path::Path::new(&file_path).exists());
+        let result = delete_local_item(file_path.clone(), false).await;
+        assert!(result.is_ok());
+        assert!(!std::path::Path::new(&file_path).exists());
+    }
+
+    #[tokio::test]
+    async fn test_delete_local_directory() {
+        let dir = create_test_dir();
+        let sub_path = dir.path().join("subdir").to_string_lossy().to_string();
+        assert!(std::path::Path::new(&sub_path).exists());
+        let result = delete_local_item(sub_path.clone(), true).await;
+        assert!(result.is_ok());
+        assert!(!std::path::Path::new(&sub_path).exists());
+    }
+
+    #[tokio::test]
+    async fn test_rename_local_item() {
+        let dir = create_test_dir();
+        let old_path = dir.path().join("file1.txt").to_string_lossy().to_string();
+        let new_path = dir.path().join("renamed.txt").to_string_lossy().to_string();
+        let result = rename_local_item(old_path.clone(), new_path.clone()).await;
+        assert!(result.is_ok());
+        assert!(!std::path::Path::new(&old_path).exists());
+        assert!(std::path::Path::new(&new_path).exists());
+    }
+
+    #[tokio::test]
+    async fn test_create_local_directory() {
+        let dir = create_test_dir();
+        let new_dir = dir.path().join("new_subdir").to_string_lossy().to_string();
+        let result = create_local_directory(new_dir.clone()).await;
+        assert!(result.is_ok());
+        assert!(std::path::Path::new(&new_dir).is_dir());
+    }
+
+    #[tokio::test]
+    async fn confined_directory_creation_stays_under_destination_root() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().to_string_lossy().to_string();
+
+        create_local_directory_confined(root, "nested/子目录".to_string())
+            .await
+            .unwrap();
+
+        assert!(dir.path().join("nested").join("子目录").is_dir());
+    }
+
+    #[tokio::test]
+    async fn confined_directory_creation_rejects_windows_traversal() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().join("destination");
+        fs::create_dir(&root).unwrap();
+
+        let result = create_local_directory_confined(
+            root.to_string_lossy().to_string(),
+            "nested\\..\\outside".to_string(),
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(!dir.path().join("outside").exists());
+    }
+
+    #[test]
+    fn confined_local_path_accepts_portable_nested_paths() {
+        let dir = TempDir::new().unwrap();
+
+        let resolved = resolve_confined_local_path(dir.path(), "子目录/report 1.txt").unwrap();
+
+        assert_eq!(resolved, dir.path().join("子目录").join("report 1.txt"));
+    }
+
+    #[test]
+    fn confined_local_path_rejects_escaping_or_ambiguous_paths() {
+        let dir = TempDir::new().unwrap();
+        let unsafe_paths = [
+            "",
+            ".",
+            "../escape.txt",
+            "nested/../../escape.txt",
+            "/absolute.txt",
+            "\\absolute.txt",
+            "nested//file.txt",
+            "nested/./file.txt",
+            "C:/escape.txt",
+            "C:\\escape.txt",
+            "\\\\server\\share\\escape.txt",
+            "nested\\..\\escape.txt",
+        ];
+
+        for relative_path in unsafe_paths {
+            assert!(
+                resolve_confined_local_path(dir.path(), relative_path).is_err(),
+                "unsafe path should be rejected: {relative_path:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn confined_local_path_allows_dots_within_normal_names() {
+        let dir = TempDir::new().unwrap();
+
+        for relative_path in ["report..txt", "..hidden", "nested/v1..2.txt"] {
+            assert!(
+                resolve_confined_local_path(dir.path(), relative_path).is_ok(),
+                "normal name should be accepted: {relative_path:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn confined_local_path_requires_an_absolute_root() {
+        assert!(resolve_confined_local_path(
+            std::path::Path::new("relative-root"),
+            "nested/file.txt"
+        )
+        .is_err());
+    }
+
+    #[tokio::test]
+    async fn test_list_local_files_recursive_returns_portable_relative_paths() {
+        let dir = create_test_dir();
+        let path = dir.path().to_string_lossy().to_string();
+        let entries = list_local_files_recursive(path, vec![]).await.unwrap();
+        let relative_paths: Vec<&str> = entries
+            .iter()
+            .map(|entry| entry.relative_path.as_str())
+            .collect();
+
+        assert!(relative_paths.contains(&"subdir/nested.txt"));
+        assert!(
+            relative_paths
+                .iter()
+                .all(|relative_path| !relative_path.contains('\\')),
+            "relative paths should use forward slashes: {:?}",
+            relative_paths
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_format_unix_permissions() {
+        assert_eq!(format_unix_permissions(0o100644), "-rw-r--r--");
+        assert_eq!(format_unix_permissions(0o040755), "drwxr-xr-x");
+        assert_eq!(format_unix_permissions(0o100755), "-rwxr-xr-x");
+        assert_eq!(format_unix_permissions(0o120777), "lrwxrwxrwx");
+    }
+
+    #[test]
+    fn test_format_unix_timestamp() {
+        // 2024-01-01 00:00:00 UTC = 1704067200
+        let s = format_unix_timestamp(1704067200);
+        assert_eq!(s, "2024-01-01 00:00:00");
+    }
+}
+
+#[cfg(test)]
+mod proxy_config_tests {
+    use super::*;
+
+    fn request(proxy_type: Option<&str>) -> ConnectRequest {
+        ConnectRequest {
+            connection_id: "c1".to_string(),
+            host: "example.com".to_string(),
+            port: 22,
+            username: "root".to_string(),
+            auth_method: "password".to_string(),
+            password: Some("pw".to_string()),
+            key_path: None,
+            passphrase: None,
+            compression: None,
+            keepalive_enabled: None,
+            keepalive_interval: None,
+            keepalive_max: None,
+            proxy_type: proxy_type.map(|s| s.to_string()),
+            proxy_host: None,
+            proxy_port: None,
+            proxy_username: None,
+            proxy_password: None,
+            jump_host: None,
+            jump_port: None,
+            jump_username: None,
+            jump_password: None,
+            jump_use_key: None,
+        }
+    }
+
+    #[test]
+    fn no_proxy_when_type_none_or_none_type() {
+        assert!(build_proxy(&request(None)).unwrap().is_none());
+        assert!(build_proxy(&request(Some("none"))).unwrap().is_none());
+        assert!(build_proxy(&request(Some(""))).unwrap().is_none());
+    }
+
+    /// Request with a proxy host set, so type/host validation reaches the type.
+    fn request_with_host(proxy_type: &str) -> ConnectRequest {
+        let mut req = request(Some(proxy_type));
+        req.proxy_host = Some("proxy.local".to_string());
+        req
+    }
+
+    #[test]
+    fn maps_supported_proxy_types() {
+        let http = build_proxy(&request_with_host("http")).unwrap().unwrap();
+        assert_eq!(http.proxy_type, ProxyType::Http);
+        let socks5 = build_proxy(&request_with_host("socks5")).unwrap().unwrap();
+        assert_eq!(socks5.proxy_type, ProxyType::Socks5);
+        let socks4 = build_proxy(&request_with_host("socks4")).unwrap().unwrap();
+        assert_eq!(socks4.proxy_type, ProxyType::Socks4);
+    }
+
+    #[test]
+    fn requires_proxy_host() {
+        let err = build_proxy(&request(Some("http"))).unwrap_err();
+        assert!(err.contains("Proxy host is required"));
+    }
+
+    #[test]
+    fn rejects_unknown_proxy_type() {
+        let err = build_proxy(&request_with_host("ftp")).unwrap_err();
+        assert!(err.contains("Invalid proxy type"));
+    }
+
+    #[test]
+    fn carries_proxy_credentials_and_port() {
+        let mut req = request(Some("socks5"));
+        req.proxy_host = Some("proxy.local".to_string());
+        req.proxy_port = Some(1080);
+        req.proxy_username = Some("user".to_string());
+        req.proxy_password = Some("pass".to_string());
+        let cfg = build_proxy(&req).unwrap().unwrap();
+        assert_eq!(cfg.host, "proxy.local");
+        assert_eq!(cfg.port, 1080);
+        assert_eq!(cfg.username.as_deref(), Some("user"));
+        assert_eq!(cfg.password.as_deref(), Some("pass"));
+    }
+
+    #[test]
+    fn defaults_proxy_port_to_8080() {
+        let mut req = request(Some("http"));
+        req.proxy_host = Some("proxy.local".to_string());
+        let cfg = build_proxy(&req).unwrap().unwrap();
+        assert_eq!(cfg.port, 8080);
+    }
+}
+
+#[cfg(test)]
+mod jump_config_tests {
+    use super::*;
+
+    fn request() -> ConnectRequest {
+        ConnectRequest {
+            connection_id: "c1".to_string(),
+            host: "target.example.com".to_string(),
+            port: 22,
+            username: "root".to_string(),
+            auth_method: "password".to_string(),
+            password: Some("pw".to_string()),
+            key_path: None,
+            passphrase: None,
+            compression: None,
+            keepalive_enabled: None,
+            keepalive_interval: None,
+            keepalive_max: None,
+            proxy_type: None,
+            proxy_host: None,
+            proxy_port: None,
+            proxy_username: None,
+            proxy_password: None,
+            jump_host: Some("bastion.example.com".to_string()),
+            jump_port: Some(2222),
+            jump_username: Some("jumpuser".to_string()),
+            jump_password: Some("jumppass".to_string()),
+            jump_use_key: Some(false),
+        }
+    }
+
+    #[test]
+    fn no_jump_when_host_missing_or_empty() {
+        let mut req = request();
+        req.jump_host = None;
+        assert!(build_jump(&req).unwrap().is_none());
+
+        req.jump_host = Some("   ".to_string());
+        assert!(build_jump(&req).unwrap().is_none());
+    }
+
+    #[test]
+    fn requires_jump_username() {
+        let mut req = request();
+        req.jump_username = None;
+        let err = build_jump(&req).unwrap_err();
+        assert!(err.contains("Jump host username is required"));
+    }
+
+    #[test]
+    fn maps_password_auth_jump() {
+        let jump = build_jump(&request()).unwrap().unwrap();
+        assert_eq!(jump.host, "bastion.example.com");
+        assert_eq!(jump.port, 2222);
+        assert_eq!(jump.username, "jumpuser");
+        match jump.auth_method {
+            AuthMethod::Password { password } => assert_eq!(password, "jumppass"),
+            _ => panic!("expected password auth"),
+        }
+    }
+
+    #[test]
+    fn defaults_jump_port_to_22() {
+        let mut req = request();
+        req.jump_port = None;
+        let jump = build_jump(&req).unwrap().unwrap();
+        assert_eq!(jump.port, 22);
+    }
+
+    #[test]
+    fn reuses_target_key_when_jump_use_key() {
+        let mut req = request();
+        req.jump_use_key = Some(true);
+        req.key_path = Some("~/.ssh/id_ed25519".to_string());
+        req.passphrase = Some("kp".to_string());
+        let jump = build_jump(&req).unwrap().unwrap();
+        match jump.auth_method {
+            AuthMethod::PublicKey {
+                key_path,
+                passphrase,
+            } => {
+                assert_eq!(key_path, "~/.ssh/id_ed25519");
+                assert_eq!(passphrase.as_deref(), Some("kp"));
+            }
+            _ => panic!("expected public key auth"),
+        }
+    }
+
+    #[test]
+    fn jump_use_key_requires_target_key_path() {
+        let mut req = request();
+        req.jump_use_key = Some(true);
+        req.key_path = None;
+        let err = build_jump(&req).unwrap_err();
+        assert!(err.contains("no key path"));
+    }
+}
