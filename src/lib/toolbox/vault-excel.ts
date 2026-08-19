@@ -5,7 +5,6 @@
  * "名称" (Name) header. Any file without that header is rejected so arbitrary
  * spreadsheets cannot be imported.
  */
-import * as XLSX from 'xlsx';
 
 /** Column definition: header text (zh) + fallback english header + field key. */
 interface ColumnDef {
@@ -64,7 +63,8 @@ function parseFavorite(value: unknown): boolean {
  * Parse an Excel/CSV workbook into rows. Throws if the required "名称" header
  * is missing.
  */
-export function parseVaultExcel(data: Uint8Array | ArrayBuffer): VaultExcelRow[] {
+export async function parseVaultExcel(data: Uint8Array | ArrayBuffer): Promise<VaultExcelRow[]> {
+  const XLSX = await import('xlsx');
   const workbook = XLSX.read(data, { type: 'array' });
   const firstSheetName = workbook.SheetNames[0];
   if (!firstSheetName) throw new Error('empty workbook');
@@ -104,7 +104,8 @@ export function parseVaultExcel(data: Uint8Array | ArrayBuffer): VaultExcelRow[]
 }
 
 /** Build a workbook (Uint8Array) from rows for export. */
-export function buildVaultExcel(rows: VaultExcelRow[]): Uint8Array {
+export async function buildVaultExcel(rows: VaultExcelRow[]): Promise<Uint8Array> {
+  const XLSX = await import('xlsx');
   const aoa: unknown[][] = [HEADER_ROW];
   for (const row of rows) {
     aoa.push([
@@ -124,7 +125,7 @@ export function buildVaultExcel(rows: VaultExcelRow[]): Uint8Array {
 }
 
 /** Build the empty template workbook (header + one example row). */
-export function buildVaultTemplate(): Uint8Array {
+export async function buildVaultTemplate(): Promise<Uint8Array> {
   return buildVaultExcel([
     {
       name: '示例：GitHub',

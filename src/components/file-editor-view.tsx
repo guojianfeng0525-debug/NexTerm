@@ -1,10 +1,10 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useRef, lazy, Suspense } from "react";
 import { useTranslation } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
 import { Save, RefreshCw, FileWarning, ExternalLink, Image as ImageIcon, FileArchive, Download } from "lucide-react";
 import { Button } from "./ui/button";
-import { CodeEditor } from "./code-editor";
+const CodeEditor = lazy(() => import("./code-editor").then((m) => ({ default: m.CodeEditor })));
 import { classifyFileByExtension, type FileViewKind } from "@/lib/editor-config";
 
 interface Base64FileResponse {
@@ -309,11 +309,13 @@ export function FileEditorView({
       {renderToolbar(true)}
       {/* Editor */}
       <div className="flex-1 min-h-0">
-        <CodeEditor
-          value={content}
-          onChange={setContent}
-          filename={fileName}
-        />
+        <Suspense fallback={<div className="h-full flex items-center justify-center text-xs text-muted-foreground">{'...'}</div>}>
+          <CodeEditor
+            value={content}
+            onChange={setContent}
+            filename={fileName}
+          />
+        </Suspense>
       </div>
     </div>
   );

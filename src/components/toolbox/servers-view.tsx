@@ -36,6 +36,7 @@ import {
   ConnectionStorageManager,
   type ConnectionData,
   type ConnectionFolder,
+  type ConnectionTreeNode,
 } from '@/lib/connection-storage';
 import { buildSshConnectRequest } from '@/lib/ssh-connect-request';
 import { prefGet, prefSet } from '@/lib/preferences';
@@ -212,19 +213,27 @@ export function ServersView({
   const nextProbeRef = useRef<Record<string, number>>({});
 
   const reload = useCallback(() => {
-    setFolders(ConnectionStorageManager.getFolders());
-    setAllServers(ConnectionStorageManager.getConnections());
+    // Spread into new arrays: the storage returns the same array reference
+    // and reorder/rename mutate items in place, so without a copy React would
+    // treat the state as unchanged and the tree would never refresh.
+    setFolders([...ConnectionStorageManager.getFolders()]);
+    setAllServers([...ConnectionStorageManager.getConnections()]);
   }, []);
 
   useEffect(() => {
     reload();
   }, [reload, refreshTrigger]);
 
-  // Refresh when connections change from elsewhere.
+  // Refresh when connections change from elsewhere (storage writes dispatch
+  // 'nexterm:connections-changed' synchronously after any cache mutation).
   useEffect(() => {
     const handler = () => reload();
     window.addEventListener('storage', handler);
-    return () => window.removeEventListener('storage', handler);
+    window.addEventListener('nexterm:connections-changed', handler);
+    return () => {
+      window.removeEventListener('storage', handler);
+      window.removeEventListener('nexterm:connections-changed', handler);
+    };
   }, [reload]);
 
   // Persist the resources toggle across sessions (SQLite preferences table).
@@ -345,6 +354,16 @@ export function ServersView({
     [folders],
   );
 
+  // Full tree (folders + servers nested under them) for the left panel.
+  const treeNodes = useMemo(
+    () => ConnectionStorageManager.buildConnectionTree(activeConnections),
+    [allServers, folders, activeConnections],
+  );
+
+  // Live tree for drag handlers (pointer events fire outside React render).
+  const treeNodesRef = useRef(treeNodes);
+  treeNodesRef.current = treeNodes;
+
   const toggleFolder = useCallback((path: string) => {
     setExpanded((prev) => {
       const next = new Set(prev);
@@ -353,6 +372,271 @@ export function ServersView({
       return next;
     });
   }, []);
+
+  /* ── drag & drop (pointer-based, works in WKWebView / WebView2) ─────────── */
+
+  const [draggedItem, setDraggedItem] = useState<ConnectionTreeNode | null>(null);
+  const [dropTarget, setDropTarget] = useState<{ nodeId: string; position: 'before' | 'after' | 'inside' } | null>(null);
+  const [dragGhost, setDragGhost] = useState<{ x: number; y: number; name: string; type: 'folder' | 'connection' } | null>(null);
+  const suppressClickRef = useRef(false);
+  const treeContainerRef = useRef<HTMLDivElement>(null);
+  const ROOT_DROP_ID = '__tree_root__';
+
+  const findNodeById = useCallback((nodes: ConnectionTreeNode[], id: string): ConnectionTreeNode | null => {
+    for (const n of nodes) {
+      if (n.id === id) return n;
+      if (n.children) {
+        const found = findNodeById(n.children, id);
+        if (found) return found;
+      }
+    }
+    return null;
+  }, []);
+
+  const findNodeContext = useCallback(
+    (
+      nodes: ConnectionTreeNode[],
+      nodeId: string,
+      parentPath?: string,
+    ): { parentPath: string | undefined; sameTypeSiblings: ConnectionTreeNode[] } | null => {
+      const idx = nodes.findIndex(n => n.id === nodeId);
+      if (idx !== -1) {
+        return {
+          parentPath,
+          sameTypeSiblings: nodes.filter(n => n.type === nodes[idx].type),
+        };
+      }
+      for (const n of nodes) {
+        if (n.children) {
+          const found = findNodeContext(n.children, nodeId, n.path);
+          if (found) return found;
+        }
+      }
+      return null;
+    },
+    [],
+  );
+
+  // Guard: dropping a folder into its own subtree is invalid.
+  const isInvalidFolderTarget = useCallback(
+    (draggedNode: ConnectionTreeNode, targetNode: ConnectionTreeNode): boolean => {
+      if (draggedNode.type !== 'folder') return false;
+      const draggedPath = draggedNode.path ?? '';
+      if (targetNode.type === 'folder' && (targetNode.path === draggedPath || targetNode.path?.startsWith(draggedPath + '/'))) {
+        return true;
+      }
+      if (targetNode.type === 'connection') {
+        const ctx = findNodeContext(treeNodesRef.current, targetNode.id);
+        const connParent = ctx?.parentPath ?? '';
+        if (connParent === draggedPath || connParent.startsWith(draggedPath + '/')) return true;
+      }
+      return false;
+    },
+    [findNodeContext],
+  );
+
+  const calcDropPosition = (targetNode: ConnectionTreeNode, rowEl: HTMLElement, clientY: number): 'before' | 'after' | 'inside' => {
+    if (targetNode.path === 'All Connections') return 'inside'; // root only accepts inside
+    const rect = rowEl.getBoundingClientRect();
+    const ratio = (clientY - rect.top) / rect.height;
+    if (targetNode.type === 'folder') {
+      return ratio < 0.25 ? 'before' : ratio > 0.75 ? 'after' : 'inside';
+    }
+    return ratio < 0.5 ? 'before' : 'after';
+  };
+
+  const findRowAtPoint = (x: number, y: number): HTMLElement | null => {
+    for (const el of document.elementsFromPoint(x, y)) {
+      if (el.hasAttribute('data-conn-node-id')) return el as HTMLElement;
+    }
+    return null;
+  };
+
+  const isOverTreeContainer = (x: number, y: number): boolean => {
+    for (const el of document.elementsFromPoint(x, y)) {
+      if (el.hasAttribute('data-conn-tree-container')) return true;
+    }
+    return false;
+  };
+
+  const updateDropTargetFromPoint = useCallback(
+    (x: number, y: number, draggedNode: ConnectionTreeNode) => {
+      const rowEl = findRowAtPoint(x, y);
+      if (rowEl) {
+        const targetId = rowEl.getAttribute('data-conn-node-id')!;
+        if (targetId === draggedNode.id) {
+          setDropTarget(null);
+          return;
+        }
+        const targetNode = findNodeById(treeNodesRef.current, targetId);
+        if (!targetNode || isInvalidFolderTarget(draggedNode, targetNode)) {
+          setDropTarget(null);
+          return;
+        }
+        const position = calcDropPosition(targetNode, rowEl, y);
+        setDropTarget(prev =>
+          prev?.nodeId === targetId && prev.position === position ? prev : { nodeId: targetId, position },
+        );
+        return;
+      }
+      if (isOverTreeContainer(x, y)) {
+        setDropTarget(prev =>
+          prev?.nodeId === ROOT_DROP_ID ? prev : { nodeId: ROOT_DROP_ID, position: 'inside' },
+        );
+        return;
+      }
+      setDropTarget(null);
+    },
+    [isInvalidFolderTarget, findNodeById],
+  );
+
+  const executeDrop = useCallback(
+    (draggedNode: ConnectionTreeNode, targetNode: ConnectionTreeNode | undefined, position: 'before' | 'after' | 'inside') => {
+      if (targetNode?.type === 'connection' && position === 'inside') {
+        position = 'after';
+      }
+
+      let targetParentPath: string | undefined;
+      let newIndex: number;
+
+      if (!targetNode) {
+        // Dropped on empty container space → root level.
+        targetParentPath = undefined;
+        const rootNode = treeNodesRef.current.find(n => n.type === 'folder' && n.path === 'All Connections');
+        newIndex = rootNode?.children?.filter(c => c.type === draggedNode.type).length ?? 0;
+      } else if (position === 'inside') {
+        targetParentPath = targetNode.path ?? undefined;
+        newIndex = targetNode.children?.filter(c => c.type === draggedNode.type).length ?? 0;
+      } else {
+        const ctx = findNodeContext(treeNodesRef.current, targetNode.id);
+        if (!ctx) return;
+        targetParentPath = ctx.parentPath;
+        const siblings = ctx.sameTypeSiblings.filter(s => s.id !== draggedNode.id);
+        const idx = siblings.findIndex(s => s.id === targetNode.id);
+        newIndex = position === 'before' ? idx : idx + 1;
+      }
+
+      // Guard: cannot move a folder into its own subtree.
+      if (draggedNode.type === 'folder' && targetParentPath !== undefined) {
+        const draggedPath = draggedNode.path ?? '';
+        if (targetParentPath === draggedPath || targetParentPath.startsWith(draggedPath + '/')) {
+          toast.error(t('serversView.cannotMoveIntoOwn'));
+          return;
+        }
+      }
+
+      const draggedCtx = findNodeContext(treeNodesRef.current, draggedNode.id);
+      if (draggedCtx) {
+        const currentParent = draggedCtx.parentPath ?? 'All Connections';
+        const resolvedTarget = targetParentPath ?? 'All Connections';
+        if (currentParent === resolvedTarget) {
+          const currentIndex = draggedCtx.sameTypeSiblings.findIndex(s => s.id === draggedNode.id);
+          if (currentIndex === newIndex) return;
+        }
+      }
+
+      const sourceParentPath = draggedNode.type === 'connection'
+        ? (ConnectionStorageManager.getConnection(draggedNode.id)?.folder ?? 'All Connections')
+        : ConnectionStorageManager.getFolders().find(f => f.id === draggedNode.id)?.parentPath;
+
+      let success: boolean;
+      if (draggedNode.type === 'connection') {
+        success = ConnectionStorageManager.reorderItem(draggedNode.id, 'connection', targetParentPath, newIndex);
+      } else {
+        success = ConnectionStorageManager.moveFolderRecursive(draggedNode.path ?? '', targetParentPath);
+        if (success) {
+          success = ConnectionStorageManager.reorderItem(draggedNode.id, 'folder', targetParentPath, newIndex);
+        }
+      }
+
+      if (success) {
+        reload();
+        const resolvedTargetParent = targetParentPath ?? 'All Connections';
+        if ((sourceParentPath ?? 'All Connections') !== resolvedTargetParent) {
+          toast.success(t('serversView.moved', { name: draggedNode.name }));
+        }
+      } else {
+        toast.error(t('serversView.moveFailed'));
+      }
+    },
+    [findNodeContext, reload, t],
+  );
+
+  const performDropAtPoint = useCallback(
+    (x: number, y: number, draggedNode: ConnectionTreeNode) => {
+      const rowEl = findRowAtPoint(x, y);
+      if (rowEl) {
+        const targetId = rowEl.getAttribute('data-conn-node-id')!;
+        if (targetId === draggedNode.id) return;
+        const targetNode = findNodeById(treeNodesRef.current, targetId);
+        if (!targetNode) return;
+        const position = calcDropPosition(targetNode, rowEl, y);
+        executeDrop(draggedNode, targetNode, position);
+      } else if (isOverTreeContainer(x, y)) {
+        executeDrop(draggedNode, undefined, 'inside');
+      }
+    },
+    [findNodeById, executeDrop],
+  );
+
+  const handleNodePointerDown = useCallback(
+    (e: React.PointerEvent, node: ConnectionTreeNode) => {
+      if (e.button !== 0) return; // left button only
+      if (node.type === 'folder' && node.path === 'All Connections') return; // root not draggable
+
+      const startX = e.clientX;
+      const startY = e.clientY;
+      let dragging = false;
+      const DRAG_THRESHOLD = 5;
+
+      const onMove = (ev: PointerEvent) => {
+        const dx = ev.clientX - startX;
+        const dy = ev.clientY - startY;
+        if (!dragging) {
+          if (Math.abs(dx) + Math.abs(dy) < DRAG_THRESHOLD) return;
+          dragging = true;
+          suppressClickRef.current = true;
+          setDraggedItem(node);
+          document.body.style.userSelect = 'none';
+        }
+        setDragGhost({ x: ev.clientX, y: ev.clientY, name: node.name, type: node.type });
+        updateDropTargetFromPoint(ev.clientX, ev.clientY, node);
+
+        // Auto-scroll the tree near vertical edges.
+        const container = treeContainerRef.current;
+        if (container) {
+          const rect = container.getBoundingClientRect();
+          const EDGE = 40;
+          const SPEED = 10;
+          if (ev.clientY < rect.top + EDGE) container.scrollTop -= SPEED;
+          else if (ev.clientY > rect.bottom - EDGE) container.scrollTop += SPEED;
+        }
+      };
+
+      const onUp = (ev: PointerEvent | FocusEvent) => {
+        document.removeEventListener('pointermove', onMove);
+        document.removeEventListener('pointerup', onUp);
+        document.removeEventListener('pointercancel', onUp);
+        window.removeEventListener('blur', onUp);
+        document.body.style.userSelect = '';
+        if (dragging) {
+          const clientX = 'clientX' in ev ? ev.clientX : 0;
+          const clientY = 'clientY' in ev ? ev.clientY : 0;
+          if (clientX || clientY) performDropAtPoint(clientX, clientY, node);
+        }
+        setDraggedItem(null);
+        setDropTarget(null);
+        setDragGhost(null);
+        setTimeout(() => { suppressClickRef.current = false; }, 0);
+      };
+
+      document.addEventListener('pointermove', onMove);
+      document.addEventListener('pointerup', onUp);
+      document.addEventListener('pointercancel', onUp);
+      window.addEventListener('blur', onUp);
+    },
+    [performDropAtPoint, updateDropTargetFromPoint],
+  );
 
   const openNewFolder = useCallback((parentPath?: string) => {
     setFolderParent(parentPath);
@@ -370,7 +654,9 @@ export function ServersView({
     setFolderDialogOpen(false);
     toast.success(t('serversView.folderCreated'), { description: folderName.trim() });
     if (folderParent) {
-      setExpanded((prev) => new Set(prev).add(folderParent));
+      // expanded stores folder ids — resolve the parent id after reload.
+      const parent = ConnectionStorageManager.getFolders().find((f) => f.path === folderParent);
+      if (parent) setExpanded((prev) => new Set(prev).add(parent.id));
     }
   }, [folderName, folderParent, reload, t]);
 
@@ -435,85 +721,181 @@ export function ServersView({
     [reload, t],
   );
 
-  // Plain recursive function (not memoized) so the self-reference is safe.
-  function renderFolderTree(parentPath: string | undefined, level: number): React.ReactNode {
-      const children = childFolders(parentPath);
-      if (children.length === 0 && parentPath !== undefined) return null;
-      return children.map((folder) => {
-        const isExpanded = expanded.has(folder.path);
-        const isSelected = selection.kind === 'folder' && selection.path === folder.path;
-        const hasChildren = childFolders(folder.path).length > 0;
-        return (
-          <div key={folder.path}>
-            <div
+  // Render one tree node: a folder (with its servers + subfolders) or a
+  // connection. Clicking a server opens its terminal directly.
+  function renderTreeNode(node: ConnectionTreeNode, level: number): React.ReactNode {
+    const isFolder = node.type === 'folder';
+    if (isFolder) {
+      const isExpanded = expanded.has(node.id);
+      const isSelected = selection.kind === 'folder' && selection.path === node.path;
+      const hasChildren = (node.children?.length ?? 0) > 0;
+      return (
+        <div key={node.id}>
+          <div
+            data-conn-node-id={node.id}
+            data-conn-tree-container="true"
+            onPointerDown={(e) => handleNodePointerDown(e, node)}
+            onClick={() => {
+              if (suppressClickRef.current) return;
+              setSelection({ kind: 'folder', path: node.path ?? 'All Connections' });
+            }}
+            className={cn(
+              'group flex items-center gap-1 rounded-md py-1 pr-1 text-sm cursor-pointer select-none',
+              isSelected ? 'bg-primary/10 text-primary' : 'hover:bg-accent/60 text-foreground/90',
+              dropTarget?.nodeId === node.id && dropTarget.position === 'inside' && 'ring-1 ring-inset ring-primary/40',
+              dropTarget?.nodeId === node.id && dropTarget.position === 'before' && 'shadow-[0_-1px_0_0_theme(colors.primary)]',
+              dropTarget?.nodeId === node.id && dropTarget.position === 'after' && 'shadow-[0_1px_0_0_theme(colors.primary)]',
+            )}
+            style={{ paddingLeft: `${level * 14 + 4}px` }}
+          >
+            <button
+              type="button"
               className={cn(
-                'group flex items-center gap-1 rounded-md py-1 pr-1 text-sm cursor-pointer select-none',
-                isSelected ? 'bg-primary/10 text-primary' : 'hover:bg-accent/60 text-foreground/90',
+                'flex h-4 w-4 items-center justify-center rounded-sm text-muted-foreground hover:text-foreground',
+                !hasChildren && 'invisible',
               )}
-              style={{ paddingLeft: `${level * 14 + 4}px` }}
-              onClick={() => setSelection({ kind: 'folder', path: folder.path })}
+              onClick={(e) => {
+                e.stopPropagation();
+                toggleFolder(node.id);
+              }}
+              aria-label={t('serversView.toggleFolder')}
             >
+              {isExpanded ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
+            </button>
+            {isExpanded ? (
+              <FolderOpen className="h-4 w-4 shrink-0 text-amber-500" />
+            ) : (
+              <Folder className="h-4 w-4 shrink-0 text-amber-500" />
+            )}
+            <span className="flex-1 min-w-0 truncate">{node.name}</span>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <button
+                  type="button"
+                  className="flex h-5 w-5 items-center justify-center rounded text-muted-foreground opacity-0 group-hover:opacity-100 hover:bg-accent hover:text-foreground"
+                  onClick={(e) => e.stopPropagation()}
+                  aria-label={t('common.more')}
+                >
+                  <MoreVertical className="h-3.5 w-3.5" />
+                </button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start" className="min-w-[150px]">
+                <DropdownMenuItem onClick={(e) => { e.stopPropagation(); openNewFolder(node.path); }}>
+                  <FolderPlus className="mr-2 h-4 w-4" />
+                  {t('serversView.newSubfolder')}
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    const f = folders.find((x) => x.path === node.path);
+                    if (f) {
+                      setRenameFolderTarget(f);
+                      setRenameFolderName(f.name);
+                      setRenameFolderDialogOpen(true);
+                    }
+                  }}
+                >
+                  <Pencil className="mr-2 h-4 w-4" />
+                  {t('serversView.renameFolder')}
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  variant="destructive"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    const f = folders.find((x) => x.path === node.path);
+                    if (f) setDeleteFolderTarget(f);
+                  }}
+                >
+                  <Trash2 className="mr-2 h-4 w-4" />
+                  {t('common.delete')}
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </div>
+          {isExpanded && (
+            <div>
+              {(node.children ?? []).map((child) => renderTreeNode(child, level + 1))}
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    // ── Connection node: click → open terminal ──
+    const isDragging = draggedItem?.id === node.id;
+    return (
+      <div key={node.id}>
+        <div
+          data-conn-node-id={node.id}
+          data-conn-tree-container="true"
+          onPointerDown={(e) => handleNodePointerDown(e, node)}
+          onClick={() => {
+            if (suppressClickRef.current) return;
+            if (node.id) onConnect(node.id);
+          }}
+          title={node.host ? `${t('serversView.openTerminal')} ${node.host}` : undefined}
+          className={cn(
+            'group flex items-center gap-1 rounded-md py-1 pr-1 text-xs cursor-pointer select-none',
+            'hover:bg-accent/60 text-foreground/80',
+            isDragging && 'opacity-50',
+            dropTarget?.nodeId === node.id && dropTarget.position === 'before' && 'shadow-[0_-1px_0_0_theme(colors.primary)]',
+            dropTarget?.nodeId === node.id && dropTarget.position === 'after' && 'shadow-[0_1px_0_0_theme(colors.primary)]',
+          )}
+          style={{ paddingLeft: `${level * 14 + 20}px` }}
+        >
+          {protocolIcon(node.protocol ?? 'SSH')}
+          <span className="flex-1 min-w-0 truncate">{node.name}</span>
+          {node.host && (
+            <span className="shrink-0 text-[10px] font-mono text-primary/80 group-hover:text-primary truncate max-w-[90px]">
+              {node.host}
+            </span>
+          )}
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
               <button
                 type="button"
-                className={cn(
-                  'flex h-4 w-4 items-center justify-center rounded-sm text-muted-foreground hover:text-foreground',
-                  !hasChildren && 'invisible',
-                )}
+                className="flex h-5 w-5 items-center justify-center rounded text-muted-foreground opacity-0 group-hover:opacity-100 hover:bg-accent hover:text-foreground"
+                onClick={(e) => e.stopPropagation()}
+                aria-label={t('common.more')}
+              >
+                <MoreVertical className="h-3.5 w-3.5" />
+              </button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="start" className="min-w-[150px]">
+              <DropdownMenuItem onClick={(e) => { e.stopPropagation(); onConnect(node.id); }}>
+                <Play className="mr-2 h-4 w-4" />
+                {t('serversView.connect')}
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={(e) => { e.stopPropagation(); onEdit(node.id); }}>
+                <Pencil className="mr-2 h-4 w-4" />
+                {t('common.edit')}
+              </DropdownMenuItem>
+              <DropdownMenuItem
                 onClick={(e) => {
                   e.stopPropagation();
-                  toggleFolder(folder.path);
+                  const server = ConnectionStorageManager.getConnection(node.id);
+                  if (server) duplicateServer(server);
                 }}
-                aria-label={t('serversView.toggleFolder')}
               >
-                {isExpanded ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
-              </button>
-              {isExpanded ? (
-                <FolderOpen className="h-4 w-4 shrink-0 text-amber-500" />
-              ) : (
-                <Folder className="h-4 w-4 shrink-0 text-amber-500" />
-              )}
-              <span className="flex-1 min-w-0 truncate">{folder.name}</span>
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <button
-                    type="button"
-                    className="flex h-5 w-5 items-center justify-center rounded text-muted-foreground opacity-0 group-hover:opacity-100 hover:bg-accent hover:text-foreground"
-                    onClick={(e) => e.stopPropagation()}
-                    aria-label={t('common.more')}
-                  >
-                    <MoreVertical className="h-3.5 w-3.5" />
-                  </button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="start" className="min-w-[150px]">
-                  <DropdownMenuItem onClick={(e) => { e.stopPropagation(); openNewFolder(folder.path); }}>
-                    <FolderPlus className="mr-2 h-4 w-4" />
-                    {t('serversView.newSubfolder')}
-                  </DropdownMenuItem>
-                  <DropdownMenuItem
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setRenameFolderTarget(folder);
-                      setRenameFolderName(folder.name);
-                      setRenameFolderDialogOpen(true);
-                    }}
-                  >
-                    <Pencil className="mr-2 h-4 w-4" />
-                    {t('serversView.renameFolder')}
-                  </DropdownMenuItem>
-                  <DropdownMenuItem
-                    variant="destructive"
-                    onClick={(e) => { e.stopPropagation(); setDeleteFolderTarget(folder); }}
-                  >
-                    <Trash2 className="mr-2 h-4 w-4" />
-                    {t('common.delete')}
-                  </DropdownMenuItem>
-                </DropdownMenuContent>
-              </DropdownMenu>
-            </div>
-            {isExpanded && renderFolderTree(folder.path, level + 1)}
-          </div>
-        );
-      });
+                <Copy className="mr-2 h-4 w-4" />
+                {t('serversView.duplicate')}
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                variant="destructive"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  const server = ConnectionStorageManager.getConnection(node.id);
+                  if (server) setDeleteTarget(server);
+                }}
+              >
+                <Trash2 className="mr-2 h-4 w-4" />
+                {t('common.delete')}
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </div>
+      </div>
+    );
   }
 
   return (
@@ -593,11 +975,15 @@ export function ServersView({
           </div>
 
           <ScrollArea className="flex-1 min-h-0">
-            <div className="px-1 pb-2 space-y-0.5">
-              {folders.length === 0 ? (
+            <div
+              ref={treeContainerRef}
+              data-conn-tree-container="true"
+              className={cn('px-1 pb-2 space-y-0.5', dropTarget?.nodeId === ROOT_DROP_ID && 'ring-1 ring-inset ring-primary/30 rounded-md')}
+            >
+              {treeNodes.length === 0 ? (
                 <p className="px-2 py-1 text-xs text-muted-foreground">{t('serversView.noFolders')}</p>
               ) : (
-                renderFolderTree(undefined, 0)
+                treeNodes.map((node) => renderTreeNode(node, 0))
               )}
             </div>
           </ScrollArea>
@@ -960,6 +1346,21 @@ export function ServersView({
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      {/* Drag ghost (pointer-based DnD feedback) */}
+      {dragGhost && (
+        <div
+          className="pointer-events-none fixed z-[120] flex items-center gap-1.5 rounded-md border border-border bg-background/95 px-2 py-1 text-xs shadow-lg"
+          style={{ left: dragGhost.x + 12, top: dragGhost.y + 12 }}
+        >
+          {dragGhost.type === 'folder' ? (
+            <Folder className="h-3.5 w-3.5 text-amber-500" />
+          ) : (
+            <Server className="h-3.5 w-3.5 text-green-500" />
+          )}
+          <span className="max-w-[160px] truncate">{dragGhost.name}</span>
+        </div>
+      )}
     </div>
   );
 }

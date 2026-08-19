@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import { invoke } from '@tauri-apps/api/core';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from './ui/dialog';
@@ -14,6 +14,12 @@ import { Checkbox } from './ui/checkbox';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './ui/card';
 
 import { Separator } from './ui/separator';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from './ui/dropdown-menu';
 import { ConnectionProfileManager, type ConnectionProfile } from '../lib/connection-profiles';
 import { ConnectionStorageManager } from '../lib/connection-storage';
 import { buildSshConnectRequest } from '../lib/ssh-connect-request';
@@ -25,6 +31,7 @@ import {
   Network,
   Terminal as TerminalIcon,
   Monitor,
+  ServerCog,
 } from 'lucide-react';
 import { getDefaultPort, getAuthMethods, getHiddenFields, isDesktopProtocol } from '@/lib/protocol-config';
 
@@ -613,6 +620,48 @@ const handleCancelConnectionAttempt = async () => {
     setConfig(prev => ({ ...prev, ...updates }));
   };
 
+  // Saved SSH/SFTP servers that can serve as a jump host (exclude the
+  // connection being edited itself).
+  const jumpCandidates = useMemo(
+    () =>
+      ConnectionStorageManager.getConnections().filter((c) => {
+        const proto = (c.protocol || '').toUpperCase();
+        if (proto !== 'SSH' && proto !== 'SFTP') return false;
+        return c.id !== editingConnection?.id;
+      }),
+    [editingConnection],
+  );
+
+  // When a jump host is picked from the saved-servers list, its connection
+  // fields are reused as-is and locked so the user doesn't re-enter them.
+  const [jumpServerId, setJumpServerId] = useState<string | null>(null);
+
+  /**
+   * Fill the jump fields from a saved server and lock them. Credentials are
+   * reused from that server: password-auth servers supply their own password;
+   * key-auth servers fall back to the shared private key model.
+   */
+  const applyJumpFromServer = useCallback(
+    (server: { id: string; host: string; port?: number; username?: string; authMethod?: string; password?: string }) => {
+      setJumpEnabled(true);
+      setJumpServerId(server.id);
+      const usePassword = server.authMethod === 'password' && !!server.password;
+      updateConfig({
+        jumpHost: server.host,
+        jumpPort: server.port || 22,
+        jumpUsername: server.username || '',
+        jumpPassword: usePassword ? server.password : '',
+        jumpUseKey: !usePassword,
+      });
+    },
+    [],
+  );
+
+  /** Unlock the jump fields for manual editing. */
+  const clearJumpServer = useCallback(() => {
+    setJumpServerId(null);
+  }, []);
+
   const handleOpenChange = (newOpen: boolean) => {
     // If trying to close while connecting, cancel first then close
     if (!newOpen && isConnecting) {
@@ -1089,6 +1138,7 @@ const handleCancelConnectionAttempt = async () => {
                             id="jump-host"
                             placeholder={t('connectionDialog.placeholder.jumpHost')}
                             value={config.jumpHost}
+                            disabled={!!jumpServerId}
                             onChange={(e) => updateConfig({ jumpHost: e.target.value })}
                           />
                         </div>
@@ -1098,6 +1148,7 @@ const handleCancelConnectionAttempt = async () => {
                             id="jump-port"
                             type="number"
                             value={displayValues.jumpPort}
+                            disabled={!!jumpServerId}
                             onChange={(e) => handleNumberInput('jumpPort', e.target.value, (n) => updateConfig({ jumpPort: n }))}
                           />
                         </div>
@@ -1110,6 +1161,7 @@ const handleCancelConnectionAttempt = async () => {
                             id="jump-username"
                             placeholder={t('connectionDialog.placeholder.jumpUsername')}
                             value={config.jumpUsername}
+                            disabled={!!jumpServerId}
                             onChange={(e) => updateConfig({ jumpUsername: e.target.value })}
                           />
                         </div>
@@ -1119,21 +1171,68 @@ const handleCancelConnectionAttempt = async () => {
                             id="jump-password"
                             placeholder={t('connectionDialog.placeholder.jumpPassword')}
                             value={config.jumpPassword}
-                            disabled={!!config.jumpUseKey}
+                            disabled={!!jumpServerId || !!config.jumpUseKey}
                             onChange={(e) => updateConfig({ jumpPassword: e.target.value })}
                           />
                         </div>
                       </div>
 
-                      <div className="flex items-center space-x-2 pt-1">
-                        <Checkbox
-                          id="jump-use-key"
-                          checked={!!config.jumpUseKey}
-                          onCheckedChange={(checked) => updateConfig({ jumpUseKey: checked === true })}
-                        />
-                        <Label htmlFor="jump-use-key" className="text-sm font-normal">
-                          {t('connectionDialog.label.jumpUseKey')}
-                        </Label>
+                      <div className="flex items-center justify-between pt-1">
+                        <div className="flex items-center space-x-2">
+                          <Checkbox
+                            id="jump-use-key"
+                            checked={!!config.jumpUseKey}
+                            disabled={!!jumpServerId}
+                            onCheckedChange={(checked) => updateConfig({ jumpUseKey: checked === true })}
+                          />
+                          <Label htmlFor="jump-use-key" className="text-sm font-normal">
+                            {t('connectionDialog.label.jumpUseKey')}
+                          </Label>
+                        </div>
+                        <div className="flex items-center gap-1.5">
+                          {jumpServerId && (
+                            <>
+                              <span className="text-[10px] text-muted-foreground">
+                                {t('connectionDialog.label.jumpFromServer')}:{' '}
+                                {jumpCandidates.find((s) => s.id === jumpServerId)?.name ?? ''}
+                              </span>
+                              <Button size="sm" variant="ghost" className="h-7 px-2 text-xs" onClick={clearJumpServer}>
+                                {t('connectionDialog.label.jumpClearServer')}
+                              </Button>
+                            </>
+                          )}
+                          <DropdownMenu>
+                          <DropdownMenuTrigger asChild>
+                            <Button size="sm" variant="outline" className="h-7 gap-1 text-xs">
+                              <ServerCog className="h-3.5 w-3.5" />
+                              {t('connectionDialog.label.jumpPickFromServers')}
+                            </Button>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent align="end" className="max-h-64 overflow-y-auto w-64">
+                            {jumpCandidates.length === 0 ? (
+                              <DropdownMenuItem disabled className="text-xs text-muted-foreground">
+                                {t('connectionDialog.noSavedServers')}
+                              </DropdownMenuItem>
+                            ) : (
+                              jumpCandidates.map((s) => (
+                                <DropdownMenuItem
+                                  key={s.id}
+                                  onClick={() => applyJumpFromServer(s)}
+                                  className="flex items-start gap-2"
+                                >
+                                  <Server className="h-3.5 w-3.5 mt-0.5 shrink-0 text-muted-foreground" />
+                                  <span className="flex-1 min-w-0">
+                                    <span className="block truncate text-xs font-medium">{s.name}</span>
+                                    <span className="block truncate text-[10px] font-mono text-muted-foreground">
+                                      {s.username ? `${s.username}@` : ''}{s.host}:{s.port}
+                                    </span>
+                                  </span>
+                                </DropdownMenuItem>
+                              ))
+                            )}
+                          </DropdownMenuContent>
+                        </DropdownMenu>
+                      </div>
                       </div>
                     </>
                   )}

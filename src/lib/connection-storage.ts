@@ -301,10 +301,25 @@ async function persistAll(): Promise<void> {
   ]);
 }
 
+/**
+ * Notify UI listeners (ServersView, ConnectionManager) that the connection /
+ * folder data changed, so they can reload without waiting for a
+ * refreshTrigger prop from the parent. Dispatched synchronously after any
+ * cache mutation — the in-memory cache is already up to date at that point.
+ */
+function notifyConnectionsChanged(): void {
+  try {
+    window.dispatchEvent(new Event('nexterm:connections-changed'));
+  } catch {
+    /* ignore */
+  }
+}
+
 /** Persist the given connections list: update the cache, then flush to SQLite. */
 function persistConnections(connections: ConnectionData[]): void {
   if (!sqlCache) sqlCache = { connections: [], folders: [], active: [] };
   sqlCache.connections = connections;
+  notifyConnectionsChanged();
   void persistAll();
 }
 
@@ -312,6 +327,7 @@ function persistConnections(connections: ConnectionData[]): void {
 function persistFolders(folders: ConnectionFolder[]): void {
   if (!sqlCache) sqlCache = { connections: [], folders: [], active: [] };
   sqlCache.folders = folders;
+  notifyConnectionsChanged();
   void persistAll();
 }
 
@@ -319,6 +335,7 @@ function persistBoth(connections: ConnectionData[], folders: ConnectionFolder[])
   if (!sqlCache) sqlCache = { connections: [], folders: [], active: [] };
   sqlCache.connections = connections;
   sqlCache.folders = folders;
+  notifyConnectionsChanged();
   void persistAll();
 }
 
@@ -463,6 +480,7 @@ export class ConnectionStorageManager {
 
     if (!sqlCache) sqlCache = { connections: [], folders: [], active: [] };
     sqlCache.connections = filtered;
+    notifyConnectionsChanged();
     void rowDelete('connections', id);
     return true;
   }
@@ -566,7 +584,6 @@ export class ConnectionStorageManager {
   static renameFolder(oldPath: string, newName: string): boolean {
     const trimmed = newName.trim();
     if (!trimmed || trimmed.includes('/')) return false;
-    if (oldPath === 'All Connections') return false;
 
     const folders = this.getFolders();
     const connections = this.getConnections();
@@ -727,6 +744,7 @@ export class ConnectionStorageManager {
     const removedConns = connections.filter(c => !filteredConnections.some(nc => nc.id === c.id));
     sqlCache.folders = filteredFolders;
     sqlCache.connections = filteredConnections;
+    notifyConnectionsChanged();
     for (const f of removedFolders) void rowDelete('folders', f.id);
     for (const c of removedConns) void rowDelete('connections', c.id);
 
@@ -920,6 +938,7 @@ export class ConnectionStorageManager {
     sqlCache.connections = [];
     sqlCache.folders = [];
     sqlCache.active = [];
+    notifyConnectionsChanged();
     for (const c of removedConns) void rowDelete('connections', c.id);
     for (const f of removedFolders) void rowDelete('folders', f.id);
     this.initialize();

@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState, lazy, Suspense } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
 import { toast } from 'sonner';
@@ -24,7 +24,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
-import { CodeEditor } from '@/components/code-editor';
+const CodeEditor = lazy(() => import('@/components/code-editor').then((m) => ({ default: m.CodeEditor })));
 import { NotesStorage, generateId } from '@/lib/toolbox/toolbox-storage';
 import type { NoteItem, NoteLanguage } from '@/lib/toolbox/toolbox-types';
 import { StickyNote, Plus, Search, Trash2, Copy, Pin, PinOff, FileCode2 } from 'lucide-react';
@@ -284,12 +284,14 @@ export function ToolNotes() {
                 </Button>
               </div>
               <div className="flex-1 min-h-0 p-2">
-                <CodeEditor
-                  value={selected.content}
-                  language={selected.language}
-                  onChange={(value) => patchSelected({ content: value })}
-                  className="h-full rounded-lg border-border"
-                />
+                <Suspense fallback={<div className="h-full flex items-center justify-center text-xs text-muted-foreground">{'...'}</div>}>
+                  <CodeEditor
+                    value={selected.content}
+                    language={selected.language}
+                    onChange={(value) => patchSelected({ content: value })}
+                    className="h-full rounded-lg border-border"
+                  />
+                </Suspense>
               </div>
             </>
           ) : (

@@ -949,7 +949,15 @@ pub async fn api_request(request: ApiRequest) -> Result<ApiResponse, String> {
         .iter()
         .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
         .collect();
-    let bytes = resp.bytes().await.map_err(|e| format!("Failed to read response body: {}", e))?;
+
+    // Read the full body — the response is not truncated so the debugger can
+    // show complete data. Memory is bounded by the frontend: huge bodies are
+    // never JSON.parse'd into a second tree, the raw view renders in chunks,
+    // and switching away from the API module clears the stored response.
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| format!("Failed to read response body: {}", e))?;
     let duration_ms = start.elapsed().as_millis() as u64;
 
     let (body, body_is_base64) = match String::from_utf8(bytes.to_vec()) {

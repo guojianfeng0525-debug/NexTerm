@@ -132,7 +132,10 @@
       "maxCount": "Max Count",
       "domain": "Domain (optional)",
       "displayResolution": "Display Resolution",
-      "colorDepth": "Color Depth"
+      "colorDepth": "Color Depth",
+      "jumpPickFromServers": "Pick from saved servers",
+      "jumpFromServer": "Jump host from",
+      "jumpClearServer": "Clear"
     },
     "placeholder": {
       "connectionName": "My Server",
@@ -228,7 +231,8 @@
       "connectionFailedDesc": "Unable to connect to the server. Please check your credentials and try again.",
       "connectionError": "Connection Error",
       "connectionErrorDesc": "An unexpected error occurred while connecting."
-    }
+    },
+    "noSavedServers": "No saved servers available"
   },
   "settings": {
     "title": "Settings & Preferences",
@@ -1492,7 +1496,7 @@
       "varValue": "Value",
       "addEnv": "Add environment",
       "noEnv": "No environment",
-      "viewTree": "Tree",
+      "viewTree": "Formatted",
       "viewRaw": "Raw",
       "doc": "Document",
       "docDesc": "Generated API document for the current request.",
@@ -1505,7 +1509,10 @@
       "requestFields": "Request Fields",
       "response": "Response",
       "responseFields": "Response Fields",
-      "docNoResponse": "Send the request first to include the response in the document."
+      "docNoResponse": "Send the request first to include the response in the document.",
+      "truncated": "truncated",
+      "bodyTooLarge": "Response body too large — formatted parsing skipped. Switch to Raw view.",
+      "loadMore": "Load more"
     },
     "history": {
       "title": "Command History",
@@ -1580,7 +1587,11 @@
     "renameFolderTitle": "Rename folder",
     "renameFolderDesc": "Rename this folder. Subfolders and servers are moved automatically.",
     "folderRenamed": "Folder renamed",
-    "folderRenameFailed": "Could not rename the folder."
+    "folderRenameFailed": "Could not rename the folder.",
+    "cannotMoveIntoOwn": "Cannot move a folder into its own subtree",
+    "moved": "Moved \"{{name}}\"",
+    "moveFailed": "Failed to move",
+    "openTerminal": "Open terminal: "
   },
   "terminalEmpty": {
     "title": "Terminal",

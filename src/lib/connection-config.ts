@@ -8,9 +8,11 @@ import type { ConnectionConfig } from '../components/connection-dialog';
 /**
  * Build a ConnectionConfig from a persisted ConnectionData.
  *
- * Carries every field the edit dialog can display — including the proxy
- * settings — so that saved proxy config survives a round-trip through
- * storage and is shown again when the connection is edited.
+ * Carries every field the edit dialog can display — including the proxy,
+ * jump host and default-directory settings — so that saved config survives
+ * a round-trip through storage and is shown again when the connection is
+ * edited. Dropping any field here silently erases it from the edit dialog
+ * (and a later save would overwrite the stored value with an empty one).
  */
 export function toConnectionConfig(data: ConnectionData): ConnectionConfig {
   return {
@@ -33,6 +35,12 @@ export function toConnectionConfig(data: ConnectionData): ConnectionConfig {
     proxyPort: data.proxyPort ?? 8080,
     proxyUsername: data.proxyUsername,
     proxyPassword: data.proxyPassword,
+    jumpHost: data.jumpHost,
+    jumpPort: data.jumpPort ?? 22,
+    jumpUsername: data.jumpUsername,
+    jumpPassword: data.jumpPassword,
+    jumpUseKey: data.jumpUseKey,
+    defaultDirectory: data.defaultDirectory,
     compression: data.compression,
     keepAlive: data.keepAlive,
     keepAliveInterval: data.keepAliveInterval,

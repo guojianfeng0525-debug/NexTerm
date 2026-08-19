@@ -161,60 +161,123 @@ function formatJsonText(text: string): string {
 
 
 
-/* ── JSON tree view ─────────────────────────────────────────────────────── */
+/* ── Formatted JSON view (collapsible blocks, no field tree) ───────────── */
 
-const JsonTree = React.memo(function JsonTree({ data, name }: { data: unknown; name?: string }) {
-  const [open, setOpen] = useState(true);
-  const isArray = Array.isArray(data);
-  const isObject = data !== null && typeof data === 'object';
+// Cap for JSON.parse of response bodies — above this the formatted view is
+// skipped and only raw text is shown.
+const MAX_PARSE_BODY_CHARS = 2 * 1024 * 1024; // 2 MiB
+// Cap for schema inference (inferFields walks the whole tree).
+const MAX_FIELD_INFER_CHARS = 512 * 1024; // 512 KiB
+// Raw view renders the response body in chunks of this many characters.
+const RAW_CHUNK_CHARS = 200_000;
+// Blocks deeper than this depth start collapsed (initial render stays small
+// even for huge payloads).
+const DEFAULT_COLLAPSE_DEPTH = 1;
 
-  if (!isObject) {
-    let text = typeof data === 'string' || typeof data === 'number' || typeof data === 'boolean'
-      ? String(data)
-      : data === null
-        ? 'null'
-        : JSON.stringify(data);
-    if (typeof text === 'string' && text.length > 500) text = `${text.slice(0, 500)}…`;
-    let color = 'text-foreground/90';
-    if (typeof data === 'string') color = 'text-green-600 dark:text-green-400';
-    else if (typeof data === 'number') color = 'text-amber-600 dark:text-amber-400';
-    else if (typeof data === 'boolean') color = 'text-purple-600 dark:text-purple-400';
-    else if (data === null) color = 'text-muted-foreground';
-    return (
-      <div className="pl-3 text-xs leading-5 break-all">
-        {name !== undefined && <span className="text-sky-600 dark:text-sky-400">{name}: </span>}
-        <span className={color}>{text}</span>
-      </div>
-    );
+interface JsonBlockLine {
+  indent: number;
+  text: string;
+  /** This line opens a `{`/`[` block. */
+  open: boolean;
+  depth: number;
+  /** Index of the matching closing line when `open`. */
+  closeIndex: number;
+  /** This line closes a block. */
+  isClose: boolean;
+}
+
+/** Parse pretty-printed JSON into indented lines with block ranges. */
+function buildJsonLines(text: string): JsonBlockLine[] {
+  const lines = text.split('\n');
+  const out: JsonBlockLine[] = [];
+  const stack: number[] = [];
+  let depth = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const indent = /^\s*/.exec(lines[i])?.[0].length ?? 0;
+    const trimmed = lines[i].trim();
+    const open = trimmed.endsWith('{') || trimmed.endsWith('[');
+    const isClose = trimmed.startsWith('}') || trimmed.startsWith(']');
+    if (isClose && stack.length > 0) {
+      depth = Math.max(0, depth - 1);
+      const openIdx = stack.pop()!;
+      out[openIdx].closeIndex = i;
+    }
+    out.push({ indent, text: lines[i], open, depth, closeIndex: -1, isClose });
+    if (open) {
+      stack.push(i);
+      depth += 1;
+    }
+  }
+  return out;
+}
+
+const CollapsibleJson = React.memo(function CollapsibleJson({ text }: { text: string }) {
+  const lines = useMemo(() => buildJsonLines(text), [text]);
+  // Block lines that are currently collapsed (keyed by the opening line index).
+  const [collapsed, setCollapsed] = useState<Set<number>>(() => {
+    const init = new Set<number>();
+    for (const l of lines) {
+      if (l.open && l.depth >= DEFAULT_COLLAPSE_DEPTH) init.add(lines.indexOf(l));
+    }
+    return init;
+  });
+
+  const toggle = useCallback((lineIndex: number) => {
+    setCollapsed((prev) => {
+      const next = new Set(prev);
+      if (next.has(lineIndex)) next.delete(lineIndex);
+      else next.add(lineIndex);
+      return next;
+    });
+  }, []);
+
+  const rows: React.ReactNode[] = [];
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    const isCollapsed = line.open && collapsed.has(i);
+    const pad = { paddingLeft: `${line.indent * 0.6 + 0.25}rem` };
+    if (line.open) {
+      rows.push(
+        <div key={i} className="flex items-start leading-5" style={pad}>
+          <button
+            type="button"
+            className="w-4 h-4 shrink-0 flex items-center justify-center text-muted-foreground hover:text-primary"
+            onClick={() => toggle(i)}
+            aria-label={isCollapsed ? 'expand' : 'collapse'}
+          >
+            {isCollapsed ? <ChevronRight className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
+          </button>
+          <span className="break-all">
+            {isCollapsed ? (
+              <>
+                <span className="text-muted-foreground/60">{line.text} …</span>
+                <span className="text-muted-foreground/60">{lines[line.closeIndex].text}</span>
+              </>
+            ) : (
+              line.text
+            )}
+          </span>
+        </div>,
+      );
+      if (isCollapsed) {
+        i = line.closeIndex + 1;
+        continue;
+      }
+    } else {
+      rows.push(
+        <div key={i} className="flex items-start leading-5" style={pad}>
+          <span className="w-4 h-4 shrink-0" />
+          <span className="break-all">{line.text}</span>
+        </div>,
+      );
+    }
+    i++;
   }
 
-  const entries = Object.entries(data as Record<string, unknown>);
-  return (
-    <div className="text-xs leading-5">
-      <button
-        type="button"
-        className="flex items-center gap-1 text-foreground/90 hover:text-primary font-mono"
-        onClick={() => setOpen((v) => !v)}
-      >
-        {open ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
-        {name !== undefined && <span className="text-sky-600 dark:text-sky-400">{name}: </span>}
-        <span className="text-muted-foreground">
-          {isArray ? `[${entries.length}]` : `{${entries.length}}`}
-        </span>
-      </button>
-      {open && (
-        <div className="border-l border-border ml-1.5 pl-1">
-          {entries.map(([k, v]) => (
-            <JsonTree key={k} data={v} name={k} />
-          ))}
-        </div>
-      )}
-    </div>
-  );
+  return <div className="font-mono text-xs text-foreground/90">{rows}</div>;
 });
 
-
-/* ── field table (request/response properties) ──────────────────────────── */
 
 const FieldTable = React.memo(function FieldTable({ root }: { root: ApiField }) {
   const rows = flattenFields(root);
@@ -459,7 +522,13 @@ const WsPanel = React.memo(function WsPanel({
 
 /* ── main component ─────────────────────────────────────────────────────── */
 
-export function ToolApiDebug() {
+interface ToolApiDebugProps {
+  /** False while another toolbox module is shown — big response state is
+   *  cleared so memory returns to baseline (views stay mounted otherwise). */
+  active?: boolean;
+}
+
+export function ToolApiDebug({ active = true }: ToolApiDebugProps) {
   const { t } = useTranslation();
   const [mode, setMode] = useState<'rest' | 'ws'>('rest');
 
@@ -487,6 +556,9 @@ export function ToolApiDebug() {
   const [loading, setLoading] = useState(false);
   const [response, setResponse] = useState<RestResponse | null>(null);
   const [showRespHeaders, setShowRespHeaders] = useState(false);
+  // Raw view renders the body in chunks so a multi-MB response never becomes
+  // one giant text node (which freezes layout). Chunks grow on demand.
+  const [rawChars, setRawChars] = useState(RAW_CHUNK_CHARS);
   const [respView, setRespView] = useState<'tree' | 'raw' | 'fields'>('tree');
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [docOpen, setDocOpen] = useState(false);
@@ -507,6 +579,18 @@ export function ToolApiDebug() {
   useEffect(() => {
     persistActiveEnv(activeEnvId);
   }, [activeEnvId]);
+
+  // Release the (potentially huge) response + ws buffers when the user
+  // switches to another module — the view stays mounted, so without this the
+  // memory would never return to baseline.
+  useEffect(() => {
+    if (!active) {
+      setResponse(null);
+      setWsMessages([]);
+      setShowRespHeaders(false);
+      setRawChars(RAW_CHUNK_CHARS);
+    }
+  }, [active]);
 
   const activeEnv = useMemo(
     () => environments.find((e) => e.id === activeEnvId) ?? null,
@@ -626,7 +710,8 @@ export function ToolApiDebug() {
       const req = buildRequest();
       const resp = await invoke<RestResponse>('api_request', { request: req });
       setResponse(resp);
-      setRespView('tree');
+      // Huge bodies can't be parsed into a tree — land on the raw view.
+      setRespView(resp.body.length > MAX_PARSE_BODY_CHARS ? 'raw' : 'tree');
     } catch (error) {
       toast.error(t('toolbox.apiDebug.requestFailed'), {
         description: error instanceof Error ? error.message : String(error),
@@ -769,6 +854,9 @@ export function ToolApiDebug() {
 
   const parsedBody = useMemo(() => {
     if (!response || response.bodyIsBase64) return null;
+    // Huge bodies are never JSON.parse'd — the formatted view is skipped and
+    // only raw (chunked) text is shown.
+    if (response.body.length > MAX_PARSE_BODY_CHARS) return null;
     try {
       return JSON.parse(response.body) as unknown;
     } catch {
@@ -776,8 +864,19 @@ export function ToolApiDebug() {
     }
   }, [response]);
 
+  // Pretty-printed JSON text for the formatted (collapsible) view.
+  const prettyBody = useMemo(() => {
+    if (parsedBody === null) return '';
+    try {
+      return JSON.stringify(parsedBody, null, 2);
+    } catch {
+      return '';
+    }
+  }, [parsedBody]);
+
   const responseFields = useMemo(() => {
     if (!parsedBody || response?.bodyIsBase64) return null;
+    if ((response?.body.length ?? 0) > MAX_FIELD_INFER_CHARS) return null;
     return inferFields(parsedBody);
   }, [parsedBody, response]);
 
@@ -1055,7 +1154,12 @@ export function ToolApiDebug() {
                       )}
                       {!!parsedBody && (
                         <div className={cn('p-3', respView !== 'tree' && 'hidden')}>
-                          <JsonTree data={parsedBody} />
+                          <CollapsibleJson text={prettyBody} />
+                        </div>
+                      )}
+                      {!parsedBody && respView === 'tree' && (
+                        <div className="p-6 text-center text-xs text-muted-foreground">
+                          {t('toolbox.apiDebug.bodyTooLarge')}
                         </div>
                       )}
                       <pre
@@ -1064,8 +1168,17 @@ export function ToolApiDebug() {
                           respView !== 'raw' && 'hidden',
                         )}
                       >
-                        {response.bodyIsBase64 ? `[binary, base64]\n${response.body}` : response.body}
+                        {response.bodyIsBase64
+                          ? `[binary, base64]\n${response.body.slice(0, rawChars)}`
+                          : response.body.slice(0, rawChars)}
                       </pre>
+                      {respView === 'raw' && response.body.length > rawChars && (
+                        <div className="p-2 flex justify-center border-t border-border shrink-0">
+                          <Button size="sm" variant="outline" className="h-7 text-xs" onClick={() => setRawChars((c) => c + RAW_CHUNK_CHARS)}>
+                            {t('toolbox.apiDebug.loadMore')} ({((response.body.length - rawChars) / 1024).toFixed(0)} KB)
+                          </Button>
+                        </div>
+                      )}
                     </ScrollArea>
                   </div>
                 ) : (

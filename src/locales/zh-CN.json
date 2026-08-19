@@ -132,7 +132,10 @@
       "maxCount": "最大次数",
       "domain": "域（可选）",
       "displayResolution": "显示分辨率",
-      "colorDepth": "色彩深度"
+      "colorDepth": "色彩深度",
+      "jumpPickFromServers": "从服务器列表选择",
+      "jumpFromServer": "跳板机来自",
+      "jumpClearServer": "清除"
     },
     "placeholder": {
       "connectionName": "我的服务器",
@@ -228,7 +231,8 @@
       "connectionFailedDesc": "无法连接到服务器，请检查您的凭据并重试。",
       "connectionError": "连接错误",
       "connectionErrorDesc": "连接时发生意外错误。"
-    }
+    },
+    "noSavedServers": "暂无可用服务器"
   },
   "settings": {
     "title": "设置与首选项",
@@ -1492,7 +1496,7 @@
       "varValue": "值",
       "addEnv": "添加环境",
       "noEnv": "无环境",
-      "viewTree": "树形",
+      "viewTree": "格式化",
       "viewRaw": "原始",
       "doc": "接口文档",
       "docDesc": "为当前请求生成的接口文档。",
@@ -1505,7 +1509,10 @@
       "requestFields": "请求属性",
       "response": "响应",
       "responseFields": "响应属性",
-      "docNoResponse": "请先发送请求，文档中将包含响应内容。"
+      "docNoResponse": "请先发送请求，文档中将包含响应内容。",
+      "truncated": "已截断",
+      "bodyTooLarge": "响应体过大，已跳过格式化解析。请切换到「原始」视图查看。",
+      "loadMore": "加载更多"
     },
     "history": {
       "title": "命令记录",
@@ -1580,7 +1587,11 @@
     "renameFolderTitle": "重命名文件夹",
     "renameFolderDesc": "重命名该文件夹，其子文件夹和其中的服务器会自动迁移。",
     "folderRenamed": "文件夹已重命名",
-    "folderRenameFailed": "无法重命名该文件夹。"
+    "folderRenameFailed": "无法重命名该文件夹。",
+    "cannotMoveIntoOwn": "不能移动到自身或其子目录内",
+    "moved": "已移动「{{name}}」",
+    "moveFailed": "移动失败",
+    "openTerminal": "点击打开终端: "
   },
   "terminalEmpty": {
     "title": "终端",

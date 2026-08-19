@@ -170,7 +170,7 @@ export function ToolVault() {
         filters: [{ name: 'Excel', extensions: ['xlsx'] }],
       });
       if (!path) return;
-      await writeFile(path, buildVaultTemplate());
+      await writeFile(path, await buildVaultTemplate());
       toast.success(t('toolbox.vault.templateDownloaded'));
     } catch (error) {
       toast.error(t('toolbox.vault.exportFailed'), {
@@ -198,7 +198,7 @@ export function ToolVault() {
         filters: [{ name: 'Excel', extensions: ['xlsx'] }],
       });
       if (!path) return;
-      await writeFile(path, buildVaultExcel(rows));
+      await writeFile(path, await buildVaultExcel(rows));
       toast.success(t('toolbox.vault.exported'), {
         description: t('toolbox.vault.exportedDesc', { count: entries.length }),
       });
@@ -223,7 +223,7 @@ export function ToolVault() {
       const bytes = await readFile(path);
       let rows: VaultExcelRow[];
       try {
-        rows = parseVaultExcel(bytes);
+        rows = await parseVaultExcel(bytes);
       } catch (parseError) {
         toast.error(t('toolbox.vault.importInvalid'), {
           description: parseError instanceof Error ? parseError.message : String(parseError),

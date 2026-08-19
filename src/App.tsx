@@ -1,10 +1,9 @@
-import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef, lazy, Suspense } from 'react';
 import { useTranslation } from 'react-i18next';
 import { applyLanguageFromPreference } from './lib/i18n';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { MenuBar } from './components/menu-bar';
-import { SystemMonitor } from './components/system-monitor';
 import { LogMonitor } from './components/log-monitor';
 import { StatusBar } from './components/status-bar';
 import { ConnectionDialog, ConnectionConfig } from './components/connection-dialog';
@@ -1814,7 +1813,9 @@ function AppContent() {
                               <div className="h-full overflow-hidden px-1 py-2">
                                 {activeConnection ? (
                                   <ErrorBoundary label={t('app.systemMonitor')}>
-                                    <SystemMonitor connectionId={activeConnection.connectionId} />
+                                    <Suspense fallback={<div className="h-full flex items-center justify-center text-xs text-muted-foreground">{'...'}</div>}>
+                                      <SystemMonitor connectionId={activeConnection.connectionId} />
+                                    </Suspense>
                                   </ErrorBoundary>
                                 ) : null}
                               </div>
@@ -1890,7 +1891,7 @@ function AppContent() {
             <ToolCommandHistory />
           </div>
           <div className={cn('absolute inset-0 bg-background', section === 'api' ? '' : 'hidden')}>
-            <ToolApiDebug />
+            <ToolApiDebug active={section === 'api'} />
           </div>
         </div>
       </div>
@@ -1929,6 +1930,8 @@ function AppContent() {
     </div>
   );
 }
+
+const SystemMonitor = lazy(() => import('./components/system-monitor').then((m) => ({ default: m.SystemMonitor })));
 
 export default function App() {
   return (
