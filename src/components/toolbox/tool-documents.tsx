@@ -5,8 +5,8 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
-import { open } from '@tauri-apps/plugin-dialog';
-import { readFile } from '@tauri-apps/plugin-fs';
+import { open, save } from '@tauri-apps/plugin-dialog';
+import { readFile, writeFile } from '@tauri-apps/plugin-fs';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { ScrollArea } from '@/components/ui/scroll-area';
@@ -30,6 +30,7 @@ import {
   FileText,
   Sheet,
   Upload,
+  Download,
   Search,
   Trash2,
   History,
@@ -48,7 +49,7 @@ import {
   type DocumentVersion,
 } from '@/lib/toolbox/documents-storage';
 import { BetterEditor } from './document-better-editor';
-import { cn } from '@/lib/utils';
+import { useWebviewFileDrop } from '@/lib/use-webview-file-drop';
 
 /** Maximum import size in bytes (10 MiB). */
 const MAX_IMPORT_BYTES = 10 * 1024 * 1024;
@@ -73,6 +74,20 @@ export function ToolDocuments() {
     return docs.filter((d) => d.name.toLowerCase().includes(q));
   }, [docs, query]);
 
+  /** Import raw bytes under a file name (shared by picker and drag & drop). */
+  const importBytes = useCallback(
+    async (name: string, bytes: Uint8Array) => {
+      if (bytes.byteLength > MAX_IMPORT_BYTES) {
+        toast.error(t('toolbox.documents.tooLarge'), { description: t('toolbox.documents.tooLargeDesc') });
+        return;
+      }
+      const meta = await importDocument(name, bytes);
+      setDocs((prev) => [meta, ...prev]);
+      toast.success(t('toolbox.documents.imported'), { description: name });
+    },
+    [t],
+  );
+
   const handleImport = useCallback(async () => {
     try {
       const selected = await open({
@@ -87,15 +102,63 @@ export function ToolDocuments() {
         return;
       }
       const name = selected.split(/[\\/]/).pop() || selected;
-      const meta = await importDocument(name, bytes);
-      setDocs((prev) => [meta, ...prev]);
-      toast.success(t('toolbox.documents.imported'), { description: name });
+      await importBytes(name, bytes);
     } catch (error) {
       toast.error(t('toolbox.documents.importFailed'), {
         description: error instanceof Error ? error.message : String(error),
       });
     }
-  }, [t]);
+  }, [importBytes, t]);
+
+  /** Export a document to a real file on disk via the OS save dialog. */
+  const handleDownload = useCallback(
+    async (doc: DocumentMeta) => {
+      try {
+        const target = await save({
+          defaultPath: doc.name,
+          filters: [
+            {
+              name: doc.kind === 'xlsx' ? 'Excel Workbook' : 'Word Document',
+              extensions: [doc.kind],
+            },
+          ],
+        });
+        if (typeof target !== 'string' || !target) return;
+        const bytes = await exportDocument(doc.id);
+        await writeFile(target, bytes);
+        toast.success(t('toolbox.documents.downloaded'), { description: doc.name });
+      } catch (error) {
+        toast.error(t('toolbox.documents.downloadFailed'), {
+          description: error instanceof Error ? error.message : String(error),
+        });
+      }
+    },
+    [t],
+  );
+
+  /** Drag & drop — OS-native via the Tauri webview singleton (returns paths). */
+  const listRef = React.useRef<HTMLDivElement>(null);
+  const { isDragOver: osDragOver } = useWebviewFileDrop({
+    enabled: !viewing,
+    targetRef: listRef,
+    priority: 2,
+    onDrop: async (paths) => {
+      for (const path of paths) {
+        const name = path.split(/[\\/]/).pop() || path;
+        const lower = name.toLowerCase();
+        const ok = lower.endsWith('.xlsx') || lower.endsWith('.xls') || lower.endsWith('.docx') || lower.endsWith('.doc');
+        if (!ok) continue;
+        try {
+          const bytes = await readFile(path);
+          await importBytes(name, bytes);
+        } catch (error) {
+          toast.error(t('toolbox.documents.importFailed'), {
+            description: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+    },
+  });
 
   const handleOpen = useCallback(async (doc: DocumentMeta) => {
     setViewing(doc);
@@ -170,7 +233,10 @@ export function ToolDocuments() {
     );
 
   return (
-    <div className="h-full flex flex-col bg-background">
+    <div
+      ref={listRef}
+      className="h-full relative flex flex-col bg-background"
+    >
       {viewing && (
         /* ── Full-screen editor view ── */
         <div className="h-full flex flex-col">
@@ -183,6 +249,14 @@ export function ToolDocuments() {
             <span className="text-sm font-medium text-foreground truncate">{viewing.name}</span>
             <span className="text-[10px] text-muted-foreground shrink-0">{t('toolbox.documents.v', { n: headVersion })}</span>
             <div className="ml-auto flex items-center gap-1.5 shrink-0">
+              <button
+                type="button"
+                className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:bg-accent"
+                title={t('toolbox.documents.download')}
+                onClick={() => void handleDownload(viewing)}
+              >
+                <Download className="h-4 w-4" />
+              </button>
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
                   <button
@@ -268,6 +342,7 @@ export function ToolDocuments() {
             </div>
             <p className="text-sm font-medium text-foreground">{t('toolbox.documents.empty')}</p>
             <p className="text-xs text-muted-foreground max-w-sm">{t('toolbox.documents.emptyDesc')}</p>
+            <p className="text-[11px] text-muted-foreground/70">{t('toolbox.documents.dropHint')}</p>
             <Button size="sm" onClick={() => void handleImport()} className="gap-1.5">
               <Upload className="h-3.5 w-3.5" />
               {t('toolbox.documents.importFirst')}
@@ -295,19 +370,41 @@ export function ToolDocuments() {
                     )}
                   </div>
                 </div>
-                <button
-                  type="button"
-                  className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground opacity-0 group-hover:opacity-100 hover:bg-destructive/10 hover:text-destructive"
-                  onClick={(e) => { e.stopPropagation(); setDeleteTarget(doc); }}
-                  aria-label={t('common.delete')}
-                >
-                  <Trash2 className="h-3.5 w-3.5" />
-                </button>
+                <div className="flex shrink-0 items-center gap-0.5">
+                  <button
+                    type="button"
+                    className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground opacity-0 group-hover:opacity-100 hover:bg-accent"
+                    onClick={(e) => { e.stopPropagation(); void handleDownload(doc); }}
+                    aria-label={t('toolbox.documents.download')}
+                    title={t('toolbox.documents.download')}
+                  >
+                    <Download className="h-3.5 w-3.5" />
+                  </button>
+                  <button
+                    type="button"
+                    className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground opacity-0 group-hover:opacity-100 hover:bg-destructive/10 hover:text-destructive"
+                    onClick={(e) => { e.stopPropagation(); setDeleteTarget(doc); }}
+                    aria-label={t('common.delete')}
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </button>
+                </div>
               </div>
             ))}
           </div>
         )}
       </ScrollArea>
+
+      {/* Drag & drop overlay */}
+      {osDragOver && (
+        <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center bg-background/70 backdrop-blur-[2px]">
+          <div className="flex flex-col items-center gap-2 rounded-xl border-2 border-dashed border-primary/60 bg-card/80 px-8 py-6 text-center">
+            <Upload className="h-8 w-8 text-primary" />
+            <p className="text-sm font-medium text-foreground">{t('toolbox.documents.dropActive')}</p>
+            <p className="text-xs text-muted-foreground">.xlsx · .xls · .docx · .doc</p>
+          </div>
+        </div>
+      )}
 
       </>
       )}

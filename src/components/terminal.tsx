@@ -209,8 +209,11 @@ export function Terminal({ connectionId, connectionName, host = 'localhost', use
 
     // Keyboard shortcuts handler
     const handleKeyDown = (e: KeyboardEvent) => {
-      // Copy: Ctrl+Shift+C or Cmd+C (when text is selected)
-      if ((e.ctrlKey && e.shiftKey && e.key === 'C') || (e.metaKey && e.key === 'c')) {
+      // Copy: Ctrl+C / Ctrl+Shift+C or Cmd+C (when text is selected).
+      // Without a selection Ctrl+C falls through to the line-interrupt path.
+      if (
+        ((e.ctrlKey && e.key === 'c') || (e.metaKey && e.key === 'c'))
+      ) {
         const selection = term.getSelection();
         if (selection) {
           e.preventDefault();
@@ -223,8 +226,10 @@ export function Terminal({ connectionId, connectionName, host = 'localhost', use
         }
       }
       
-      // Paste: Ctrl+Shift+V or Cmd+V
-      else if ((e.ctrlKey && e.shiftKey && e.key === 'V') || (e.metaKey && e.key === 'v')) {
+      // Paste: Ctrl+V / Ctrl+Shift+V or Cmd+V
+      else if (
+        ((e.ctrlKey && e.key === 'v') || (e.metaKey && e.key === 'v'))
+      ) {
         e.preventDefault();
         readClipboardText().then(text => {
           // Paste the text into the terminal

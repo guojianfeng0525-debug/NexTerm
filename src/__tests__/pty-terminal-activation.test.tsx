@@ -371,10 +371,11 @@ describe('PtyTerminal activation', () => {
     });
   });
 
-  it('lets xterm handle Ctrl+V paste without duplicate custom send', async () => {
+  it('handles Ctrl+V paste via the Tauri clipboard plugin', async () => {
     const { readText } = await import('@tauri-apps/plugin-clipboard-manager');
     const readTextMock = vi.mocked(readText);
     readTextMock.mockClear();
+    readTextMock.mockResolvedValue('pasted text');
     Object.defineProperty(navigator, 'platform', {
       configurable: true,
       value: 'Win32',
@@ -394,15 +395,16 @@ describe('PtyTerminal activation', () => {
     } as unknown as KeyboardEvent);
     await flushPromises();
 
-    expect(handled).toBe(true);
-    expect(preventDefault).not.toHaveBeenCalled();
-    expect(readTextMock).not.toHaveBeenCalled();
+    expect(handled).toBe(false);
+    expect(preventDefault).toHaveBeenCalled();
+    expect(readTextMock).toHaveBeenCalled();
   });
 
-  it('lets xterm handle Command+V paste without duplicate custom send on macOS', async () => {
+  it('handles Command+V paste via the Tauri clipboard plugin on macOS', async () => {
     const { readText } = await import('@tauri-apps/plugin-clipboard-manager');
     const readTextMock = vi.mocked(readText);
     readTextMock.mockClear();
+    readTextMock.mockResolvedValue('pasted text');
     Object.defineProperty(navigator, 'platform', {
       configurable: true,
       value: 'MacIntel',
@@ -422,8 +424,8 @@ describe('PtyTerminal activation', () => {
     } as unknown as KeyboardEvent);
     await flushPromises();
 
-    expect(handled).toBe(true);
-    expect(preventDefault).not.toHaveBeenCalled();
-    expect(readTextMock).not.toHaveBeenCalled();
+    expect(handled).toBe(false);
+    expect(preventDefault).toHaveBeenCalled();
+    expect(readTextMock).toHaveBeenCalled();
   });
 });

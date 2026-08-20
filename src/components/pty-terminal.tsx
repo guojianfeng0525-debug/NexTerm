@@ -873,13 +873,25 @@ export function PtyTerminal({
         return true;
       }
 
-      // Handle copy shortcut
+      // Handle copy shortcut — only when a selection exists; otherwise the
+      // event passes through to the shell as the normal SIGINT (Ctrl+C).
       if (modKey && key === 'c' && term.hasSelection()) {
         // Allow copy to happen
         const selection = term.getSelection();
         writeClipboardText(selection).catch(() => {
           console.error('Failed to copy');
         });
+        return false;
+      }
+
+      // Handle paste shortcut — Ctrl+V / Cmd+V. xterm's own textarea paste
+      // handler relies on the browser clipboard API which can be unavailable
+      // in the Tauri WebView (CSP / permissions); route through the Tauri
+      // clipboard plugin instead so paste always works. term.paste() wraps the
+      // text in bracketed-paste mode and fires onData → sendInputToPty.
+      if (modKey && key === 'v') {
+        event.preventDefault();
+        void pasteClipboardIntoPty();
         return false;
       }
 
