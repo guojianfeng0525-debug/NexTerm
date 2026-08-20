@@ -1044,6 +1044,7 @@ export function ServersView({
                           : 'border-transparent hover:border-border hover:bg-card',
                       )}
                       onClick={() => setSelectedServer(server)}
+                      onDoubleClick={() => onConnect(server.id)}
                     >
                       {/* Column 1 (1/3): icon + name + IP */}
                       <div className="flex items-center gap-2.5 min-w-0">
@@ -1057,7 +1058,25 @@ export function ServersView({
                         </div>
                         <div className="min-w-0">
                           <div className="flex items-center gap-1.5 min-w-0">
-                            <span className="text-sm font-medium text-foreground truncate">{server.name}</span>
+                            {/* Clicking the server name opens the terminal right away. */}
+                            <span
+                              role="button"
+                              tabIndex={0}
+                              title={`${t('serversView.openTerminal')} ${server.host}`}
+                              className="text-sm font-medium text-foreground truncate hover:text-primary hover:underline decoration-dotted underline-offset-2 cursor-pointer"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                onConnect(server.id);
+                              }}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter' || e.key === ' ') {
+                                  e.stopPropagation();
+                                  onConnect(server.id);
+                                }
+                              }}
+                            >
+                              {server.name}
+                            </span>
                             {server.favorite && <Star className="h-3.5 w-3.5 fill-amber-400 text-amber-400 shrink-0" />}
                             <Badge variant="outline" className={cn('text-[10px] shrink-0', PROTOCOL_COLORS[protocol])}>
                               {protocol}

@@ -242,11 +242,15 @@ pub async fn launch_app(request: LaunchAppRequest) -> Result<(), String> {
         Ok(_) => Ok(()),
         Err(e) => {
             // Fallback: hand the path to the platform opener.
-            // Windows exe/lnk files fall back to `cmd /C start "" <path>`.
+            // Windows exe/lnk files fall back to `cmd /C start "" <path>` —
+            // the path MUST be double-quoted or paths containing spaces are
+            // mis-parsed by cmd (this was breaking apps saved from the
+            // picker, e.g. "C:\Program Files\...").
             #[cfg(target_os = "windows")]
             {
+                let quoted = format!("\"{}\"", path.replace('"', "\\\""));
                 let mut start = std::process::Command::new("cmd");
-                start.arg("/C").arg("start").arg("").arg(&path);
+                start.arg("/C").arg("start").arg("").arg(&quoted);
                 if let Some(cwd) = &request.cwd {
                     start.current_dir(cwd);
                 }

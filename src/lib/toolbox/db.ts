@@ -36,7 +36,8 @@ export type DbTable =
   | 'workspace_meta'
   | 'workspace_groups'
   | 'workspace_tabs'
-  | 'workspace_grid_nodes';
+  | 'workspace_grid_nodes'
+  | 'documents';
 
 export type Row = Record<string, unknown>;
 

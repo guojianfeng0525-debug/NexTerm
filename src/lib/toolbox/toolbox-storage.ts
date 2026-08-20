@@ -182,6 +182,15 @@ export function isToolboxStoreInitialized(): boolean {
   return initialized;
 }
 
+/** Reset the in-memory cache (used by tests to simulate an app restart). */
+export function resetToolboxStore(): void {
+  cache.apps = [];
+  cache.tunnels = [];
+  cache.services = [];
+  cache.notes = [];
+  initialized = false;
+}
+
 function list<T>(kind: Kind): T[] {
   return cache[kind] as T[];
 }

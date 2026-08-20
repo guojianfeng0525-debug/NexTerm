@@ -1,6 +1,7 @@
 mod commands;
 mod connection_manager;
-mod db;
+pub mod documents;
+pub mod db;
 mod desktop_protocol;
 mod ftp_client;
 mod ls_parser;
@@ -401,7 +402,7 @@ pub fn run() {
                     }
                     match db::DbState::open(&path) {
                         Ok(state) => {
-                            app.manage(state);
+                            app.manage(std::sync::Arc::new(state));
                             tracing::info!("SQLite store opened at {:?}", path);
                             opened = true;
                         }
@@ -416,7 +417,7 @@ pub fn run() {
                             }
                             match db::DbState::open(&dir.join("nexterm.db")) {
                                 Ok(state) => {
-                                    app.manage(state);
+                                    app.manage(std::sync::Arc::new(state));
                                     tracing::info!(
                                         "SQLite store opened at {:?} (app-data fallback)",
                                         dir.join("nexterm.db")
@@ -454,6 +455,12 @@ pub fn run() {
             commands::ssh_tab_complete,
             commands::get_system_stats,
             commands::probe_server_stats,
+            documents::documents_list,
+            documents::documents_import,
+            documents::documents_export,
+            documents::documents_save,
+            documents::documents_versions,
+            documents::documents_delete,
             commands::list_files,
             commands::list_connections,
             commands::sftp_download_file,

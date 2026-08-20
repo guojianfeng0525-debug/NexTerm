@@ -1177,7 +1177,9 @@
       "pickIcon": "选择图标图片",
       "extractIcon": "读取应用图标",
       "extractIconOk": "图标已读取",
-      "extractIconNoPath": "请先填写应用路径"
+      "extractIconNoPath": "请先填写应用路径",
+      "iconTooLarge": "图标过大已跳过保存",
+      "iconTooLargeDesc": "图标超过 1MB，未随应用保存（应用本身已保存，可重新选择小图标）"
     },
     "vault": {
       "title": "记录本",
@@ -1529,6 +1531,34 @@
       "empty": "暂无命令记录",
       "emptyDesc": "在任何终端中执行的命令都会显示在这里，方便以后查看。",
       "truncated": "显示前 500 条（共 {{count}} 条）"
+    },
+    "documents": {
+      "title": "文档",
+      "description": "导入 Excel / Word 文件，点击在线查看",
+      "import": "导入",
+      "importFirst": "导入第一个文件",
+      "imported": "已导入",
+      "importFailed": "导入失败",
+      "deleted": "已删除",
+      "searchPlaceholder": "搜索文件名…",
+      "empty": "还没有文档",
+      "emptyDesc": "导入 .xlsx / .xls / .docx / .doc 文件，每个文件一条记录，点击可在线查看",
+      "open": "点击查看",
+      "tooLarge": "文件过大",
+      "tooLargeDesc": "单个文件最大 10MB（SQLite 存储）",
+      "deleteTitle": "删除文档",
+      "deleteDesc": "确定删除 \"{{name}}\" 吗？此操作不可恢复。",
+      "docNotSupported": "旧版 .doc 格式暂不支持内联查看，请转存为 .docx",
+      "saved": "已保存",
+      "openFailed": "打开失败",
+      "saveFailed": "保存失败",
+      "restored": "已恢复到该版本",
+      "restoreFailed": "恢复失败",
+      "deleteFailed": "删除失败",
+      "history": "版本历史",
+      "versionLabel": "版本 {{n}}",
+      "noVersions": "暂无版本",
+      "v": "v{{n}}"
     }
   },
   "serversView": {

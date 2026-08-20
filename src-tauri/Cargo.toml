@@ -46,8 +46,16 @@ base64 = "0.22"
 sys-locale = "0.3"
 reqwest = { version = "0.12", features = ["json", "stream"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
+betteroffice-docx = "0.1.0"
+betteroffice-xlsx = "0.1.0"
+docx-parse = { package = "betteroffice-docx-parse", version = "0.1.0" }
+ooxml-opc = { package = "betteroffice-opc", version = "0.1.0" }
+xlsx-model = { package = "betteroffice-xlsx-model", version = "0.1.0" }
+sha2 = "0.11.0"
+zip = "8.6.0"
 
 [dev-dependencies]
+rusqlite = "0.32"
 tempfile = "3"
 
 # Performance optimization profiles

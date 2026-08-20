@@ -35,6 +35,7 @@ import { ToolTunnels } from './components/toolbox/tool-tunnels';
 import { ToolServices } from './components/toolbox/tool-services';
 import { ToolNotes } from './components/toolbox/tool-notes';
 import { ToolCommandHistory } from './components/toolbox/tool-command-history';
+const ToolDocuments = lazy(() => import('./components/toolbox/tool-documents').then((m) => ({ default: m.ToolDocuments })));
 import { ToolApiDebug } from './components/toolbox/tool-api-debug';
 import { ErrorBoundary } from './components/error-boundary';
 import { initializeAllStorage } from './lib/storage-init';
@@ -1889,6 +1890,11 @@ function AppContent() {
           </div>
           <div className={cn('absolute inset-0 bg-background', section === 'history' ? '' : 'hidden')}>
             <ToolCommandHistory />
+          </div>
+          <div className={cn('absolute inset-0 bg-background', section === 'documents' ? '' : 'hidden')}>
+            <Suspense fallback={<div className="h-full flex items-center justify-center text-xs text-muted-foreground">{'...'}</div>}>
+              <ToolDocuments />
+            </Suspense>
           </div>
           <div className={cn('absolute inset-0 bg-background', section === 'api' ? '' : 'hidden')}>
             <ToolApiDebug active={section === 'api'} />

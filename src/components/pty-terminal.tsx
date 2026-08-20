@@ -6,6 +6,7 @@ import { WebLinksAddon } from '@xterm/addon-web-links';
 import { WebglAddon } from '@xterm/addon-webgl';
 import { SearchAddon } from '@xterm/addon-search';
 import { ClipboardAddon } from '@xterm/addon-clipboard';
+import { Unicode11Addon } from '@xterm/addon-unicode11';
 import { invoke } from '@tauri-apps/api/core';
 import { cn } from '@/lib/utils';
 import { readText as readClipboardText, writeText as writeClipboardText } from '@tauri-apps/plugin-clipboard-manager';
@@ -30,6 +31,7 @@ import {
   connectionScope,
   cwdScope,
 } from '../lib/suggestion/store';
+import { recordExecutedCommand } from '../lib/command-history';
 import '@xterm/xterm/css/xterm.css';
 
 interface PtyTerminalProps {
@@ -510,6 +512,8 @@ export function PtyTerminal({
     if (!trimmed) return;
     try {
       recordUse(trimmed, connScope, cwdScopeRef.current);
+      // Also persist to the command-history view (command_usage/history tables).
+      recordExecutedCommand(trimmed);
     } catch {
       /* suggestion learning must never break the terminal */
     }
@@ -726,6 +730,12 @@ export function PtyTerminal({
     term.loadAddon(fitAddon);
     term.loadAddon(webLinks);
     term.loadAddon(searchAddon);
+    // Unicode 11 width tables — CJK (Chinese/Japanese/Korean) characters must
+    // occupy two cells, otherwise the cursor position and IME output drift.
+    term.loadAddon(new Unicode11Addon());
+    if (term.unicode) {
+      term.unicode.activeVersion = '11';
+    }
     const clipboardAddon = new ClipboardAddon();
     term.loadAddon(clipboardAddon);
     clipboardAddonRef.current = clipboardAddon;
@@ -994,10 +1004,12 @@ export function PtyTerminal({
     let creditsGranted = 0;
     
     // CRITICAL: Wait for terminal to have proper dimensions before connecting
-    // Hidden terminals (display: none) may have cols=10, rows=5 which breaks PTY
+    // Hidden terminals (display: none) may have cols=10, rows=5 which breaks PTY.
+    // A short wait avoids opening the terminal "slowly"; once the tab is
+    // visible the fit addon re-fits and sends Resize anyway.
     const waitForProperSize = () => {
       return new Promise<void>((resolve) => {
-        const MAX_WAIT_MS = 10_000; // Give up after 10 seconds (tab is probably hidden)
+        const MAX_WAIT_MS = 2_000; // give up quickly, re-fit on visibility
         const startTime = Date.now();
 
         const checkSize = () => {
@@ -1005,9 +1017,8 @@ export function PtyTerminal({
 
           // Refit to get latest dimensions
           fitAddon.fit();
-          
+
           // Consider terminal properly sized if it has reasonable dimensions
-          // Typical minimum: 80x24, but we'll accept 40x10 as minimum
           if (term.cols >= 40 && term.rows >= 10) {
             console.log(`[PTY Terminal] [${connectionId}] Terminal properly sized: ${term.cols}x${term.rows}`);
             resolve();
@@ -1021,7 +1032,7 @@ export function PtyTerminal({
             setTimeout(checkSize, 100);
           }
         };
-        
+
         // Start checking after a brief delay
         setTimeout(checkSize, 50);
       });

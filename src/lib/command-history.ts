@@ -24,6 +24,10 @@ let hydrated = false;
 let usageEnc = new Map<string, string>();
 let historyEnc = new Map<string, string>();
 
+// Serialises async persistence: concurrent recordExecutedCommand calls must
+// not both encrypt the same command (AES-GCM random IV → duplicate rows).
+let persistChain: Promise<void> = Promise.resolve();
+
 export function isCommandHistoryHydrated(): boolean {
   return hydrated;
 }
@@ -105,4 +109,59 @@ export function setCommandData(
     void rewriteUsage();
     void rewriteHistory();
   }
+}
+
+/**
+ * Record one executed command into usage + history and persist it
+ * incrementally. Called by the terminal on every submitted command; the
+ * suggestion engine keeps its own `command_stats` table separately.
+ */
+export function recordExecutedCommand(command: string): void {
+  const trimmed = command.trim();
+  if (!trimmed) return;
+  const now = Date.now();
+
+  usage = usage ?? {};
+  usage[trimmed] = (usage[trimmed] ?? 0) + 1;
+
+  history = history ?? [];
+  const existing = history.find((h) => h.c === trimmed);
+  if (existing) {
+    existing.n += 1;
+    existing.t = now;
+  } else {
+    history.push({ c: trimmed, n: 1, t: now });
+  }
+
+  if (!hydrated) return;
+  const count = usage[trimmed];
+  const entry = existing ?? history[history.length - 1];
+  // Notify the history view synchronously — the async SQLite write below must
+  // not gate UI refresh (it can lag or fail while memory is already updated).
+  try {
+    window.dispatchEvent(new Event('nexterm:command-history-changed'));
+  } catch {
+    /* ignore */
+  }
+  persistChain = persistChain.then(async () => {
+    // Reuse the stored ciphertext for this command (AES-GCM uses a random IV,
+    // so a fresh encryption would create a duplicate row).
+    let usageCipher = usageEnc.get(trimmed);
+    if (!usageCipher) {
+      const fresh = await encField(trimmed);
+      if (!fresh) return;
+      usageCipher = fresh;
+      usageEnc.set(trimmed, fresh);
+    }
+    await rowUpsert('command_usage', { command: usageCipher, count });
+
+    let historyCipher = historyEnc.get(trimmed);
+    if (!historyCipher) {
+      const fresh = await encField(trimmed);
+      if (!fresh) return;
+      historyCipher = fresh;
+      historyEnc.set(trimmed, fresh);
+    }
+    await rowUpsert('command_history', { command: historyCipher, count: entry?.n ?? 1, last_used: now });
+  });
 }

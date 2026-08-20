@@ -1177,7 +1177,9 @@
       "pickIcon": "Choose an icon image",
       "extractIcon": "Extract icon from app",
       "extractIconOk": "Icon extracted",
-      "extractIconNoPath": "Please enter the app path first"
+      "extractIconNoPath": "Please enter the app path first",
+      "iconTooLarge": "Icon too large, skipped",
+      "iconTooLargeDesc": "Icon exceeds 1MB and was not saved with the app (the app itself was saved; pick a smaller icon to attach it)"
     },
     "vault": {
       "title": "Vault",
@@ -1529,6 +1531,34 @@
       "empty": "No commands recorded yet",
       "emptyDesc": "Commands you execute in any terminal will appear here, so you can look them up later.",
       "truncated": "Showing first 500 of {{count}} commands"
+    },
+    "documents": {
+      "title": "Documents",
+      "description": "Import Excel / Word files and view them inline",
+      "import": "Import",
+      "importFirst": "Import first file",
+      "imported": "Imported",
+      "importFailed": "Import failed",
+      "deleted": "Deleted",
+      "searchPlaceholder": "Search file name…",
+      "empty": "No documents yet",
+      "emptyDesc": "Import .xlsx / .xls / .docx / .doc files — each file is one record, click to view inline",
+      "open": "Click to view",
+      "tooLarge": "File too large",
+      "tooLargeDesc": "Max 10MB per file (stored in SQLite)",
+      "deleteTitle": "Delete document",
+      "deleteDesc": "Delete \"{{name}}\"? This cannot be undone.",
+      "docNotSupported": "Legacy .doc format is not viewable inline — convert it to .docx",
+      "saved": "Saved",
+      "openFailed": "Failed to open",
+      "saveFailed": "Failed to save",
+      "restored": "Restored to this version",
+      "restoreFailed": "Failed to restore",
+      "deleteFailed": "Failed to delete",
+      "history": "Version history",
+      "versionLabel": "Version {{n}}",
+      "noVersions": "No versions",
+      "v": "v{{n}}"
     }
   },
   "serversView": {

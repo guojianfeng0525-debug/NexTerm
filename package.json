@@ -18,6 +18,13 @@
     "build:windows:portable": "pnpm build && pnpm tauri build --no-bundle && node scripts/build-windows-portable.mjs"
   },
   "dependencies": {
+    "@betteroffice/docx": "0.1.0",
+    "@betteroffice/docx-i18n": "0.1.0",
+    "@betteroffice/docx-react": "^0.1.0",
+    "@betteroffice/fonts": "^0.0.1",
+    "@betteroffice/fonts-cjk": "^0.1.0",
+    "@betteroffice/xlsx-i18n": "0.1.0",
+    "@betteroffice/xlsx-react": "^0.1.0",
     "@codemirror/autocomplete": "^6.20.3",
     "@codemirror/commands": "^6.10.3",
     "@codemirror/lang-cpp": "^6.0.3",

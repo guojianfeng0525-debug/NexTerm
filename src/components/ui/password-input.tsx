@@ -6,11 +6,17 @@ import { cn } from "./utils";
 
 function PasswordInput({ className, type: _type, ...props }: React.ComponentProps<"input">) {
   const [show, setShow] = React.useState(false);
+  // Passwords are ASCII — block IME composition (Chinese/Japanese/Korean) so
+  // the input method can never inject composed text into the field.
+  const blockIme = (e: React.CompositionEvent<HTMLInputElement>) => e.preventDefault();
   return (
     <div className="relative">
       <Input
         type={show ? "text" : "password"}
         className={cn("pr-10", className)}
+        onCompositionStart={blockIme}
+        onCompositionUpdate={blockIme}
+        onCompositionEnd={blockIme}
         {...props}
       />
       <Button

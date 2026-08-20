@@ -44,6 +44,9 @@ function iconSrc(path?: string): string | undefined {
   return path.startsWith('data:') ? path : convertFileSrc(path);
 }
 
+// Icons above this many characters are dropped on save (see handleSave).
+const MAX_ICON_CHARS = 1024 * 1024;
+
 const EMPTY_FORM = {
   name: '',
   path: '',
@@ -264,6 +267,11 @@ export function ToolApps() {
       return;
     }
     const now = Date.now();
+    // Very large icon data-URLs can bloat the row and risk failing the whole
+    // upsert (which would lose the app entry on restart). Guard the size: the
+    // app still saves, just without the icon (it can be re-picked later).
+    const rawIcon = form.iconPath.trim();
+    const iconSafe = rawIcon && rawIcon.length <= MAX_ICON_CHARS ? rawIcon : undefined;
     const item: ToolboxApp = {
       id: editing?.id ?? generateId('app'),
       name: form.name.trim(),
@@ -271,7 +279,7 @@ export function ToolApps() {
       args: form.args.trim() || undefined,
       cwd: form.cwd.trim() || undefined,
       icon: form.icon.trim() || undefined,
-      iconPath: form.iconPath.trim() || undefined,
+      iconPath: iconSafe,
       category: form.category.trim() || undefined,
       description: form.description.trim() || undefined,
       createdAt: editing?.createdAt ?? now,
@@ -279,9 +287,15 @@ export function ToolApps() {
     };
     setApps(AppsStorage.upsert(item));
     setDialogOpen(false);
-    toast.success(editing ? t('toolbox.apps.updated') : t('toolbox.apps.added'), {
-      description: item.name,
-    });
+    if (rawIcon && !iconSafe) {
+      toast.warning(t('toolbox.apps.iconTooLarge'), {
+        description: t('toolbox.apps.iconTooLargeDesc'),
+      });
+    } else {
+      toast.success(editing ? t('toolbox.apps.updated') : t('toolbox.apps.added'), {
+        description: item.name,
+      });
+    }
   }, [editing, form, t]);
 
   const handleDelete = useCallback(() => {

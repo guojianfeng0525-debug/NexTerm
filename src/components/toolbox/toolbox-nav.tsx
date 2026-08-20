@@ -13,6 +13,7 @@ import {
   Brackets,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { FileText } from 'lucide-react';
 import type { ToolboxViewId } from '@/lib/toolbox/toolbox-types';
 
 /** Workspace sections: connection workspace, terminal-only view, or a toolbox tool. */
@@ -30,7 +31,8 @@ interface NavEntry {
     | 'toolbox.services.title'
     | 'toolbox.notes.title'
     | 'toolbox.history.title'
-    | 'toolbox.apiDebug.title';
+    | 'toolbox.apiDebug.title'
+    | 'toolbox.documents.title';
 }
 
 const NAV_ENTRIES: NavEntry[] = [
@@ -42,6 +44,7 @@ const NAV_ENTRIES: NavEntry[] = [
   { id: 'services', icon: Server, labelKey: 'toolbox.services.title' },
   { id: 'notes', icon: StickyNote, labelKey: 'toolbox.notes.title' },
   { id: 'history', icon: HistoryIcon, labelKey: 'toolbox.history.title' },
+  { id: 'documents', icon: FileText, labelKey: 'toolbox.documents.title' },
   { id: 'api', icon: Brackets, labelKey: 'toolbox.apiDebug.title' },
 ];
 

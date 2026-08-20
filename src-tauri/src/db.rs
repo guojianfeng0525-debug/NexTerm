@@ -16,12 +16,12 @@
 use rusqlite::{params_from_iter, Connection, Row};
 use rusqlite::types::{Value as SqlValue, ValueRef};
 use serde_json::{Map as JsonMap, Value as JsonValue};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use tauri::State;
 
 /// Allow-listed normalized tables. Table names are validated against this
 /// list before being interpolated into SQL, so no injection is possible.
-pub const TABLES: [&str; 23] = [
+pub const TABLES: [&str; 26] = [
     "connections",
     "folders",
     "active_connections",
@@ -47,6 +47,10 @@ pub const TABLES: [&str; 23] = [
     "workspace_groups",
     "workspace_tabs",
     "workspace_grid_nodes",
+    // Documents module — metadata + canonical model versions + resources.
+    "documents",
+    "document_versions",
+    "document_resources",
 ];
 
 /// Tables whose legacy key-value layout collides with a new normalized table
@@ -85,6 +89,25 @@ impl DbState {
             .map_err(|e| format!("Failed to init tables: {}", e))?;
         // Drop the very first single-table layout if it somehow still exists.
         let _ = conn.execute_batch("DROP TABLE IF EXISTS kv_store;");
+        // documents.content (base64 original file) was removed by the model
+        // redesign — drop the obsolete columns so old databases converge.
+        for legacy_col in ["content", "edited_content"] {
+            if table_columns(&conn, "documents")
+                .map(|cols| cols.iter().any(|c| c == legacy_col))
+                .unwrap_or(false)
+            {
+                let _ = conn.execute_batch(&format!(
+                    "ALTER TABLE \"documents\" DROP COLUMN {legacy_col};"
+                ));
+            }
+        }
+        // documents.type (old field) → documents.kind (model redesign).
+        {
+            let cols = table_columns(&conn, "documents").unwrap_or_default();
+            if cols.iter().any(|c| c == "type") && !cols.iter().any(|c| c == "kind") {
+                let _ = conn.execute_batch("ALTER TABLE \"documents\" RENAME COLUMN type TO kind;");
+            }
+        }
         // Schema evolution for databases created before a column existed.
         // `CREATE TABLE IF NOT EXISTS` never alters existing tables, so any
         // column added after a release must be back-filled here.
@@ -106,6 +129,21 @@ impl DbState {
                 "command_suggestions",
                 "command_suggestions INTEGER NOT NULL DEFAULT 1",
             ),
+            (
+                "documents",
+                "edited_content",
+                "edited_content TEXT",
+            ),
+            (
+                "documents",
+                "head_version",
+                "head_version INTEGER NOT NULL DEFAULT 0",
+            ),
+            (
+                "documents",
+                "source_hash",
+                "source_hash TEXT",
+            ),
         ] {
             ensure_column(&conn, table, column, ddl)?;
         }
@@ -113,6 +151,192 @@ impl DbState {
             conn: Mutex::new(conn),
         })
     }
+
+    // ── Documents module (canonical model + versioned parts) ──────────────
+
+    /// Write a document version atomically: metadata row + model version +
+    /// resources (BLOBs). `expect_head` guards optimistic concurrency.
+    pub fn documents_write(
+        &self,
+        id: &str,
+        name: &str,
+        kind: &str,
+        size: i64,
+        source_hash: Option<&str>,
+        version: i64,
+        expect_head: Option<i64>,
+        model: &str,
+        model_hash: &str,
+        resources: &[(String, String, String, Vec<u8>, String)],
+    ) -> Result<(), String> {
+        let mut conn = self.conn.lock().map_err(|_| "db lock poisoned".to_string())?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+
+        if let Some(expected) = expect_head {
+            let cur: i64 = tx
+                .query_row(
+                    "SELECT head_version FROM documents WHERE id = ?1",
+                    [id],
+                    |r| r.get(0),
+                )
+                .map_err(|e| format!("read head_version: {e}"))?;
+            if cur != expected {
+                return Err(format!("version conflict: head is {cur}, expected {expected}"));
+            }
+        }
+
+        tx.execute(
+            "INSERT INTO documents (id, name, kind, size, source_hash, head_version, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(id) DO UPDATE SET
+               name=excluded.name, kind=excluded.kind, size=excluded.size,
+               source_hash=excluded.source_hash, head_version=excluded.head_version,
+               updated_at=excluded.updated_at",
+            rusqlite::params![id, name, kind, size, source_hash, version, now_ms(), now_ms()],
+        )
+        .map_err(|e| format!("upsert documents: {e}"))?;
+
+        tx.execute(
+            "INSERT INTO document_versions (id, document_id, version, model, model_hash, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![format!("{id}-v{version}"), id, version, model, model_hash, now_ms()],
+        )
+        .map_err(|e| format!("insert document_versions: {e}"))?;
+
+        for (resource_id, kind_res, mime, data, sha) in resources {
+            tx.execute(
+                "INSERT INTO document_resources (id, document_id, resource_id, kind, mime, data, sha256)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                 ON CONFLICT(id) DO UPDATE SET
+                   kind=excluded.kind, mime=excluded.mime, data=excluded.data, sha256=excluded.sha256",
+                rusqlite::params![
+                    format!("{id}-{resource_id}"),
+                    id,
+                    resource_id,
+                    kind_res,
+                    mime,
+                    data,
+                    sha
+                ],
+            )
+            .map_err(|e| format!("upsert document_resources: {e}"))?;
+        }
+
+        tx.commit().map_err(|e| e.to_string())
+    }
+
+    /// Document kind ('docx' | 'xlsx'), if present.
+    pub fn documents_kind(&self, doc_id: &str) -> Result<Option<String>, String> {
+        let conn = self.conn.lock().map_err(|_| "db lock poisoned".to_string())?;
+        let mut stmt = conn
+            .prepare("SELECT kind FROM documents WHERE id = ?1")
+            .map_err(|e| format!("prepare: {e}"))?;
+        let mut rows = stmt.query([doc_id]).map_err(|e| format!("query: {e}"))?;
+        if let Some(row) = rows.next().map_err(|e| e.to_string())? {
+            Ok(Some(row.get(0).map_err(|e| e.to_string())?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Read a model version. `version: None` reads the head.
+    pub fn documents_read_model(
+        &self,
+        doc_id: &str,
+        version: Option<i64>,
+    ) -> Result<Option<(i64, String)>, String> {
+        let conn = self.conn.lock().map_err(|_| "db lock poisoned".to_string())?;
+        let (sql, params): (&str, Vec<Box<dyn rusqlite::ToSql>>) = match version {
+            Some(v) => (
+                "SELECT version, model FROM document_versions WHERE document_id = ?1 AND version = ?2",
+                vec![Box::new(doc_id), Box::new(v)],
+            ),
+            None => (
+                "SELECT version, model FROM document_versions WHERE document_id = ?1 ORDER BY version DESC LIMIT 1",
+                vec![Box::new(doc_id)],
+            ),
+        };
+        let mut stmt = conn.prepare(sql).map_err(|e| format!("prepare: {e}"))?;
+        let mut rows = stmt
+            .query(rusqlite::params_from_iter(params))
+            .map_err(|e| format!("query: {e}"))?;
+        if let Some(row) = rows.next().map_err(|e| e.to_string())? {
+            Ok(Some((
+                row.get(0).map_err(|e| e.to_string())?,
+                row.get(1).map_err(|e| e.to_string())?,
+            )))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// All resources for a document (resource_id, kind, mime, data).
+    pub fn documents_resources(
+        &self,
+        doc_id: &str,
+    ) -> Result<Vec<(String, String, String, Vec<u8>)>, String> {
+        let conn = self.conn.lock().map_err(|_| "db lock poisoned".to_string())?;
+        let mut stmt = conn
+            .prepare("SELECT resource_id, kind, mime, data FROM document_resources WHERE document_id = ?1")
+            .map_err(|e| format!("prepare: {e}"))?;
+        let rows = stmt
+            .query_map([doc_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .map_err(|e| format!("query: {e}"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        Ok(rows)
+    }
+
+    /// Version list: (version, created_at) newest first.
+    pub fn documents_versions(&self, doc_id: &str) -> Result<Vec<(i64, i64)>, String> {
+        let conn = self.conn.lock().map_err(|_| "db lock poisoned".to_string())?;
+        let mut stmt = conn
+            .prepare("SELECT version, created_at FROM document_versions WHERE document_id = ?1 ORDER BY version DESC")
+            .map_err(|e| format!("prepare: {e}"))?;
+        let rows = stmt
+            .query_map([doc_id], |r| Ok((r.get(0)?, r.get(1)?)))
+            .map_err(|e| format!("query: {e}"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        Ok(rows)
+    }
+
+    /// Delete a document and all its versions/resources.
+    pub fn documents_delete(&self, doc_id: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|_| "db lock poisoned".to_string())?;
+        conn.execute("DELETE FROM document_versions WHERE document_id = ?1", [doc_id])
+            .map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM document_resources WHERE document_id = ?1", [doc_id])
+            .map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM documents WHERE id = ?1", [doc_id])
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// Metadata rows for the documents list.
+    pub fn documents_list(
+        &self,
+    ) -> Result<Vec<(String, String, String, i64, i64, i64, i64)>, String> {
+        let conn = self.conn.lock().map_err(|_| "db lock poisoned".to_string())?;
+        let mut stmt = conn
+            .prepare("SELECT id, name, kind, size, head_version, created_at, updated_at FROM documents ORDER BY created_at DESC")
+            .map_err(|e| format!("prepare: {e}"))?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?))
+            })
+            .map_err(|e| format!("query: {e}"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        Ok(rows)
+    }
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 /// Detect legacy `key`/`value` tables whose name collides with a normalized
@@ -192,6 +416,9 @@ fn pk_column(table: &str) -> Result<&'static str, String> {
         "workspace_groups" => "group_id",
         "workspace_tabs" => "tab_id",
         "workspace_grid_nodes" => "node_id",
+        "documents" => "id",
+        "document_versions" => "id",
+        "document_resources" => "id",
         _ => return Err(format!("unknown table: {}", table)),
     })
 }
@@ -263,7 +490,7 @@ fn row_to_json(row: &Row, names: &[String]) -> rusqlite::Result<JsonMap<String, 
 pub fn row_upsert(
     table: String,
     row: JsonMap<String, JsonValue>,
-    state: State<'_, DbState>,
+    state: State<'_, Arc<DbState>>,
 ) -> Result<(), String> {
     validate_table(&table)?;
     let pk = pk_column(&table)?.to_string();
@@ -336,7 +563,7 @@ pub fn row_upsert(
 pub fn row_get(
     table: String,
     key: String,
-    state: State<'_, DbState>,
+    state: State<'_, Arc<DbState>>,
 ) -> Result<Option<JsonMap<String, JsonValue>>, String> {
     validate_table(&table)?;
     let pk = pk_column(&table)?.to_string();
@@ -357,7 +584,7 @@ pub fn row_get(
 #[tauri::command]
 pub fn row_list(
     table: String,
-    state: State<'_, DbState>,
+    state: State<'_, Arc<DbState>>,
 ) -> Result<Vec<JsonMap<String, JsonValue>>, String> {
     validate_table(&table)?;
     let conn = state.conn.lock().map_err(|_| "db lock poisoned".to_string())?;
@@ -377,7 +604,7 @@ pub fn row_list(
 pub fn row_delete(
     table: String,
     key: String,
-    state: State<'_, DbState>,
+    state: State<'_, Arc<DbState>>,
 ) -> Result<(), String> {
     validate_table(&table)?;
     let pk = pk_column(&table)?.to_string();
@@ -389,7 +616,7 @@ pub fn row_delete(
 
 /// Delete every row in a normalized table (used for full-state rewrites).
 #[tauri::command]
-pub fn row_clear(table: String, state: State<'_, DbState>) -> Result<(), String> {
+pub fn row_clear(table: String, state: State<'_, Arc<DbState>>) -> Result<(), String> {
     validate_table(&table)?;
     let conn = state.conn.lock().map_err(|_| "db lock poisoned".to_string())?;
     let sql = format!("DELETE FROM \"{}\"", table);
@@ -402,7 +629,7 @@ pub fn row_clear(table: String, state: State<'_, DbState>) -> Result<(), String>
 pub fn legacy_db_get(
     table: String,
     key: String,
-    state: State<'_, DbState>,
+    state: State<'_, Arc<DbState>>,
 ) -> Result<Option<String>, String> {
     if !LEGACY_TABLES.contains(&table.as_str()) {
         return Err(format!("not a legacy table: {}", table));
@@ -422,7 +649,7 @@ pub fn legacy_db_get(
 /// Drop the legacy key-value tables after the frontend migrated their data
 /// into the normalized tables.
 #[tauri::command]
-pub fn drop_legacy_tables(state: State<'_, DbState>) -> Result<(), String> {
+pub fn drop_legacy_tables(state: State<'_, Arc<DbState>>) -> Result<(), String> {
     let conn = state.conn.lock().map_err(|_| "db lock poisoned".to_string())?;
     conn.execute_batch(
         "DROP TABLE IF EXISTS connections_legacy; \
@@ -722,6 +949,33 @@ CREATE TABLE IF NOT EXISTS "workspace_grid_nodes" (
   position INTEGER NOT NULL DEFAULT 0,
   size REAL NOT NULL DEFAULT 1,
   group_id TEXT
+);
+CREATE TABLE IF NOT EXISTS "documents" (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL DEFAULT '',
+  kind TEXT NOT NULL DEFAULT '',
+  size INTEGER NOT NULL DEFAULT 0,
+  source_hash TEXT,
+  head_version INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS "document_versions" (
+  id TEXT PRIMARY KEY,
+  document_id TEXT NOT NULL,
+  version INTEGER NOT NULL,
+  model TEXT NOT NULL,
+  model_hash TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS "document_resources" (
+  id TEXT PRIMARY KEY,
+  document_id TEXT NOT NULL,
+  resource_id TEXT NOT NULL,
+  kind TEXT NOT NULL DEFAULT '',
+  mime TEXT NOT NULL DEFAULT '',
+  data BLOB NOT NULL,
+  sha256 TEXT NOT NULL DEFAULT ''
 );
 "#;
 

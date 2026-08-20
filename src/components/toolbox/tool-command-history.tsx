@@ -45,14 +45,18 @@ export function ToolCommandHistory() {
   const [confirmClear, setConfirmClear] = useState(false);
 
   // Refresh when the terminal emits new commands (the store is updated in
-  // memory synchronously, so a simple poll-on-focus + manual refresh works).
+  // memory synchronously, so focus / a change event / manual refresh all work).
   const refresh = useCallback(() => {
     setEntries(getCommandHistory());
   }, []);
   useEffect(() => {
-    const onFocus = () => refresh();
-    window.addEventListener('focus', onFocus);
-    return () => window.removeEventListener('focus', onFocus);
+    const onChanged = () => refresh();
+    window.addEventListener('focus', onChanged);
+    window.addEventListener('nexterm:command-history-changed', onChanged);
+    return () => {
+      window.removeEventListener('focus', onChanged);
+      window.removeEventListener('nexterm:command-history-changed', onChanged);
+    };
   }, [refresh]);
 
   const filtered = useMemo(() => {
