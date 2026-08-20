@@ -54,9 +54,12 @@ xlsx-model = { package = "betteroffice-xlsx-model", version = "0.1.0" }
 sha2 = "0.11.0"
 hex = "0.4"
 regex = "1"
+# zip: keep only pure-Rust features so the Windows CI build has no native
+# (C) compression dependencies. JAR/WAR/EAR archives use deflate or store.
+zip = { version = "8.6.0", default-features = false, features = ["deflate", "deflate64", "bzip2-rs"] }
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
-zip = "8.6.0"
 
 [dev-dependencies]
 rusqlite = "0.32"

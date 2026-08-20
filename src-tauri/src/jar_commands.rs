@@ -560,7 +560,7 @@ pub async fn jar_method_location(
     project_id: String,
     class_internal_name: String, // slash form, e.g. "demo/Bar"
     method_name: String,
-    descriptor: Option<String>,
+    _descriptor: Option<String>, // reserved for descriptor-accurate matching
     state: State<'_, JarState>,
 ) -> Result<serde_json::Value, String> {
     use std::path::Path as FsPath;
@@ -739,7 +739,7 @@ pub async fn jar_constant_search(
     flags: u32, // bit0=strings, bit1=fields, bit2=methods
     state: State<'_, JarState>,
 ) -> Result<serde_json::Value, String> {
-    use std::collections::{HashMap, HashSet};
+    use std::collections::HashSet;
 
     let conn = state.conn()?;
     let pat = pattern.trim().to_lowercase();
