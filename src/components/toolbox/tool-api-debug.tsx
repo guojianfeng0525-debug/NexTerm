@@ -171,8 +171,10 @@ const MAX_FIELD_INFER_CHARS = 512 * 1024; // 512 KiB
 // Raw view renders the response body in chunks of this many characters.
 const RAW_CHUNK_CHARS = 200_000;
 // Blocks deeper than this depth start collapsed (initial render stays small
-// even for huge payloads).
-const DEFAULT_COLLAPSE_DEPTH = 1;
+// even for huge payloads). Depth 1 is the root object itself; depth 2 is its
+// direct children — keeping those expanded shows the actual payload, only
+// deeper nesting collapses.
+const DEFAULT_COLLAPSE_DEPTH = 2;
 
 interface JsonBlockLine {
   indent: number;
@@ -212,12 +214,19 @@ function buildJsonLines(text: string): JsonBlockLine[] {
 }
 
 const CollapsibleJson = React.memo(function CollapsibleJson({ text }: { text: string }) {
+  const { t } = useTranslation();
   const lines = useMemo(() => buildJsonLines(text), [text]);
   // Block lines that are currently collapsed (keyed by the opening line index).
+  // Default: collapse only deep nesting (>= depth 2) so the top-level payload
+  // is visible immediately. Very large bodies collapse deeper so the initial
+  // render stays cheap.
   const [collapsed, setCollapsed] = useState<Set<number>>(() => {
     const init = new Set<number>();
+    const bigBody = lines.length > 5000;
     for (const l of lines) {
-      if (l.open && l.depth >= DEFAULT_COLLAPSE_DEPTH) init.add(lines.indexOf(l));
+      if (l.open && l.depth >= (bigBody ? 1 : DEFAULT_COLLAPSE_DEPTH)) {
+        init.add(lines.indexOf(l));
+      }
     }
     return init;
   });
@@ -230,6 +239,15 @@ const CollapsibleJson = React.memo(function CollapsibleJson({ text }: { text: st
       return next;
     });
   }, []);
+
+  // Expand / collapse everything — handy when a payload is deeply nested and
+  // the initial auto-collapse hid too much (or the whole tree is huge).
+  const expandAll = useCallback(() => setCollapsed(new Set()), []);
+  const collapseAll = useCallback(() => {
+    const next = new Set<number>();
+    for (const l of lines) if (l.open && l.depth >= 1) next.add(lines.indexOf(l));
+    setCollapsed(next);
+  }, [lines]);
 
   const rows: React.ReactNode[] = [];
   let i = 0;
@@ -275,7 +293,27 @@ const CollapsibleJson = React.memo(function CollapsibleJson({ text }: { text: st
     i++;
   }
 
-  return <div className="font-mono text-xs text-foreground/90">{rows}</div>;
+  return (
+    <div className="font-mono text-xs text-foreground/90">
+      <div className="mb-1.5 flex items-center gap-1 text-[10px]">
+        <button
+          type="button"
+          className="rounded px-1.5 py-0.5 text-muted-foreground hover:bg-muted hover:text-foreground"
+          onClick={expandAll}
+        >
+          ⤢ {t('toolbox.apiDebug.expandAll')}
+        </button>
+        <button
+          type="button"
+          className="rounded px-1.5 py-0.5 text-muted-foreground hover:bg-muted hover:text-foreground"
+          onClick={collapseAll}
+        >
+          ⤡ {t('toolbox.apiDebug.collapseAll')}
+        </button>
+      </div>
+      {rows}
+    </div>
+  );
 });
 
 

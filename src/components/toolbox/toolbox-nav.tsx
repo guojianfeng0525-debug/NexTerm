@@ -11,6 +11,7 @@ import {
   StickyNote,
   History as HistoryIcon,
   Brackets,
+  Archive,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { FileText } from 'lucide-react';
@@ -32,7 +33,8 @@ interface NavEntry {
     | 'toolbox.notes.title'
     | 'toolbox.history.title'
     | 'toolbox.apiDebug.title'
-    | 'toolbox.documents.title';
+    | 'toolbox.documents.title'
+    | 'toolbox.jar.title';
 }
 
 const NAV_ENTRIES: NavEntry[] = [
@@ -45,6 +47,7 @@ const NAV_ENTRIES: NavEntry[] = [
   { id: 'notes', icon: StickyNote, labelKey: 'toolbox.notes.title' },
   { id: 'history', icon: HistoryIcon, labelKey: 'toolbox.history.title' },
   { id: 'documents', icon: FileText, labelKey: 'toolbox.documents.title' },
+  { id: 'jar', icon: Archive, labelKey: 'toolbox.jar.title' },
   { id: 'api', icon: Brackets, labelKey: 'toolbox.apiDebug.title' },
 ];
 

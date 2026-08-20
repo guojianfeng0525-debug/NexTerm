@@ -337,13 +337,15 @@ export function PtyTerminal({
   // Command suggestion (Tab-completion hints from the remote shell)
   const [suggestions, setSuggestions] = React.useState<string[]>([]);
   const [suggestionsVisible, setSuggestionsVisible] = React.useState(false);
-  const [selectedIndex, setSelectedIndex] = React.useState(0);
+  // -1 = nothing selected: Enter runs the typed command unless the user has
+  // explicitly picked a suggestion with ↑/↓ (or mouse).
+  const [selectedIndex, setSelectedIndex] = React.useState(-1);
   const [suggestionPos, setSuggestionPos] = React.useState({ left: 12, top: 12 });
   const inputBufferRef = React.useRef('');
   const suggestTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
   const suggestionsRef = React.useRef<string[]>([]);
   const suggestionsVisibleRef = React.useRef(false);
-  const selectedIndexRef = React.useRef(0);
+  const selectedIndexRef = React.useRef(-1);
   const suppressSuggestionsRef = React.useRef(false);
   const suggestionBarRef = React.useRef<HTMLDivElement | null>(null);
   // Command-suggestion master switch (settings → app_settings → event).
@@ -500,7 +502,13 @@ export function PtyTerminal({
   const cycleSuggestion = (dir: number) => {
     const count = suggestionsRef.current.length;
     if (count === 0) return;
-    const next = (selectedIndexRef.current + dir + count) % count;
+    // From "nothing selected", ↓ goes to the first, ↑ to the last.
+    let next: number;
+    if (selectedIndexRef.current === -1) {
+      next = dir > 0 ? 0 : count - 1;
+    } else {
+      next = (selectedIndexRef.current + dir + count) % count;
+    }
     selectedIndexRef.current = next;
     setSelectedIndex(next);
   };
@@ -612,8 +620,10 @@ export function PtyTerminal({
           setSuggestions(result.candidates.map((c) => c.command));
           setSuggestionsVisible(true);
           suggestionsVisibleRef.current = true;
-          setSelectedIndex(0);
-          selectedIndexRef.current = 0;
+          // No suggestion is pre-selected: the user must pick one with ↑/↓ or
+          // the mouse, so Enter executes what they typed instead.
+          setSelectedIndex(-1);
+          selectedIndexRef.current = -1;
           setSuggestionPos(computeCursorPosition());
         } else {
           setSuggestionsVisible(false);
@@ -655,8 +665,8 @@ export function PtyTerminal({
         inputBufferRef.current = `${cmd} `;
         setSuggestionsVisible(false);
         suggestionsVisibleRef.current = false;
-        setSelectedIndex(0);
-        selectedIndexRef.current = 0;
+        setSelectedIndex(-1);
+        selectedIndexRef.current = -1;
         suppressSuggestionsRef.current = true;
         window.setTimeout(() => {
           suppressSuggestionsRef.current = false;
@@ -672,8 +682,8 @@ export function PtyTerminal({
     const backspaces = '\x7f'.repeat(wordToReplace.length);
     setSuggestionsVisible(false);
     suggestionsVisibleRef.current = false;
-    setSelectedIndex(0);
-    selectedIndexRef.current = 0;
+    setSelectedIndex(-1);
+    selectedIndexRef.current = -1;
     // Briefly suppress re-popup while the pasted characters stream through onData.
     suppressSuggestionsRef.current = true;
     window.setTimeout(() => {
@@ -690,7 +700,9 @@ export function PtyTerminal({
   const acceptSelected = () => {
     const list = suggestionsRef.current;
     if (list.length === 0) return;
-    const cmd = list[selectedIndexRef.current] ?? list[0];
+    const idx = selectedIndexRef.current;
+    if (idx < 0 || idx >= list.length) return; // nothing selected
+    const cmd = list[idx];
     acceptSuggestion(cmd);
   };
 
@@ -707,6 +719,8 @@ export function PtyTerminal({
   const hideSuggestions = () => {
     setSuggestionsVisible(false);
     suggestionsVisibleRef.current = false;
+    setSelectedIndex(-1);
+    selectedIndexRef.current = -1;
   };
 
   React.useEffect(() => {
@@ -844,14 +858,19 @@ export function PtyTerminal({
       }
 
       if (suggestionsVisibleRef.current && hasCandidates) {
-        // Enter: ALWAYS select the highlighted suggestion WITHOUT executing it.
-        // The suggestion is written to the input line (via acceptSelected) and
-        // the box closes; pressing Enter again then runs the command. This
-        // matches "回车选中但不执行" — the box only ever selects.
+        // Enter: apply the suggestion ONLY when the user has explicitly
+        // selected one with ↑/↓ (or mouse). With nothing selected, Enter
+        // passes through and executes exactly what was typed.
         if (event.key === 'Enter') {
-          event.preventDefault();
-          acceptSelected();
-          return false;
+          if (selectedIndexRef.current >= 0) {
+            event.preventDefault();
+            acceptSelected();
+            return false;
+          }
+          // No selection → execute the typed command; hide the box so the
+          // suggestion doesn't linger over the executed line.
+          hideSuggestions();
+          return true;
         }
         if (event.key === 'Escape') {
           event.preventDefault();
@@ -1769,7 +1788,7 @@ export function PtyTerminal({
         >
           <div className="flex flex-col gap-0.5">
             <span className="text-[10px] text-muted-foreground mb-0.5 shrink-0">
-              {t('ptyTerminal.suggestions')} <kbd className="rounded border border-border bg-muted px-1">↑↓</kbd> 选择 · <kbd className="rounded border border-border bg-muted px-1">Enter</kbd> 使用 · <kbd className="rounded border border-border bg-muted px-1">Esc</kbd> 关闭
+              {t('ptyTerminal.suggestions')} <kbd className="rounded border border-border bg-muted px-1">↑↓</kbd> {t('ptyTerminal.select')} · <kbd className="rounded border border-border bg-muted px-1">Enter</kbd> {t('ptyTerminal.useOrRun')} · <kbd className="rounded border border-border bg-muted px-1">Esc</kbd> {t('ptyTerminal.close')}
             </span>
             {suggestions.slice(0, 6).map((cmd, index) => (
               <button

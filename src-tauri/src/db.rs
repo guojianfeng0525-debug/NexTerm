@@ -21,7 +21,7 @@ use tauri::State;
 
 /// Allow-listed normalized tables. Table names are validated against this
 /// list before being interpolated into SQL, so no injection is possible.
-pub const TABLES: [&str; 26] = [
+pub const TABLES: [&str; 31] = [
     "connections",
     "folders",
     "active_connections",
@@ -51,6 +51,12 @@ pub const TABLES: [&str; 26] = [
     "documents",
     "document_versions",
     "document_resources",
+    // JAR decompiler module — projects / classes / builds / libraries / symbols.
+    "jar_projects",
+    "jar_classes",
+    "jar_builds",
+    "jar_libraries",
+    "jar_symbols",
 ];
 
 /// Tables whose legacy key-value layout collides with a new normalized table
@@ -143,6 +149,12 @@ impl DbState {
                 "documents",
                 "source_hash",
                 "source_hash TEXT",
+            ),
+            // JAR decompiler module migrations.
+            (
+                "jar_classes",
+                "library_id",
+                "library_id TEXT NOT NULL DEFAULT ''",
             ),
         ] {
             ensure_column(&conn, table, column, ddl)?;
@@ -977,6 +989,68 @@ CREATE TABLE IF NOT EXISTS "document_resources" (
   data BLOB NOT NULL,
   sha256 TEXT NOT NULL DEFAULT ''
 );
+CREATE TABLE IF NOT EXISTS "jar_projects" (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL DEFAULT '',
+  jar_path TEXT NOT NULL DEFAULT '',
+  jar_hash TEXT NOT NULL DEFAULT '',
+  size INTEGER NOT NULL DEFAULT 0,
+  class_count INTEGER NOT NULL DEFAULT 0,
+  resource_count INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS "jar_classes" (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL,
+  library_id TEXT NOT NULL DEFAULT '',
+  entry_path TEXT NOT NULL,
+  class_name TEXT NOT NULL DEFAULT '',
+  package_name TEXT NOT NULL DEFAULT '',
+  kind TEXT NOT NULL DEFAULT 'class',
+  is_inner_class INTEGER NOT NULL DEFAULT 0,
+  modified_source TEXT,
+  modified INTEGER NOT NULL DEFAULT 0,
+  compile_status TEXT NOT NULL DEFAULT 'none',
+  compile_output TEXT,
+  compile_timestamp INTEGER,
+  source_hash TEXT
+);
+CREATE TABLE IF NOT EXISTS "jar_builds" (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  project_id TEXT NOT NULL,
+  output_path TEXT NOT NULL DEFAULT '',
+  built_at INTEGER NOT NULL,
+  result TEXT NOT NULL DEFAULT 'ok',
+  detail TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_jar_classes_project ON jar_classes(project_id);
+CREATE INDEX IF NOT EXISTS idx_jar_builds_project ON jar_builds(project_id);
+CREATE TABLE IF NOT EXISTS "jar_libraries" (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL,
+  name TEXT NOT NULL DEFAULT '',
+  group_id TEXT NOT NULL DEFAULT '',
+  artifact_id TEXT NOT NULL DEFAULT '',
+  version TEXT NOT NULL DEFAULT '',
+  jar_path TEXT NOT NULL DEFAULT '',
+  jar_hash TEXT NOT NULL DEFAULT '',
+  class_count INTEGER NOT NULL DEFAULT 0,
+  editable INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS "jar_symbols" (
+  id TEXT PRIMARY KEY,
+  class_id TEXT NOT NULL,
+  project_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  kind TEXT NOT NULL DEFAULT 'method',
+  line INTEGER NOT NULL DEFAULT 0,
+  signature TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_jar_libraries_project ON jar_libraries(project_id);
+CREATE INDEX IF NOT EXISTS idx_jar_symbols_class ON jar_symbols(class_id);
+CREATE INDEX IF NOT EXISTS idx_jar_symbols_name ON jar_symbols(name);
+CREATE INDEX IF NOT EXISTS idx_jar_symbols_project ON jar_symbols(project_id);
 "#;
 
 #[cfg(test)]
@@ -1114,4 +1188,57 @@ mod upsert_tests {
             .unwrap();
         assert_eq!(count, 1);
     }
+
+    #[test]
+    fn migrates_old_jar_classes_library_id() {
+        // Simulate a DB created before jar_classes had library_id.
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static C: AtomicU32 = AtomicU32::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "nexterm-db-jarmig-{}-{}.db",
+            std::process::id(),
+            C.fetch_add(1, Ordering::Relaxed),
+        ));
+        let _ = std::fs::remove_file(&path);
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(
+                r#"
+                CREATE TABLE IF NOT EXISTS "jar_classes" (
+                  id TEXT PRIMARY KEY,
+                  project_id TEXT NOT NULL,
+                  entry_path TEXT NOT NULL,
+                  class_name TEXT NOT NULL DEFAULT '',
+                  package_name TEXT NOT NULL DEFAULT '',
+                  kind TEXT NOT NULL DEFAULT 'class',
+                  is_inner_class INTEGER NOT NULL DEFAULT 0,
+                  original_decompiled TEXT,
+                  modified_source TEXT,
+                  modified INTEGER NOT NULL DEFAULT 0,
+                  compile_status TEXT NOT NULL DEFAULT 'none',
+                  compile_output TEXT,
+                  compile_timestamp INTEGER,
+                  source_hash TEXT
+                );
+                "#,
+            )
+            .unwrap();
+            conn.execute("INSERT INTO jar_classes (id, project_id, entry_path, class_name) VALUES ('x', 'p', 'A.class', 'A')", [])
+                .unwrap();
+        }
+        // Open triggers migration.
+        let state = DbState::open(&path).expect("open migrates");
+        let conn = state.conn.lock().unwrap();
+        let cols = table_columns(&conn, "jar_classes").unwrap();
+        assert!(cols.iter().any(|c| c == "library_id"), "library_id column missing: {cols:?}");
+        // Existing row is readable with library_id default ''.
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM jar_classes WHERE library_id = ''", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+        drop(conn);
+        let _ = std::fs::remove_file(&path);
+    }
+
+
 }

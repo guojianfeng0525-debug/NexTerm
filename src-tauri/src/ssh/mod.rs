@@ -167,6 +167,29 @@ impl client::Handler for Client {
     ) -> Result<bool, Self::Error> {
         Ok(true) // In production, verify the server key
     }
+
+    async fn disconnected(
+        &mut self,
+        reason: russh::client::DisconnectReason<Self::Error>,
+    ) -> Result<(), Self::Error> {
+        // Normal teardown is routine — the offline resource probe opens and
+        // closes sessions constantly. russh maps ANY clean end-of-connection
+        // (including our own disconnect()) to Error::Disconnect, so that is
+        // debug-level; only genuine transport failures deserve a warning.
+        match &reason {
+            russh::client::DisconnectReason::ReceivedDisconnect(info) => {
+                tracing::debug!("[ssh] SSH session closed: {:?}", info);
+            }
+            russh::client::DisconnectReason::Error(e) => {
+                if matches!(e, russh::Error::Disconnect) {
+                    tracing::debug!("[ssh] SSH session ended (Disconnect)");
+                } else {
+                    tracing::warn!("[ssh] SSH session disconnected with error: {e}");
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 impl SshClient {
@@ -180,11 +203,20 @@ impl SshClient {
     pub async fn connect(&mut self, config: &SshConfig) -> Result<()> {
         let keepalive_interval = config.keepalive_interval.map(Duration::from_secs);
 
+        // russh 0.62 bug: when a *jump-host* session negotiates zlib
+        // compression, the direct-tcpip channel used to tunnel the target SSH
+        // handshake breaks — the target session dies with "early eof" /
+        // "channel closed" right after connect_stream returns. The tunnel is
+        // already encrypted, so per-hop compression is redundant; disable it
+        // for the whole connection when a jump host is in use (both the jump
+        // hop and the target leg). Direct connections keep zlib compression.
+        let use_compression = config.compression && config.jump.is_none();
+
         let ssh_config = client::Config {
             preferred: russh::Preferred {
                 key: std::borrow::Cow::Borrowed(PREFERRED_HOST_KEY_ALGOS),
                 compression: std::borrow::Cow::Borrowed(compression_preferences(
-                    config.compression,
+                    use_compression,
                 )),
                 ..russh::Preferred::DEFAULT
             },
@@ -202,12 +234,17 @@ impl SshClient {
         // russh `Config` is not `Clone`; share one instance across every hop.
         let ssh_config = Arc::new(ssh_config);
 
+        // The target leg of a jump connection must not re-enable compression
+        // independently — reuse the same (compression-disabled) config.
+        let jump_target_config = Arc::clone(&ssh_config);
+
         // Connection timeout: 3 seconds
         let connection_timeout = Duration::from_secs(3);
 
         let mut ssh_session = if let Some(jump) = &config.jump {
             // --- SSH jump host (bastion) ---
             // 1) Connect to the jump host.
+            tracing::info!("[ssh] connecting via jump host {}:{}", jump.host, jump.port);
             let mut jump_session = tokio::time::timeout(
                 connection_timeout,
                 client::connect(
@@ -253,6 +290,11 @@ impl SshClient {
 
             // 3) Open a direct-tcpip channel to the target host through the
             //    jump host, then run the target SSH handshake over it.
+            tracing::info!(
+                "[ssh] opening direct-tcpip channel to target {}:{} via jump",
+                config.host,
+                config.port
+            );
             let channel = tokio::time::timeout(
                 connection_timeout,
                 jump_session.channel_open_direct_tcpip(
@@ -269,7 +311,7 @@ impl SshClient {
             let session = tokio::time::timeout(
                 connection_timeout,
                 client::connect_stream(
-                    Arc::clone(&ssh_config),
+                    Arc::clone(&jump_target_config),
                     channel.into_stream(),
                     Client,
                 ),
@@ -468,12 +510,21 @@ impl SshClient {
                 self.execute_command(BASH_VERSION_PROBE),
             )
             .await
+            .inspect_err(|_| tracing::debug!("[ssh] bash version probe timed out"))
             .ok()
-            .and_then(Result::ok)
+            .and_then(|r| {
+                if let Err(e) = &r {
+                    tracing::debug!("[ssh] bash version probe failed: {e}");
+                }
+                r.ok()
+            })
             .and_then(|output| bash_version_from_probe(&output));
 
             // Open a new SSH channel
-            let mut channel = session.channel_open_session().await?;
+            let mut channel = session
+                .channel_open_session()
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to open PTY channel (session may have dropped): {e}"))?;
             let bash_terminal_modes = [(Pty::ECHO, 0), (Pty::ECHONL, 0)];
             let terminal_modes = if bash_version.is_some() {
                 bash_terminal_modes.as_slice()
@@ -493,10 +544,14 @@ impl SshClient {
                     0,                // pixel_height (not used)
                     terminal_modes,
                 )
-                .await?;
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to request PTY on the session: {e}"))?;
 
             // Start interactive shell
-            channel.request_shell(true).await?;
+            channel
+                .request_shell(true)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to start shell on the session: {e}"))?;
 
             // Create channels for bidirectional communication (like ttyd's pty_buf)
             // Increased capacity for better buffering during fast input

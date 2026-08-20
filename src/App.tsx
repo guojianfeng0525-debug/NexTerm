@@ -36,6 +36,7 @@ import { ToolServices } from './components/toolbox/tool-services';
 import { ToolNotes } from './components/toolbox/tool-notes';
 import { ToolCommandHistory } from './components/toolbox/tool-command-history';
 const ToolDocuments = lazy(() => import('./components/toolbox/tool-documents').then((m) => ({ default: m.ToolDocuments })));
+const ToolJarDecompiler = lazy(() => import('./components/toolbox/tool-jar-decompiler').then((m) => ({ default: m.ToolJarDecompiler })));
 import { ToolApiDebug } from './components/toolbox/tool-api-debug';
 import { ErrorBoundary } from './components/error-boundary';
 import { initializeAllStorage } from './lib/storage-init';
@@ -48,7 +49,8 @@ import { dispatchTerminalCommand, type TerminalCommand } from './lib/terminal-co
 
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from './components/ui/resizable';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from './components/ui/tabs';
-import { History, ShieldCheck, PlugZap, Activity, Loader2, Terminal, Plus } from 'lucide-react';
+import { Dialog, DialogContent } from './components/ui/dialog';
+import { History, ShieldCheck, PlugZap, Activity, Loader2, Terminal, Plus, Maximize2, ScrollText } from 'lucide-react';
 import type { ToolboxViewId } from './lib/toolbox/toolbox-types';
 
 interface ConnectionNode {
@@ -120,6 +122,8 @@ function AppContent() {
   const [rightSidebarTab, setRightSidebarTab] = useState("monitor");
   const [externalLogPath, setExternalLogPath] = useState<string | undefined>();
   const [externalLogPathKey, setExternalLogPathKey] = useState(0);
+  // Floating log viewer: the Log Monitor tab can detach into its own dialog.
+  const [logsFloating, setLogsFloating] = useState(false);
 
   // Restoration state
   const [isRestoring, setIsRestoring] = useState(false);
@@ -1807,6 +1811,16 @@ function AppContent() {
                           <TabsList className="inline-flex w-auto mx-1 mt-2">
                             <TabsTrigger value="monitor" className="text-xs px-2">{t('app.monitor')}</TabsTrigger>
                             <TabsTrigger value="logs" className="text-xs px-2">{t('app.logs')}</TabsTrigger>
+                            {rightSidebarTab === 'logs' && activeConnection && (
+                              <button
+                                type="button"
+                                className="ml-auto inline-flex items-center justify-center rounded px-1.5 py-1 text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+                                onClick={() => setLogsFloating(true)}
+                                title={t('app.floatLogs')}
+                              >
+                                <Maximize2 className="h-3.5 w-3.5" />
+                              </button>
+                            )}
                           </TabsList>
 
                           <div className="flex-1 mt-0 overflow-hidden relative">
@@ -1836,6 +1850,34 @@ function AppContent() {
                           </div>
                         </Tabs>
                       </ResizablePanel>
+
+                      {/* Floating log viewer (detached from the sidebar tab) */}
+                      <Dialog open={logsFloating} onOpenChange={(o) => { if (!o) setLogsFloating(false); }}>
+                        <DialogContent className="top-[6vh] translate-y-0 sm:max-w-[80vw] h-[84vh] p-0 gap-0 flex flex-col overflow-hidden">
+                          <div className="flex items-center gap-2 px-3 py-2 border-b shrink-0">
+                            <ScrollText className="h-4 w-4 text-muted-foreground" />
+                            <span className="text-sm font-semibold">{t('app.logMonitor')}</span>
+                            <span className="ml-auto text-[10px] text-muted-foreground truncate">
+                              {activeConnection?.name}
+                            </span>
+                          </div>
+                          <div className="flex-1 min-h-0 overflow-hidden">
+                            {activeConnection ? (
+                              <ErrorBoundary label={t('app.logMonitor')}>
+                                <LogMonitor
+                                  connectionId={activeConnection.connectionId}
+                                  externalLogPath={externalLogPath}
+                                  externalLogPathKey={externalLogPathKey}
+                                />
+                              </ErrorBoundary>
+                            ) : (
+                              <div className="h-full flex items-center justify-center text-xs text-muted-foreground">
+                                {t('app.noActiveConnection')}
+                              </div>
+                            )}
+                          </div>
+                        </DialogContent>
+                      </Dialog>
                     </>
                   )}
                 </ResizablePanelGroup>
@@ -1898,6 +1940,11 @@ function AppContent() {
           </div>
           <div className={cn('absolute inset-0 bg-background', section === 'api' ? '' : 'hidden')}>
             <ToolApiDebug active={section === 'api'} />
+          </div>
+          <div className={cn('absolute inset-0 bg-background', section === 'jar' ? '' : 'hidden')}>
+            <Suspense fallback={<div className="h-full flex items-center justify-center text-xs text-muted-foreground">{'...'}</div>}>
+              <ToolJarDecompiler />
+            </Suspense>
           </div>
         </div>
       </div>

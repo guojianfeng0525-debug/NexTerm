@@ -594,3 +594,30 @@ mod compression_pref_tests {
         assert_eq!(negotiate(prefs, "none,zlib@openssh.com"), Some("none"));
     }
 }
+
+    // DisconnectReason handling: Error(Disconnect) — the universal mapping for
+    // a clean end-of-connection (our probe / disconnect()) — must NOT produce a
+    // warning path; it returns Ok like every other reason.
+    #[tokio::test]
+    async fn disconnected_clean_end_is_ok() {
+        use russh::client::Handler;
+        let mut client = super::Client;
+        let reason = russh::client::DisconnectReason::Error(russh::Error::Disconnect);
+        let res = client.disconnected(reason).await;
+        assert!(res.is_ok(), "clean Disconnect must not fail");
+    }
+
+    #[tokio::test]
+    async fn disconnected_received_is_ok() {
+        use russh::client::Handler;
+        let mut client = super::Client;
+        let info = russh::client::RemoteDisconnectInfo {
+            reason_code: russh::Disconnect::ByApplication,
+            message: String::new(),
+            lang_tag: String::new(),
+        };
+        let res = client
+            .disconnected(russh::client::DisconnectReason::ReceivedDisconnect(info))
+            .await;
+        assert!(res.is_ok(), "received disconnect must not fail");
+    }

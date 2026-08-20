@@ -1,9 +1,13 @@
 import React, { useRef, useEffect, useCallback, useState } from "react";
+import { useTranslation } from "react-i18next";
+import { Search, ChevronUp, ChevronDown, X } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { EditorView, keymap, lineNumbers, highlightActiveLine, highlightActiveLineGutter, drawSelection, rectangularSelection, crosshairCursor, highlightSpecialChars, dropCursor } from "@codemirror/view";
 import { EditorState, type Extension } from "@codemirror/state";
 import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
 import { syntaxHighlighting, defaultHighlightStyle, indentOnInput, bracketMatching, foldGutter, foldKeymap, StreamLanguage } from "@codemirror/language";
-import { searchKeymap, highlightSelectionMatches } from "@codemirror/search";
+import { searchKeymap, highlightSelectionMatches, setSearchQuery, findNext, findPrevious, SearchQuery } from "@codemirror/search";
 import { oneDark } from "@codemirror/theme-one-dark";
 import { loadEditorConfig, EDITOR_CONFIG_CHANGED_EVENT, type EditorConfig } from "@/lib/editor-config";
 import type { NoteLanguage } from "@/lib/toolbox/toolbox-types";
@@ -197,7 +201,13 @@ export function CodeEditor({
   const containerRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
   const onChangeRef = useRef(onChange);
+  const { t } = useTranslation();
   const [editorConfig, setEditorConfig] = useState<EditorConfig>(() => loadEditorConfig());
+  // Custom themed + i18n search panel (replaces CodeMirror's built-in panel).
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchText, setSearchText] = useState("");
+  const [searchCount, setSearchCount] = useState(0);
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
 
   // Reload config whenever it changes in settings
   useEffect(() => {
@@ -228,6 +238,31 @@ export function CodeEditor({
         ...foldKeymap,
         ...searchKeymap,
         indentWithTab,
+        // Override the built-in find panel with our themed search bar.
+        {
+          key: "Mod-f",
+          run: () => {
+            setSearchOpen(true);
+            setSearchCount(0);
+            requestAnimationFrame(() => searchInputRef.current?.focus());
+            return true;
+          },
+        },
+        {
+          key: "Escape",
+          run: () => {
+            if (searchOpen) {
+              setSearchOpen(false);
+              const view = viewRef.current;
+              if (view) {
+                view.dispatch({ effects: setSearchQuery.of(new SearchQuery({ search: "" })) });
+                view.focus();
+              }
+              return true;
+            }
+            return false;
+          },
+        },
       ]),
       // Dispatch listener for onChange
       EditorView.updateListener.of((update) => {
@@ -316,16 +351,101 @@ export function CodeEditor({
     }
   }, [value]);
 
+  // Apply the search query to the editor (highlights + counts matches).
+  const applySearch = useCallback((text: string, next = false) => {
+    const view = viewRef.current;
+    if (!view) return;
+    const query = new SearchQuery({ search: text, caseSensitive: false });
+    view.dispatch({ effects: setSearchQuery.of(query) });
+    if (text.trim()) {
+      // Count matches for the "n / total" indicator.
+      const doc = view.state.doc.toString();
+      const lower = text.toLowerCase();
+      let count = 0;
+      let idx = 0;
+      while ((idx = doc.toLowerCase().indexOf(lower, idx)) !== -1) {
+        count++;
+        idx += Math.max(lower.length, 1);
+      }
+      setSearchCount(count);
+      if (next) findNext(view);
+    } else {
+      setSearchCount(0);
+    }
+  }, []);
+
+  const handleSearchInput = useCallback(
+    (text: string) => {
+      setSearchText(text);
+      applySearch(text, true);
+    },
+    [applySearch],
+  );
+
+  const handleSearchNext = useCallback(() => {
+    const view = viewRef.current;
+    if (view) findNext(view);
+  }, []);
+
+  const handleSearchPrev = useCallback(() => {
+    const view = viewRef.current;
+    if (view) findPrevious(view);
+  }, []);
+
+  const handleSearchClose = useCallback(() => {
+    setSearchOpen(false);
+    setSearchText("");
+    setSearchCount(0);
+    const view = viewRef.current;
+    if (view) {
+      view.dispatch({ effects: setSearchQuery.of(new SearchQuery({ search: "" })) });
+      view.focus();
+    }
+  }, []);
+
   return (
-    <div
-      ref={containerRef}
-      className={`overflow-auto border rounded-md ${className}`}
-      style={{
-        height: "100%",
-        fontSize: `${editorConfig.fontSize}px`,
-        fontFamily: editorConfig.fontFamily,
-      }}
-    />
+    <div className={`relative h-full flex flex-col overflow-hidden border rounded-md ${className}`}>
+      {searchOpen && (
+        <div className="flex items-center gap-2 px-2.5 py-1.5 border-b bg-background/95 backdrop-blur shrink-0 z-10" data-editor-search>
+          <Search className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+          <Input
+            ref={searchInputRef}
+            value={searchText}
+            onChange={(e) => handleSearchInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                if (e.shiftKey) handleSearchPrev();
+                else handleSearchNext();
+              }
+              if (e.key === "Escape") handleSearchClose();
+            }}
+            placeholder={t("editor.searchPlaceholder")}
+            className="h-7 text-xs flex-1 min-w-0"
+          />
+          <span className="text-[10px] text-muted-foreground tabular-nums shrink-0 w-10 text-right">
+            {searchText.trim() ? `${searchCount}` : ""}
+          </span>
+          <Button size="sm" variant="ghost" className="h-7 w-7 p-0 shrink-0" onClick={handleSearchPrev} title={t("editor.findPrev")}>
+            <ChevronUp className="h-3.5 w-3.5" />
+          </Button>
+          <Button size="sm" variant="ghost" className="h-7 w-7 p-0 shrink-0" onClick={handleSearchNext} title={t("editor.findNext")}>
+            <ChevronDown className="h-3.5 w-3.5" />
+          </Button>
+          <Button size="sm" variant="ghost" className="h-7 w-7 p-0 shrink-0" onClick={handleSearchClose} title={t("editor.close")}>
+            <X className="h-3.5 w-3.5" />
+          </Button>
+        </div>
+      )}
+      <div
+        ref={containerRef}
+        className="flex-1 min-h-0 overflow-auto"
+        style={{
+          fontSize: `${editorConfig.fontSize}px`,
+          fontFamily: editorConfig.fontFamily,
+        }}
+      />
+    </div>
   );
 }
 

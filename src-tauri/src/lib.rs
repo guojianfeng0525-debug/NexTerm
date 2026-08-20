@@ -10,10 +10,18 @@ mod jump;
 mod proxy;
 mod rdp_client;
 mod sftp_client;
-mod ssh;
+pub mod ssh;
 mod toolbox;
 mod vnc_client;
 mod websocket_server;
+
+pub mod jar;
+pub mod jar_db;
+pub mod decompile;
+pub mod compile;
+pub mod builder;
+pub mod pom;
+mod jar_commands;
 
 use connection_manager::ConnectionManager;
 use std::sync::atomic::AtomicU16;
@@ -405,6 +413,13 @@ pub fn run() {
                             app.manage(std::sync::Arc::new(state));
                             tracing::info!("SQLite store opened at {:?}", path);
                             opened = true;
+                            // Initialize the JAR decompiler state (shares the
+                            // same SQLite file via per-command connections).
+                            app.manage(jar_commands::JarState {
+                                db_path: path.clone(),
+                                cancels: std::sync::Mutex::new(Default::default()),
+                                scratch: app.path().app_data_dir().unwrap_or_else(|_| dir.clone()).join("jar-scratch"),
+                            });
                         }
                         Err(e) => tracing::warn!("Failed to open SQLite store at {:?}: {}", path, e),
                     }
@@ -422,6 +437,11 @@ pub fn run() {
                                         "SQLite store opened at {:?} (app-data fallback)",
                                         dir.join("nexterm.db")
                                     );
+                                    app.manage(jar_commands::JarState {
+                                        db_path: dir.join("nexterm.db"),
+                                        cancels: std::sync::Mutex::new(Default::default()),
+                                        scratch: dir.join("jar-scratch"),
+                                    });
                                 }
                                 Err(e) => tracing::warn!("Failed to open SQLite store: {}", e),
                             }
@@ -545,6 +565,36 @@ pub fn run() {
             toolbox::api_ws_connect,
             toolbox::api_ws_send,
             toolbox::api_ws_close,
+            // JAR decompiler commands
+            jar_commands::jar_project_open,
+            jar_commands::jar_project_reopen,
+            jar_commands::jar_project_list,
+            jar_commands::jar_project_delete,
+            jar_commands::jar_class_index,
+            jar_commands::jar_class_search,
+            jar_commands::jar_open_type,
+            jar_commands::jar_known_class_names,
+            jar_commands::jar_type_hierarchy,
+            jar_commands::jar_constant_search,
+            jar_commands::jar_decompile,
+            jar_commands::jar_decompile_cancel,
+            jar_commands::jar_resource_read,
+            jar_commands::jar_class_save,
+            jar_commands::jar_class_revert,
+            jar_commands::jar_project_reset,
+            jar_commands::jar_jdk_detect,
+            jar_commands::jar_compile,
+            jar_commands::jar_compile_cancel,
+            jar_commands::jar_build,
+            jar_commands::jar_build_cancel,
+            jar_commands::jar_pom_open,
+            jar_commands::jar_libraries,
+            jar_commands::jar_library_index,
+            jar_commands::jar_navigate,
+            jar_commands::jar_method_location,
+            jar_commands::jar_resource_bytes,
+            jar_commands::jar_export_all,
+            jar_commands::jar_class_info,
             // Note: PTY terminal I/O now uses WebSocket instead of IPC
             // WebSocket server runs on a dynamically assigned port (9001-9010)
         ])

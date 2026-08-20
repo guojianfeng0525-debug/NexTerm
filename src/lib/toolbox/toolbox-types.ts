@@ -198,6 +198,6 @@ export interface NoteItem {
 
 /* ── Toolbox tab view ids ────────────────────────────────────────────────── */
 
-export type ToolboxViewId = 'apps' | 'vault' | 'tunnels' | 'services' | 'notes' | 'history' | 'documents';
+export type ToolboxViewId = 'apps' | 'vault' | 'tunnels' | 'services' | 'notes' | 'history' | 'documents' | 'jar';
 
-export const TOOLBOX_VIEW_IDS: ToolboxViewId[] = ['apps', 'vault', 'tunnels', 'services', 'notes', 'history', 'documents'];
+export const TOOLBOX_VIEW_IDS: ToolboxViewId[] = ['apps', 'vault', 'tunnels', 'services', 'notes', 'history', 'documents', 'jar'];

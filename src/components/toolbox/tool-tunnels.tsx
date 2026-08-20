@@ -42,6 +42,7 @@ import {
 } from '@/components/ui/alert-dialog';
 import { TunnelsStorage, generateId } from '@/lib/toolbox/toolbox-storage';
 import type { TunnelConfig, TunnelActivity } from '@/lib/toolbox/toolbox-types';
+import { ConnectionStorageManager, type ConnectionData } from '@/lib/connection-storage';
 import {
   ArrowLeftRight,
   Plus,
@@ -102,6 +103,19 @@ export function ToolTunnels() {
   const [deleteTarget, setDeleteTarget] = useState<TunnelConfig | null>(null);
   const [activity, setActivity] = useState<Record<string, TunnelActivity[]>>({});
   const [groupFilter, setGroupFilter] = useState('');
+  /** Id of the saved server currently selected as the jump host (if any). */
+  const [jumpServerId, setJumpServerId] = useState('');
+
+  /** Saved servers that can act as an SSH jump host (SSH/SFTP use SSH auth). */
+  const servers = useMemo<ConnectionData[]>(
+    () =>
+      ConnectionStorageManager.getConnections().filter(
+        (c) => c.protocol === 'SSH' || c.protocol === 'SFTP',
+      ),
+    // Connection cache is hydrated once at app start; re-read when the dialog opens.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [formOpen],
+  );
 
   const groups = useMemo(() => {
     const set = new Set<string>();
@@ -164,6 +178,7 @@ export function ToolTunnels() {
   const openAdd = useCallback(() => {
     setEditing(null);
     setForm({ ...EMPTY_FORM });
+    setJumpServerId('');
     setFormOpen(true);
   }, []);
 
@@ -182,8 +197,31 @@ export function ToolTunnels() {
       jumpPassword: config.jumpPassword ?? '',
       description: config.description ?? '',
     });
+    // Match the saved jump host to a server in the list, if any.
+    setJumpServerId(
+      config.jumpHost
+        ? (servers.find((s) => s.host === config.jumpHost)?.id ?? '')
+        : '',
+    );
     setFormOpen(true);
-  }, []);
+  }, [servers]);
+
+  /** Prefill the jump-host fields from a saved server. */
+  const handleJumpServerPick = useCallback(
+    (serverId: string) => {
+      const server = servers.find((s) => s.id === serverId);
+      if (!server) return;
+      setJumpServerId(serverId);
+      setForm((f) => ({
+        ...f,
+        jumpHost: server.host,
+        jumpPort: String(server.port || 22),
+        jumpUsername: server.username || '',
+        jumpPassword: server.password || '',
+      }));
+    },
+    [servers],
+  );
 
   const handleSave = useCallback(() => {
     const listenPort = parsePort(form.listenPort);
@@ -638,6 +676,28 @@ export function ToolTunnels() {
                 <Server className="h-3 w-3" />
                 {t('toolbox.tunnels.jump')}
               </p>
+              {/* Pick a jump host from the saved server list */}
+              {servers.length > 0 && (
+                <div className="space-y-1.5">
+                  <Label htmlFor="tun-jump-server">{t('toolbox.tunnels.jumpFromServer')}</Label>
+                  <Select value={jumpServerId} onValueChange={handleJumpServerPick}>
+                    <SelectTrigger id="tun-jump-server" className="h-8 text-xs">
+                      <SelectValue placeholder={t('toolbox.tunnels.selectServerPlaceholder')} />
+                    </SelectTrigger>
+                    <SelectContent className="max-h-[240px]">
+                      {servers.map((s) => (
+                        <SelectItem key={s.id} value={s.id} className="text-xs">
+                          <span className="truncate">{s.name}</span>
+                          <span className="ml-1 text-[10px] text-muted-foreground">
+                            {s.username}@{s.host}:{s.port || 22}
+                          </span>
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <p className="text-[10px] text-muted-foreground">{t('toolbox.tunnels.jumpFromServerHint')}</p>
+                </div>
+              )}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div className="space-y-1.5">
                   <Label htmlFor="tun-jump-host">{t('toolbox.tunnels.jumpHost')}</Label>
