@@ -14,6 +14,11 @@ import { useTranslation } from 'react-i18next';
 import type { Translations as DocxTranslations } from '@betteroffice/docx-i18n';
 import type { Translations as XlsxTranslations } from '@betteroffice/xlsx-i18n';
 import { ensureBetterOfficeFonts } from '@/lib/toolbox/betteroffice-fonts';
+// DOCX editor chrome styles — required for the toolbar/menus/dialogs to render
+// with surfaces, borders and colors. Without it the `--doc-*` theme variables
+// and `.oox-root` rules are missing and menu backgrounds render transparent.
+// Loaded in this chunk (never the app shell bundle).
+import '@betteroffice/docx-react/styles.css';
 
 // Font provider must be registered before any editor instance loads (the
 // engine's font registry keeps its provider once created). This module-level
@@ -49,11 +54,24 @@ function useEditorLocale(
       setLocale(undefined);
       return;
     }
-    const loader =
-      kind === 'xlsx'
-        ? import('@betteroffice/xlsx-i18n/zh-CN')
-        : import('@betteroffice/docx-i18n/zh-CN');
-    loader
+    if (kind === 'xlsx') {
+      // The official xlsx zh-CN pack is an empty shell (all null), so merge our
+      // full in-repo translation over it — upstream additions win when present.
+      Promise.all([
+        import('@betteroffice/xlsx-i18n/zh-CN'),
+        import('@/lib/toolbox/xlsx-zh-cn'),
+      ])
+        .then(([official, ours]) => {
+          if (!cancelled) setLocale(deepMerge(official.default, ours.XLSX_ZH_CN));
+        })
+        .catch(() => {
+          if (!cancelled) setLocale(undefined);
+        });
+      return () => {
+        cancelled = true;
+      };
+    }
+    import('@betteroffice/docx-i18n/zh-CN')
       .then((m) => {
         if (!cancelled) setLocale(m.default);
       })
@@ -67,6 +85,18 @@ function useEditorLocale(
   }, [kind, wantZh]);
 
   return locale;
+}
+
+/** Merge `over` into `base`, recursively; `over` wins on conflicts. */
+function deepMerge<T>(base: T, over: unknown): T {
+  if (over === null || typeof over !== 'object' || Array.isArray(over)) {
+    return (over === null ? base : over) as T;
+  }
+  const out: Record<string, unknown> = { ...(base as Record<string, unknown>) };
+  for (const [k, v] of Object.entries(over as Record<string, unknown>)) {
+    out[k] = deepMerge(out[k], v);
+  }
+  return out as T;
 }
 
 export function BetterEditor({ kind, bytes, onSave, onError }: BetterEditorProps) {

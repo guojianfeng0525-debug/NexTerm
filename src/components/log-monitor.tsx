@@ -673,8 +673,11 @@ export function LogMonitor({ connectionId, externalLogPath, externalLogPathKey }
                         key={src.id}
                         value={src.id}
                         className="text-xs"
+                        title={src.path}
                       >
-                        {src.path}
+                        <div className="flex items-center gap-2 w-full min-w-0">
+                          <span className="truncate min-w-0 flex-1">{src.path}</span>
+                        </div>
                       </SelectItem>
                     ))}
                 </SelectGroup>

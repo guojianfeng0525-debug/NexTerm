@@ -676,7 +676,7 @@ export function SystemMonitor({ connectionId }: SystemMonitorProps) {
 
   return (
     <ScrollArea className="h-full">
-      <div className="space-y-2">
+      <div className="space-y-2 pr-2.5">
         {/* System Overview */}
         <div className="space-y-1">
           <div className="flex items-center gap-1.5">
