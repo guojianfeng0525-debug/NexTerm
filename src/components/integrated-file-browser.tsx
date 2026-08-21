@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useReducer, useRef, useCallback, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
-import { invoke } from '@tauri-apps/api/core';
+import { invoke, Channel } from '@tauri-apps/api/core';
 import { writeText as writeClipboardText } from '@tauri-apps/plugin-clipboard-manager';
 import { save, open as tauriOpen } from '@tauri-apps/plugin-dialog';
 import { withRetry, CancelledError } from '@/lib/async-retry';
@@ -415,6 +415,27 @@ export function IntegratedFileBrowser({ connectionId, host: _host, isConnected, 
 
     const doTransfer = async () => {
       try {
+        // Real-time progress via a Tauri Channel: the backend streams
+        // (totalBytes, transferredBytes); we compute speed + percent here.
+        const lastSampleRef = { bytes: 0, time: Date.now() };
+        const channel = new Channel<{ totalBytes: number; transferredBytes: number }>();
+        channel.onmessage = (p) => {
+          const now = Date.now();
+          const dt = (now - lastSampleRef.time) / 1000;
+          const dBytes = p.transferredBytes - lastSampleRef.bytes;
+          const speed = dt > 0 && dBytes >= 0 ? Math.round(dBytes / dt) : 0;
+          lastSampleRef.bytes = p.transferredBytes;
+          lastSampleRef.time = now;
+          const pct = p.totalBytes > 0 ? Math.min(100, Math.round((p.transferredBytes / p.totalBytes) * 100)) : 0;
+          dispatchTransfer({
+            type: "PROGRESS",
+            id: nextItem.id,
+            progress: pct,
+            bytesTransferred: p.transferredBytes,
+            speed,
+          });
+        };
+
         if (nextItem.direction === "upload") {
           const result = await invoke<{ success: boolean; bytes_transferred?: number; error?: string }>(
             "upload_remote_file",
@@ -422,6 +443,7 @@ export function IntegratedFileBrowser({ connectionId, host: _host, isConnected, 
               connectionId,
               localPath: nextItem.sourcePath,
               remotePath: nextItem.destinationPath,
+              onProgress: channel,
             },
           );
           if (result.success) {
@@ -445,6 +467,7 @@ export function IntegratedFileBrowser({ connectionId, host: _host, isConnected, 
               connectionId,
               remotePath: nextItem.sourcePath,
               localPath: nextItem.destinationPath,
+              onProgress: channel,
             },
           );
           if (result.success) {

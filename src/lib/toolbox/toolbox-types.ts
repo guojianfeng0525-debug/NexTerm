@@ -164,6 +164,29 @@ export interface ServiceLogEntry {
   timestamp: number;
 }
 
+/* ── 4b. Service orchestrations ─────────────────────────────────────────── */
+
+/** One step of a service orchestration: reference to a tunnel or a service. */
+export interface OrchestrationItem {
+  /** 'tunnel' | 'service' — which kind of config this step starts. */
+  kind: 'tunnel' | 'service';
+  /** id of the referenced TunnelConfig / ServiceConfig. */
+  id: string;
+}
+
+/**
+ * An ordered runbook: "start tunnel A, then service B, then service C".
+ * Items are executed strictly in order; a failure stops the run.
+ */
+export interface ServiceOrchestration {
+  id: string;
+  name: string;
+  /** Ordered steps. */
+  items: OrchestrationItem[];
+  createdAt: number;
+  updatedAt: number;
+}
+
 /* ── 5. Notes ────────────────────────────────────────────────────────────── */
 
 /** Languages supported by the notes editor. */

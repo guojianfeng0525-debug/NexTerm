@@ -140,16 +140,25 @@ export function ToolTunnels() {
   }, [configs]);
 
   // Sync running state from backend on mount
-  useEffect(() => {
-    void (async () => {
-      try {
-        const running = await invoke<{ id: string; active: boolean }[]>('tunnel_list');
-        setRunningIds(new Set(running.map((r) => r.id)));
-      } catch {
-        // Backend unavailable (browser preview) — ignore
-      }
-    })();
+  const syncRunning = useCallback(async () => {
+    try {
+      const running = await invoke<{ id: string; active: boolean }[]>('tunnel_list');
+      setRunningIds(new Set(running.map((r) => r.id)));
+    } catch {
+      // Backend unavailable (browser preview) — ignore
+    }
   }, []);
+
+  useEffect(() => {
+    void syncRunning();
+  }, [syncRunning]);
+
+  // When an orchestration panel starts/stops tunnels, refresh this view.
+  useEffect(() => {
+    const handler = () => void syncRunning();
+    window.addEventListener('nexterm:orchestration-ran', handler);
+    return () => window.removeEventListener('nexterm:orchestration-ran', handler);
+  }, [syncRunning]);
 
   // Subscribe to tunnel events
   useEffect(() => {

@@ -275,6 +275,19 @@ impl StandaloneSftpClient {
 
     /// Download a remote file to a local path. Returns bytes downloaded.
     pub async fn download_file(&self, remote_path: &str, local_path: &str) -> Result<u64> {
+        self.download_file_with_progress(remote_path, local_path, |_, _| {})
+            .await
+    }
+
+    /// Download with a progress callback `(total_bytes, transferred_bytes)`.
+    /// The total is `None`-safe: we report an estimate when the remote size is
+    /// unknown. Called after every read chunk (32 KiB).
+    pub async fn download_file_with_progress(
+        &self,
+        remote_path: &str,
+        local_path: &str,
+        mut on_progress: impl FnMut(u64, u64) + Send,
+    ) -> Result<u64> {
         let sftp = self
             .sftp
             .as_ref()
@@ -284,26 +297,35 @@ impl StandaloneSftpClient {
             .open(remote_path)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to open remote file '{}': {}", remote_path, e))?;
+        let total = remote_file.metadata().await.map(|m| m.size.unwrap_or(0)).unwrap_or(0);
 
-        let mut buffer = Vec::new();
         let mut temp_buf = vec![0u8; 32768];
-        let mut total_bytes = 0u64;
+        let mut transferred: u64 = 0;
+
+        let mut local_file = tokio::fs::File::create(local_path)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to create local file '{}': {}", local_path, e))?;
 
         loop {
             let n = remote_file.read(&mut temp_buf).await?;
             if n == 0 {
                 break;
             }
-            buffer.extend_from_slice(&temp_buf[..n]);
-            total_bytes += n as u64;
+            local_file.write_all(&temp_buf[..n]).await?;
+            transferred += n as u64;
+            on_progress(total, transferred);
         }
-
-        tokio::fs::write(local_path, buffer).await?;
-        Ok(total_bytes)
+        local_file.flush().await?;
+        Ok(transferred)
     }
 
-    /// Upload a local file to a remote path. Returns bytes uploaded.
-    pub async fn upload_file(&self, local_path: &str, remote_path: &str) -> Result<u64> {
+    /// Upload with a progress callback `(total_bytes, transferred_bytes)`.
+    pub async fn upload_file_with_progress(
+        &self,
+        local_path: &str,
+        remote_path: &str,
+        mut on_progress: impl FnMut(u64, u64) + Send,
+    ) -> Result<u64> {
         let sftp = self
             .sftp
             .as_ref()
@@ -324,10 +346,16 @@ impl StandaloneSftpClient {
             let end = std::cmp::min(offset + chunk_size, data.len());
             remote_file.write_all(&data[offset..end]).await?;
             offset = end;
+            on_progress(total_bytes, offset as u64);
         }
         remote_file.flush().await?;
 
         Ok(total_bytes)
+    }
+
+    pub async fn upload_file(&self, local_path: &str, remote_path: &str) -> Result<u64> {
+        self.upload_file_with_progress(local_path, remote_path, |_, _| {})
+            .await
     }
 
     /// Create a directory on the remote server.

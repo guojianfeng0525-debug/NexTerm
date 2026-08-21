@@ -12,6 +12,11 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: mocks.invoke,
+  // Minimal Channel stub: the backend never emits during these tests, so the
+  // onmessage handler simply never fires.
+  Channel: class {
+    onmessage: ((payload: unknown) => void) | null = null;
+  },
 }));
 
 vi.mock('sonner', () => ({
@@ -100,6 +105,7 @@ describe('DirectoryTransferDialog download', () => {
       destinationRoot: 'C:/Downloads',
       remoteRelativePath: '子目录/report 1.txt',
       destinationRelativePath: 'release files/子目录/report 1.txt',
+      onProgress: expect.any(Object),
     });
     expect(mocks.invoke).toHaveBeenCalledWith('download_remote_file_confined', {
       connectionId: 'conn-1',
@@ -107,6 +113,7 @@ describe('DirectoryTransferDialog download', () => {
       destinationRoot: 'C:/Downloads',
       remoteRelativePath: 'README.md',
       destinationRelativePath: 'release files/README.md',
+      onProgress: expect.any(Object),
     });
     expect(mocks.success).toHaveBeenCalledOnce();
   });
@@ -148,6 +155,7 @@ describe('DirectoryTransferDialog download', () => {
       destinationRoot: 'C:/Downloads',
       remoteRelativePath: 'nested\\..\\outside.txt',
       destinationRelativePath: 'release/nested\\..\\outside.txt',
+      onProgress: expect.any(Object),
     });
     expect(mocks.invoke.mock.calls.some(([command]) => command === 'download_remote_file')).toBe(false);
     expect(mocks.success).not.toHaveBeenCalled();

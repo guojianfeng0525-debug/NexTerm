@@ -26,6 +26,7 @@ export type DbTable =
   | 'toolbox_apps'
   | 'tunnels'
   | 'services'
+  | 'service_orchestrations'
   | 'notes'
   | 'api_collections'
   | 'api_environments'

@@ -11,7 +11,7 @@
  */
 import React, { useState, useCallback, useRef, useEffect } from "react";
 import { useTranslation } from 'react-i18next';
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, Channel } from "@tauri-apps/api/core";
 import { toast } from "sonner";
 import {
   Dialog,
@@ -35,6 +35,11 @@ import {
   Loader2,
 } from "lucide-react";
 import { formatSize } from "@/lib/file-entry-types";
+
+function formatSpeed(bytesPerSec: number): string {
+  if (!bytesPerSec || bytesPerSec <= 0) return "—";
+  return `${formatSize(bytesPerSec)}/s`;
+}
 
 // ── Types ──
 
@@ -65,6 +70,8 @@ interface TransferProgress {
   totalBytes: number;
   currentItem?: string;
   errors: string[];
+  /** Instantaneous transfer speed (bytes/sec) — shown in the status line. */
+  speed?: number;
 }
 
 const initialProgress: TransferProgress = {
@@ -245,6 +252,19 @@ export function DirectoryTransferDialog({
       // Phase 3: Transfer all files
       let processedFiles = 0;
       let bytesTransferred = 0;
+      // Speed sampling state (shared across the whole transfer).
+      const speedSample = { bytes: 0, time: Date.now() };
+
+      const emitProgress = (doneBytes: number) => {
+        const now = Date.now();
+        const dt = (now - speedSample.time) / 1000;
+        const dB = doneBytes - speedSample.bytes;
+        const speed = dt > 0 && dB >= 0 ? Math.round(dB / dt) : 0;
+        speedSample.bytes = doneBytes;
+        speedSample.time = now;
+        bytesTransferred = doneBytes;
+        setProgress((p) => ({ ...p, bytesTransferred: doneBytes, speed }));
+      };
 
       for (const file of files) {
         if (cancelRef.current) {
@@ -264,6 +284,12 @@ export function DirectoryTransferDialog({
           bytesTransferred,
         }));
 
+        // Per-file real-time progress channel from the backend.
+        const channel = new Channel<{ totalBytes: number; transferredBytes: number }>();
+        channel.onmessage = (p) => {
+          emitProgress(bytesTransferred + p.transferredBytes);
+        };
+
         try {
           if (direction === "upload") {
             const fileDestPath =
@@ -277,6 +303,7 @@ export function DirectoryTransferDialog({
               connectionId,
               localPath: fileSrcPath,
               remotePath: fileDestPath,
+              onProgress: channel,
             });
             if (!result.success) {
               throw new Error(result.error ?? "Upload failed");
@@ -291,12 +318,15 @@ export function DirectoryTransferDialog({
               destinationRoot: destPath,
               remoteRelativePath: file.relative_path,
               destinationRelativePath: destinationRelativePath(file.relative_path),
+              onProgress: channel,
             });
             if (!result.success) {
               throw new Error(result.error ?? "Download failed");
             }
           }
-          bytesTransferred += file.size;
+          // Ensure the counter reflects the file even if the backend sent no
+          // progress events (e.g. tiny files that finished in one chunk).
+          emitProgress(bytesTransferred + file.size);
         } catch (err) {
           setProgress((p) => ({
             ...p,
@@ -359,8 +389,14 @@ export function DirectoryTransferDialog({
   const isDone = progress.phase === "completed" || progress.phase === "cancelled" || progress.phase === "error";
   const totalItems = progress.totalFiles + progress.totalDirs;
   const processedItems = progress.processedFiles + progress.processedDirs;
+  // Byte-based progress (real-time from the backend channel) — falls back to
+  // item counts when total bytes are unknown (e.g. FTP downloads).
   const progressPercent =
-    totalItems > 0 ? Math.round((processedItems / totalItems) * 100) : 0;
+    progress.totalBytes > 0
+      ? Math.min(100, Math.round((progress.bytesTransferred / progress.totalBytes) * 100))
+      : totalItems > 0
+        ? Math.round((processedItems / totalItems) * 100)
+        : 0;
 
   const _dirName = sourcePath.split("/").filter(Boolean).pop() ?? sourcePath;
 
@@ -459,6 +495,11 @@ export function DirectoryTransferDialog({
                   {formatSize(progress.bytesTransferred)} /{" "}
                   {formatSize(progress.totalBytes)}
                 </span>
+                {progress.speed !== undefined && progress.speed > 0 && (
+                  <span className="text-green-600 dark:text-green-400">
+                    {formatSpeed(progress.speed)}
+                  </span>
+                )}
               </div>
             </div>
           )}

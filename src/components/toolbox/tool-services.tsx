@@ -42,6 +42,7 @@ import {
 } from '@/components/ui/alert-dialog';
 import { ServicesStorage, generateId } from '@/lib/toolbox/toolbox-storage';
 import type { ServiceConfig, ServiceLogEntry } from '@/lib/toolbox/toolbox-types';
+import { ServiceOrchestrations } from './tool-service-orchestrations';
 import {
   Server,
   Plus,
@@ -127,8 +128,7 @@ export function ToolServices() {
   // Subscribe to service output events
   useEffect(() => {
     const unlisteners: UnlistenFn[] = [];
-    const register = (eventName: string, kind: 'output' | 'exited') => {
-      void listen<{ id: string; line: string; stream: string }>(eventName, (event) => {
+    const register = (eventName: string, kind: 'output' | 'exited') => {      void listen<{ id: string; line: string; stream: string }>(eventName, (event) => {
         const { id, line, stream } = event.payload;
         if (kind === 'output') {
           setLogs((prev) => {
@@ -152,6 +152,29 @@ export function ToolServices() {
       for (const fn of unlisteners) fn();
     };
   }, []);
+
+  // Resync running state from the backend (also used after an orchestration run)
+  const syncRunning = useCallback(async () => {
+    try {
+      const list = await invoke<{ id: string; running: boolean; pid?: number; startedAt?: number }[]>(
+        'service_list',
+      );
+      const info: Record<string, RunningInfo> = {};
+      for (const item of list) {
+        info[item.id] = { pid: item.pid, startedAt: item.startedAt };
+      }
+      setRunning(info);
+    } catch {
+      // Backend unavailable (browser preview) — ignore
+    }
+  }, []);
+
+  // When an orchestration panel starts/stops services, refresh this view.
+  useEffect(() => {
+    const handler = () => void syncRunning();
+    window.addEventListener('nexterm:orchestration-ran', handler);
+    return () => window.removeEventListener('nexterm:orchestration-ran', handler);
+  }, [syncRunning]);
 
   // Auto-scroll expanded log panels to the bottom on new output
   useEffect(() => {
@@ -419,6 +442,9 @@ export function ToolServices() {
           </Button>
         </div>
       </div>
+
+      {/* Orchestrations — one-click ordered startup of tunnels + services */}
+      <ServiceOrchestrations />
 
       {/* List */}
       <ScrollArea className="flex-1">

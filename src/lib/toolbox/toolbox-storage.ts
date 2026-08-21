@@ -4,7 +4,7 @@
  * Keeps a synchronous in-memory cache; every mutation is persisted per-row
  * (sensitive fields — note title/content — encrypted via the app-password key).
  */
-import type { NoteItem, ToolboxApp, TunnelConfig, ServiceConfig } from './toolbox-types';
+import type { NoteItem, ToolboxApp, TunnelConfig, ServiceConfig, ServiceOrchestration } from './toolbox-types';
 import { rowList, rowUpsert, rowDelete, decField, encField } from './db';
 /** Coerce an unknown DB value to string ('' when absent). */
 function str(v: unknown): string {
@@ -17,10 +17,10 @@ export function generateId(prefix: string): string {
   return `${prefix}-${Date.now().toString(36)}-${random}`;
 }
 
-type Kind = 'apps' | 'tunnels' | 'services' | 'notes';
+type Kind = 'apps' | 'tunnels' | 'services' | 'orchestrations' | 'notes';
 
 // In-memory cache (synchronous reads for the UI).
-const cache: Record<Kind, unknown[]> = { apps: [], tunnels: [], services: [], notes: [] };
+const cache: Record<Kind, unknown[]> = { apps: [], tunnels: [], services: [], orchestrations: [], notes: [] };
 let initialized = false;
 
 /* ── row mapping helpers ──────────────────────────────────────────────────── */
@@ -131,6 +131,40 @@ function rowToService(row: Record<string, unknown>): ServiceConfig {
   return service;
 }
 
+function orchestrationToRow(o: ServiceOrchestration): Record<string, unknown> {
+  return {
+    id: o.id,
+    name: o.name,
+    items: JSON.stringify(o.items),
+    created_at: o.createdAt,
+    updated_at: o.updatedAt,
+  };
+}
+
+function rowToOrchestration(row: Record<string, unknown>): ServiceOrchestration {
+  const orchestration: ServiceOrchestration = {
+    id: str(row.id),
+    name: str(row.name),
+    items: [],
+    createdAt: row.created_at as number,
+    updatedAt: row.updated_at as number,
+  };
+  if (row.items) {
+    try {
+      const parsed = JSON.parse(str(row.items));
+      if (Array.isArray(parsed)) {
+        orchestration.items = parsed.filter(
+          (it): it is ServiceOrchestration['items'][number] =>
+            !!it && (it.kind === 'tunnel' || it.kind === 'service') && typeof it.id === 'string',
+        );
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+  return orchestration;
+}
+
 /** Note title/content are encrypted per-field before persisting. */
 async function rowToNote(row: Record<string, unknown>): Promise<NoteItem> {
   return {
@@ -156,24 +190,27 @@ async function noteToRowEncrypted(n: NoteItem): Promise<Record<string, unknown>>
 
 /* ── hydration / persistence ──────────────────────────────────────────────── */
 
-function tableFor(kind: Kind): 'toolbox_apps' | 'tunnels' | 'services' | 'notes' {
+function tableFor(kind: Kind): 'toolbox_apps' | 'tunnels' | 'services' | 'service_orchestrations' | 'notes' {
   if (kind === 'apps') return 'toolbox_apps';
   if (kind === 'tunnels') return 'tunnels';
   if (kind === 'services') return 'services';
+  if (kind === 'orchestrations') return 'service_orchestrations';
   return 'notes';
 }
 
 /** Load every toolbox list from SQLite (call once after app unlock). */
 export async function initializeToolboxStore(): Promise<void> {
-  const [apps, tunnels, services, notes] = await Promise.all([
+  const [apps, tunnels, services, orchestrations, notes] = await Promise.all([
     rowList('toolbox_apps'),
     rowList('tunnels'),
     rowList('services'),
+    rowList('service_orchestrations'),
     rowList('notes'),
   ]);
   cache.apps = apps.map(rowToApp);
   cache.tunnels = await Promise.all(tunnels.map(rowToTunnelDecrypted));
   cache.services = services.map(rowToService);
+  cache.orchestrations = orchestrations.map(rowToOrchestration);
   cache.notes = await Promise.all(notes.map(rowToNote));
   initialized = true;
 }
@@ -187,6 +224,7 @@ export function resetToolboxStore(): void {
   cache.apps = [];
   cache.tunnels = [];
   cache.services = [];
+  cache.orchestrations = [];
   cache.notes = [];
   initialized = false;
 }
@@ -228,6 +266,7 @@ function mapToRow(kind: Kind, item: { id: string }): Record<string, unknown> {
   // tunnels are persisted through the encrypted path (upsert/save), so this
   // branch is only a type-level fallback that is never executed.
   if (kind === 'tunnels') return { id: (item as TunnelConfig).id };
+  if (kind === 'orchestrations') return orchestrationToRow(item as ServiceOrchestration);
   return serviceToRow(item as ServiceConfig);
 }
 
@@ -294,6 +333,26 @@ export const ServicesStorage = {
   },
   remove(id: string): ServiceConfig[] {
     return remove('services', id);
+  },
+};
+
+/* ── Orchestrations ─────────────────────────────────────────────────────── */
+
+export const OrchestrationsStorage = {
+  load(): ServiceOrchestration[] {
+    return list<ServiceOrchestration>('orchestrations');
+  },
+  save(items: ServiceOrchestration[]): void {
+    cache.orchestrations = items;
+    for (const item of items) {
+      commitUpsert('orchestrations', orchestrationToRow(item));
+    }
+  },
+  upsert(item: ServiceOrchestration): ServiceOrchestration[] {
+    return upsert('orchestrations', item);
+  },
+  remove(id: string): ServiceOrchestration[] {
+    return remove('orchestrations', id);
   },
 };
 

@@ -25,6 +25,9 @@ vi.mock('@tauri-apps/api/core', () => ({
     }
     return mocks.invoke(...args);
   },
+  Channel: class {
+    onmessage: ((payload: unknown) => void) | null = null;
+  },
 }));
 
 vi.mock('@tauri-apps/plugin-dialog', () => ({

@@ -702,6 +702,32 @@ pub struct FileTransferResponse {
     pub error: Option<String>,
 }
 
+/// Progress payload streamed to the frontend during file transfers.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TransferProgress {
+    pub total_bytes: u64,
+    pub transferred_bytes: u64,
+}
+
+/// Throttle: at most one progress event per ~80 ms so the IPC channel isn't
+/// flooded on fast transfers (32 KiB chunks can be ~30k events for 1 GB).
+fn send_progress(
+    channel: &tauri::ipc::Channel<TransferProgress>,
+    total: u64,
+    transferred: u64,
+    last_send: &mut std::time::Instant,
+) {
+    if last_send.elapsed().as_millis() < 80 && transferred < total {
+        return;
+    }
+    let _ = channel.send(TransferProgress {
+        total_bytes: total,
+        transferred_bytes: transferred,
+    });
+    *last_send = std::time::Instant::now();
+}
+
 /// @deprecated Use `download_remote_file` instead. Kept for backward compatibility.
 #[tauri::command]
 pub async fn sftp_download_file(
@@ -2743,6 +2769,7 @@ async fn download_remote_file_to_path(
     remote_path: &str,
     local_path: &str,
     state: &Arc<ConnectionManager>,
+    on_progress: tauri::ipc::Channel<TransferProgress>,
 ) -> Result<FileTransferResponse, String> {
     let conn_type = state.get_connection_type(connection_id).await;
 
@@ -2753,7 +2780,13 @@ async fn download_remote_file_to_path(
             let client = connections
                 .get(connection_id)
                 .ok_or("SFTP connection not found".to_string())?;
-            client.download_file(remote_path, local_path).await
+            let mut last = std::time::Instant::now();
+            let ch2 = on_progress.clone();
+            client
+                .download_file_with_progress(remote_path, local_path, move |total, done| {
+                    send_progress(&ch2, total, done, &mut last);
+                })
+                .await
         }
         Some("FTP") => {
             let ftp_map = state.get_ftp_connection().await;
@@ -2761,7 +2794,13 @@ async fn download_remote_file_to_path(
             let client = connections
                 .get_mut(connection_id)
                 .ok_or("FTP connection not found".to_string())?;
-            client.download_file(remote_path, local_path).await
+            let mut last = std::time::Instant::now();
+            let ch2 = on_progress.clone();
+            client
+                .download_file_with_progress(remote_path, local_path, move |total, done| {
+                    send_progress(&ch2, total, done, &mut last);
+                })
+                .await
         }
         Some(other) => return Err(format!("Unsupported protocol: {}", other)),
         None => {
@@ -2797,9 +2836,10 @@ pub async fn download_remote_file(
     connection_id: String,
     remote_path: String,
     local_path: String,
+    on_progress: tauri::ipc::Channel<TransferProgress>,
     state: State<'_, Arc<ConnectionManager>>,
 ) -> Result<FileTransferResponse, String> {
-    download_remote_file_to_path(&connection_id, &remote_path, &local_path, state.inner()).await
+    download_remote_file_to_path(&connection_id, &remote_path, &local_path, state.inner(), on_progress).await
 }
 
 #[tauri::command]
@@ -2809,6 +2849,7 @@ pub async fn download_remote_file_confined(
     destination_root: String,
     remote_relative_path: String,
     destination_relative_path: String,
+    on_progress: tauri::ipc::Channel<TransferProgress>,
     state: State<'_, Arc<ConnectionManager>>,
 ) -> Result<FileTransferResponse, String> {
     validate_remote_relative_path(&remote_relative_path)?;
@@ -2829,7 +2870,7 @@ pub async fn download_remote_file_confined(
         )
     };
 
-    download_remote_file_to_path(&connection_id, &remote_path, local_path, state.inner()).await
+    download_remote_file_to_path(&connection_id, &remote_path, local_path, state.inner(), on_progress).await
 }
 
 #[tauri::command]
@@ -2837,6 +2878,7 @@ pub async fn upload_remote_file(
     connection_id: String,
     local_path: String,
     remote_path: String,
+    on_progress: tauri::ipc::Channel<TransferProgress>,
     state: State<'_, Arc<ConnectionManager>>,
 ) -> Result<FileTransferResponse, String> {
     let conn_type = state.get_connection_type(&connection_id).await;
@@ -2848,7 +2890,13 @@ pub async fn upload_remote_file(
             let client = connections
                 .get(&connection_id)
                 .ok_or("SFTP connection not found".to_string())?;
-            client.upload_file(&local_path, &remote_path).await
+            let mut last = std::time::Instant::now();
+            let ch2 = on_progress.clone();
+            client
+                .upload_file_with_progress(&local_path, &remote_path, move |total, done| {
+                    send_progress(&ch2, total, done, &mut last);
+                })
+                .await
         }
         Some("FTP") => {
             let ftp_map = state.get_ftp_connection().await;
@@ -2856,7 +2904,13 @@ pub async fn upload_remote_file(
             let client = connections
                 .get_mut(&connection_id)
                 .ok_or("FTP connection not found".to_string())?;
-            client.upload_file(&local_path, &remote_path).await
+            let mut last = std::time::Instant::now();
+            let ch2 = on_progress.clone();
+            client
+                .upload_file_with_progress(&local_path, &remote_path, move |total, done| {
+                    send_progress(&ch2, total, done, &mut last);
+                })
+                .await
         }
         Some(other) => return Err(format!("Unsupported protocol: {}", other)),
         None => {
@@ -3268,7 +3322,7 @@ fn resolve_confined_local_path(
 
     let mut resolved = destination_root.to_path_buf();
     for component in remote_relative_path.split('/') {
-        resolved.push(component);
+        resolved.push(sanitize_local_component(component));
     }
 
     if !resolved.starts_with(destination_root) {
@@ -3278,6 +3332,41 @@ fn resolve_confined_local_path(
         ));
     }
     Ok(resolved)
+}
+
+/// Make a single path component safe to create on the local filesystem.
+/// Remote names may legally contain characters that are invalid on Windows
+/// (`:`, `*`, `?`, `"`, `<`, `>`, `|`, `\`) or end in a dot/space (trailing
+/// dots are stripped by Windows). Replacing them keeps downloads working
+/// instead of failing with "filename, directory name, or volume label syntax
+/// is incorrect" (os error 123). Non-Windows hosts leave names untouched.
+fn sanitize_local_component(component: &str) -> String {
+    let mut out = String::with_capacity(component.len());
+    for ch in component.chars() {
+        match ch {
+            '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => out.push('_'),
+            _ => out.push(ch),
+        }
+    }
+    while out.ends_with('.') || out.ends_with(' ') {
+        out.pop();
+    }
+    // Reserved device names (CON, PRN, AUX, NUL, COM1-9, LPT1-9) can't be
+    // used as file/dir names on Windows even with an extension.
+    let stem = out.split('.').next().unwrap_or("");
+    let upper = stem.to_ascii_uppercase();
+    if matches!(
+        upper.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "COM1" | "COM2" | "COM3" | "COM4" | "COM5" | "COM6"
+            | "COM7" | "COM8" | "COM9" | "LPT1" | "LPT2" | "LPT3" | "LPT4" | "LPT5" | "LPT6"
+            | "LPT7" | "LPT8" | "LPT9"
+    ) {
+        out = format!("_{out}");
+    }
+    if out.is_empty() {
+        out = "_".to_string();
+    }
+    out
 }
 
 #[tauri::command]
@@ -3949,6 +4038,29 @@ mod local_fs_tests {
             "nested/file.txt"
         )
         .is_err());
+    }
+
+    #[test]
+    fn sanitize_component_removes_windows_invalid_chars() {
+        assert_eq!(sanitize_local_component("file:"), "file_");
+        assert_eq!(sanitize_local_component("a<b>c|d?e*f\\g"), "a_b_c_d_e_f_g");
+        assert_eq!(sanitize_local_component("trailing."), "trailing");
+        assert_eq!(sanitize_local_component("trailing "), "trailing");
+        assert_eq!(sanitize_local_component("CON"), "_CON");
+        assert_eq!(sanitize_local_component("nul.txt"), "_nul.txt");
+        assert_eq!(sanitize_local_component("normal-name"), "normal-name");
+    }
+
+    #[test]
+    fn confined_download_sanitizes_remote_colon_in_directory() {
+        // Regression: remote dir literally named "file:" must download fine on
+        // Windows instead of failing with os error 123.
+        let dir = create_test_dir();
+        let root = dir.path();
+        let path = resolve_confined_local_path(root, "bin/file:").unwrap();
+        fs::create_dir_all(&path).unwrap();
+        assert!(path.ends_with("bin/file_"), "sanitized path: {:?}", path);
+        assert!(path.exists(), "created dir must exist");
     }
 
     #[tokio::test]

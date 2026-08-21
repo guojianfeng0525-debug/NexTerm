@@ -21,7 +21,7 @@ use tauri::State;
 
 /// Allow-listed normalized tables. Table names are validated against this
 /// list before being interpolated into SQL, so no injection is possible.
-pub const TABLES: [&str; 31] = [
+pub const TABLES: [&str; 32] = [
     "connections",
     "folders",
     "active_connections",
@@ -34,6 +34,7 @@ pub const TABLES: [&str; 31] = [
     "toolbox_apps",
     "tunnels",
     "services",
+    "service_orchestrations",
     "notes",
     "api_collections",
     "api_environments",
@@ -417,6 +418,7 @@ fn pk_column(table: &str) -> Result<&'static str, String> {
         "toolbox_apps" => "id",
         "tunnels" => "id",
         "services" => "id",
+        "service_orchestrations" => "id",
         "notes" => "id",
         "api_collections" => "id",
         "api_environments" => "id",
@@ -822,6 +824,13 @@ CREATE TABLE IF NOT EXISTS "services" (
   args TEXT,
   env TEXT,
   group_name TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS "service_orchestrations" (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL DEFAULT '',
+  items TEXT NOT NULL DEFAULT '[]',
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );

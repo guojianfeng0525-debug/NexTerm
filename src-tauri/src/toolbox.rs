@@ -82,6 +82,20 @@ impl ToolboxState {
             .expect("service state poisoned");
         for (_, handle) in services.drain() {
             let _ = handle.stop_tx.try_send(());
+            // Kill the process tree (taskkill /T /F on Windows) BEFORE aborting
+            // the task: abort only drops the child wrapper via kill_on_drop,
+            // which leaves grandchildren (node/python servers) holding ports.
+            #[cfg(windows)]
+            {
+                let pid = handle.pid;
+                if pid != 0 {
+                    let _ = std::process::Command::new("taskkill")
+                        .args(["/PID", &pid.to_string(), "/T", "/F"])
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .status();
+                }
+            }
             handle.task.abort();
         }
 
@@ -603,6 +617,29 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// Kill a service's process tree.
+///
+/// On Windows the child is a `cmd` wrapper whose grandchildren (e.g. a `node`
+/// server) survive a plain kill and keep the port bound. `taskkill /T /F`
+/// walks the whole tree by PID. Elsewhere a normal kill + reap suffices.
+async fn kill_process_tree(child: &mut tokio::process::Child) {
+    #[cfg(windows)]
+    {
+        let pid = child.id().unwrap_or(0);
+        if pid != 0 {
+            let _ = std::process::Command::new("taskkill")
+                .args(["/PID", &pid.to_string(), "/T", "/F"])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+            let _ = child.wait().await;
+            return;
+        }
+    }
+    let _ = child.kill().await;
+    let _ = child.wait().await;
+}
+
 /// Start a service process and begin streaming its output.
 #[tauri::command]
 pub async fn service_start(
@@ -806,8 +843,7 @@ pub async fn service_start(
         }
 
         if !exited {
-            let _ = child_owned.kill().await;
-            let _ = child_owned.wait().await;
+            kill_process_tree(&mut child_owned).await;
         }
         let _ = emit_app.emit(
             "service://exited",
@@ -846,13 +882,30 @@ pub async fn service_stop(id: String, state: State<'_, ToolboxState>) -> Result<
         .lock()
         .expect("service state poisoned")
         .remove(&id);
-    match removed {
-        Some(handle) => {
-            // The task itself kills the child on stop, so no abort is needed.
-            let _ = handle.stop_tx.try_send(());
-            Ok(())
-        }
-        None => Err(format!("Service '{}' is not running", id)),
+    let Some(handle) = removed else {
+        return Err(format!("Service '{}' is not running", id));
+    };
+
+    // Deliver the stop signal reliably. `try_send` was previously used and
+    // silently failed when the receiver was busy (the task was polling a
+    // child wait / line read), leaving the process running while the UI
+    // reported "stopped" — the classic "port still in use" on restart.
+    handle
+        .stop_tx
+        .send(())
+        .await
+        .map_err(|_| format!("Failed to signal service '{}' to stop", id))?;
+
+    // Wait for the task to actually finish (the task kills the child and
+    // reaps it). Give it a bounded grace period so a wedged process surfaces
+    // as an error instead of a false "stopped".
+    match tokio::time::timeout(std::time::Duration::from_secs(5), handle.task).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => Err(format!("Service '{}' task failed: {e}", id)),
+        Err(_) => Err(format!(
+            "Service '{}' did not stop within 5s (process may still be running)",
+            id
+        )),
     }
 }
 

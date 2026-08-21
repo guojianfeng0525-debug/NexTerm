@@ -1,5 +1,6 @@
 use anyhow::Result;
 use async_std::io::ReadExt;
+use async_std::io::WriteExt;
 use serde::Deserialize;
 use std::time::Duration;
 
@@ -195,14 +196,38 @@ impl FtpClient {
 
     /// Download a remote file to a local path. Returns bytes downloaded.
     pub async fn download_file(&mut self, remote_path: &str, local_path: &str) -> Result<u64> {
+        self.download_file_with_progress(remote_path, local_path, |_, _| {})
+            .await
+    }
+
+    /// Download with a progress callback `(total_bytes, transferred_bytes)`.
+    /// The FTP control stream does not expose the file size up front, so the
+    /// total is reported as 0 and the UI shows an indeterminate progress bar
+    /// driven purely by transferred bytes + speed.
+    pub async fn download_file_with_progress(
+        &mut self,
+        remote_path: &str,
+        local_path: &str,
+        mut on_progress: impl FnMut(u64, u64) + Send,
+    ) -> Result<u64> {
+        let mut transferred: u64 = 0;
         let data: Vec<u8> = ftp_stream!(self, s => {
             let mut data_stream = s.retr_as_stream(remote_path).await.map_err(|e| {
                 anyhow::anyhow!("Failed to download file '{}': {}", remote_path, e)
             })?;
             let mut buf = Vec::new();
-            data_stream.read_to_end(&mut buf).await.map_err(|e| {
-                anyhow::anyhow!("Failed to read download stream: {}", e)
-            })?;
+            let mut chunk = vec![0u8; 32768];
+            loop {
+                let n = data_stream.read(&mut chunk).await.map_err(|e| {
+                    anyhow::anyhow!("Failed to read download stream: {}", e)
+                })?;
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&chunk[..n]);
+                transferred += n as u64;
+                on_progress(0, transferred);
+            }
             s.finalize_retr_stream(data_stream).await.map_err(|e| {
                 anyhow::anyhow!("Failed to finalize download: {}", e)
             })?;
@@ -211,21 +236,50 @@ impl FtpClient {
 
         let total_bytes = data.len() as u64;
         tokio::fs::write(local_path, data).await?;
+        on_progress(total_bytes, total_bytes);
         Ok(total_bytes)
     }
 
     /// Upload a local file to a remote path. Returns bytes uploaded.
     pub async fn upload_file(&mut self, local_path: &str, remote_path: &str) -> Result<u64> {
+        self.upload_file_with_progress(local_path, remote_path, |_, _| {})
+            .await
+    }
+
+    /// Upload with a progress callback `(total_bytes, transferred_bytes)`.
+    pub async fn upload_file_with_progress(
+        &mut self,
+        local_path: &str,
+        remote_path: &str,
+        mut on_progress: impl FnMut(u64, u64) + Send,
+    ) -> Result<u64> {
         let data = tokio::fs::read(local_path)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to read local file '{}': {}", local_path, e))?;
         let total_bytes = data.len() as u64;
 
         ftp_stream!(self, s => {
-            let mut reader = async_std::io::Cursor::new(data);
-            s.put_file(remote_path, &mut reader).await.map_err(|e| {
-                anyhow::anyhow!("Failed to upload file '{}': {}", remote_path, e)
-            })?
+            // Chunked put via the stream API so progress can be reported as
+            // data flows (put_file reads the whole cursor in one call).
+            let mut remote = s
+                .put_with_stream(remote_path)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to create remote file '{}': {}", remote_path, e))?;
+            let mut offset: usize = 0;
+            while offset < data.len() {
+                let end = std::cmp::min(offset + 32768, data.len());
+                remote.write_all(&data[offset..end]).await.map_err(|e| {
+                    anyhow::anyhow!("Failed to write upload stream: {}", e)
+                })?;
+                offset = end;
+                on_progress(total_bytes, offset as u64);
+            }
+            remote.flush().await.map_err(|e| {
+                anyhow::anyhow!("Failed to flush upload stream: {}", e)
+            })?;
+            s.finalize_put_stream(remote).await.map_err(|e| {
+                anyhow::anyhow!("Failed to finalize upload: {}", e)
+            })?;
         });
 
         Ok(total_bytes)
