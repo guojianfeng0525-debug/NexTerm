@@ -66,13 +66,13 @@ fn full_pipeline() {
     assert!(idx.entries.iter().any(|e| e.entry_path == "com/demo/Greeter.class"));
 
     // ── 2) Decompile Greeter with CFR. ──
-    let cfr = decompile::find_cfr_jar().unwrap();
+    let jd = decompile::find_decompiler_jar().unwrap();
     let class_bytes = jar::read_entry_bytes(&jar_path, "com/demo/Greeter.class").unwrap();
     let scratch = dir.join("decomp");
     std::fs::create_dir_all(&scratch).unwrap();
     let class_file = scratch.join("Greeter.class");
     std::fs::write(&class_file, &class_bytes).unwrap();
-    let source = decompile::decompile_class(&class_file, &cfr, None).unwrap();
+    let source = decompile::decompile_class(&class_file, &jd, "com/demo/Greeter", None).unwrap();
     assert!(source.contains("class Greeter"), "decompiled: {source}");
     assert!(source.contains("greet"), "decompiled: {source}");
 
@@ -121,7 +121,7 @@ fn full_pipeline() {
     // ── 7) Decompile the rebuilt class → confirm modification persisted. ──
     let new_class_file = scratch.join("GreeterNew.class");
     std::fs::write(&new_class_file, &new_greeter).unwrap();
-    let redec = decompile::decompile_class(&new_class_file, &cfr, None).unwrap();
+    let redec = decompile::decompile_class(&new_class_file, &jd, "com/demo/Greeter", None).unwrap();
     assert!(redec.contains("\"Hi\""), "modified value not in re-decompiled: {redec}");
     assert!(redec.contains("greet2"), "added method missing: {redec}");
 

@@ -1,6 +1,7 @@
 //! Simulates the exact `jar_decompile` command flow (index → read bytes →
-//! magic check → CFR → cache) against a real JAR + real DB, including the
-//! scratch-directory file naming used by the command layer.
+//! magic check → jd-core → ClassView) against a real JAR, including the
+//! scratch-directory file naming used by the command layer and the
+//! JD-GUI preference overrides (escapeUnicode / realign).
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -16,7 +17,7 @@ fn decompile_command_flow() {
     // Build a real jar.
     let src_dir = dir.join("src/demo");
     std::fs::create_dir_all(&src_dir).unwrap();
-    std::fs::write(src_dir.join("Test.java"), "package demo;\npublic class Test { public String msg() { return \"hi\"; } }\n").unwrap();
+    std::fs::write(src_dir.join("Test.java"), "package demo;\npublic class Test { public String msg() { return \"你好\"; } }\n").unwrap();
     let jdk = nexterm_lib::compile::detect_jdk();
     assert!(jdk.found);
     let out = dir.join("out");
@@ -40,12 +41,20 @@ fn decompile_command_flow() {
     let class_file = scratch.join(format!("{}.class", entry.replace('/', "_")));
     std::fs::write(&class_file, &bytes).unwrap();
 
-    // CFR.
-    let cfr = decompile::find_cfr_jar().unwrap();
+    // Decompile with display defaults (JD-GUI ClassFilePage: escapeUnicode=false, realign=false).
+    let jd = decompile::find_decompiler_jar().unwrap();
     let cancel = Arc::new(AtomicBool::new(false));
-    let source = decompile::decompile_class(&class_file, &cfr, Some(cancel)).unwrap();
+    let source = decompile::decompile_class(&class_file, &jd, "demo/Test", Some(cancel)).unwrap();
     assert!(source.contains("class Test"), "source: {source}");
     assert!(source.contains("msg"), "source: {source}");
     println!("DECOMPILE CMD FLOW PASS; source={} chars", source.len());
+
+    // Preferences override: escapeUnicode=true must produce \uXXXX escapes.
+    let opts = decompile::DecompileOptions { escape_unicode: true, realign: true, line_numbers: false };
+    let esc = decompile::decompile_class_with_options(&class_file, &jd, "", "demo/Test", opts, None).unwrap();
+    assert!(!esc.contains("你好"), "escapeUnicode=true must escape non-ASCII: {esc}");
+    assert!(esc.contains("\\u4F60\\u597D"), "escapeUnicode=true should emit \\u4F60\\u597D: {esc}");
+    println!("ESCAPE-UNICODE PREF PASS");
+
     std::fs::remove_dir_all(&dir).ok();
 }

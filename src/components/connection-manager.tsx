@@ -874,7 +874,7 @@ export function ConnectionManager({
         <div
           ref={treeContainerRef}
           data-conn-tree-container="true"
-          className={`flex-1 overflow-auto ${dropTarget?.nodeId === ROOT_DROP_ID ? 'ring-1 ring-inset ring-primary/30' : ''}`}
+          className={`flex-1 min-h-0 overflow-auto ${dropTarget?.nodeId === ROOT_DROP_ID ? 'ring-1 ring-inset ring-primary/30' : ''}`}
         >
           {connections.length === 0 ? (
             <div className="flex flex-col items-center justify-center h-full p-4 text-center">

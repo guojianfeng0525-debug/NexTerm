@@ -580,6 +580,51 @@ pub fn delete_symbols_for_class(conn: &Connection, class_id: &str) -> Result<(),
     Ok(())
 }
 
+/// Delete every symbol row of a project (used before re-indexing).
+pub fn delete_symbols_for_project(conn: &Connection, project_id: &str) -> Result<(), String> {
+    conn.execute("DELETE FROM jar_symbols WHERE project_id = ?1", [project_id])
+        .map_err(|e| format!("delete symbols: {e}"))?;
+    Ok(())
+}
+
+/// Bulk insert symbols. Mirrors JD-GUI's methodDeclarations/fieldDeclarations
+/// indexes: every declared method/field name of a class becomes a symbol row,
+/// so click-to-navigate by member name works across the whole project.
+/// Accepts a `&Connection` or a `&Transaction` (via Deref).
+pub fn insert_symbols_batch(
+    conn: &rusqlite::Connection,
+    project_id: &str,
+    class_id: &str,
+    members: &crate::jar::ClassMembers,
+    line_for: &dyn Fn(&str, &str) -> i64,
+) -> Result<(), String> {
+    {
+        let mut insert = conn
+            .prepare(
+                "INSERT OR REPLACE INTO jar_symbols (id, class_id, project_id, name, kind, line, signature)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            )
+            .map_err(|e| format!("prepare symbol insert: {e}"))?;
+        let mut push = |name: &str, kind: &str, line: i64| -> Result<(), String> {
+            let id = format!("{class_id}|{kind}|{name}");
+            insert
+                .execute(params![id, class_id, project_id, name, kind, line, ""])
+                .map_err(|e| format!("insert symbol {name}: {e}"))?;
+            Ok(())
+        };
+        for m in &members.methods {
+            push(m, "method", line_for(m, "method"))?;
+        }
+        for f in &members.fields {
+            push(f, "field", line_for(f, "field"))?;
+        }
+        if !members.constructors.is_empty() {
+            push("<init>", "constructor", 0)?;
+        }
+    }
+    Ok(())
+}
+
 pub fn list_symbols_for_class(conn: &Connection, class_id: &str) -> Result<Vec<JarSymbol>, String> {
     let mut stmt = conn
         .prepare("SELECT id, class_id, project_id, name, kind, line, signature FROM jar_symbols WHERE class_id = ?1 ORDER BY line")
@@ -626,5 +671,67 @@ pub fn find_symbols_by_name(conn: &Connection, project_id: &str, name: &str) -> 
         .map_err(|e| format!("query find symbols: {e}"))?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| format!("collect find symbols: {e}"))?;
+    Ok(rows)
+}
+
+// ── Subtypes (JD-GUI subTypeNames index) ─────────────────────────────────
+
+/// Clear the subtype index of a project (before re-indexing).
+pub fn delete_subtypes_for_project(conn: &Connection, project_id: &str) -> Result<(), String> {
+    conn.execute("DELETE FROM jar_subtypes WHERE project_id = ?1", [project_id])
+        .map_err(|e| format!("delete subtypes: {e}"))?;
+    Ok(())
+}
+
+/// Bulk insert super→sub edges. `edges` = (super_name, sub_name) pairs using
+/// dotted class names.
+pub fn insert_subtype_edges_batch(
+    conn: &rusqlite::Connection,
+    project_id: &str,
+    edges: &[(String, String)],
+) -> Result<(), String> {
+    if edges.is_empty() {
+        return Ok(());
+    }
+    {
+        let mut insert = conn
+            .prepare(
+                "INSERT OR REPLACE INTO jar_subtypes (id, project_id, super_name, sub_name)
+                 VALUES (?1, ?2, ?3, ?4)",
+            )
+            .map_err(|e| format!("prepare subtype insert: {e}"))?;
+        for (sup, sub) in edges {
+            let id = format!("{project_id}|{sup}|{sub}");
+            insert
+                .execute(params![id, project_id, sup, sub])
+                .map_err(|e| format!("insert subtype {sup}→{sub}: {e}"))?;
+        }
+    }
+    Ok(())
+}
+
+/// Subtypes of a type (its direct children) across the project.
+pub fn list_subtype_names(conn: &Connection, project_id: &str, super_name: &str) -> Result<Vec<String>, String> {
+    let mut stmt = conn
+        .prepare("SELECT sub_name FROM jar_subtypes WHERE project_id = ?1 AND super_name = ?2 ORDER BY sub_name")
+        .map_err(|e| format!("prepare list subtypes: {e}"))?;
+    let rows = stmt
+        .query_map(params![project_id, super_name], |r| r.get::<_, String>(0))
+        .map_err(|e| format!("query subtypes: {e}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("collect subtypes: {e}"))?;
+    Ok(rows)
+}
+
+/// The superclass of a type (single edge; used for the parent chain).
+pub fn list_super_names(conn: &Connection, project_id: &str, sub_name: &str) -> Result<Vec<String>, String> {
+    let mut stmt = conn
+        .prepare("SELECT super_name FROM jar_subtypes WHERE project_id = ?1 AND sub_name = ?2")
+        .map_err(|e| format!("prepare list supers: {e}"))?;
+    let rows = stmt
+        .query_map(params![project_id, sub_name], |r| r.get::<_, String>(0))
+        .map_err(|e| format!("query supers: {e}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("collect supers: {e}"))?;
     Ok(rows)
 }

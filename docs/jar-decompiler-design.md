@@ -6,7 +6,7 @@
 |---|---|
 | 后端架构 | **Tauri command 替代 Axum**。单进程本地运行，Rust 层即本地后端 |
 | 编辑器 | **现有 CodeMirror 6**（已支持 Java 高亮/折叠/搜索/行号），不引入 Monaco |
-| CFR 反编译器 | **捆绑 CFR 0.152 jar**（随应用资源分发）+ 自动探测 javac/JAVA_HOME |
+| 反编译器 | **jd-core 1.1.3**（JD-GUI 1.6.6 的官方引擎，捆绑为 jdcore-wrapper.jar 随应用分发）+ 自动探测 javac/JAVA_HOME |
 | 数据存储 | SQLite（项目/类/源码/历史），原始 JAR 只读，永不入库 |
 
 ## 2. 整体架构
@@ -25,7 +25,7 @@ React (CodeMirror 6)
         ▼ invoke (async + spawn_blocking)
 Rust
  ├── jar.rs — ZIP/JAR 解析、Class 索引、资源提取
- ├── decompile.rs — CFR 调用（java -jar cfr.jar）、按需反编译、缓存
+ ├── decompile.rs — jd-core 调用（java -jar jdcore-wrapper.jar，Printer 忠实移植 JD-GUI StringBuilderPrinter）、按需反编译
  ├── compile.rs — javac 探测、编译、错误解析
  ├── builder.rs — JAR 重建（原始 JAR + 修改 Class 合并）
  ├── jar_db.rs — SQLite 表 + 项目状态
@@ -60,7 +60,7 @@ CREATE TABLE IF NOT EXISTS jar_classes (
   package_name TEXT NOT NULL,    -- com.example
   kind TEXT NOT NULL DEFAULT 'class', -- class | resource | meta-inf
   is_inner_class INTEGER NOT NULL DEFAULT 0,
-  original_decompiled TEXT,      -- CFR 反编译原始结果（缓存，懒生成）
+  original_decompiled TEXT,      -- 反编译原始结果（懒生成，JD-GUI 语义不缓存）
   modified_source TEXT,          -- 用户修改后的源码（NULL = 未修改）
   modified INTEGER NOT NULL DEFAULT 0,
   compile_status TEXT NOT NULL DEFAULT 'none', -- none|ok|error|stale
@@ -121,7 +121,7 @@ CREATE TABLE IF NOT EXISTS jar_builds (
 ### 反编译（按需 + 缓存）
 | command | 说明 |
 |---|---|
-| `jar_decompile { projectId, entryPath }` | 懒反编译：有缓存直接返回；否则 CFR 反编译并入库 |
+| `jar_decompile { projectId, entryPath }` | 按需反编译（JD-GUI 语义：每次重新反编译，不缓存）并返回 ClassView |
 | `jar_decompile_cancel { projectId }` | 取消进行中的反编译 |
 
 ### 编辑/保存
@@ -153,17 +153,17 @@ CREATE TABLE IF NOT EXISTS jar_builds (
 - `$` 后缀判定内部类（`Foo$Bar.class`）
 - 懒读取：反编译/资源读取时才从原始 JAR 解压对应 entry
 
-## 6. 反编译流程（CFR）
+## 6. 反编译流程（jd-core，JD-GUI 引擎）
 
 1. 用户点击 Class → `jar_decompile`
-2. 查 `jar_classes.original_decompiled` 缓存 → 有则直接返回
-3. 无则：从原始 JAR 读该 entry 字节 → 写临时 .class 文件 → `java -jar cfr.jar tmp.class --outputdir workdir` 或 stdout 模式 → 解析输出
-4. 结果入库（original_decompiled），下次直接命中缓存
-5. 反编译失败（CFR 异常/非法 class）→ 明确错误信息，不入库
+2. 用户已修改？→ 直接返回修改源码；否则重新反编译（JD-GUI 语义：无缓存，按需生成）
+3. 从原始 JAR 读该 entry 字节 → 写临时 .class 文件 → `java -jar jdcore-wrapper.jar <class> --internal-name <name> --classpath <siblings>` → stdout 输出
+4. 兄弟类（同目录/内部类）按包结构解到临时 siblings 目录（JD-GUI ContainerLoader 语义），供 jd-core 解析
+5. 反编译失败（非法 class / java 缺失）→ 明确错误信息
 
-**CFR 调用方式**：子进程 `java -jar <bundled cfr.jar> <class文件>`，解析 stdout。为避免临时文件，也可用 stdin 管道（CFR 支持 `-` 参数），但稳妥起见用临时目录。
+**调用方式**：子进程 `java -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -jar <bundled jdcore-wrapper.jar> <class文件>`。wrapper 的 Printer 忠实移植 JD-GUI 的 StringBuilderPrinter / LineNumberStringBuilderPrinter（TAB=两空格、unicodeEscape 默认关、saver 模式 `/* n */ ` 行号前缀）。
 
-**取消**：反编译任务用 `tokio::task::AbortHandle` + CancellationToken，杀子进程。
+**取消**：反编译任务 spawn_blocking + 轮询 cancel 标志，杀子进程（unix SIGKILL / windows taskkill）。
 
 ## 7. 编译流程（javac）
 
@@ -210,7 +210,7 @@ Toolbar: [打开JAR] [JDK: 17.0.18] [构建] [恢复全部]
 - 空 JAR / 单 Class / 多层包 / 内部类 / 匿名类 / 混淆类 / 多版本 class
 - 修改→保存→恢复 / 编译成功 / 编译失败 / 新增/删除/替换 Class
 - JAR 重建字节级对比（未修改部分一致）/ 原始 JAR 未被修改
-- 单元：JAR 解析、索引分类、CFR 调用、javac 错误解析、构建合并
+- 单元：JAR 解析、索引分类、反编译调用、javac 错误解析、构建合并
 - 集成：用真实编译出的 class 做 round-trip
 
 ## 11. 实施顺序

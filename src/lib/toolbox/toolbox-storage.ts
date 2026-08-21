@@ -233,6 +233,19 @@ function list<T>(kind: Kind): T[] {
   return cache[kind] as T[];
 }
 
+/**
+ * Broadcast a "toolbox data changed" event. Sibling views (e.g. the service
+ * orchestration panel's tunnel/service pickers) listen to stay in sync when
+ * the user adds/edits/removes entries in another tool view.
+ */
+export function notifyToolboxChanged(kind: Kind): void {
+  try {
+    window.dispatchEvent(new CustomEvent('nexterm:toolbox-changed', { detail: { kind } }));
+  } catch {
+    /* non-DOM environment (tests) */
+  }
+}
+
 function commitUpsert(kind: Kind, row: Record<string, unknown>): void {
   void rowUpsert(tableFor(kind), row).then(() => undefined);
 }
@@ -258,6 +271,7 @@ function upsert<T extends { id: string }>(kind: Kind, item: T): T[] {
   } else {
     commitUpsert(kind, mapToRow(kind, item));
   }
+  notifyToolboxChanged(kind);
   return list<T>(kind);
 }
 
@@ -273,6 +287,7 @@ function mapToRow(kind: Kind, item: { id: string }): Record<string, unknown> {
 function remove<T extends { id: string }>(kind: Kind, id: string): T[] {
   cache[kind] = list<T>(kind).filter((i) => i.id !== id);
   commitDelete(kind, id);
+  notifyToolboxChanged(kind);
   return list<T>(kind);
 }
 
@@ -287,6 +302,7 @@ export const AppsStorage = {
     for (const item of items) {
       commitUpsert('apps', appToRow(item));
     }
+    notifyToolboxChanged('apps');
   },
   upsert(item: ToolboxApp): ToolboxApp[] {
     return upsert('apps', item);
@@ -307,6 +323,7 @@ export const TunnelsStorage = {
     for (const item of items) {
       void tunnelToRowEncrypted(item).then((row) => commitUpsert('tunnels', row));
     }
+    notifyToolboxChanged('tunnels');
   },
   upsert(item: TunnelConfig): TunnelConfig[] {
     return upsert('tunnels', item);
@@ -327,6 +344,7 @@ export const ServicesStorage = {
     for (const item of items) {
       commitUpsert('services', serviceToRow(item));
     }
+    notifyToolboxChanged('services');
   },
   upsert(item: ServiceConfig): ServiceConfig[] {
     return upsert('services', item);
@@ -347,6 +365,7 @@ export const OrchestrationsStorage = {
     for (const item of items) {
       commitUpsert('orchestrations', orchestrationToRow(item));
     }
+    notifyToolboxChanged('orchestrations');
   },
   upsert(item: ServiceOrchestration): ServiceOrchestration[] {
     return upsert('orchestrations', item);
@@ -367,6 +386,7 @@ export const NotesStorage = {
     for (const item of items) {
       void noteToRowEncrypted(item).then((row) => commitUpsert('notes', row));
     }
+    notifyToolboxChanged('notes');
   },
   upsert(item: NoteItem): NoteItem[] {
     return upsert('notes', item);

@@ -276,4 +276,41 @@ describe('ServiceOrchestrations', () => {
     expect(startCalls).toEqual([]);
     expect(mocks.error).toHaveBeenCalled();
   });
+
+  it('stops steps in REVERSE order and keeps going when one stop fails', async () => {
+    OrchestrationsStorage.upsert({
+      id: 'orch-5',
+      name: '停止流程',
+      items: [
+        { kind: 'tunnel', id: 'tunnel-a' },
+        { kind: 'service', id: 'svc-api' },
+        { kind: 'service', id: 'svc-web' },
+      ],
+      createdAt: now,
+      updatedAt: now,
+    });
+    mocks.invoke.mockImplementation(async (command: string) => {
+      if (command === 'service_stop' && mocks.invoke.mock.calls.filter((c) => c[0] === 'service_stop').length === 1) {
+        throw new Error('already gone');
+      }
+      return undefined;
+    });
+    render(<ServiceOrchestrations />);
+
+    const stopButtons = screen.getAllByRole('button', { name: /Stop/ });
+    await act(async () => {
+      fireEvent.click(stopButtons[0]);
+    });
+
+    const calls = mocks.invoke.mock.calls
+      .map((c) => c[0])
+      .filter((c) => c === 'tunnel_stop' || c === 'service_stop');
+    // Reverse order: svc-web → svc-api → tunnel-a. The failing middle stop
+    // must NOT abort the sweep (tunnel-a is still stopped).
+    expect(calls).toEqual(['service_stop', 'service_stop', 'tunnel_stop']);
+    expect(mocks.success).toHaveBeenCalled();
+    expect(window.dispatchEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'nexterm:orchestration-ran' }),
+    );
+  });
 });

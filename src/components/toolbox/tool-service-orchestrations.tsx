@@ -1,4 +1,4 @@
-import React, { useCallback, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { invoke } from '@tauri-apps/api/core';
 import { toast } from 'sonner';
@@ -69,6 +69,7 @@ import {
   Play,
   Plus,
   Server,
+  Square,
   Trash2,
   X,
 } from 'lucide-react';
@@ -80,7 +81,7 @@ interface StepDraft {
   item: OrchestrationItem;
 }
 
-type StepRunStatus = 'pending' | 'running' | 'ok' | 'failed';
+type StepRunStatus = 'pending' | 'running' | 'ok' | 'failed' | 'stopped';
 
 interface StepRunState {
   status: StepRunStatus;
@@ -162,8 +163,27 @@ function SortableStepRow({
 export function ServiceOrchestrations() {
   const { t } = useTranslation();
   const [orchestrations, setOrchestrations] = useState<ServiceOrchestration[]>(() => OrchestrationsStorage.load());
-  const [services] = useState<ServiceConfig[]>(() => ServicesStorage.load());
-  const [tunnels] = useState<TunnelConfig[]>(() => TunnelsStorage.load());
+  const [services, setServices] = useState<ServiceConfig[]>(() => ServicesStorage.load());
+  const [tunnels, setTunnels] = useState<TunnelConfig[]>(() => TunnelsStorage.load());
+
+  // Keep the tunnel/service pickers in sync when the user adds/edits/removes
+  // entries in the Remote Tunnels / Local Services views (they share the same
+  // storage; we re-read on the storage-changed broadcast AND on dialog open).
+  const refreshConfigs = useCallback(() => {
+    setServices(ServicesStorage.load());
+    setTunnels(TunnelsStorage.load());
+  }, []);
+
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const kind = (e as CustomEvent<{ kind?: string }>).detail?.kind;
+      if (!kind || kind === 'services' || kind === 'tunnels') {
+        refreshConfigs();
+      }
+    };
+    window.addEventListener('nexterm:toolbox-changed', handler);
+    return () => window.removeEventListener('nexterm:toolbox-changed', handler);
+  }, [refreshConfigs]);
 
   // editor state
   const [formOpen, setFormOpen] = useState(false);
@@ -203,16 +223,18 @@ export function ServiceOrchestrations() {
   );
 
   const openAdd = useCallback(() => {
+    refreshConfigs();
     setEditing(null);
     setFormName('');
     setSteps([]);
     setPickKind('tunnel');
     setPickId('');
     setFormOpen(true);
-  }, []);
+  }, [refreshConfigs]);
 
   const openEdit = useCallback(
     (orch: ServiceOrchestration) => {
+      refreshConfigs();
       setEditing(orch);
       setFormName(orch.name);
       setSteps(orch.items.map((item, index) => ({ key: `${orch.id}-${index}`, item })));
@@ -220,7 +242,7 @@ export function ServiceOrchestrations() {
       setPickId('');
       setFormOpen(true);
     },
-    [],
+    [refreshConfigs],
   );
 
   const handleAddStep = useCallback(() => {
@@ -370,6 +392,61 @@ export function ServiceOrchestrations() {
     return services;
   }, [pickKind, tunnels, services]);
 
+  /** Stop every step that is currently running, in REVERSE order (last
+   *  started stops first). Individual failures do not abort the sweep — we
+   *  try to stop everything and report the count of successful stops. */
+  const handleStop = useCallback(
+    async (orch: ServiceOrchestration) => {
+      if (runBusy) return;
+      setRunBusy(orch.id);
+      let stopped = 0;
+      const states: StepRunState[] = orch.items.map(() => ({ status: 'pending' }));
+      setRunStates((prev) => ({ ...prev, [orch.id]: states }));
+      try {
+        // Reverse order: the most recently started step stops first.
+        for (let i = orch.items.length - 1; i >= 0; i--) {
+          const item = orch.items[i];
+          setRunStates((prev) => {
+            const next = [...(prev[orch.id] ?? [])];
+            next[i] = { status: 'running' };
+            return { ...prev, [orch.id]: next };
+          });
+          try {
+            if (item.kind === 'tunnel') {
+              await invoke('tunnel_stop', { id: item.id });
+            } else {
+              await invoke('service_stop', { id: item.id });
+            }
+            stopped++;
+            setRunStates((prev) => {
+              const next = [...(prev[orch.id] ?? [])];
+              next[i] = { status: 'stopped' };
+              return { ...prev, [orch.id]: next };
+            });
+          } catch {
+            // Best-effort: keep stopping the remaining steps.
+            setRunStates((prev) => {
+              const next = [...(prev[orch.id] ?? [])];
+              next[i] = { status: 'ok' };
+              return { ...prev, [orch.id]: next };
+            });
+          }
+        }
+        if (stopped > 0) {
+          toast.success(t('toolbox.orchestrations.stopSuccess'), {
+            description: t('toolbox.orchestrations.stopSummary', { count: stopped }),
+          });
+        } else {
+          toast.info?.(t('toolbox.orchestrations.stopNothing'));
+        }
+      } finally {
+        window.dispatchEvent(new CustomEvent('nexterm:orchestration-ran'));
+        setRunBusy(null);
+      }
+    },
+    [runBusy, t],
+  );
+
   const runningNow = useMemo(() => {
     const set = new Set<string>();
     for (const [id, states] of Object.entries(runStates)) {
@@ -422,6 +499,16 @@ export function ServiceOrchestrations() {
                       {isRunning ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}
                       {isRunning ? t('toolbox.orchestrations.running') : t('toolbox.orchestrations.start')}
                     </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-7 gap-1 text-xs"
+                      disabled={isBusy}
+                      onClick={() => void handleStop(orch)}
+                    >
+                      <Square className="h-3.5 w-3.5" />
+                      {t('toolbox.orchestrations.stop')}
+                    </Button>
                     <DropdownMenu>
                       <DropdownMenuTrigger asChild>
                         <button
@@ -469,6 +556,8 @@ export function ServiceOrchestrations() {
                           <Loader2 className="h-3 w-3 animate-spin" />
                         ) : state?.status === 'ok' ? (
                           <span className="text-[10px]">✓</span>
+                        ) : state?.status === 'stopped' ? (
+                          <span className="text-[10px]">■</span>
                         ) : state?.status === 'failed' ? (
                           <span className="text-[10px]">✕</span>
                         ) : (

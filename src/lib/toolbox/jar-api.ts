@@ -58,8 +58,14 @@ export interface ClassView {
 export interface ClassRef {
   internalTypeName: string;
   name?: string | null;
-  kind: string; // 'type' | 'field' | 'method'
+  kind: string; // 'type' | 'field' | 'method' | 'constructor'
   descriptor?: string | null;
+  /** Owner internal name passed by jd-core (class containing the reference). */
+  owner?: string | null;
+  /** Exact start offset in the decompiled source (JD-GUI hyperlink position). */
+  offset?: number;
+  /** Length of the referenced token in the source. */
+  len?: number;
 }
 
 export interface CompileDiagnostic {
@@ -70,13 +76,6 @@ export interface CompileDiagnostic {
   message: string;
 }
 
-export interface JdkInfo {
-  found: boolean;
-  javacPath?: string;
-  javaVersion?: string;
-  javaHome?: string;
-  error?: string;
-}
 
 export interface PomOpenResult {
   projectId: string;
@@ -104,6 +103,8 @@ export interface NavigateResult {
   libraryId?: string;
   projectId?: string;
   line?: number | null;
+  /** JD-GUI SelectLocation: when `kind === 'multiple'`, the candidates. */
+  candidates?: { entryPath: string; libraryId: string; projectId: string }[];
 }
 
 export const jarApi = {
@@ -125,32 +126,20 @@ export const jarApi = {
   search(projectId: string, query: string): Promise<unknown[]> {
     return withTimeout(invoke('jar_class_search', { projectId, query }), 30000);
   },
-  decompile(projectId: string, entryPath: string): Promise<ClassView> {
-    return withTimeout(invoke<ClassView>('jar_decompile', { projectId, entryPath }));
+  decompile(projectId: string, entryPath: string, libraryId?: string | null, opts?: { escapeUnicode?: boolean | null; realign?: boolean | null }): Promise<ClassView> {
+    return withTimeout(invoke<ClassView>('jar_decompile', {
+      projectId,
+      entryPath,
+      libraryId: libraryId ?? null,
+      escapeUnicode: opts?.escapeUnicode ?? null,
+      realign: opts?.realign ?? null,
+    }), 120000);
   },
   decompileCancel(projectId: string): Promise<void> {
     return withTimeout(invoke('jar_decompile_cancel', { projectId }), 10000);
   },
-  readResource(projectId: string, entryPath: string): Promise<string> {
-    return withTimeout(invoke<string>('jar_resource_read', { projectId, entryPath }), 60000);
-  },
-  save(projectId: string, entryPath: string, source: string): Promise<{ saved: boolean; modified: boolean }> {
-    return withTimeout(invoke('jar_class_save', { projectId, entryPath, source }), 30000);
-  },
-  revert(projectId: string, entryPath: string, version?: number): Promise<ClassView> {
-    return withTimeout(invoke<ClassView>('jar_class_revert', { projectId, entryPath, version: version ?? null }), 30000);
-  },
-  reset(projectId: string): Promise<void> {
-    return withTimeout(invoke('jar_project_reset', { projectId }), 30000);
-  },
-  jdkDetect(): Promise<JdkInfo> {
-    return withTimeout(invoke<JdkInfo>('jar_jdk_detect'), 20000);
-  },
-  compile(projectId: string, entryPath?: string): Promise<{ success: boolean; diagnostics: CompileDiagnostic[]; classCount: number; message?: string }> {
-    return withTimeout(invoke('jar_compile', { projectId, entryPath: entryPath ?? null }), 120000);
-  },
-  build(projectId: string, outputPath: string): Promise<{ success: boolean; size: number; outputPath: string }> {
-    return withTimeout(invoke('jar_build', { projectId, outputPath }), 120000);
+  readResource(projectId: string, entryPath: string, libraryId?: string | null): Promise<string> {
+    return withTimeout(invoke<string>('jar_resource_read', { projectId, entryPath, libraryId: libraryId ?? null }), 60000);
   },
   pomOpen(path: string): Promise<PomOpenResult> {
     return withTimeout(invoke<PomOpenResult>('jar_pom_open', { path }), 120000);
@@ -181,17 +170,32 @@ export const jarApi = {
     return withTimeout(invoke('jar_type_hierarchy', { projectId, entryPath, libraryId: libraryId ?? null }), 120000);
   },
 
-  constantSearch(projectId: string, pattern: string, flags: number): Promise<{ results: { kind: string; value: string; className: string; libraryId: string }[] }> {
+  constantSearch(projectId: string, pattern: string, flags: number): Promise<{ results: { entryPath: string; className: string; libraryId: string; matches: { kind: string; scope: string; value: string; internalTypeName: string }[] }[] }> {
     return withTimeout(invoke('jar_constant_search', { projectId, pattern, flags }), 120000);
   },
 
   resourceBytes(projectId: string, entryPath: string, libraryId?: string): Promise<{ bytes: string; size: number; isText: boolean }> {
     return withTimeout(invoke('jar_resource_bytes', { projectId, entryPath, libraryId: libraryId ?? null }), 60000);
   },
-  exportAll(projectId: string, outputDir: string): Promise<{ exported: number; total: number; failed: number; failedClasses: string[]; outputDir: string }> {
-    return withTimeout(invoke('jar_export_all', { projectId, outputDir }), 300000);
+  exportAll(projectId: string, outputDir: string, opts?: { writeMetadata?: boolean; writeLineNumbers?: boolean; escapeUnicode?: boolean | null; realign?: boolean | null }): Promise<{ exported: number; total: number; failed: number; failedClasses: string[]; outputDir: string }> {
+    return withTimeout(invoke('jar_export_all', {
+      projectId,
+      outputDir,
+      writeMetadata: opts?.writeMetadata ?? true,
+      writeLineNumbers: opts?.writeLineNumbers ?? true,
+      escapeUnicode: opts?.escapeUnicode ?? null,
+      realign: opts?.realign ?? null,
+    }), 300000);
   },
   classInfo(projectId: string, entryPath: string, libraryId?: string): Promise<{ className: string; javaVersion: string; major: number; minor: number; size: number }> {
     return withTimeout(invoke('jar_class_info', { projectId, entryPath, libraryId: libraryId ?? null }), 30000);
+  },
+  /** JD-GUI MavenOrgSourceLoader: download the library's -sources.jar. */
+  mavenSources(projectId: string, libraryId: string, filters?: string): Promise<{ root: string; groupId: string; artifactId: string; version: string }> {
+    return withTimeout(invoke('jar_maven_sources', { projectId, libraryId, filters: filters ?? null }), 180000);
+  },
+  /** Read a .java file from an extracted Maven sources root. */
+  readSourceFile(root: string, entryPath: string): Promise<{ source: string; size: number }> {
+    return withTimeout(invoke('jar_read_source_file', { root, entryPath }), 30000);
   },
 };

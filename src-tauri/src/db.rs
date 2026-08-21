@@ -21,7 +21,7 @@ use tauri::State;
 
 /// Allow-listed normalized tables. Table names are validated against this
 /// list before being interpolated into SQL, so no injection is possible.
-pub const TABLES: [&str; 32] = [
+pub const TABLES: [&str; 33] = [
     "connections",
     "folders",
     "active_connections",
@@ -58,6 +58,7 @@ pub const TABLES: [&str; 32] = [
     "jar_builds",
     "jar_libraries",
     "jar_symbols",
+    "jar_subtypes",
 ];
 
 /// Tables whose legacy key-value layout collides with a new normalized table
@@ -1056,10 +1057,19 @@ CREATE TABLE IF NOT EXISTS "jar_symbols" (
   line INTEGER NOT NULL DEFAULT 0,
   signature TEXT NOT NULL DEFAULT ''
 );
+CREATE TABLE IF NOT EXISTS "jar_subtypes" (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL,
+  super_name TEXT NOT NULL,
+  sub_name TEXT NOT NULL
+);
 CREATE INDEX IF NOT EXISTS idx_jar_libraries_project ON jar_libraries(project_id);
 CREATE INDEX IF NOT EXISTS idx_jar_symbols_class ON jar_symbols(class_id);
 CREATE INDEX IF NOT EXISTS idx_jar_symbols_name ON jar_symbols(name);
 CREATE INDEX IF NOT EXISTS idx_jar_symbols_project ON jar_symbols(project_id);
+CREATE INDEX IF NOT EXISTS idx_jar_subtypes_super ON jar_subtypes(super_name);
+CREATE INDEX IF NOT EXISTS idx_jar_subtypes_sub ON jar_subtypes(sub_name);
+CREATE INDEX IF NOT EXISTS idx_jar_subtypes_project ON jar_subtypes(project_id);
 "#;
 
 #[cfg(test)]

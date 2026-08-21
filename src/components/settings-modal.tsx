@@ -425,7 +425,7 @@ export function SettingsModal({ open, onOpenChange, onAppearanceChange }: Settin
             </TabsList>
           </div>
 
-          <TabsContent value="terminal" className="flex-1 overflow-y-auto px-6 py-4 space-y-4 mt-0">
+          <TabsContent value="terminal" className="flex-1 min-h-0 overflow-y-auto px-6 py-4 space-y-4 mt-0">
             <Card>
               <CardHeader>
                 <CardTitle className="flex items-center gap-2">
@@ -740,7 +740,7 @@ export function SettingsModal({ open, onOpenChange, onAppearanceChange }: Settin
             </Card>
           </TabsContent>
 
-          <TabsContent value="editor" className="flex-1 overflow-y-auto px-6 py-4 space-y-4 mt-0">
+          <TabsContent value="editor" className="flex-1 min-h-0 overflow-y-auto px-6 py-4 space-y-4 mt-0">
             <Card>
               <CardHeader>
                 <CardTitle className="flex items-center gap-2">
@@ -882,7 +882,7 @@ export function SettingsModal({ open, onOpenChange, onAppearanceChange }: Settin
             </Card>
           </TabsContent>
 
-          <TabsContent value="connection" className="flex-1 overflow-y-auto px-6 py-4 space-y-4 mt-0">
+          <TabsContent value="connection" className="flex-1 min-h-0 overflow-y-auto px-6 py-4 space-y-4 mt-0">
             <Card>
               <CardHeader>
                   <CardTitle className="flex items-center gap-2">
@@ -947,7 +947,7 @@ export function SettingsModal({ open, onOpenChange, onAppearanceChange }: Settin
             </Card>
           </TabsContent>
 
-          <TabsContent value="security" className="flex-1 overflow-y-auto px-6 py-4 space-y-4 mt-0">
+          <TabsContent value="security" className="flex-1 min-h-0 overflow-y-auto px-6 py-4 space-y-4 mt-0">
             <Card>
               <CardHeader>
                   <CardTitle className="flex items-center gap-2">
@@ -1029,7 +1029,7 @@ export function SettingsModal({ open, onOpenChange, onAppearanceChange }: Settin
             </Card>
           </TabsContent>
 
-          <TabsContent value="interface" className="flex-1 overflow-y-auto px-6 py-4 space-y-4 mt-0">
+          <TabsContent value="interface" className="flex-1 min-h-0 overflow-y-auto px-6 py-4 space-y-4 mt-0">
             <Card>
               <CardHeader>
                   <CardTitle className="flex items-center gap-2">
@@ -1138,7 +1138,7 @@ export function SettingsModal({ open, onOpenChange, onAppearanceChange }: Settin
             </Card>
           </TabsContent>
 
-          <TabsContent value="keyboard" className="flex-1 overflow-y-auto px-6 py-4 space-y-4 mt-0">
+          <TabsContent value="keyboard" className="flex-1 min-h-0 overflow-y-auto px-6 py-4 space-y-4 mt-0">
             <Card>
               <CardHeader>
                   <CardTitle className="flex items-center gap-2">
@@ -1197,7 +1197,7 @@ export function SettingsModal({ open, onOpenChange, onAppearanceChange }: Settin
             </Card>
           </TabsContent>
 
-          <TabsContent value="advanced" className="flex-1 overflow-y-auto px-6 py-4 space-y-4 mt-0">
+          <TabsContent value="advanced" className="flex-1 min-h-0 overflow-y-auto px-6 py-4 space-y-4 mt-0">
             <Card>
               <CardHeader>
                   <CardTitle className="flex items-center gap-2">

@@ -27,7 +27,7 @@
 | 14 | Navigation > Back / Forward 浏览历史 | 菜单 / Alt+← / Alt+→ / 工具栏 | ❌ | **缺失（页面浏览历史前后导航）** |
 | 15 | Search > Search... 常量池搜索 | 菜单 / Ctrl+Shift+S / 工具栏 | ❌ | **缺失（跨 jar 搜索常量：字符串/字段/方法/类型/模块/声明/引用，8 个勾选 flag）** |
 | 16 | Help > JD Web site / issues / About | 菜单 / F1 | ❌ | 缺失（可后补） |
-| 17 | Help > Preferences... 偏好设置 | 菜单 / Ctrl+Shift+P | ❌ | **缺失（字体大小、CFR 参数、单实例、标签布局等 6 个偏好面板）** |
+| 17 | Help > Preferences... 偏好设置 | 菜单 / Ctrl+Shift+P | ❌ | **缺失（字体大小、反编译参数、单实例、标签布局等 6 个偏好面板）** |
 | 18 | 空状态引导页（"No files are open" + 操作提示） | 启动无文件 | ⚠️ 简单提示 | JD-GUI 有专门引导面板 |
 
 ## 二、树面板交互事件（TreeTabbedPanel.java + Tree.java）
@@ -117,7 +117,7 @@
 |---|---|---|
 | Main window | 单实例开关、窗口状态持久化 | ❌ |
 | Tabs | 单行/多行标签布局 | ❌ |
-| Class file（CFR） | 反编译参数 | ❌ |
+| Class file（反编译） | 反编译参数 | ❌ |
 | Class file（保存） | 保存行为 | ❌ |
 | Directory exploration | 目录索引深度 | ❌ |
 | Appearance（Viewer） | 字体大小等 | ❌ |
@@ -128,10 +128,10 @@
 
 - 打开 jar、拖拽打开、最近文件、pom 依赖库、库切换
 - 包树浏览、单击打开类、多标签 + 关闭/关闭其他/关闭全部 + 标签右键复制类名
-- CFR 反编译、编辑保存修改、revert、javac 编译、构建 jar、导出全部源码
+- jd-core 反编译（JD-GUI 引擎）、编辑保存修改、revert、javac 编译、构建 jar、导出全部源码
 - 类信息面板（Java 版本/major/size）、方法导航跳行、Ctrl/Cmd+click 跳转
 - 资源预览（图片/文本/hex）、类树实时过滤搜索、状态栏、Problems/Output/Search 底部面板
-- 实时 CFR（不缓存）JD-GUI 语义、依赖 jar 只读
+- 实时反编译（不缓存）JD-GUI 语义、依赖 jar 只读
 
 ## 差距按优先级建议（P0 核心体验 → P2 锦上添花）
 
@@ -154,7 +154,7 @@
 12. 多 jar 并行打开（多主面板）——牵动 Open Type/常量池搜索的数据模型
 13. 索引体系扩展（8 类索引 + 异步后台）
 14. 嵌套容器/更多文件类型
-15. 偏好设置面板（字体/CFR 参数/标签布局）
+15. 偏好设置面板（字体/反编译参数/标签布局）
 16. Save All Sources zip 输出 + 进度
 17. Paste Log、META-INF 分组、包节点聚合、内部类隐藏策略
 
@@ -203,7 +203,7 @@
 ### 剩余可选（未实施，JD-GUI 有但价值较低）
 - 单 .class / .java 文件直接打开（需新容器模型）
 - 嵌套容器（jar 内嵌 war）
-- 偏好面板中的 CFR 参数 / maven.org 在线源码下载
+- 偏好面板中的反编译参数 / maven.org 在线源码下载
 - Help 菜单（网页链接/About）
 
 ---

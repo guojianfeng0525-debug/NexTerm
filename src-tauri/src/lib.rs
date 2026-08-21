@@ -420,6 +420,7 @@ pub fn run() {
                                 cancels: std::sync::Mutex::new(Default::default()),
                                 scratch: app.path().app_data_dir().unwrap_or_else(|_| dir.clone()).join("jar-scratch"),
                                 resource_dir: app.path().resource_dir().ok(),
+                                indexes: std::sync::Mutex::new(Default::default()),
                             });
                         }
                         Err(e) => tracing::warn!("Failed to open SQLite store at {:?}: {}", path, e),
@@ -443,6 +444,7 @@ pub fn run() {
                                         cancels: std::sync::Mutex::new(Default::default()),
                                         scratch: dir.join("jar-scratch"),
                                         resource_dir: app.path().resource_dir().ok(),
+                                        indexes: std::sync::Mutex::new(Default::default()),
                                     });
                                 }
                                 Err(e) => tracing::warn!("Failed to open SQLite store: {}", e),
@@ -582,14 +584,6 @@ pub fn run() {
             jar_commands::jar_decompile,
             jar_commands::jar_decompile_cancel,
             jar_commands::jar_resource_read,
-            jar_commands::jar_class_save,
-            jar_commands::jar_class_revert,
-            jar_commands::jar_project_reset,
-            jar_commands::jar_jdk_detect,
-            jar_commands::jar_compile,
-            jar_commands::jar_compile_cancel,
-            jar_commands::jar_build,
-            jar_commands::jar_build_cancel,
             jar_commands::jar_pom_open,
             jar_commands::jar_libraries,
             jar_commands::jar_library_index,
@@ -598,6 +592,8 @@ pub fn run() {
             jar_commands::jar_resource_bytes,
             jar_commands::jar_export_all,
             jar_commands::jar_class_info,
+            jar_commands::jar_maven_sources,
+            jar_commands::jar_read_source_file,
             // Note: PTY terminal I/O now uses WebSocket instead of IPC
             // WebSocket server runs on a dynamically assigned port (9001-9010)
         ])

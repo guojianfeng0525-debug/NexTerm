@@ -21,27 +21,172 @@ use crate::jar_db;
 /// Shared state: path to the SQLite file + per-project cancellation flags.
 /// A fresh `rusqlite::Connection` is opened per command — connections are not
 /// `Clone` and cannot cross `await` points inside a `MutexGuard`.
+/// One nested dependency jar (BOOT-INF/lib, WEB-INF/lib, ...) held in MEMORY
+/// (JD-GUI indexes jars in memory; nothing is persisted to a database).
+pub struct NestedJarData {
+    pub id: String,
+    pub entry_path: String,
+    pub name: String,
+    /// Maven coordinates (pom-opened dependency jars); empty for fat-jar
+    /// nested jars.
+    pub group_id: String,
+    pub artifact_id: String,
+    pub version: String,
+    /// The nested jar's bytes (read once from the parent zip).
+    pub bytes: Vec<u8>,
+    pub entries: Vec<jar::JarEntryInfo>,
+    pub tree: std::collections::BTreeMap<String, jar::PackageNode>,
+    pub class_count: usize,
+}
+
+/// In-memory index of one opened jar project. Rebuilt every time the jar is
+/// opened; dropped when the project is closed — no jar_* DB writes at all.
+pub struct MemoryIndex {
+    pub project_id: String,
+    pub name: String,
+    pub jar_path: String,
+    pub jar_hash: String,
+    pub size: i64,
+    pub class_count: usize,
+    pub resource_count: usize,
+    /// Main jar entries (classes/resources/module), indexed order.
+    pub entries: Vec<jar::JarEntryInfo>,
+    /// Main jar tree (package → classes/resources).
+    pub main_tree: std::collections::BTreeMap<String, jar::PackageNode>,
+    /// Nested dependency jars keyed by library id.
+    pub nested: std::collections::HashMap<String, NestedJarData>,
+    /// Every class name (dotted) across the main jar + nested jars — the
+    /// clickability index (JD-GUI typeDeclarations equivalent).
+    pub class_names: std::collections::BTreeSet<String>,
+}
+
+impl MemoryIndex {
+    /// Find a class entry by its binary name (com.foo.Bar); None when absent.
+    fn find_class(&self, dotted: &str) -> Option<(String, &jar::JarEntryInfo)> {
+        if let Some(e) = self.entries.iter().find(|e| e.kind == "class" && e.class_name == dotted) {
+            return Some((String::new(), e));
+        }
+        for (lib_id, n) in &self.nested {
+            if let Some(e) = n.entries.iter().find(|e| e.kind == "class" && e.class_name == dotted) {
+                return Some((lib_id.clone(), e));
+            }
+        }
+        None
+    }
+
+    /// Read a class entry's bytes from memory: the main jar file when
+    /// `library_id` is empty, otherwise the nested jar's in-memory bytes.
+    pub fn read_class_bytes(&self, library_id: &str, entry_path: &str) -> Result<Vec<u8>, String> {
+        if library_id.is_empty() {
+            jar::read_entry_bytes(std::path::Path::new(&self.jar_path), entry_path)
+        } else {
+            let n = self.nested.get(library_id).ok_or("Library not found")?;
+            let mut cur = std::io::Cursor::new(&n.bytes);
+            let mut archive = zip::ZipArchive::new(&mut cur).map_err(|e| format!("open nested jar: {e}"))?;
+            let mut e = archive
+                .by_name(entry_path)
+                .map_err(|e| format!("entry {entry_path} not found: {e}"))?;
+            let mut buf = Vec::with_capacity(e.size() as usize);
+            use std::io::Read;
+            e.read_to_end(&mut buf).map_err(|e| format!("read entry: {e}"))?;
+            Ok(buf)
+        }
+    }
+
+    /// Extract same-directory classes of `entry_path` (JD-GUI ContainerLoader)
+    /// from MEMORY into `dest_root` (package structure preserved).
+    pub fn extract_sibling_classes_to(
+        &self,
+        library_id: &str,
+        entry_path: &str,
+        dest_root: &std::path::Path,
+    ) -> Result<(), String> {
+        let dir = match entry_path.rfind('/') {
+            Some(i) => &entry_path[..i],
+            None => "",
+        };
+        let prefix = if dir.is_empty() { String::new() } else { format!("{dir}/") };
+        use std::io::Write;
+        if library_id.is_empty() {
+            let file = std::fs::File::open(&self.jar_path).map_err(|e| format!("open jar: {e}"))?;
+            let mut archive = zip::ZipArchive::new(file).map_err(|e| format!("zip: {e}"))?;
+            for i in 0..archive.len() {
+                let mut entry = match archive.by_index(i) {
+                    Ok(e) => e,
+                    Err(_) => continue,
+                };
+                let name = entry.name().to_string();
+                if name.ends_with(".class") && name.starts_with(&prefix) {
+                    let dest = dest_root.join(&name);
+                    if let Some(p) = dest.parent() {
+                        let _ = std::fs::create_dir_all(p);
+                    }
+                    let mut out = match std::fs::File::create(&dest) {
+                        Ok(f) => f,
+                        Err(_) => continue,
+                    };
+                    if std::io::copy(&mut entry, &mut out).is_err() {
+                        let _ = std::fs::remove_file(&dest);
+                    }
+                    let _ = out.flush();
+                }
+            }
+        } else {
+            let n = self.nested.get(library_id).ok_or("Library not found")?;
+            let mut cur = std::io::Cursor::new(&n.bytes);
+            let mut archive = zip::ZipArchive::new(&mut cur).map_err(|e| format!("zip: {e}"))?;
+            for i in 0..archive.len() {
+                let mut entry = match archive.by_index(i) {
+                    Ok(e) => e,
+                    Err(_) => continue,
+                };
+                let name = entry.name().to_string();
+                if name.ends_with(".class") && name.starts_with(&prefix) {
+                    let dest = dest_root.join(&name);
+                    if let Some(p) = dest.parent() {
+                        let _ = std::fs::create_dir_all(p);
+                    }
+                    let mut out = match std::fs::File::create(&dest) {
+                        Ok(f) => f,
+                        Err(_) => continue,
+                    };
+                    if std::io::copy(&mut entry, &mut out).is_err() {
+                        let _ = std::fs::remove_file(&dest);
+                    }
+                    let _ = out.flush();
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 pub struct JarState {
-    /// Path to the nexterm.db file (shared with the rest of the app).
+    /// Path to the nexterm.db file (shared with the rest of the app — the jar
+    /// feature no longer writes to it).
     pub db_path: std::path::PathBuf,
-    /// project_id → cancel flag for the active decompile/compile/build.
+    /// project_id → cancel flag for the active decompile.
     pub cancels: Mutex<HashMap<String, Arc<AtomicBool>>>,
-    /// Where decompile/compile scratch dirs live.
+    /// Where decompile scratch dirs live (temporary .class files).
     pub scratch: PathBuf,
-    /// Tauri resource dir (bundled cfr/ lives here). Resolved at startup so
-    /// the CFR jar is found on every platform, including Windows exe layout.
+    /// Tauri resource dir (bundled jdcore/ lives here). Resolved at startup so
+    /// the jd-core wrapper jar is found on every platform, including Windows
+    /// exe layout.
     pub resource_dir: Option<std::path::PathBuf>,
+    /// Open jar projects: project_id → in-memory index (JD-GUI: no DB).
+    pub indexes: Mutex<HashMap<String, MemoryIndex>>,
 }
 
 impl JarState {
-    /// Locate the bundled CFR jar, preferring the Tauri resource dir.
-    pub fn cfr_jar(&self) -> Result<std::path::PathBuf, String> {
-        decompile::find_cfr_jar_with(self.resource_dir.as_deref())
+    /// Locate the bundled jd-core wrapper jar, preferring the Tauri resource dir.
+    pub fn decompiler_jar(&self) -> Result<std::path::PathBuf, String> {
+        decompile::find_decompiler_jar_with(self.resource_dir.as_deref())
     }
 }
 
 impl JarState {
-    /// Open a fresh connection to the shared SQLite file.
+    /// Open a fresh connection to the shared SQLite file (kept for non-jar
+    /// features; the jar feature is fully in-memory now).
     pub fn conn(&self) -> Result<rusqlite::Connection, String> {
         jar_db::open(&self.db_path)
     }
@@ -113,159 +258,108 @@ pub async fn jar_project_open(
         return Err(format!("JAR file not found: {}", path_buf.display()));
     }
 
-    // Heavy: index (spawn_blocking).
+    // Heavy: index (spawn_blocking) — reads the zip metadata into memory.
     let path_for_index = path_buf.clone();
     let idx = tauri::async_runtime::spawn_blocking(move || jar::index_jar(&path_for_index))
         .await
         .map_err(|e| e.to_string())??;
-
-    let mut conn = state.conn()?;
 
     let name = path_buf
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "untitled.jar".into());
     let id = format!("jar-{}", &idx.jar_hash[..16.min(idx.jar_hash.len())]);
-
-    let existing = jar_db::get_project(&conn, &id)?;
     let now = jar_db::now_ms();
-    let (created_at, updated_at) = match &existing {
-        Some(p) => (p.created_at, now),
-        None => (now, now),
-    };
 
-    let hash_changed = existing
-        .as_ref()
-        .map(|p| p.jar_hash != idx.jar_hash)
-        .unwrap_or(true);
-    if hash_changed {
-        jar_db::delete_classes_for_project(&conn, &id)?;
-        let project = jar_db::JarProject {
-            id: id.clone(),
-            name: name.clone(),
-            jar_path: path_buf.display().to_string(),
-            jar_hash: idx.jar_hash.clone(),
-            size: idx.size as i64,
-            class_count: idx.class_count as i64,
-            resource_count: idx.resource_count as i64,
-            created_at,
-            updated_at,
+    // JD-GUI recursive container model: nested dependency jars (BOOT-INF/lib,
+    // WEB-INF/lib, ...) are read INTO MEMORY (zip bytes) and indexed — nothing
+    // is extracted to disk or persisted.
+    let main_path = path_buf.clone();
+    let pid = id.clone();
+    let nested = tauri::async_runtime::spawn_blocking(move || -> Vec<NestedJarData> {
+        let mut out = Vec::new();
+        let file = match std::fs::File::open(&main_path) {
+            Ok(f) => f,
+            Err(_) => return out,
         };
-        jar_db::upsert_project(&conn, &project)?;
-
-        // Batch insert all classes in one transaction (large jars: thousands
-        // of rows — per-row autocommit is the main first-open cost).
-        {
-            let tx = conn
-                .transaction()
-                .map_err(|e| format!("begin tx: {e}"))?;
-            {
-                let mut insert = tx
-                    .prepare(
-                        "INSERT OR REPLACE INTO jar_classes
-                           (id, project_id, library_id, entry_path, class_name, package_name, kind, is_inner_class,
-                            modified_source, modified, compile_status, compile_output, compile_timestamp, source_hash)
-                         VALUES (?1, ?2, '', ?3, ?4, ?5, ?6, ?7, NULL, 0, 'none', NULL, NULL, NULL)",
-                    )
-                    .map_err(|e| format!("prepare insert: {e}"))?;
-                for e in &idx.entries {
-                    insert
-                        .execute(rusqlite::params![
-                            format!("{id}:{}", e.entry_path),
-                            id,
-                            e.entry_path,
-                            e.class_name,
-                            e.package_name,
-                            e.kind,
-                            e.is_inner_class,
-                        ])
-                        .map_err(|er| format!("insert class: {er}"))?;
-                }
+        let mut archive = match zip::ZipArchive::new(file) {
+            Ok(a) => a,
+            Err(_) => return out,
+        };
+        let names = match jar::list_nested_archives(&main_path) {
+            Ok(n) => n,
+            Err(_) => return out,
+        };
+        use std::io::Read;
+        for ename in names {
+            let mut bytes = Vec::new();
+            let mut entry = match archive.by_name(&ename) {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            if entry.read_to_end(&mut bytes).is_err() {
+                continue;
             }
-            tx.commit().map_err(|e| format!("commit tx: {e}"))?;
+            let mut cur = std::io::Cursor::new(bytes.clone());
+            let nidx = match jar::index_jar_reader(&mut cur) {
+                Ok(i) => i,
+                Err(_) => continue,
+            };
+            let base = ename.rsplit('/').next().unwrap_or(&ename).to_string();
+            let lib_id = format!(
+                "{pid}:nested:{}",
+                crate::jar::sha256_bytes(ename.as_bytes()).get(..12).unwrap_or("n")
+            );
+            out.push(NestedJarData {
+                id: lib_id,
+                entry_path: ename.clone(),
+                name: format!("[nested] {base}|{ename}"),
+                group_id: String::new(),
+                artifact_id: base.replace(".jar", ""),
+                version: String::new(),
+                bytes,
+                entries: nidx.entries.clone(),
+                tree: jar::build_tree(&nidx.entries),
+                class_count: nidx.class_count,
+            });
         }
-    } else {
-        jar_db::upsert_project(
-            &conn,
-            &jar_db::JarProject {
-                id: id.clone(),
-                name: name.clone(),
-                jar_path: path_buf.display().to_string(),
-                jar_hash: idx.jar_hash.clone(),
-                size: idx.size as i64,
-                class_count: idx.class_count as i64,
-                resource_count: idx.resource_count as i64,
-                created_at,
-                updated_at,
-            },
-        )?;
+        out
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+
+    // Clickability index: every class name across the main jar + nested jars
+    // (JD-GUI typeDeclarations).
+    let mut class_names: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for e in &idx.entries {
+        if e.kind == "class" {
+            class_names.insert(e.class_name.clone());
+        }
     }
-
-    // Index nested archives (Spring Boot BOOT-INF/lib/*.jar, WEB-INF/lib/*.jar).
-    // Mirrors JD-GUI's recursive container model: nested jars become read-only
-    // libraries so their classes are navigable / searchable. Extraction +
-    // indexing run in parallel; inserts are batched in a transaction.
-    if hash_changed {
-        let main_path = path_buf.clone();
-        let scratch_root = state.scratch.join(format!("{id}-nested"));
-        let nested = tauri::async_runtime::spawn_blocking(move || {
-            jar::extract_and_index_nested(&main_path, &scratch_root)
-        })
-        .await
-        .map_err(|e| e.to_string())?;
-
-        let mut conn = state.conn()?;
-        let tx = conn
-            .transaction()
-            .map_err(|e| format!("begin tx: {e}"))?;
-        {
-            let mut insert = tx
-                .prepare(
-                    "INSERT OR REPLACE INTO jar_classes
-                       (id, project_id, library_id, entry_path, class_name, package_name, kind, is_inner_class,
-                        modified_source, modified, compile_status, compile_output, compile_timestamp, source_hash)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL, 0, 'none', NULL, NULL, NULL)",
-                )
-                .map_err(|e| format!("prepare insert: {e}"))?;
-            for (ename, extracted, nested_idx) in &nested {
-                let lib_id = format!(
-                    "{id}:nested:{}",
-                    crate::jar::sha256_bytes(ename.as_bytes()).get(..12).unwrap_or("n")
-                );
-                let base_name = ename.rsplit('/').next().unwrap_or(ename);
-                let lib = jar_db::JarLibrary {
-                    id: lib_id.clone(),
-                    project_id: id.clone(),
-                    name: format!("[nested] {base_name}|{ename}"),
-                    group_id: String::new(),
-                    artifact_id: base_name.replace(".jar", ""),
-                    version: String::new(),
-                    jar_path: extracted.clone(),
-                    jar_hash: nested_idx.jar_hash.clone(),
-                    class_count: nested_idx.class_count as i64,
-                    editable: false,
-                };
-                jar_db::upsert_library(&tx, &lib)?;
-                for e in &nested_idx.entries {
-                    insert
-                        .execute(rusqlite::params![
-                            format!("{lib_id}:{}", e.entry_path),
-                            id,
-                            lib_id,
-                            e.entry_path,
-                            e.class_name,
-                            e.package_name,
-                            e.kind,
-                            e.is_inner_class,
-                        ])
-                        .map_err(|er| format!("insert class: {er}"))?;
-                }
+    for n in &nested {
+        for e in &n.entries {
+            if e.kind == "class" {
+                class_names.insert(e.class_name.clone());
             }
         }
-        tx.commit().map_err(|e| format!("commit tx: {e}"))?;
     }
 
-    let tree = jar::build_tree(&idx.entries);
+    let main_tree = jar::build_tree(&idx.entries);
+    let index = MemoryIndex {
+        project_id: id.clone(),
+        name: name.clone(),
+        jar_path: path_buf.display().to_string(),
+        jar_hash: idx.jar_hash.clone(),
+        size: idx.size as i64,
+        class_count: idx.class_count,
+        resource_count: idx.resource_count,
+        entries: idx.entries.clone(),
+        main_tree: main_tree.clone(),
+        nested: nested.into_iter().map(|n| (n.id.clone(), n)).collect(),
+        class_names,
+    };
+    state.indexes.lock().expect("indexes poisoned").insert(id.clone(), index);
+
     Ok(ProjectSummary {
         id,
         name,
@@ -274,29 +368,29 @@ pub async fn jar_project_open(
         size: idx.size as i64,
         class_count: idx.class_count as i64,
         resource_count: idx.resource_count as i64,
-        class_tree: tree,
-        created_at,
-        updated_at,
+        class_tree: main_tree,
+        created_at: now,
+        updated_at: now,
     })
 }
 
 #[tauri::command]
 pub async fn jar_project_list(state: State<'_, JarState>) -> Result<Vec<ProjectSummary>, String> {
-    let conn = state.conn()?;
-    let projects = jar_db::list_projects(&conn)?;
-    Ok(projects
-        .into_iter()
-        .map(|p| ProjectSummary {
-            id: p.id,
-            name: p.name,
-            jar_path: p.jar_path,
-            jar_hash: p.jar_hash,
-            size: p.size,
-            class_count: p.class_count,
-            resource_count: p.resource_count,
-            class_tree: Default::default(),
-            created_at: p.created_at,
-            updated_at: p.updated_at,
+    let now = jar_db::now_ms();
+    let indexes = state.indexes.lock().expect("indexes poisoned");
+    Ok(indexes
+        .values()
+        .map(|ix| ProjectSummary {
+            id: ix.project_id.clone(),
+            name: ix.name.clone(),
+            jar_path: ix.jar_path.clone(),
+            jar_hash: ix.jar_hash.clone(),
+            size: ix.size,
+            class_count: ix.class_count as i64,
+            resource_count: ix.resource_count as i64,
+            class_tree: ix.main_tree.clone(),
+            created_at: now,
+            updated_at: now,
         })
         .collect())
 }
@@ -306,75 +400,31 @@ pub async fn jar_project_delete(
     project_id: String,
     state: State<'_, JarState>,
 ) -> Result<(), String> {
-    let conn = state.conn()?;
-    jar_db::delete_project(&conn, &project_id)?;
+    state.indexes.lock().expect("indexes poisoned").remove(&project_id);
     state.cancels.lock().expect("poisoned").remove(&project_id);
     Ok(())
 }
 
-// ── Class tree / search ───────────────────────────────────────────────────
-
-/// Reopen a previously-indexed project from the DB (no re-indexing). Used by
-/// cross-project Open Type navigation (JD-GUI: every open file is navigable).
 #[tauri::command]
 pub async fn jar_project_reopen(
     project_id: String,
     state: State<'_, JarState>,
 ) -> Result<ProjectSummary, String> {
-    let conn = state.conn()?;
-    let p = jar_db::get_project(&conn, &project_id)?.ok_or("Project not found")?;
-    let count: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM jar_classes WHERE project_id = ?1 AND kind = 'class'",
-            [&project_id],
-            |r| r.get(0),
-        )
-        .map_err(|e| format!("count classes: {e}"))?;
-    let res_count: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM jar_classes WHERE project_id = ?1 AND kind != 'class'",
-            [&project_id],
-            |r| r.get(0),
-        )
-        .map_err(|e| format!("count resources: {e}"))?;
-    // Nested libraries live in the scratch dir, which is wiped on restart.
-    // Re-extract any missing nested jar from the main archive so navigation
-    // to their classes keeps working (JD-GUI semantics).
-    for lib in jar_db::list_libraries(&conn, &project_id)? {
-        let lib_path = PathBuf::from(&lib.jar_path);
-        if lib.name.starts_with("[nested]") && !lib_path.exists() {
-            if let Some(ename) = restore_nested_entry_name(&lib.name) {
-                let main_path = PathBuf::from(&p.jar_path);
-                if main_path.is_file() {
-                    let _ = jar::extract_entry(&main_path, &ename, &lib_path);
-                }
-            }
-        }
-    }
+    let now = jar_db::now_ms();
+    let indexes = state.indexes.lock().expect("indexes poisoned");
+    let ix = indexes.get(&project_id).ok_or("Project not found")?;
     Ok(ProjectSummary {
-        id: p.id,
-        name: p.name,
-        jar_path: p.jar_path,
-        jar_hash: p.jar_hash,
-        size: p.size,
-        class_count: count,
-        resource_count: res_count,
-        class_tree: Default::default(),
-        created_at: p.created_at,
-        updated_at: p.updated_at,
+        id: ix.project_id.clone(),
+        name: ix.name.clone(),
+        jar_path: ix.jar_path.clone(),
+        jar_hash: ix.jar_hash.clone(),
+        size: ix.size,
+        class_count: ix.class_count as i64,
+        resource_count: ix.resource_count as i64,
+        class_tree: ix.main_tree.clone(),
+        created_at: now,
+        updated_at: now,
     })
-}
-
-/// Recover the original nested-archive entry name from the library display
-/// name ("[nested] spring-core.jar" → "BOOT-INF/lib/spring-core.jar" is not
-/// recoverable from the name alone, so we store it in the name suffix).
-fn restore_nested_entry_name(name: &str) -> Option<String> {
-    // We append the entry name after a marker when creating the library.
-    let s = name.strip_prefix("[nested] ")?;
-    if let Some(idx) = s.rfind('|') {
-        return Some(s[idx + 1..].to_string());
-    }
-    None
 }
 
 #[tauri::command]
@@ -382,21 +432,11 @@ pub async fn jar_class_index(
     project_id: String,
     state: State<'_, JarState>,
 ) -> Result<std::collections::BTreeMap<String, jar::PackageNode>, String> {
-    let conn = state.conn()?;
-    let rows = jar_db::list_classes(&conn, &project_id)?;
-    let infos: Vec<jar::JarEntryInfo> = rows
-        .into_iter()
-        .map(|r| jar::JarEntryInfo {
-            entry_path: r.entry_path,
-            class_name: r.class_name,
-            package_name: r.package_name,
-            kind: r.kind,
-            is_inner_class: r.is_inner_class,
-            size: 0,
-            compressed_size: 0,
-        })
-        .collect();
-    Ok(jar::build_tree(&infos))
+    // JD-GUI container model: the MAIN tree shows only the main jar's classes
+    // (memory index); dependency jars are separate containers.
+    let indexes = state.indexes.lock().expect("indexes poisoned");
+    let ix = indexes.get(&project_id).ok_or("Project not found")?;
+    Ok(ix.main_tree.clone())
 }
 
 #[tauri::command]
@@ -405,44 +445,30 @@ pub async fn jar_class_search(
     query: String,
     state: State<'_, JarState>,
 ) -> Result<Vec<serde_json::Value>, String> {
-    let conn = state.conn()?;
     let q = query.to_lowercase();
-    let rows = jar_db::list_classes(&conn, &project_id)?;
-    Ok(rows
-        .into_iter()
-        .filter(|r| {
-            let name = r.class_name.to_lowercase();
-            let pkg = r.package_name.to_lowercase();
-            name.contains(&q) || pkg.contains(&q)
-        })
-        .take(200)
-        .map(|r| {
-            serde_json::json!({
-                "entryPath": r.entry_path,
-                "className": r.class_name,
-                "packageName": r.package_name,
-                "kind": r.kind,
-                "modified": r.modified,
-                "compileStatus": r.compile_status,
-            })
-        })
-        .collect::<Vec<_>>())
+    let indexes = state.indexes.lock().expect("indexes poisoned");
+    let ix = indexes.get(&project_id).ok_or("Project not found")?;
+    let mut out: Vec<serde_json::Value> = Vec::new();
+    for e in ix.entries.iter().chain(ix.nested.values().flat_map(|n| n.entries.iter())) {
+        let name = e.class_name.to_lowercase();
+        let pkg = e.package_name.to_lowercase();
+        if name.contains(&q) || pkg.contains(&q) {
+            out.push(serde_json::json!({
+                "entryPath": e.entry_path,
+                "className": e.class_name,
+                "packageName": e.package_name,
+                "kind": e.kind,
+                "modified": false,
+                "compileStatus": "none",
+            }));
+            if out.len() >= 200 {
+                break;
+            }
+        }
+    }
+    Ok(out)
 }
 
-// ── Open Type (Ctrl+T): global type search across main jar + libraries ────
-
-/// JD-GUI Open Type smart matching: build a regexp from the pattern.
-/// Rules (from jd-gui OpenTypeController.createRegExpPattern):
-///   '*'        matches 0 or N characters
-///   '?'        matches 1 character
-///   lower case matches insensitive case
-///   upper case matches upper case (and acts as a word boundary)
-/// JD-GUI Open Type smart matching (exact port of
-/// OpenTypeController.createRegExpPattern + match()):
-///   - lower case matches case-insensitively ([cC])
-///   - upper case matches exactly; a ".*" is inserted before it when i > 1
-///   - '*' matches 0..N chars, '?' matches 1 char
-///   - the whole SIMPLE class name (package stripped) must match (matches())
 fn open_type_regexp(pattern: &str) -> Result<regex::Regex, String> {
     let mut re = String::new();
     let chars: Vec<char> = pattern.chars().collect();
@@ -469,7 +495,6 @@ fn open_type_regexp(pattern: &str) -> Result<regex::Regex, String> {
         }
     }
     re.push_str(".*");
-    // Java's Matcher.matches() = whole input must match → anchor both ends.
     let anchored = format!("^(?:{})$", re);
     regex::Regex::new(&anchored).map_err(|e| format!("bad pattern: {e}"))
 }
@@ -489,39 +514,53 @@ pub async fn jar_open_type(
     scope: Option<String>,
     state: State<'_, JarState>,
 ) -> Result<Vec<serde_json::Value>, String> {
-    let conn = state.conn()?;
     let pat = pattern.trim();
     if pat.is_empty() {
         return Ok(Vec::new());
     }
     let re = open_type_regexp(pat)?;
-    // JD-GUI Open Type searches across every open file. We persist each opened
-    // jar's index, so scope=all searches every known project (incl. libraries).
-    let projects: Vec<(String, String)> = if scope.as_deref() == Some("all") {
-        jar_db::list_projects(&conn)?
-            .into_iter()
-            .map(|p| (p.id, p.name))
-            .collect()
+    let indexes = state.indexes.lock().expect("indexes poisoned");
+    let pids: Vec<String> = if scope.as_deref() == Some("all") {
+        indexes.keys().cloned().collect()
     } else {
-        vec![(project_id.clone(), String::new())]
+        vec![project_id.clone()]
     };
     let mut out = Vec::new();
-    for (pid, pname) in projects {
-        let rows = jar_db::list_classes(&conn, &pid)?;
-        for r in rows.into_iter().filter(|r| r.kind == "class") {
-            if re.is_match(simple_class_name(&r.class_name)) {
+    for pid in pids {
+        let Some(ix) = indexes.get(&pid) else { continue };
+        for e in ix.entries.iter().filter(|e| e.kind == "class") {
+            if re.is_match(simple_class_name(&e.class_name)) {
                 out.push(serde_json::json!({
-                    "entryPath": r.entry_path,
-                    "className": r.class_name,
-                    "packageName": r.package_name,
-                    "libraryId": r.library_id,
+                    "entryPath": e.entry_path,
+                    "className": e.class_name,
+                    "packageName": e.package_name,
+                    "libraryId": "",
                     "projectId": pid,
-                    "projectName": pname,
-                    "isInnerClass": r.is_inner_class,
-                    "modified": r.modified,
+                    "projectName": ix.name,
+                    "isInnerClass": e.is_inner_class,
+                    "modified": false,
                 }));
                 if out.len() >= 500 {
                     return Ok(out);
+                }
+            }
+        }
+        for (lib_id, n) in &ix.nested {
+            for e in n.entries.iter().filter(|e| e.kind == "class") {
+                if re.is_match(simple_class_name(&e.class_name)) {
+                    out.push(serde_json::json!({
+                        "entryPath": e.entry_path,
+                        "className": e.class_name,
+                        "packageName": e.package_name,
+                        "libraryId": lib_id,
+                        "projectId": pid,
+                        "projectName": n.name,
+                        "isInnerClass": e.is_inner_class,
+                        "modified": false,
+                    }));
+                    if out.len() >= 500 {
+                        return Ok(out);
+                    }
                 }
             }
         }
@@ -535,27 +574,21 @@ pub async fn jar_open_type(
 /// IndexesUtil.containsInternalTypeName over every open container.
 #[tauri::command]
 pub async fn jar_known_class_names(
-    project_id: String,
+    _project_id: String,
     state: State<'_, JarState>,
 ) -> Result<serde_json::Value, String> {
     use std::collections::BTreeSet;
-    let conn = state.conn()?;
-    // All projects + the current project's libraries.
-    let mut project_ids: Vec<String> = jar_db::list_projects(&conn)?.into_iter().map(|p| p.id).collect();
-    if !project_ids.iter().any(|id| id == &project_id) {
-        project_ids.push(project_id.clone());
-    }
+    let indexes = state.indexes.lock().expect("indexes poisoned");
     let mut names: BTreeSet<String> = BTreeSet::new();
     let mut simple: BTreeSet<String> = BTreeSet::new();
-    for pid in project_ids {
-        let rows = jar_db::list_classes(&conn, &pid)?;
-        for r in rows.into_iter().filter(|r| r.kind == "class") {
-            names.insert(r.class_name.clone());
-            if let Some(s) = r.class_name.rsplit('.').next() {
-                simple.insert(s.to_string());
+    for ix in indexes.values() {
+        for e in ix.entries.iter().chain(ix.nested.values().flat_map(|n| n.entries.iter())) {
+            if e.kind == "class" {
+                names.insert(e.class_name.clone());
+                if let Some(s) = e.class_name.rsplit('.').next() {
+                    simple.insert(s.to_string());
+                }
             }
-            // Slash form too, so bytecode internalTypeName matches directly.
-            names.insert(r.class_name.replace('.', "/"));
         }
     }
     Ok(serde_json::json!({
@@ -564,9 +597,6 @@ pub async fn jar_known_class_names(
     }))
 }
 
-/// Locate a method declaration inside a class, returning its source line.
-/// Mirrors JD-GUI: clicking a method reference opens the owning class and
-/// jumps to the declaration (fragment = type-method-descriptor).
 #[tauri::command]
 pub async fn jar_method_location(
     project_id: String,
@@ -576,57 +606,80 @@ pub async fn jar_method_location(
     state: State<'_, JarState>,
 ) -> Result<serde_json::Value, String> {
     use std::path::Path as FsPath;
-    let conn = state.conn()?;
-    // Resolve the class to an entry path (dotted class name → jar row).
-    let dotted = class_internal_name.replace('/', ".");
-    let row = jar_db::list_classes(&conn, &project_id)?
-        .into_iter()
-        .find(|c| c.class_name == dotted && c.kind == "class")
-        .ok_or_else(|| format!("Class not found: {dotted}"))?;
-    let entry_path = row.entry_path.clone();
-    let jar_path = if row.library_id.is_empty() {
-        jar_db::get_project(&conn, &project_id)?.ok_or("Project not found")?.jar_path
-    } else {
-        jar_db::get_library(&conn, &project_id, &row.library_id)?.ok_or("Library not found")?.jar_path
-    };
 
-    let bytes = tauri::async_runtime::spawn_blocking({
-        let p = jar_path.clone();
-        let e = entry_path.clone();
-        move || jar::read_entry_bytes(FsPath::new(&p), &e)
-    })
-    .await
-    .map_err(|e| e.to_string())??;
+    // Resolve the declaring class: walk the super chain from the named type
+    // (JD-GUI searchTypeHavingMember) against the in-memory index.
+    fn resolve_member(
+        indexes: &std::collections::HashMap<String, MemoryIndex>,
+        project_id: &str,
+        type_internal: &str,
+        method_name: &str,
+        decompiler_jar: &std::path::Path,
+        scratch: &std::path::Path,
+        visited: &mut std::collections::HashSet<String>,
+    ) -> Result<Option<(String, String, String, i64)>, String> {
+        if !visited.insert(type_internal.to_string()) {
+            return Ok(None); // cycle detected
+        }
+        let Some(ix) = indexes.get(project_id) else {
+            return Ok(None);
+        };
+        let dotted = type_internal.replace('/', ".");
+        let Some((library_id, entry)) = ix.find_class(&dotted) else {
+            return Ok(None);
+        };
+        let bytes = match ix.read_class_bytes(&library_id, &entry.entry_path) {
+            Ok(b) => b,
+            Err(_) => return Ok(None),
+        };
+        let members = jar::class_members(&bytes);
+        if members.methods.iter().any(|m| m == method_name) {
+            let scratch_dir = scratch.join(project_id);
+            let _ = std::fs::create_dir_all(&scratch_dir);
+            let class_file = scratch_dir.join(format!("loc-{}.class", entry.entry_path.replace('/', "_")));
+            if std::fs::write(&class_file, &bytes).is_ok() {
+                let siblings_dir = scratch_dir.join(format!("sib-{}", entry.entry_path.replace('/', "_")));
+                let _ = std::fs::remove_dir_all(&siblings_dir);
+                let _ = ix.extract_sibling_classes_to(&library_id, &entry.entry_path, &siblings_dir);
+                let classpath_arg = siblings_dir.display().to_string();
+                let internal_name = entry.entry_path.strip_suffix(".class").unwrap_or(&entry.entry_path);
+                if let Ok(res) = decompile::decompile_class_with_classpath(&class_file, decompiler_jar, &classpath_arg, internal_name, None) {
+                    let _ = std::fs::remove_file(&class_file);
+                    let hit = jar::extract_methods(&res.source)
+                        .into_iter()
+                        .find(|m| m.name == method_name);
+                    return Ok(Some((entry.class_name.clone(), entry.entry_path.clone(), library_id, hit.map(|m| m.line as i64).unwrap_or(1))));
+                }
+                let _ = std::fs::remove_file(&class_file);
+            }
+            return Ok(Some((entry.class_name.clone(), entry.entry_path.clone(), library_id, 1)));
+        }
+        let (sup, ifaces) = jar::class_super(&bytes).unwrap_or((None, Vec::new()));
+        for parent in sup.iter().chain(ifaces.iter()) {
+            if let Some(found) = resolve_member(indexes, project_id, parent, method_name, decompiler_jar, scratch, visited)? {
+                return Ok(Some(found));
+            }
+        }
+        Ok(None)
+    }
 
-    let cfr = state.cfr_jar()?;
-    let scratch = state.scratch.join(&project_id);
-    std::fs::create_dir_all(&scratch).map_err(|e| format!("scratch: {e}"))?;
-    let class_file = scratch.join(format!("loc-{}.class", entry_path.replace('/', "_")));
-    std::fs::write(&class_file, &bytes).map_err(|e| format!("write class: {e}"))?;
-    let source = tauri::async_runtime::spawn_blocking({
-        let cf = class_file.clone();
-        let cfr = cfr.clone();
-        move || decompile::decompile_class(&cf, &cfr, None)
-    })
-    .await
-    .map_err(|e| e.to_string())??;
-    let _ = std::fs::remove_file(&class_file);
-
-    let methods = crate::jar::extract_methods(&source);
-    let hit = methods.iter().find(|m| m.name == method_name).cloned();
-    let line = hit.map(|m| m.line).unwrap_or(1);
-
-    Ok(serde_json::json!({
-        "entryPath": entry_path,
-        "className": dotted,
-        "libraryId": row.library_id,
-        "line": line,
-    }))
+    let decompiler_jar = state.decompiler_jar()?;
+    let scratch = state.scratch.clone();
+    let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
+    {
+        let indexes = state.indexes.lock().expect("indexes poisoned");
+        match resolve_member(&indexes, &project_id, &class_internal_name, &method_name, &decompiler_jar, &scratch, &mut visited)? {
+            Some((class_name, entry_path, library_id, line)) => Ok(serde_json::json!({
+                "entryPath": entry_path,
+                "className": class_name,
+                "libraryId": library_id,
+                "line": line,
+            })),
+            None => Err(format!("Method not found: {method_name}")),
+        }
+    }
 }
 
-/// Build a full class hierarchy (parents + subclasses) for one class.
-/// Scans every class in the project (main jar + libraries) once, reading the
-/// constant pool super/interfaces — mirrors JD-GUI's subTypeNames index.
 #[tauri::command]
 pub async fn jar_type_hierarchy(
     project_id: String,
@@ -634,1074 +687,131 @@ pub async fn jar_type_hierarchy(
     library_id: Option<String>,
     state: State<'_, JarState>,
 ) -> Result<serde_json::Value, String> {
-    use std::collections::HashMap;
+    let indexes = state.indexes.lock().expect("indexes poisoned");
+    let ix = indexes.get(&project_id).ok_or("Project not found")?;
+    let target_lib = library_id.clone().unwrap_or_default();
 
-    let conn = state.conn()?;
-    let jar_path = if let Some(lib_id) = &library_id {
-        jar_db::get_library(&conn, &project_id, lib_id)?.ok_or("Library not found")?.jar_path
+    let target_entry = if target_lib.is_empty() {
+        ix.entries.iter().find(|e| e.kind == "class" && e.entry_path == entry_path)
     } else {
-        jar_db::get_project(&conn, &project_id)?.ok_or("Project not found")?.jar_path
+        ix.nested.get(&target_lib).and_then(|n| n.entries.iter().find(|e| e.kind == "class" && e.entry_path == entry_path))
     };
+    let target_class_name = target_entry.map(|e| e.class_name.clone()).ok_or("Class not found")?;
 
-    // Collect every class in the same jar (target + its jar siblings).
-    let classes = jar_db::list_classes(&conn, &project_id)?;
-    let siblings: Vec<(String, String)> = classes
-        .iter()
-        .filter(|c| c.kind == "class" && c.library_id == library_id.clone().unwrap_or_default())
-        .map(|c| (c.entry_path.clone(), c.class_name.clone()))
-        .collect();
-
-    let target_class_name = classes
-        .iter()
-        .find(|c| c.entry_path == entry_path && c.library_id == library_id.clone().unwrap_or_default())
-        .map(|c| c.class_name.clone())
-        .ok_or("Class not found")?;
-
-    // Scan jar: class_name (dotted) → (super dotted, interfaces dotted).
-    let jar_path2 = jar_path.clone();
-    let entries2 = siblings.clone();
-    let scan = tauri::async_runtime::spawn_blocking(move || {
-        let file = std::fs::File::open(&jar_path2).map_err(|e| format!("open jar: {e}"))?;
-        let mut archive = zip::ZipArchive::new(file).map_err(|e| format!("zip: {e}"))?;
-        let mut result: HashMap<String, (Option<String>, Vec<String>)> = HashMap::new();
-        for (entry, class_name) in &entries2 {
-            let bytes = {
-                let mut e = match archive.by_name(entry) {
-                    Ok(e) => e,
-                    Err(_) => continue,
-                };
-                let mut buf = Vec::with_capacity(e.size() as usize);
-                use std::io::Read;
-                if e.read_to_end(&mut buf).is_err() {
-                    continue;
-                }
-                buf
-            };
-            if let Ok((sup, ifaces)) = crate::jar::class_super(&bytes) {
-                let to_dotted = |s: String| s.replace('/', ".");
-                result.insert(
-                    class_name.clone(),
-                    (sup.map(to_dotted), ifaces.into_iter().map(to_dotted).collect()),
-                );
-            }
+    // Lazy subtype edges: scan every opened container's classes; each class's
+    // super + interfaces become (super → this) edges (JD-GUI subTypeNames).
+    let mut children: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+    let mut read_class = |ix: &MemoryIndex, e: &jar::JarEntryInfo| -> Option<Vec<u8>> {
+        let lib = if ix.entries.iter().any(|x| std::ptr::eq(x, e)) { "" } else {
+            ix.nested.values().find(|n| n.entries.iter().any(|x| std::ptr::eq(x, e))).map(|n| n.id.as_str()).unwrap_or("")
+        };
+        ix.read_class_bytes(lib, &e.entry_path).ok()
+    };
+    for e in ix.entries.iter().chain(ix.nested.values().flat_map(|n| n.entries.iter())) {
+        if e.kind != "class" {
+            continue;
         }
-        Ok::<_, String>(result)
-    })
-    .await
-    .map_err(|e| e.to_string())??;
-
-    // Build children map (parent → children) from the scan.
-    let mut children: HashMap<String, Vec<String>> = HashMap::new();
-    for (name, (sup, _)) in &scan {
-        if let Some(p) = sup {
-            children.entry(p.clone()).or_default().push(name.clone());
+        let Some(bytes) = read_class(ix, e) else { continue };
+        let Ok((sup, ifaces)) = jar::class_super(&bytes) else { continue };
+        for parent in sup.iter().chain(ifaces.iter()) {
+            let pd = parent.replace('/', ".");
+            children.entry(pd).or_default().push(e.class_name.clone());
         }
     }
     for v in children.values_mut() {
         v.sort();
+        v.dedup();
     }
 
-    // Walk up to the root of the hierarchy.
-    fn ancestors<'a>(
-        name: &str,
-        scan: &'a HashMap<String, (Option<String>, Vec<String>)>,
-        out: &mut Vec<String>,
-    ) {
-        if let Some((Some(p), _)) = scan.get(name) {
-            out.push(p.clone());
-            ancestors(p, scan, out);
+    fn ancestors(ix: &MemoryIndex, read: &dyn Fn(&MemoryIndex, &jar::JarEntryInfo) -> Option<Vec<u8>>, name: &str, out: &mut Vec<String>, visited: &mut std::collections::HashSet<String>) {
+        if !visited.insert(name.to_string()) {
+            return;
+        }
+        let Some((_, e)) = ix.find_class(name) else { return };
+        let Some(bytes) = read(ix, e) else { return };
+        if let Ok((sup, _)) = jar::class_super(&bytes) {
+            if let Some(p) = sup {
+                out.push(p.clone());
+                ancestors(ix, read, &p, out, visited);
+            }
         }
     }
     let mut parent_chain: Vec<String> = Vec::new();
-    ancestors(&target_class_name, &scan, &mut parent_chain);
+    let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
+    ancestors(ix, &read_class, &target_class_name, &mut parent_chain, &mut visited);
 
-    // Walk down: full subtree under the target.
-    fn subtree(name: &str, children: &HashMap<String, Vec<String>>, depth: usize) -> Vec<serde_json::Value> {
+    fn subtree(children: &std::collections::HashMap<String, Vec<String>>, name: &str, depth: usize, seen: &mut std::collections::HashSet<String>) -> Vec<serde_json::Value> {
         let mut out = Vec::new();
+        if depth > 16 || !seen.insert(name.to_string()) {
+            return out;
+        }
         if let Some(kids) = children.get(name) {
             for k in kids {
-                if depth > 16 {
-                    break; // safety
-                }
                 out.push(serde_json::json!({
                     "className": k,
-                    "children": subtree(k, children, depth + 1),
+                    "children": subtree(children, k, depth + 1, seen),
                 }));
             }
         }
         out
+    }
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    seen.insert(target_class_name.clone());
+    let sub_types = subtree(&children, &target_class_name, 0, &mut seen);
+
+    let mut parent_subtypes: Vec<Vec<String>> = Vec::new();
+    for p in &parent_chain {
+        parent_subtypes.push(children.get(p).cloned().unwrap_or_default());
     }
 
     Ok(serde_json::json!({
         "target": target_class_name,
         "targetEntryPath": entry_path,
         "parents": parent_chain,
-        "subTypes": subtree(&target_class_name, &children, 0),
+        "parentSubTypes": parent_subtypes,
+        "subTypes": sub_types,
     }))
 }
 
-// ── Search in constant pools (Ctrl+Shift+S): JD-GUI cross-jar search ──────
-
-/// Search string constants / field refs / method refs across all classes of
-/// the project (main jar + libraries). Mirrors JD-GUI Search in Constant Pools.
-#[tauri::command]
-pub async fn jar_constant_search(
-    project_id: String,
-    pattern: String,
-    flags: u32, // bit0=strings, bit1=fields, bit2=methods
-    state: State<'_, JarState>,
-) -> Result<serde_json::Value, String> {
-    use std::collections::HashSet;
-
-    let conn = state.conn()?;
-    let pat = pattern.trim().to_lowercase();
-    if pat.is_empty() {
-        return Ok(serde_json::json!({ "results": [] }));
-    }
-
-    // Gather every jar in scope: main + libraries.
-    let mut scopes: Vec<(String, String)> = Vec::new(); // (jar_path, library_id)
-    if let Some(p) = jar_db::get_project(&conn, &project_id)? {
-        scopes.push((p.jar_path, String::new()));
-    }
-    for lib in jar_db::list_libraries(&conn, &project_id)? {
-        scopes.push((lib.jar_path, lib.id));
-    }
-
-    let want_strings = flags & 1 != 0;
-    let want_fields = flags & 2 != 0;
-    let want_methods = flags & 4 != 0;
-
-    let scan = tauri::async_runtime::spawn_blocking(move || {
-        let mut results: Vec<serde_json::Value> = Vec::new();
-        let mut seen: HashSet<String> = HashSet::new();
-        for (jar_path, lib_id) in &scopes {
-            let file = match std::fs::File::open(jar_path) {
-                Ok(f) => f,
-                Err(_) => continue,
-            };
-            let mut archive = match zip::ZipArchive::new(file) {
-                Ok(a) => a,
-                Err(_) => continue,
-            };
-            for i in 0..archive.len() {
-                let mut entry = match archive.by_index(i) {
-                    Ok(e) => e,
-                    Err(_) => continue,
-                };
-                let name = entry.name().to_string();
-                if !name.ends_with(".class") {
-                    continue;
-                }
-                let mut buf = Vec::with_capacity(entry.size() as usize);
-                use std::io::Read;
-                if entry.read_to_end(&mut buf).is_err() {
-                    continue;
-                }
-                let pool = match crate::jar::parse_class_pool(&buf) {
-                    Ok(p) => p,
-                    Err(_) => continue,
-                };
-                let class_name = name.strip_suffix(".class").unwrap_or(&name).replace('/', ".");
-                if want_strings {
-                    for s in &pool.strings {
-                        if s.to_lowercase().contains(&pat) {
-                            let key = format!("s:{lib_id}:{s}");
-                            if seen.insert(key) {
-                                results.push(serde_json::json!({
-                                    "kind": "string", "value": s, "className": class_name, "libraryId": lib_id,
-                                }));
-                            }
-                        }
-                    }
-                }
-                if want_fields {
-                    for f in &pool.field_refs {
-                        if f.to_lowercase().contains(&pat) {
-                            let key = format!("f:{lib_id}:{class_name}:{f}");
-                            if seen.insert(key) {
-                                results.push(serde_json::json!({
-                                    "kind": "field", "value": f, "className": class_name, "libraryId": lib_id,
-                                }));
-                            }
-                        }
-                    }
-                }
-                if want_methods {
-                    for m in &pool.method_refs {
-                        if m.to_lowercase().contains(&pat) {
-                            let key = format!("m:{lib_id}:{class_name}:{m}");
-                            if seen.insert(key) {
-                                results.push(serde_json::json!({
-                                    "kind": "method", "value": m, "className": class_name, "libraryId": lib_id,
-                                }));
-                            }
-                        }
-                    }
-                }
-                if results.len() >= 500 {
-                    break;
-                }
-            }
-            if results.len() >= 500 {
-                break;
-            }
-        }
-        Ok::<_, String>(results)
-    })
-    .await
-    .map_err(|e| e.to_string())??;
-
-    Ok(serde_json::json!({ "results": scan }))
-}
-
-// ── Decompile (JD-GUI semantics: no caching — re-decompile on demand) ─────
+// JD-GUI SearchInConstantPoolsView flag bits (exact values from source).
+const SEARCH_TYPE: u32 = 1;
+const SEARCH_CONSTRUCTOR: u32 = 2;
+const SEARCH_METHOD: u32 = 4;
+const SEARCH_FIELD: u32 = 8;
+const SEARCH_STRING: u32 = 16;
+const SEARCH_MODULE: u32 = 32;
+const SEARCH_DECLARATION: u32 = 64;
+const SEARCH_REFERENCE: u32 = 128;
 
 #[tauri::command]
-pub async fn jar_decompile(
-    project_id: String,
-    entry_path: String,
-    state: State<'_, JarState>,
-) -> Result<ClassView, String> {
-    // 1) User-modified? Show the user's source directly (no re-decompile).
-    {
-        let conn = state.conn()?;
-        if let Some(c) = jar_db::get_class(&conn, &project_id, &entry_path)? {
-            if let Some(src) = c.modified_source.clone() {
-                let methods: Vec<MethodLine> = jar::extract_methods(&src)
-                    .into_iter()
-                    .map(|m| MethodLine { name: m.name, line: m.line as i64 })
-                    .collect();
-                return Ok(ClassView {
-                    entry_path: entry_path.clone(),
-                    class_name: c.class_name.clone(),
-                    package_name: c.package_name.clone(),
-                    kind: "class".into(),
-                    is_inner_class: c.is_inner_class,
-                    source: src.clone(),
-                    original_source: Some(src),
-                    modified: true,
-                    compile_status: c.compile_status.clone(),
-                    compile_output: c.compile_output.clone(),
-                    refs: Vec::new(),
-                    methods,
-                });
+
+/// JD-GUI SearchInConstantPoolsController.createPattern: a SIMPLE regular
+/// expression from the user pattern — `*` → `.*`, `?` → `.`, `.` → `\.`,
+/// every other character literal; matched with `Matcher.matches()`.
+fn constant_pool_regexp(pattern: &str) -> Result<regex::Regex, String> {
+    let mut re = String::new();
+    for c in pattern.chars() {
+        match c {
+            '*' => re.push_str(".*"),
+            '?' => re.push('.'),
+            '.' => re.push_str("\\."),
+            c if c.is_ascii_alphanumeric() || c == '_' || c == '-' => re.push(c),
+            c => {
+                re.push('\\');
+                re.push(c);
             }
         }
     }
-
-    // 2) Otherwise re-decompile from the original JAR (never cached).
-    let project = {
-        let conn = state.conn()?;
-        jar_db::get_project(&conn, &project_id)?
-    }
-    .ok_or("Project not found")?;
-
-    let class_bytes = tauri::async_runtime::spawn_blocking({
-        let p = project.jar_path.clone();
-        let e = entry_path.clone();
-        move || jar::read_entry_bytes(Path::new(&p), &e)
-    })
-    .await
-    .map_err(|e| e.to_string())??;
-
-    // A valid .class file starts with CAFEBABE — fail fast with a clear
-    // message instead of letting CFR silently produce nothing.
-    if !class_bytes.starts_with(&[0xca, 0xfe, 0xba, 0xbe]) {
-        return Err(format!(
-            "Class {} is not a valid JVM class (missing CAFEBABE magic, {} bytes). It may be encrypted or corrupt.",
-            entry_path,
-            class_bytes.len()
-        ));
-    }
-
-    let cfr_jar = state.cfr_jar()?;
-    let cancel = state.cancel_flag(&project_id);
-    cancel.store(false, Ordering::Relaxed);
-
-    let scratch = state.scratch.join(&project_id);
-    std::fs::create_dir_all(&scratch).map_err(|e| format!("scratch: {e}"))?;
-    let class_file = scratch.join(format!("{}.class", entry_path.replace('/', "_")));
-    std::fs::write(&class_file, &class_bytes).map_err(|e| format!("write class: {e}"))?;
-
-    let source = tauri::async_runtime::spawn_blocking({
-        let cfr = cfr_jar.clone();
-        let cf = class_file.clone();
-        let cancel = cancel.clone();
-        move || decompile::decompile_class(&cf, &cfr, Some(cancel))
-    })
-    .await
-    .map_err(|e| e.to_string())??;
-
-    let _ = std::fs::remove_file(&class_file);
-
-    // Bytecode-level references for click-to-jump (JD-GUI printReference).
-    let refs = jar::parse_class_pool(&class_bytes)
-        .map(|pool| pool.refs)
-        .unwrap_or_default();
-    // Own method declarations (name → line) for same-page method jumps.
-    let methods: Vec<MethodLine> = jar::extract_methods(&source)
-        .into_iter()
-        .map(|m| MethodLine { name: m.name, line: m.line as i64 })
-        .collect();
-
-    let inner = entry_path.rsplit('$').count() > 1;
-    let ret_entry = entry_path.clone();
-    Ok(ClassView {
-        entry_path: ret_entry,
-        class_name: entry_path_to_class_name(&entry_path),
-        package_name: entry_path_to_package(&entry_path),
-        kind: "class".into(),
-        is_inner_class: inner,
-        source: source.clone(),
-        original_source: Some(source),
-        modified: false,
-        compile_status: "none".into(),
-        compile_output: None,
-        refs,
-        methods,
-    })
+    let anchored = format!("^(?:{re})");
+    regex::Regex::new(&anchored).map_err(|e| format!("bad pattern: {e}"))
 }
 
-#[tauri::command]
-pub async fn jar_decompile_cancel(project_id: String, state: State<'_, JarState>) -> Result<(), String> {
-    let flag = state.cancel_flag(&project_id);
-    flag.store(true, Ordering::Relaxed);
-    Ok(())
+/// Simple name of an internal type name ("java/util/Map$Entry" → "Entry").
+fn simple_internal_name(internal: &str) -> &str {
+    let slash = internal.rfind('/').map(|i| i + 1).unwrap_or(0);
+    let dollar = internal.rfind('$').map(|i| i + 1).unwrap_or(0);
+    &internal[slash.max(dollar)..]
 }
-
-// ── Read resource text ────────────────────────────────────────────────────
-
-#[tauri::command]
-pub async fn jar_resource_read(
-    project_id: String,
-    entry_path: String,
-    state: State<'_, JarState>,
-) -> Result<String, String> {
-    let project = {
-        let conn = state.conn()?;
-        jar_db::get_project(&conn, &project_id)?
-    }
-    .ok_or("Project not found")?;
-
-    let bytes = tauri::async_runtime::spawn_blocking({
-        let p = project.jar_path.clone();
-        let e = entry_path.clone();
-        move || jar::read_entry_bytes(Path::new(&p), &e)
-    })
-    .await
-    .map_err(|e| e.to_string())??;
-
-    String::from_utf8(bytes).map_err(|_| "Resource is binary, not UTF-8 text.".into())
-}
-
-// ── Save / revert ─────────────────────────────────────────────────────────
-
-#[tauri::command]
-pub async fn jar_class_save(
-    project_id: String,
-    entry_path: String,
-    source: String,
-    state: State<'_, JarState>,
-) -> Result<serde_json::Value, String> {
-    let conn = state.conn()?;
-    let source_hash = crate::jar::sha256_bytes(source.as_bytes());
-    let id = format!("{project_id}:{entry_path}");
-
-    let c = jar_db::get_class_by_id(&conn, &id)?.ok_or("Class not indexed")?;
-    jar_db::upsert_class(
-        &conn,
-        &jar_db::JarClassRow {
-            modified_source: Some(source),
-            modified: true,
-            compile_status: "stale".into(),
-            compile_output: None,
-            compile_timestamp: None,
-            source_hash: Some(source_hash),
-            ..c
-        },
-    )?;
-    Ok(serde_json::json!({ "saved": true, "modified": true }))
-}
-
-#[tauri::command]
-pub async fn jar_class_revert(
-    project_id: String,
-    entry_path: String,
-    version: Option<i64>,
-    state: State<'_, JarState>,
-) -> Result<ClassView, String> {
-    let conn = state.conn()?;
-    let id = format!("{project_id}:{entry_path}");
-    let c = jar_db::get_class_by_id(&conn, &id)?.ok_or("Class not indexed")?;
-
-    // JD-GUI semantics: "revert" discards the user's edit and restores the
-    // original class. Version history is not persisted (no caching), so a
-    // specific version request is no longer supported.
-    if version.is_some() {
-        return Err("Version history is not persisted (decompiled sources are re-generated on demand).".into());
-    }
-
-    jar_db::upsert_class(
-        &conn,
-        &jar_db::JarClassRow {
-            modified_source: None,
-            modified: false,
-            compile_status: "none".into(),
-            compile_output: None,
-            compile_timestamp: None,
-            source_hash: None,
-            ..c.clone()
-        },
-    )?;
-
-    // Re-decompile the original class to hand back its pristine source.
-    let project = jar_db::get_project(&conn, &project_id)?.ok_or("Project not found")?;
-    let bytes = tauri::async_runtime::spawn_blocking({
-        let p = project.jar_path.clone();
-        let e = entry_path.clone();
-        move || jar::read_entry_bytes(Path::new(&p), &e)
-    })
-    .await
-    .map_err(|e| e.to_string())??;
-    if !bytes.starts_with(&[0xca, 0xfe, 0xba, 0xbe]) {
-        return Err(format!("Class {entry_path} is not a valid JVM class (missing CAFEBABE magic)."));
-    }
-    let cfr = state.cfr_jar()?;
-    let scratch = state.scratch.join(&project_id);
-    std::fs::create_dir_all(&scratch).map_err(|e| format!("scratch: {e}"))?;
-    let class_file = scratch.join(format!("revert-{}.class", entry_path.replace('/', "_")));
-    std::fs::write(&class_file, &bytes).map_err(|e| format!("write class: {e}"))?;
-    let source = tauri::async_runtime::spawn_blocking({
-        let cf = class_file.clone();
-        let cfr = cfr.clone();
-        move || decompile::decompile_class(&cf, &cfr, None)
-    })
-    .await
-    .map_err(|e| e.to_string())??;
-    let _ = std::fs::remove_file(&class_file);
-
-    let refs = jar::parse_class_pool(&bytes).map(|pool| pool.refs).unwrap_or_default();
-    let methods: Vec<MethodLine> = jar::extract_methods(&source)
-        .into_iter()
-        .map(|m| MethodLine { name: m.name, line: m.line as i64 })
-        .collect();
-
-    Ok(ClassView {
-        entry_path,
-        class_name: c.class_name,
-        package_name: c.package_name,
-        kind: "class".into(),
-        is_inner_class: c.is_inner_class,
-        source: source.clone(),
-        original_source: Some(source),
-        modified: false,
-        compile_status: "none".into(),
-        compile_output: None,
-        refs,
-        methods,
-    })
-}
-
-#[tauri::command]
-pub async fn jar_project_reset(
-    project_id: String,
-    state: State<'_, JarState>,
-) -> Result<(), String> {
-    let conn = state.conn()?;
-    let classes = jar_db::list_classes(&conn, &project_id)?;
-    for c in classes {
-        jar_db::upsert_class(
-            &conn,
-            &jar_db::JarClassRow {
-                modified_source: None,
-                modified: false,
-                compile_status: "none".into(),
-                compile_output: None,
-                compile_timestamp: None,
-                source_hash: None,
-                ..c.clone()
-            },
-        )?;
-    }
-    Ok(())
-}
-
-// ── JDK detect / compile ──────────────────────────────────────────────────
-
-#[tauri::command]
-pub async fn jar_jdk_detect() -> Result<compile::JdkInfo, String> {
-    tauri::async_runtime::spawn_blocking(compile::detect_jdk)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub async fn jar_compile(
-    project_id: String,
-    entry_path: Option<String>,
-    state: State<'_, JarState>,
-) -> Result<serde_json::Value, String> {
-    let jdk = compile::detect_jdk();
-    if !jdk.found {
-        return Err(jdk.error.unwrap_or("JDK not found".into()));
-    }
-    let javac = jdk.javac_path.clone().ok_or("javac missing")?;
-
-    let project = {
-        let conn = state.conn()?;
-        jar_db::get_project(&conn, &project_id)?
-    }
-    .ok_or("Project not found")?;
-
-    // Collect sources (only modified classes need compiling).
-    let (sources, classpath) = {
-        let conn = state.conn()?;
-        let modified = jar_db::list_modified_classes(&conn, &project_id)?;
-        let mut srcs = Vec::new();
-        for c in &modified {
-            if let Some(entry) = entry_path.as_ref() {
-                if &c.entry_path != entry {
-                    continue;
-                }
-            }
-            let src = c
-                .modified_source
-                .clone()
-                .ok_or_else(|| format!("No source for {}", c.entry_path))?;
-            let java_rel = c.entry_path.replace(".class", ".java");
-            srcs.push((java_rel, src));
-        }
-        (srcs, project.jar_path.clone())
-    };
-
-    if sources.is_empty() {
-        return Ok(serde_json::json!({ "success": false, "diagnostics": [], "message": "No modified classes to compile." }));
-    }
-
-    let cancel = state.cancel_flag(&project_id);
-    cancel.store(false, Ordering::Relaxed);
-    let scratch = state.scratch.join(format!("{project_id}-compile"));
-    std::fs::create_dir_all(&scratch).map_err(|e| format!("scratch: {e}"))?;
-    let out = scratch.join("out");
-    let _ = std::fs::remove_dir_all(&out);
-
-    let result = tauri::async_runtime::spawn_blocking({
-        let javac = javac.clone();
-        let cp = classpath.clone();
-        let sc = scratch.clone();
-        move || compile::compile_sources(&javac, &sources, Some(&cp), &sc)
-    })
-    .await
-    .map_err(|e| e.to_string())??;
-
-    let diags = result.diagnostics.clone();
-    let compile_succeeded = result.success;
-
-    {
-        let conn = state.conn()?;
-        let modified = jar_db::list_modified_classes(&conn, &project_id)?;
-        for c in &modified {
-            // Compiled output is NOT persisted (JD-GUI semantics): it lives in
-            // the scratch dir and is regenerated by jar_build on demand.
-            jar_db::upsert_class(
-                &conn,
-                &jar_db::JarClassRow {
-                    compile_status: if compile_succeeded { "ok".into() } else { "error".into() },
-                    compile_output: Some(
-                        diags
-                            .iter()
-                            .map(|d| format!("{}:{}:{}: {}", d.file, d.line, d.column, d.message))
-                            .collect::<Vec<_>>()
-                            .join("\n"),
-                    ),
-                    compile_timestamp: Some(jar_db::now_ms()),
-                    ..c.clone()
-                },
-            )?;
-        }
-    }
-
-    Ok(serde_json::json!({
-        "success": result.success,
-        "diagnostics": diags.iter().map(|d| serde_json::json!({
-            "file": d.file, "line": d.line, "column": d.column, "level": d.level, "message": d.message,
-        })).collect::<Vec<_>>(),
-        "classCount": result.classes.len(),
-    }))
-}
-
-#[tauri::command]
-pub async fn jar_compile_cancel(project_id: String, state: State<'_, JarState>) -> Result<(), String> {
-    let flag = state.cancel_flag(&project_id);
-    flag.store(true, Ordering::Relaxed);
-    Ok(())
-}
-
-// ── Build ─────────────────────────────────────────────────────────────────
-
-#[tauri::command]
-pub async fn jar_build(
-    project_id: String,
-    output_path: String,
-    state: State<'_, JarState>,
-) -> Result<serde_json::Value, String> {
-    let project = {
-        let conn = state.conn()?;
-        jar_db::get_project(&conn, &project_id)?
-    }
-    .ok_or("Project not found")?;
-
-    // Collect modified sources; recompile them (JD-GUI semantics: compiled
-    // bytes are never persisted — rebuild regenerates them on demand).
-    let (sources, modified_rows) = {
-        let conn = state.conn()?;
-        let rows = jar_db::list_classes(&conn, &project_id)?;
-        let mut srcs = Vec::new();
-        for c in &rows {
-            if c.modified && c.kind == "class" {
-                let src = c
-                    .modified_source
-                    .clone()
-                    .ok_or_else(|| format!("No source for {}", c.entry_path))?;
-                srcs.push((c.entry_path.replace(".class", ".java"), src));
-            }
-        }
-        (srcs, rows)
-    };
-
-    // Recompile all modified classes.
-    let jdk = compile::detect_jdk();
-    if !jdk.found {
-        return Err(jdk.error.unwrap_or("JDK not found".into()));
-    }
-    let javac = jdk.javac_path.clone().ok_or("javac missing")?;
-    let scratch = state.scratch.join(format!("{project_id}-build"));
-    std::fs::create_dir_all(&scratch).map_err(|e| format!("scratch: {e}"))?;
-    let out = scratch.join("out");
-    let _ = std::fs::remove_dir_all(&out);
-
-    let compiled = tauri::async_runtime::spawn_blocking({
-        let javac = javac.clone();
-        let cp = project.jar_path.clone();
-        let sc = scratch.clone();
-        let srcs = sources.clone();
-        move || compile::compile_sources(&javac, &srcs, Some(&cp), &sc)
-    })
-    .await
-    .map_err(|e| e.to_string())??;
-
-    if !compiled.success {
-        let diag = compiled
-            .diagnostics
-            .iter()
-            .map(|d| format!("{}:{}:{}: {}", d.file, d.line, d.column, d.message))
-            .collect::<Vec<_>>()
-            .join("\n");
-        return Err(format!("Build aborted — compilation failed:\n{diag}"));
-    }
-
-    // Map compiled output → overrides (rel .class path → bytes).
-    let overrides: HashMap<String, Vec<u8>> = compiled
-        .classes
-        .iter()
-        .map(|(rel, bytes)| (rel.clone(), bytes.clone()))
-        .collect();
-    // Guard: every modified class must have a compiled artifact.
-    for c in &modified_rows {
-        if c.modified && c.kind == "class" {
-            if !overrides.contains_key(&c.entry_path) {
-                return Err(format!(
-                    "Class {} was modified but produced no compiled output — build aborted.",
-                    c.class_name
-                ));
-            }
-        }
-    }
-    let deletions: Vec<String> = Vec::new();
-    let additions: Vec<(String, Vec<u8>)> = Vec::new();
-
-    let out_path = PathBuf::from(&output_path);
-    let original = PathBuf::from(&project.jar_path);
-    let cancel = state.cancel_flag(&project_id);
-    cancel.store(false, Ordering::Relaxed);
-
-    let build_result = tauri::async_runtime::spawn_blocking(move || {
-        builder::build_jar(&original, &overrides, &deletions, &additions, &out_path)
-    })
-    .await
-    .map_err(|e| e.to_string())?;
-
-    let detail = match &build_result {
-        Ok(_) => "ok".to_string(),
-        Err(e) => e.clone(),
-    };
-    let ok = build_result.is_ok();
-    {
-        let conn = state.conn()?;
-        jar_db::insert_build(
-            &conn,
-            &project_id,
-            &output_path,
-            if ok { "ok" } else { "error" },
-            Some(&detail),
-        )?;
-    }
-
-    build_result.map(|size| serde_json::json!({ "success": true, "size": size, "outputPath": output_path }))
-}
-
-#[tauri::command]
-pub async fn jar_build_cancel(project_id: String, state: State<'_, JarState>) -> Result<(), String> {
-    let flag = state.cancel_flag(&project_id);
-    flag.store(true, Ordering::Relaxed);
-    Ok(())
-}
-
-
-// ── POM project (dependencies as read-only libraries) ─────────────────────
-
-/// Open a pom.xml: index the main jar (if any) + all resolved dependency
-/// jars as read-only libraries. Returns the project summary with the main
-/// class tree; dependency trees are available via jar_libraries + jar_class_index.
-#[tauri::command]
-pub async fn jar_pom_open(
-    path: String,
-    state: State<'_, JarState>,
-) -> Result<serde_json::Value, String> {
-    let pom_path = PathBuf::from(&path);
-    if !pom_path.is_file() {
-        return Err(format!("pom.xml not found: {}", pom_path.display()));
-    }
-
-    // Parse pom (fast, inline).
-    let pom = crate::pom::parse_pom_file(&pom_path)?;
-
-    // Project id: from pom groupId:artifactId:version.
-    let id = format!(
-        "jar-pom-{}",
-        crate::jar::sha256_bytes(
-            format!("{}:{}:{}", pom.group_id, pom.artifact_id, pom.version).as_bytes()
-        )
-        .get(..16)
-        .unwrap_or("pom")
-    );
-
-    let conn = state.conn()?;
-    let now = jar_db::now_ms();
-    let existing = jar_db::get_project(&conn, &id)?;
-    let (created_at, updated_at) = match &existing {
-        Some(p) => (p.created_at, now),
-        None => (now, now),
-    };
-
-    // Look for a built jar in target/ (best effort) as the editable main jar.
-    let pom_dir = pom_path.parent().unwrap_or(Path::new("."));
-    let main_jar = {
-        let c1 = pom_dir.join("target").join(format!("{}-{}.jar", pom.artifact_id, pom.version));
-        let c2 = pom_dir.join(format!("{}-{}.jar", pom.artifact_id, pom.version));
-        if c1.is_file() {
-            Some(c1)
-        } else if c2.is_file() {
-            Some(c2)
-        } else {
-            None
-        }
-    };
-
-    let project = jar_db::JarProject {
-        id: id.clone(),
-        name: format!("{}-{}", pom.artifact_id, pom.version),
-        jar_path: main_jar.as_ref().map(|p| p.display().to_string()).unwrap_or_default(),
-        jar_hash: "".into(),
-        size: 0,
-        class_count: 0,
-        resource_count: 0,
-        created_at,
-        updated_at,
-    };
-    jar_db::upsert_project(&conn, &project)?;
-
-    // Clear previous libraries + their classes.
-    jar_db::delete_libraries_for_project(&conn, &id)?;
-    // Delete classes for libraries (keep main project classes? simplest: reset all).
-    conn.execute("DELETE FROM jar_classes WHERE project_id = ?1", [&id])
-        .map_err(|e| format!("clear classes: {e}"))?;
-    conn.execute("DELETE FROM jar_symbols WHERE project_id = ?1", [&id])
-        .map_err(|e| format!("clear symbols: {e}"))?;
-
-    let mut lib_summaries = Vec::new();
-
-    // 1) Main jar (editable).
-    if let Some(main) = &main_jar {
-        let path_for_index = main.clone();
-        let idx = tauri::async_runtime::spawn_blocking(move || jar::index_jar(&path_for_index))
-            .await
-            .map_err(|e| e.to_string())??;
-        for e in &idx.entries {
-            let row = jar_db::JarClassRow {
-                id: format!("{id}:{}", e.entry_path),
-                project_id: id.clone(),
-                library_id: "".into(),
-                entry_path: e.entry_path.clone(),
-                class_name: e.class_name.clone(),
-                package_name: e.package_name.clone(),
-                kind: e.kind.clone(),
-                is_inner_class: e.is_inner_class,
-                modified_source: None,
-                modified: false,
-                compile_status: "none".into(),
-                compile_output: None,
-                compile_timestamp: None,
-                source_hash: None,
-            };
-            jar_db::upsert_class(&conn, &row)?;
-        }
-        lib_summaries.push(serde_json::json!({
-            "id": "", "name": project.name, "editable": true, "classCount": idx.class_count,
-        }));
-    }
-
-    // 2) Dependency jars (read-only libraries).
-    let dep_jars: Vec<(String, String, String, String)> = pom
-        .dependencies
-        .iter()
-        .filter_map(|d| {
-            d.jar_path
-                .clone()
-                .map(|p| (p, d.group_id.clone(), d.artifact_id.clone(), d.version.clone()))
-        })
-        .collect();
-
-    for (jar_path_str, group, artifact, version) in dep_jars {
-        let jar_path = PathBuf::from(&jar_path_str);
-        let path_for_index = jar_path.clone();
-        let idx = match tauri::async_runtime::spawn_blocking(move || jar::index_jar(&path_for_index))
-            .await
-            .map_err(|e| e.to_string())?
-        {
-            Ok(i) => i,
-            Err(_) => continue, // unreadable dep — skip
-        };
-        let lib_id = format!(
-            "{id}:dep:{}",
-            crate::jar::sha256_bytes(jar_path_str.as_bytes()).get(..12).unwrap_or("d")
-        );
-        let lib = jar_db::JarLibrary {
-            id: lib_id.clone(),
-            project_id: id.clone(),
-            name: format!("{artifact}-{version}.jar"),
-            group_id: group,
-            artifact_id: artifact,
-            version,
-            jar_path: jar_path_str.clone(),
-            jar_hash: idx.jar_hash.clone(),
-            class_count: idx.class_count as i64,
-            editable: false,
-        };
-        jar_db::upsert_library(&conn, &lib)?;
-        for e in &idx.entries {
-            let row = jar_db::JarClassRow {
-                id: format!("{lib_id}:{}", e.entry_path),
-                project_id: id.clone(),
-                library_id: lib_id.clone(),
-                entry_path: e.entry_path.clone(),
-                class_name: e.class_name.clone(),
-                package_name: e.package_name.clone(),
-                kind: e.kind.clone(),
-                is_inner_class: e.is_inner_class,
-                modified_source: None,
-                modified: false,
-                compile_status: "none".into(),
-                compile_output: None,
-                compile_timestamp: None,
-                source_hash: None,
-            };
-            jar_db::upsert_class(&conn, &row)?;
-        }
-        lib_summaries.push(serde_json::json!({
-            "id": lib_id, "name": lib.name, "editable": false, "classCount": idx.class_count,
-        }));
-    }
-
-    // 3) Main class tree (project_id = "").
-    let tree = jar_db::list_classes(&conn, &id)?
-        .into_iter()
-        .filter(|c| c.library_id.is_empty())
-        .map(|r| jar::JarEntryInfo {
-            entry_path: r.entry_path,
-            class_name: r.class_name,
-            package_name: r.package_name,
-            kind: r.kind,
-            is_inner_class: r.is_inner_class,
-            size: 0,
-            compressed_size: 0,
-        })
-        .collect::<Vec<_>>();
-
-    Ok(serde_json::json!({
-        "projectId": id,
-        "name": project.name,
-        "pom": {
-            "groupId": pom.group_id,
-            "artifactId": pom.artifact_id,
-            "version": pom.version,
-            "resolvedCount": pom.resolved_count,
-        },
-        "libraries": lib_summaries,
-        "classTree": jar::build_tree(&tree),
-    }))
-}
-
-/// List libraries (dependency jars) for a project.
-#[tauri::command]
-pub async fn jar_libraries(
-    project_id: String,
-    state: State<'_, JarState>,
-) -> Result<Vec<serde_json::Value>, String> {
-    let conn = state.conn()?;
-    let libs = jar_db::list_libraries(&conn, &project_id)?;
-    Ok(libs
-        .into_iter()
-        .map(|l| {
-            serde_json::json!({
-                "id": l.id,
-                "name": l.name,
-                "groupId": l.group_id,
-                "artifactId": l.artifact_id,
-                "version": l.version,
-                "jarPath": l.jar_path,
-                "classCount": l.class_count,
-                "editable": l.editable,
-            })
-        })
-        .collect())
-}
-
-/// Index the class tree of a specific library (dependency jar).
-#[tauri::command]
-pub async fn jar_library_index(
-    project_id: String,
-    library_id: String,
-    state: State<'_, JarState>,
-) -> Result<std::collections::BTreeMap<String, jar::PackageNode>, String> {
-    let conn = state.conn()?;
-    let rows = jar_db::list_classes(&conn, &project_id)?;
-    let infos: Vec<jar::JarEntryInfo> = rows
-        .into_iter()
-        .filter(|r| r.library_id == library_id)
-        .map(|r| jar::JarEntryInfo {
-            entry_path: r.entry_path,
-            class_name: r.class_name,
-            package_name: r.package_name,
-            kind: r.kind,
-            is_inner_class: r.is_inner_class,
-            size: 0,
-            compressed_size: 0,
-        })
-        .collect();
-    Ok(jar::build_tree(&infos))
-}
-
-/// Navigate to a class or method by name across the project + libraries.
-/// `kind` is "class" or "method". Returns the target class (and line for
-/// methods) so the frontend can open it and scroll.
-#[tauri::command]
-pub async fn jar_navigate(
-    project_id: String,
-    name: String,
-    kind: String,
-    state: State<'_, JarState>,
-) -> Result<serde_json::Value, String> {
-    let conn = state.conn()?;
-    let rows = jar_db::list_classes(&conn, &project_id)?;
-
-    if kind == "class" {
-        // Exact class-name match (binary name), prefer main project then libs.
-        let target = rows
-            .iter()
-            .filter(|c| c.kind == "class")
-            .find(|c| c.class_name == name || c.class_name.ends_with(&format!(".{name}")))
-            .or_else(|| {
-                rows.iter()
-                    .filter(|c| c.kind == "class")
-                    .find(|c| c.class_name.split('.').next_back() == Some(name.as_str()))
-            });
-        let Some(c) = target else {
-            // JD-GUI: a reference may resolve to a class in another open file.
-            // Fall back to every indexed project before giving up.
-            for p in jar_db::list_projects(&conn)? {
-                if p.id == project_id {
-                    continue;
-                }
-                let rows2 = jar_db::list_classes(&conn, &p.id)?;
-                if let Some(c2) = rows2.iter().find(|c| c.kind == "class" && c.class_name == name) {
-                    return Ok(serde_json::json!({
-                        "kind": "class",
-                        "className": c2.class_name,
-                        "entryPath": c2.entry_path,
-                        "libraryId": c2.library_id,
-                        "projectId": p.id,
-                        "line": null,
-                    }));
-                }
-            }
-            return Err(format!("Class not found: {name}"));
-        };
-        return Ok(serde_json::json!({
-            "kind": "class",
-            "className": c.class_name,
-            "entryPath": c.entry_path,
-            "libraryId": c.library_id,
-            "projectId": project_id,
-            "line": null,
-        }));
-    }
-
-    if kind == "method" {
-        // Find a method symbol named `name`; prefer main project.
-        let symbols = jar_db::find_symbols_by_name(&conn, &project_id, &name)?;
-        if !symbols.is_empty() {
-            // Prefer non-library (main project) then first.
-            let primary = symbols
-                .iter()
-                .find(|s| !s["libraryId"].is_null())
-                .or_else(|| symbols.first())
-                .cloned()
-                .unwrap_or_else(|| symbols[0].clone());
-            return Ok(serde_json::json!({
-                "kind": "method",
-                "className": primary["className"],
-                "entryPath": primary["entryPath"],
-                "libraryId": primary["libraryId"],
-                "projectId": project_id,
-                "line": primary["line"],
-            }));
-        }
-        // Cross-project fallback (JD-GUI resolves references across open files).
-        for p in jar_db::list_projects(&conn)? {
-            if p.id == project_id {
-                continue;
-            }
-            let syms = jar_db::find_symbols_by_name(&conn, &p.id, &name)?;
-            if let Some(s) = syms.first() {
-                return Ok(serde_json::json!({
-                    "kind": "method",
-                    "className": s["className"],
-                    "entryPath": s["entryPath"],
-                    "libraryId": s["libraryId"],
-                    "projectId": p.id,
-                    "line": s["line"],
-                }));
-            }
-        }
-        return Err(format!("Method not found: {name}"));
-    }
-
-    Err(format!("Unknown navigation kind: {kind}"))
-}
-
-// ── Helpers ───────────────────────────────────────────────────────────────
 
 fn entry_path_to_class_name(entry_path: &str) -> String {
     let without_ext = entry_path.strip_suffix(".class").unwrap_or(entry_path);
@@ -1716,9 +826,455 @@ fn entry_path_to_package(entry_path: &str) -> String {
     }
 }
 
-// ── JD-GUI style: resource bytes + export-all + class info ────────────────
+#[tauri::command]
+pub async fn jar_constant_search(
+    project_id: String,
+    pattern: String,
+    flags: u32,
+    state: State<'_, JarState>,
+) -> Result<serde_json::Value, String> {
+    use std::collections::BTreeMap;
+    let pat = pattern.trim();
+    if pat.is_empty() {
+        return Ok(serde_json::json!({ "results": [] }));
+    }
+    let re = constant_pool_regexp(pat)?;
+    let want = |bit: u32| flags & bit != 0;
+    let want_type = want(SEARCH_TYPE);
+    let want_ctor = want(SEARCH_CONSTRUCTOR);
+    let want_method = want(SEARCH_METHOD);
+    let want_field = want(SEARCH_FIELD);
+    let want_string = want(SEARCH_STRING);
+    let want_decl = want(SEARCH_DECLARATION);
+    let want_ref = want(SEARCH_REFERENCE);
+    let want_module = want(SEARCH_MODULE);
+    let scan_strings = want_string && (want_decl || want_ref);
 
-/// Read a resource as raw bytes (for image/binary preview). Returns base64.
+    let scan = {
+        let indexes = state.indexes.lock().expect("indexes poisoned");
+        let ix = indexes.get(&project_id).ok_or("Project not found")?;
+        let mut scopes: Vec<(Vec<u8>, String)> = Vec::new();
+        if let Ok(b) = std::fs::read(&ix.jar_path) {
+            scopes.push((b, String::new()));
+        }
+        for (lib_id, n) in &ix.nested {
+            scopes.push((n.bytes.clone(), lib_id.clone()));
+        }
+        tauri::async_runtime::spawn_blocking(move || {
+            let mut file_results: BTreeMap<String, serde_json::Value> = BTreeMap::new();
+            for (jar_bytes, lib_id) in &scopes {
+                let mut cur = std::io::Cursor::new(jar_bytes);
+                let mut archive = match zip::ZipArchive::new(&mut cur) {
+                    Ok(a) => a,
+                    Err(_) => continue,
+                };
+                for i in 0..archive.len() {
+                    let mut entry = match archive.by_index(i) {
+                        Ok(e) => e,
+                        Err(_) => continue,
+                    };
+                    let name = entry.name().to_string();
+                    if name.ends_with('/') {
+                        continue;
+                    }
+                    if !want_decl && !want_ref {
+                        break;
+                    }
+                    let bytes = {
+                        let mut buf = Vec::with_capacity(entry.size() as usize);
+                        use std::io::Read;
+                        if entry.read_to_end(&mut buf).is_err() {
+                            continue;
+                        }
+                        buf
+                    };
+                    let is_class = name.ends_with(".class");
+                    let mut matches: Vec<serde_json::Value> = Vec::new();
+                    if is_class {
+                        if let Ok(pool) = jar::parse_class_pool(&bytes) {
+                            if want_type {
+                                for t in &pool.type_refs {
+                                    if re.is_match(simple_internal_name(t)) {
+                                        matches.push(serde_json::json!({ "kind": "type", "value": t }));
+                                    }
+                                }
+                            }
+                            if want_string && scan_strings {
+                                for s in &pool.strings {
+                                    if re.is_match(s) {
+                                        matches.push(serde_json::json!({ "kind": "string", "value": s }));
+                                    }
+                                }
+                            }
+                            if want_method || want_field || want_ctor {
+                                let members = jar::class_members(&bytes);
+                                if want_method {
+                                    for m in &members.methods {
+                                        if re.is_match(m) {
+                                            matches.push(serde_json::json!({ "kind": "method", "value": m }));
+                                        }
+                                    }
+                                }
+                                if want_field {
+                                    for f in &members.fields {
+                                        if re.is_match(f) {
+                                            matches.push(serde_json::json!({ "kind": "field", "value": f }));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } else if want_string && scan_strings && name.ends_with(".properties") || want_module && name.ends_with("module-info.class") {
+                        if want_string && scan_strings && name.ends_with(".properties") {
+                            if let Ok(text) = String::from_utf8(bytes.clone()) {
+                                if re.is_match(&text) {
+                                    matches.push(serde_json::json!({ "kind": "string", "value": text }));
+                                }
+                            }
+                        }
+                        if want_module && name.ends_with("module-info.class") {
+                            if re.is_match(&name) {
+                                matches.push(serde_json::json!({ "kind": "module", "value": name }));
+                            }
+                        }
+                    }
+                    if !matches.is_empty() {
+                        let entry = file_results.entry(name.clone()).or_insert_with(|| serde_json::json!({
+                            "entryPath": name,
+                            "className": name,
+                            "libraryId": lib_id,
+                            "kind": "class",
+                            "matches": Vec::<serde_json::Value>::new(),
+                        }));
+                        if let Some(arr) = entry.get_mut("matches").and_then(|m| m.as_array_mut()) {
+                            arr.extend(matches);
+                        }
+                    }
+                    if file_results.len() >= 500 {
+                        break;
+                    }
+                }
+            }
+            Ok::<_, String>(serde_json::json!({ "results": file_results.into_values().collect::<Vec<_>>() }))
+        })
+    }
+    .await
+    .map_err(|e| e.to_string())??;
+    Ok(scan)
+}
+
+
+#[tauri::command]
+pub async fn jar_decompile(
+    project_id: String,
+    entry_path: String,
+    library_id: Option<String>,
+    escape_unicode: Option<bool>,
+    realign: Option<bool>,
+    state: State<'_, JarState>,
+) -> Result<ClassView, String> {
+    let (is_inner, class_bytes) = {
+        let indexes = state.indexes.lock().expect("indexes poisoned");
+        let ix = indexes.get(&project_id).ok_or("Project not found")?;
+        let lib_id = library_id.clone().unwrap_or_default();
+        let entry = if lib_id.is_empty() {
+            ix.entries.iter().find(|e| e.entry_path == entry_path)
+        } else {
+            ix.nested.get(&lib_id).and_then(|n| n.entries.iter().find(|e| e.entry_path == entry_path))
+        }
+        .ok_or_else(|| format!("Class not found in archive: {entry_path}"))?;
+        let bytes = ix.read_class_bytes(&lib_id, &entry_path)?;
+        (entry.is_inner_class, bytes)
+    };
+    if !class_bytes.starts_with(&[0xca, 0xfe, 0xba, 0xbe]) {
+        return Err(format!(
+            "Class {} is not a valid JVM class (missing CAFEBABE magic, {} bytes). It may be encrypted or corrupt.",
+            entry_path,
+            class_bytes.len()
+        ));
+    }
+    let decompiler_jar = state.decompiler_jar()?;
+    let cancel = state.cancel_flag(&project_id);
+    cancel.store(false, Ordering::Relaxed);
+    let scratch = state.scratch.join(&project_id);
+    std::fs::create_dir_all(&scratch).map_err(|e| format!("scratch: {e}"))?;
+    let class_file = scratch.join(format!("{}.class", entry_path.replace('/', "_")));
+    std::fs::write(&class_file, &class_bytes).map_err(|e| format!("write class: {e}"))?;
+
+    let siblings_dir = scratch.join("siblings");
+    let _ = std::fs::remove_dir_all(&siblings_dir);
+    let lib_id = library_id.clone().unwrap_or_default();
+    let classpath_arg = {
+        let indexes = state.indexes.lock().expect("indexes poisoned");
+        let ix = indexes.get(&project_id).ok_or("Project not found")?;
+        ix.extract_sibling_classes_to(&lib_id, &entry_path, &siblings_dir).ok();
+        siblings_dir.display().to_string()
+    };
+
+    let result = tauri::async_runtime::spawn_blocking({
+        let jd = decompiler_jar.clone();
+        let cf = class_file.clone();
+        let cancel = cancel.clone();
+        let cp = classpath_arg.clone();
+        let internal_name = entry_path.strip_suffix(".class").unwrap_or(&entry_path).to_string();
+        let mut opts = decompile::DecompileOptions::default();
+        if let Some(v) = escape_unicode {
+            opts.escape_unicode = v;
+        }
+        if let Some(v) = realign {
+            opts.realign = v;
+        }
+        move || decompile::decompile_class_with_options(&cf, &jd, &cp, &internal_name, opts, Some(cancel))
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    let source = result.source.clone();
+    let _ = std::fs::remove_file(&class_file);
+    let refs = result.refs;
+    let methods: Vec<MethodLine> = jar::extract_methods(&source)
+        .into_iter()
+        .map(|m| MethodLine { name: m.name, line: m.line as i64 })
+        .collect();
+    Ok(ClassView {
+        entry_path: entry_path.clone(),
+        class_name: entry_path_to_class_name(&entry_path),
+        package_name: entry_path_to_package(&entry_path),
+        kind: "class".into(),
+        is_inner_class: is_inner,
+        source: source.clone(),
+        original_source: Some(source),
+        modified: false,
+        compile_status: "none".into(),
+        compile_output: None,
+        refs,
+        methods,
+    })
+}
+
+
+#[tauri::command]
+pub async fn jar_decompile_cancel(project_id: String, state: State<'_, JarState>) -> Result<(), String> {
+    let flag = state.cancel_flag(&project_id);
+    flag.store(true, Ordering::Relaxed);
+    Ok(())
+}
+
+// ── Read resource text ────────────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn jar_resource_read(
+    project_id: String,
+    entry_path: String,
+    library_id: Option<String>,
+    state: State<'_, JarState>,
+) -> Result<String, String> {
+    let lib_id = library_id.clone().unwrap_or_default();
+    let bytes = {
+        let indexes = state.indexes.lock().expect("indexes poisoned");
+        let ix = indexes.get(&project_id).ok_or("Project not found")?;
+        ix.read_class_bytes(&lib_id, &entry_path)?
+    };
+    String::from_utf8(bytes).map_err(|_| "Resource is binary, not UTF-8 text.".into())
+}
+
+#[tauri::command]
+pub async fn jar_class_revert(
+    project_id: String,
+    entry_path: String,
+    library_id: Option<String>,
+    _version: Option<i64>,
+    state: State<'_, JarState>,
+) -> Result<ClassView, String> {
+    // View-only mode: "revert" re-decompiles the pristine class from memory.
+    let (is_inner, class_bytes) = {
+        let indexes = state.indexes.lock().expect("indexes poisoned");
+        let ix = indexes.get(&project_id).ok_or("Project not found")?;
+        let lib_id = library_id.clone().unwrap_or_default();
+        let entry = if lib_id.is_empty() {
+            ix.entries.iter().find(|e| e.entry_path == entry_path)
+        } else {
+            ix.nested.get(&lib_id).and_then(|n| n.entries.iter().find(|e| e.entry_path == entry_path))
+        }
+        .ok_or_else(|| format!("Class not found in archive: {entry_path}"))?;
+        let bytes = ix.read_class_bytes(&lib_id, &entry_path)?;
+        (entry.is_inner_class, bytes)
+    };
+    if !class_bytes.starts_with(&[0xca, 0xfe, 0xba, 0xbe]) {
+        return Err(format!("Class {entry_path} is not a valid JVM class (missing CAFEBABE magic)."));
+    }
+    let decompiler_jar = state.decompiler_jar()?;
+    let scratch = state.scratch.join(&project_id);
+    std::fs::create_dir_all(&scratch).map_err(|e| format!("scratch: {e}"))?;
+    let class_file = scratch.join(format!("revert-{}.class", entry_path.replace('/', "_")));
+    std::fs::write(&class_file, &class_bytes).map_err(|e| format!("write class: {e}"))?;
+    let siblings_dir = scratch.join("siblings");
+    let _ = std::fs::remove_dir_all(&siblings_dir);
+    let lib_id = library_id.clone().unwrap_or_default();
+    let classpath_arg = {
+        let indexes = state.indexes.lock().expect("indexes poisoned");
+        let ix = indexes.get(&project_id).ok_or("Project not found")?;
+        ix.extract_sibling_classes_to(&lib_id, &entry_path, &siblings_dir).ok();
+        siblings_dir.display().to_string()
+    };
+    let result = tauri::async_runtime::spawn_blocking({
+        let cf = class_file.clone();
+        let jd = decompiler_jar.clone();
+        let cp = classpath_arg.clone();
+        let internal_name = entry_path.strip_suffix(".class").unwrap_or(&entry_path).to_string();
+        move || decompile::decompile_class_with_classpath(&cf, &jd, &cp, &internal_name, None)
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    let _ = std::fs::remove_file(&class_file);
+    let source = result.source.clone();
+    let refs = result.refs;
+    let methods: Vec<MethodLine> = jar::extract_methods(&source)
+        .into_iter()
+        .map(|m| MethodLine { name: m.name, line: m.line as i64 })
+        .collect();
+    Ok(ClassView {
+        entry_path: entry_path.clone(),
+        class_name: entry_path_to_class_name(&entry_path),
+        package_name: entry_path_to_package(&entry_path),
+        kind: "class".into(),
+        is_inner_class: is_inner,
+        source: source.clone(),
+        original_source: Some(source),
+        modified: false,
+        compile_status: "none".into(),
+        compile_output: None,
+        refs,
+        methods,
+    })
+}
+
+#[tauri::command]
+pub async fn jar_library_index(
+    project_id: String,
+    library_id: String,
+    state: State<'_, JarState>,
+) -> Result<std::collections::BTreeMap<String, jar::PackageNode>, String> {
+    let indexes = state.indexes.lock().expect("indexes poisoned");
+    let ix = indexes.get(&project_id).ok_or("Project not found")?;
+    let n = ix.nested.get(&library_id).ok_or("Library not found")?;
+    Ok(n.tree.clone())
+}
+
+#[tauri::command]
+pub async fn jar_navigate(
+    project_id: String,
+    name: String,
+    kind: String,
+    state: State<'_, JarState>,
+) -> Result<serde_json::Value, String> {
+    let indexes = state.indexes.lock().expect("indexes poisoned");
+    if kind == "class" {
+        let name_dotted = name.replace('/', ".");
+        fn hits_for(ix: &MemoryIndex, pid: &str, name_dotted: &str) -> Vec<serde_json::Value> {
+            let mut local: Vec<serde_json::Value> = Vec::new();
+            let lib_of = |e: &jar::JarEntryInfo| -> String {
+                if ix.entries.iter().any(|x| std::ptr::eq(x, e)) {
+                    return String::new();
+                }
+                ix.nested
+                    .values()
+                    .find(|n| n.entries.iter().any(|x| std::ptr::eq(x, e)))
+                    .map(|n| n.id.clone())
+                    .unwrap_or_default()
+            };
+            if let Some((lib_id, e)) = ix.find_class(name_dotted) {
+                local.push(serde_json::json!({
+                    "kind": "class",
+                    "className": e.class_name,
+                    "entryPath": e.entry_path,
+                    "libraryId": lib_id,
+                    "projectId": pid,
+                    "line": null,
+                }));
+            }
+            if local.is_empty() {
+                let simple = name_dotted.rsplit('.').next().unwrap_or(name_dotted).to_string();
+                for e in ix.entries.iter().chain(ix.nested.values().flat_map(|n| n.entries.iter())) {
+                    if e.kind == "class" && e.class_name.rsplit('.').next() == Some(simple.as_str()) {
+                        local.push(serde_json::json!({
+                            "kind": "class",
+                            "className": e.class_name,
+                            "entryPath": e.entry_path,
+                            "libraryId": lib_of(e),
+                            "projectId": pid,
+                            "line": null,
+                        }));
+                    }
+                }
+            }
+            local
+        }
+        let mut hits: Vec<serde_json::Value> = Vec::new();
+        if let Some(ix) = indexes.get(&project_id) {
+            hits = hits_for(ix, &project_id, &name_dotted);
+        }
+        if hits.is_empty() {
+            for (pid, ix) in indexes.iter() {
+                if pid == &project_id {
+                    continue;
+                }
+                hits = hits_for(ix, pid, &name_dotted);
+                if !hits.is_empty() {
+                    break;
+                }
+            }
+        }
+        if hits.is_empty() {
+            return Err(format!("Class not found: {name}"));
+        }
+        if hits.len() == 1 {
+            return Ok(hits.into_iter().next().unwrap());
+        }
+        return Ok(serde_json::json!({ "kind": "multiple", "candidates": hits }));
+    }
+    if kind == "method" {
+        let simple = name.rsplit('.').next().unwrap_or(&name).to_string();
+        let mut found: Option<serde_json::Value> = None;
+        for (pid, ix) in indexes.iter() {
+            if pid != &project_id {
+                continue;
+            }
+            for e in ix.entries.iter().chain(ix.nested.values().flat_map(|n| n.entries.iter())) {
+                if e.kind != "class" {
+                    continue;
+                }
+                let lib = if ix.entries.iter().any(|x| std::ptr::eq(x, e)) { "" } else {
+                    ix.nested.values().find(|n| n.entries.iter().any(|x| std::ptr::eq(x, e))).map(|n| n.id.as_str()).unwrap_or("")
+                };
+                let bytes = match ix.read_class_bytes(lib, &e.entry_path) {
+                    Ok(b) => b,
+                    Err(_) => continue,
+                };
+                let members = jar::class_members(&bytes);
+                if members.methods.iter().any(|m| m == &simple) {
+                    found = Some(serde_json::json!({
+                        "kind": "method",
+                        "className": e.class_name,
+                        "entryPath": e.entry_path,
+                        "libraryId": lib.to_string(),
+                        "projectId": pid,
+                        "line": null,
+                    }));
+                    break;
+                }
+            }
+            if found.is_some() {
+                break;
+            }
+        }
+        return match found {
+            Some(v) => Ok(v),
+            None => Err(format!("Method not found: {name}")),
+        };
+    }
+    Err(format!("Unknown navigation kind: {kind}"))
+}
+
 #[tauri::command]
 pub async fn jar_resource_bytes(
     project_id: String,
@@ -1726,25 +1282,12 @@ pub async fn jar_resource_bytes(
     library_id: Option<String>,
     state: State<'_, JarState>,
 ) -> Result<serde_json::Value, String> {
-    // Resolve the jar path: main project or a library.
-    let conn = state.conn()?;
-    let jar_path = if let Some(lib_id) = &library_id {
-        let lib = jar_db::get_library(&conn, &project_id, lib_id)?
-            .ok_or("Library not found")?;
-        lib.jar_path
-    } else {
-        let p = jar_db::get_project(&conn, &project_id)?.ok_or("Project not found")?;
-        p.jar_path
+    let lib_id = library_id.clone().unwrap_or_default();
+    let bytes = {
+        let indexes = state.indexes.lock().expect("indexes poisoned");
+        let ix = indexes.get(&project_id).ok_or("Project not found")?;
+        ix.read_class_bytes(&lib_id, &entry_path)?
     };
-
-    let bytes = tauri::async_runtime::spawn_blocking({
-        let p = jar_path.clone();
-        let e = entry_path.clone();
-        move || jar::read_entry_bytes(Path::new(&p), &e)
-    })
-    .await
-    .map_err(|e| e.to_string())??;
-
     use base64::Engine;
     Ok(serde_json::json!({
         "bytes": base64::engine::general_purpose::STANDARD.encode(&bytes),
@@ -1753,139 +1296,124 @@ pub async fn jar_resource_bytes(
     }))
 }
 
-/// Recursively add a directory tree into a zip archive (used by export-all).
-fn pack_dir_into_zip(
-    dir: &Path,
-    prefix: &str,
-    zip: &mut zip::ZipWriter<std::fs::File>,
-    opts: zip::write::SimpleFileOptions,
-) -> Result<(), String> {
-    let mut entries: Vec<_> = std::fs::read_dir(dir)
-        .map_err(|e| format!("read staging: {e}"))?
-        .filter_map(|r| r.ok())
-        .collect();
-    entries.sort_by_key(|e| e.file_name());
-    for e in entries {
-        let path = e.path();
-        let name = if prefix.is_empty() {
-            e.file_name().to_string_lossy().into_owned()
-        } else {
-            format!("{prefix}/{}", e.file_name().to_string_lossy())
-        };
-        if path.is_dir() {
-            pack_dir_into_zip(&path, &name, zip, opts)?;
-        } else {
-            let data = std::fs::read(&path).map_err(|e| format!("read staging file: {e}"))?;
-            zip.start_file(name, opts).map_err(|e| format!("zip entry: {e}"))?;
-            use std::io::Write;
-            zip.write_all(&data).map_err(|e| format!("zip write: {e}"))?;
-        }
-    }
-    Ok(())
-}
-
-/// Export the decompiled source of ALL classes in the project (main jar +
-/// libraries) to a directory. Returns per-file results. Cancellable.
 #[tauri::command]
 pub async fn jar_export_all(
     project_id: String,
     output_dir: String,
+    write_metadata: Option<bool>,
+    write_line_numbers: Option<bool>,
+    escape_unicode: Option<bool>,
+    realign: Option<bool>,
     state: State<'_, JarState>,
 ) -> Result<serde_json::Value, String> {
-    let conn = state.conn()?;
-    let classes = jar_db::list_classes(&conn, &project_id)?;
-    let class_files: Vec<(String, String, String)> = classes
-        .iter()
-        .filter(|c| c.kind == "class")
-        .map(|c| (c.library_id.clone(), c.entry_path.clone(), c.class_name.clone()))
-        .collect();
+    let (class_files, main_path) = {
+        let indexes = state.indexes.lock().expect("indexes poisoned");
+        let ix = indexes.get(&project_id).ok_or("Project not found")?;
+        let mut files: Vec<(String, String, String)> = Vec::new();
+        for e in ix.entries.iter().filter(|e| e.kind == "class" && !e.entry_path.contains('$')) {
+            files.push((String::new(), e.entry_path.clone(), e.class_name.clone()));
+        }
+        for (lib_id, n) in &ix.nested {
+            for e in n.entries.iter().filter(|e| e.kind == "class" && !e.entry_path.contains('$')) {
+                files.push((lib_id.clone(), e.entry_path.clone(), e.class_name.clone()));
+            }
+        }
+        (files, ix.jar_path.clone())
+    };
     let class_count = class_files.len();
-    drop(conn);
 
     let out = PathBuf::from(&output_dir);
     let want_zip = out.extension().map(|e| e.eq_ignore_ascii_case("zip")).unwrap_or(false);
-    // When exporting a zip, write sources to a staging dir first, then pack.
     let staging = if want_zip {
-        let s = state.scratch.join(format!("{project_id}-export-src"));
-        let _ = std::fs::remove_dir_all(&s);
-        std::fs::create_dir_all(&s).map_err(|e| format!("create staging: {e}"))?;
-        s
+        let st = state.scratch.join(format!("{project_id}-export-src"));
+        let _ = std::fs::remove_dir_all(&st);
+        std::fs::create_dir_all(&st).map_err(|e| format!("create staging: {e}"))?;
+        st
     } else {
         std::fs::create_dir_all(&out).map_err(|e| format!("create output dir: {e}"))?;
         out.clone()
     };
 
-    let cfr_jar = state.cfr_jar()?;
+    let decompiler_jar = state.decompiler_jar()?;
     let cancel = state.cancel_flag(&project_id);
     cancel.store(false, Ordering::Relaxed);
-
-    // Resolve jar per library id.
-    let resolve_jar = |conn: &rusqlite::Connection, lib_id: &str| -> Result<String, String> {
-        if lib_id.is_empty() {
-            Ok(jar_db::get_project(conn, &project_id)?.ok_or("Project not found")?.jar_path)
-        } else {
-            Ok(jar_db::get_library(conn, &project_id, lib_id)?.ok_or("Library not found")?.jar_path)
-        }
-    };
+    let scratch = state.scratch.join(&project_id);
+    std::fs::create_dir_all(&scratch).map_err(|e| format!("scratch: {e}"))?;
 
     let mut exported = 0usize;
     let mut failed: Vec<String> = Vec::new();
 
-    // Group by jar to batch reads.
-    let conn = state.conn()?;
-    let mut by_jar: std::collections::HashMap<String, Vec<&(String, String, String)>> =
-        std::collections::HashMap::new();
-    for c in &class_files {
-        let jar = resolve_jar(&conn, &c.0)?;
-        by_jar.entry(jar).or_default().push(c);
-    }
-    drop(conn);
-
-    for (jar_path, entries) in by_jar {
+    let indexes = state.indexes.lock().expect("indexes poisoned");
+    let ix = indexes.get(&project_id).ok_or("Project not found")?;
+    for (lib_id, entry, class_name) in &class_files {
         if cancel.load(Ordering::Relaxed) {
             return Err("Export cancelled".into());
         }
-        let scratch = state.scratch.join(format!("{project_id}-export"));
-        std::fs::create_dir_all(&scratch).map_err(|e| format!("scratch: {e}"))?;
-
-        for c in &entries {
-            if cancel.load(Ordering::Relaxed) {
-                return Err("Export cancelled".into());
-            }
-            // Read class bytes.
-            let bytes = match jar::read_entry_bytes(Path::new(&jar_path), &c.1) {
-                Ok(b) => b,
-                Err(_) => {
-                    failed.push(c.2.clone());
-                    continue;
-                }
-            };
-            let class_file = scratch.join(format!("{}.class", c.1.replace('/', "_")));
-            if std::fs::write(&class_file, &bytes).is_err() {
-                failed.push(c.2.clone());
+        let bytes = match ix.read_class_bytes(lib_id, entry) {
+            Ok(b) => b,
+            Err(_) => {
+                failed.push(class_name.clone());
                 continue;
             }
-            match decompile::decompile_class(&class_file, &cfr_jar, Some(cancel.clone())) {
-                Ok(src) => {
-                    // Write to staging/output preserving package structure.
-                    let rel_java = c.1.replace(".class", ".java");
-                    let dest = staging.join(&rel_java);
-                    if let Some(parent) = dest.parent() {
-                        let _ = std::fs::create_dir_all(parent);
-                    }
-                    if std::fs::write(&dest, &src).is_ok() {
-                        exported += 1;
-                    } else {
-                        failed.push(c.2.clone());
-                    }
-                }
-                Err(_) => failed.push(c.2.clone()),
-            }
-            let _ = std::fs::remove_file(&class_file);
+        };
+        let class_file = scratch.join(format!("{}.class", entry.replace('/', "_")));
+        if std::fs::write(&class_file, &bytes).is_err() {
+            failed.push(class_name.clone());
+            continue;
         }
+        let siblings_dir = scratch.join("siblings");
+        let _ = std::fs::remove_dir_all(&siblings_dir);
+        ix.extract_sibling_classes_to(lib_id, entry, &siblings_dir).ok();
+        let internal_name = entry.strip_suffix(".class").unwrap_or(entry);
+        let mut saver_opts = decompile::DecompileOptions::saver();
+        if let Some(v) = escape_unicode {
+            saver_opts.escape_unicode = v;
+        }
+        if let Some(v) = realign {
+            saver_opts.realign = v;
+        }
+        if let Some(wl) = write_line_numbers {
+            saver_opts.line_numbers = wl;
+        }
+        let res = decompile::decompile_class_with_options(
+            &class_file,
+            &decompiler_jar,
+            &siblings_dir.display().to_string(),
+            internal_name,
+            saver_opts,
+            Some(cancel.clone()),
+        );
+        match res {
+            Ok(res) => {
+                let mut out_src = res.source;
+                if write_metadata.unwrap_or(true) {
+                    let location = if lib_id.is_empty() { main_path.replace('\\', "/") } else { lib_id.clone() };
+                    let (minor, major, version_label) = jar::class_file_info(&bytes).unwrap_or((0, 0, String::new()));
+                    let mut meta = String::new();
+                    meta.push_str("\\n\\n/* Location:              ");
+                    meta.push_str(&location);
+                    meta.push_str(&format!(":{entry}\\n * Java compiler version: {version_label}"));
+                    meta.push_str(&format!(" ({}", major));
+                    meta.push_str(&format!(".{})\\n * JD-Core Version:       1.1.3\\n */", minor));
+                    out_src.push_str(&meta);
+                }
+                let rel_java = entry.replace(".class", ".java");
+                let dest = staging.join(&rel_java);
+                if let Some(parent) = dest.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                if std::fs::write(&dest, &out_src).is_ok() {
+                    exported += 1;
+                } else {
+                    failed.push(class_name.clone());
+                }
+            }
+            Err(_) => failed.push(class_name.clone()),
+        }
+        let _ = std::fs::remove_file(&class_file);
     }
+    drop(indexes);
 
-    // Pack into a zip when requested.
     if want_zip {
         let file = std::fs::File::create(&out).map_err(|e| format!("create zip: {e}"))?;
         let mut zip = zip::ZipWriter::new(file);
@@ -1895,24 +1423,190 @@ pub async fn jar_export_all(
         let _ = std::fs::remove_dir_all(&staging);
     }
 
-    jar_db::insert_build(
-        &state.conn()?,
-        &project_id,
-        &output_dir,
-        if failed.is_empty() { "ok" } else { "partial" },
-        Some(&format!("exported {exported}/{class_count}, failed {}", failed.len())),
-    )?;
-
     Ok(serde_json::json!({
         "exported": exported,
         "total": class_count,
         "failed": failed.len(),
-        "failedClasses": failed.iter().take(20).collect::<Vec<_>>(),
+        "failedClasses": failed,
         "outputDir": output_dir,
     }))
 }
 
-/// Class file info: version, access flags (JD-GUI's class info view).
+/// Recursively pack a directory into a zip (export "Save All Sources" as zip).
+fn pack_dir_into_zip(dir: &std::path::Path, prefix: &str, zip: &mut zip::ZipWriter<std::fs::File>, opts: zip::write::SimpleFileOptions) -> Result<(), String> {
+    for entry in std::fs::read_dir(dir).map_err(|e| format!("read dir: {e}"))? {
+        let entry = entry.map_err(|e| format!("entry: {e}"))?;
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+        let rel = if prefix.is_empty() { name.clone() } else { format!("{prefix}/{name}") };
+        if path.is_dir() {
+            pack_dir_into_zip(&path, &rel, zip, opts)?;
+        } else {
+            let bytes = std::fs::read(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+            zip.start_file(rel.clone(), opts).map_err(|e| format!("zip start {rel}: {e}"))?;
+            use std::io::Write;
+            zip.write_all(&bytes).map_err(|e| format!("zip write {rel}: {e}"))?;
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn jar_libraries(
+    project_id: String,
+    state: State<'_, JarState>,
+) -> Result<Vec<serde_json::Value>, String> {
+    let indexes = state.indexes.lock().expect("indexes poisoned");
+    let ix = indexes.get(&project_id).ok_or("Project not found")?;
+    let mut libs: Vec<serde_json::Value> = ix
+        .nested
+        .values()
+        .map(|n| {
+            serde_json::json!({
+                "id": n.id,
+                "name": n.name,
+                "groupId": "",
+                "artifactId": n.entry_path.rsplit('/').next().unwrap_or("").replace(".jar", ""),
+                "version": "",
+                "jarPath": n.entry_path,
+                "classCount": n.class_count,
+                "editable": false,
+            })
+        })
+        .collect();
+    libs.sort_by(|a, b| a["name"].as_str().unwrap_or("").cmp(b["name"].as_str().unwrap_or("")));
+    Ok(libs)
+}
+
+/// Open a Maven pom.xml: the built main jar + dependency jars are indexed in
+/// memory (JD-GUI: pom dependencies become read-only containers).
+#[tauri::command]
+pub async fn jar_pom_open(
+    path: String,
+    state: State<'_, JarState>,
+) -> Result<serde_json::Value, String> {
+    let pom_path = PathBuf::from(&path);
+    if !pom_path.is_file() {
+        return Err(format!("pom.xml not found: {}", pom_path.display()));
+    }
+    let pom = crate::pom::parse_pom_file(&pom_path)?;
+    let id = format!(
+        "jar-pom-{}",
+        crate::jar::sha256_bytes(
+            format!("{}:{}:{}", pom.group_id, pom.artifact_id, pom.version).as_bytes()
+        )
+        .get(..16)
+        .unwrap_or("pom")
+    );
+
+    let pom_dir = pom_path.parent().unwrap_or(Path::new("."));
+    let main_jar = {
+        let c1 = pom_dir.join("target").join(format!("{}-{}.jar", pom.artifact_id, pom.version));
+        let c2 = pom_dir.join(format!("{}-{}.jar", pom.artifact_id, pom.version));
+        if c1.is_file() {
+            Some(c1)
+        } else if c2.is_file() {
+            Some(c2)
+        } else {
+            None
+        }
+    };
+
+    let mut main_entries: Vec<jar::JarEntryInfo> = Vec::new();
+    let mut main_tree: std::collections::BTreeMap<String, jar::PackageNode> = Default::default();
+    let mut main_hash = String::new();
+    let mut main_size = 0i64;
+    let mut class_count = 0usize;
+    let mut resource_count = 0usize;
+    if let Some(main) = &main_jar {
+        if let Ok(idx) = jar::index_jar(main) {
+            main_hash = idx.jar_hash.clone();
+            main_size = idx.size as i64;
+            class_count = idx.class_count;
+            resource_count = idx.resource_count;
+            main_entries = idx.entries.clone();
+            main_tree = jar::build_tree(&idx.entries);
+        }
+    }
+
+    let mut nested: std::collections::HashMap<String, NestedJarData> = std::collections::HashMap::new();
+    let mut lib_summaries: Vec<serde_json::Value> = Vec::new();
+    for dep in &pom.dependencies {
+        let Some(jar_path) = &dep.jar_path else { continue };
+        let Ok(bytes) = std::fs::read(jar_path) else { continue };
+        let mut cur = std::io::Cursor::new(bytes.clone());
+        let Ok(idx) = jar::index_jar_reader(&mut cur) else { continue };
+        let base = jar_path.rsplit(['/', '\\']).next().unwrap_or(jar_path).to_string();
+        let lib_id = format!(
+            "{}:dep:{}",
+            id,
+            crate::jar::sha256_bytes(jar_path.as_bytes()).get(..12).unwrap_or("d")
+        );
+        let name = format!("{}-{}.jar", dep.artifact_id, dep.version);
+        nested.insert(
+            lib_id.clone(),
+            NestedJarData {
+                id: lib_id.clone(),
+                entry_path: base.clone(),
+                name: name.clone(),
+                group_id: dep.group_id.clone(),
+                artifact_id: dep.artifact_id.clone(),
+                version: dep.version.clone(),
+                bytes,
+                entries: idx.entries.clone(),
+                tree: jar::build_tree(&idx.entries),
+                class_count: idx.class_count,
+            },
+        );
+        lib_summaries.push(serde_json::json!({
+            "id": lib_id, "name": name, "editable": false, "classCount": idx.class_count,
+        }));
+    }
+
+    let mut class_names: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for e in &main_entries {
+        if e.kind == "class" {
+            class_names.insert(e.class_name.clone());
+        }
+    }
+    for n in nested.values() {
+        for e in &n.entries {
+            if e.kind == "class" {
+                class_names.insert(e.class_name.clone());
+            }
+        }
+    }
+
+    let name = format!("{}-{}", pom.artifact_id, pom.version);
+    let index = MemoryIndex {
+        project_id: id.clone(),
+        name: name.clone(),
+        jar_path: main_jar.as_ref().map(|p| p.display().to_string()).unwrap_or_default(),
+        jar_hash: main_hash,
+        size: main_size,
+        class_count,
+        resource_count,
+        entries: main_entries.clone(),
+        main_tree: main_tree.clone(),
+        nested,
+        class_names,
+    };
+    state.indexes.lock().expect("indexes poisoned").insert(id.clone(), index);
+
+    Ok(serde_json::json!({
+        "projectId": id,
+        "name": name,
+        "pom": {
+            "groupId": pom.group_id,
+            "artifactId": pom.artifact_id,
+            "version": pom.version,
+            "resolvedCount": pom.resolved_count,
+        },
+        "libraries": lib_summaries,
+        "classTree": main_tree,
+    }))
+}
+
 #[tauri::command]
 pub async fn jar_class_info(
     project_id: String,
@@ -1920,23 +1614,13 @@ pub async fn jar_class_info(
     library_id: Option<String>,
     state: State<'_, JarState>,
 ) -> Result<serde_json::Value, String> {
-    let conn = state.conn()?;
-    let jar_path = if let Some(lib_id) = &library_id {
-        jar_db::get_library(&conn, &project_id, lib_id)?.ok_or("Library not found")?.jar_path
-    } else {
-        jar_db::get_project(&conn, &project_id)?.ok_or("Project not found")?.jar_path
+    let lib_id = library_id.clone().unwrap_or_default();
+    let bytes = {
+        let indexes = state.indexes.lock().expect("indexes poisoned");
+        let ix = indexes.get(&project_id).ok_or("Project not found")?;
+        ix.read_class_bytes(&lib_id, &entry_path)?
     };
-
-    let bytes = tauri::async_runtime::spawn_blocking({
-        let p = jar_path.clone();
-        let e = entry_path.clone();
-        move || jar::read_entry_bytes(Path::new(&p), &e)
-    })
-    .await
-    .map_err(|e| e.to_string())??;
-
     let (minor, major, java_version) = jar::class_file_info(&bytes)?;
-
     Ok(serde_json::json!({
         "className": entry_path_to_class_name(&entry_path),
         "javaVersion": java_version,
@@ -1944,6 +1628,119 @@ pub async fn jar_class_info(
         "minor": minor,
         "size": bytes.len(),
     }))
+}
+
+/// Download the Maven -sources.jar for a pom-opened dependency and extract it
+/// under the scratch dir (cached by g:a:v). The library must have Maven
+/// coordinates (pom-opened); fat-jar nested jars have none.
+#[tauri::command]
+pub async fn jar_maven_sources(
+    project_id: String,
+    library_id: String,
+    filters: Option<String>,
+    state: State<'_, JarState>,
+) -> Result<serde_json::Value, String> {
+    let (group_id, artifact_id, version) = {
+        let indexes = state.indexes.lock().expect("indexes poisoned");
+        let ix = indexes.get(&project_id).ok_or("Project not found")?;
+        let n = ix.nested.get(&library_id).ok_or("Library not found")?;
+        (n.group_id.clone(), n.artifact_id.clone(), n.version.clone())
+    };
+    if group_id.is_empty() || artifact_id.is_empty() || version.is_empty() {
+        return Err("Library has no Maven coordinates (groupId:artifactId:version). Open via pom.xml to enable source download.".into());
+    }
+    if let Some(f) = filters {
+        let f = f.trim();
+        if !f.is_empty() {
+            let allow: Vec<&str> = f.split_whitespace().filter(|x| x.starts_with('+')).map(|x| &x[1..]).collect();
+            let deny: Vec<&str> = f.split_whitespace().filter(|x| x.starts_with('-')).map(|x| &x[1..]).collect();
+            let hit = allow.iter().any(|p| group_id.starts_with(p));
+            let blocked = deny.iter().any(|p| group_id.starts_with(p));
+            let ok = (allow.is_empty() || hit) && !blocked;
+            if !ok {
+                return Err("Library group is filtered out by the Maven source filter.".into());
+            }
+        }
+    }
+    let cache_key = format!("{group_id}:{artifact_id}:{version}");
+    let cache_key_safe = cache_key.replace([':', '.', '/'], "_");
+    let extract_root = state.scratch.join(format!("maven-src-{cache_key_safe}"));
+    let marker = extract_root.join(".ok");
+    if !marker.exists() {
+        let _ = std::fs::remove_dir_all(&extract_root);
+        let _ = std::fs::create_dir_all(&extract_root);
+        let url = format!(
+            "https://repo1.maven.org/maven2/{}/{}/{}/{}-{}-sources.jar",
+            group_id.replace('.', "/"),
+            artifact_id,
+            version,
+            artifact_id,
+            version,
+        );
+        let bytes = tauri::async_runtime::spawn_blocking(move || {
+            let resp = reqwest::blocking::get(&url).map_err(|e| format!("download {url}: {e}"))?;
+            if !resp.status().is_success() {
+                return Err(format!("Maven sources download failed (HTTP {})", resp.status()));
+            }
+            resp.bytes().map(|b| b.to_vec()).map_err(|e| format!("read body: {e}"))
+        })
+        .await
+        .map_err(|e| e.to_string())??;
+        {
+            use std::io::Cursor;
+            let mut archive = zip::ZipArchive::new(Cursor::new(&bytes))
+                .map_err(|e| format!("sources.jar is not a valid zip: {e}"))?;
+            for i in 0..archive.len() {
+                let mut entry = archive
+                    .by_index(i)
+                    .map_err(|e| format!("read zip entry {i}: {e}"))?;
+                let name = entry.name().to_string();
+                if entry.is_dir() || name.contains("META-INF/") {
+                    continue;
+                }
+                if name.starts_with('/') || name.contains("..") {
+                    continue;
+                }
+                let dest = extract_root.join(&name);
+                if !dest.starts_with(&extract_root) {
+                    continue;
+                }
+                if let Some(parent) = dest.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                let mut out = match std::fs::File::create(&dest) {
+                    Ok(f) => f,
+                    Err(_) => continue,
+                };
+                use std::io::Write;
+                let _ = std::io::copy(&mut entry, &mut out);
+                let _ = out.flush();
+            }
+        }
+        std::fs::write(&marker, "ok").map_err(|e| format!("write marker: {e}"))?;
+    }
+    Ok(serde_json::json!({
+        "root": extract_root.display().to_string(),
+        "groupId": group_id,
+        "artifactId": artifact_id,
+        "version": version,
+    }))
+}
+
+/// Read a .java file from an extracted Maven sources root (path stays inside
+/// the root — zip-slip style traversal is rejected).
+#[tauri::command]
+pub async fn jar_read_source_file(root: String, entry_path: String) -> Result<serde_json::Value, String> {
+    let root_path = PathBuf::from(&root);
+    let target = root_path.join(&entry_path);
+    if !target.starts_with(&root_path) {
+        return Err("Path escapes the sources root.".into());
+    }
+    if !target.is_file() {
+        return Err(format!("Source file not found: {entry_path}"));
+    }
+    let text = std::fs::read_to_string(&target).map_err(|e| format!("read: {e}"))?;
+    Ok(serde_json::json!({ "source": text }))
 }
 
 #[cfg(test)]
@@ -1979,24 +1776,111 @@ mod open_type_tests {
     }
 
     #[test]
+    fn inner_class_simple_name() {
+        // $ keeps the last segment (JD-GUI OpenType matches the SIMPLE name).
+        assert!(matches("entry", "java.util.Map$Entry"));
+    }
+
+    #[test]
     fn wildcards() {
-        assert!(matches("*Map", "java.util.HashMap"));
-        assert!(matches("Hash*", "java.util.HashMap"));
-        // '?' matches exactly one char: HashMap has 's' where 'p' is expected.
-        assert!(!matches("Ha?p", "java.util.HashMap"));
+        assert!(matches("st*", "java.lang.String"));
+        assert!(matches("s?r", "java.lang.String"));
+    }
+}
+
+#[cfg(test)]
+mod memory_index_tests {
+    use super::*;
+    use std::path::Path;
+
+    fn compile(dir: &Path, rel: &str, pkg: &str, body: &str) -> std::path::PathBuf {
+        let src = dir.join(rel);
+        std::fs::create_dir_all(src.parent().unwrap()).unwrap();
+        std::fs::write(&src, format!("package {pkg};\n{body}\n")).unwrap();
+        let jdk = crate::compile::detect_jdk();
+        assert!(jdk.found);
+        let out = dir.join(format!("o-{}", src.file_name().unwrap().to_string_lossy()));
+        std::fs::create_dir_all(&out).unwrap();
+        assert!(std::process::Command::new(jdk.javac_path.as_deref().unwrap())
+            .arg("-d").arg(&out).arg(&src).status().unwrap().success());
+        out
+    }
+    fn copy_tree(src: &Path, base: &Path, dest: &Path) {
+        if src.is_dir() {
+            for f in std::fs::read_dir(src).unwrap() {
+                copy_tree(&f.unwrap().path(), base, dest);
+            }
+        } else {
+            let rel = src.strip_prefix(base).unwrap();
+            let d = dest.join(rel);
+            std::fs::create_dir_all(d.parent().unwrap()).unwrap();
+            std::fs::copy(src, d).unwrap();
+        }
     }
 
     #[test]
-    fn inner_classes() {
-        // Simple name of Map$Entry is "Entry" — the pattern targets the name
-        // with the package stripped, matching JD-GUI's substring(lastIndex).
-        assert!(matches("Entry", "java.util.Map$Entry"));
-    }
+    fn memory_index_resolves_main_and_nested_classes() {
+        let dir = std::env::temp_dir().join(format!("jar-memidx-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
 
-    #[test]
-    fn simple_name_strips_package_and_inner() {
-        assert_eq!(simple_class_name("java.util.Map$Entry"), "Entry");
-        assert_eq!(simple_class_name("cn.hutool.StrUtil"), "StrUtil");
-        assert_eq!(simple_class_name("Foo"), "Foo");
+        let dep_out = compile(&dir, "com/dep/Util.java", "com.dep", "public class Util { public int f() { return 1; } }");
+        let dep_jar = dir.join("dep.jar");
+        assert!(std::process::Command::new("jar").arg("cf").arg(&dep_jar).arg("-C").arg(&dep_out).arg(".").status().unwrap().success());
+
+        let main_out = compile(&dir, "com/app/Main.java", "com.app", "public class Main { public int x = 1; }");
+        let staging = dir.join("stg");
+        std::fs::create_dir_all(staging.join("BOOT-INF/classes")).unwrap();
+        std::fs::create_dir_all(staging.join("BOOT-INF/lib")).unwrap();
+        copy_tree(&main_out, &main_out, &staging.join("BOOT-INF/classes"));
+        std::fs::copy(&dep_jar, staging.join("BOOT-INF/lib/dep.jar")).unwrap();
+        let fat = dir.join("fat.jar");
+        assert!(std::process::Command::new("jar").arg("cf").arg(&fat).arg("-C").arg(&staging).arg(".").status().unwrap().success());
+
+        let idx = jar::index_jar(&fat).unwrap();
+        let mut nested_map: std::collections::HashMap<String, NestedJarData> = Default::default();
+        {
+            use std::io::Read;
+            let mut archive = zip::ZipArchive::new(std::fs::File::open(&fat).unwrap()).unwrap();
+            for i in 0..archive.len() {
+                let mut e = archive.by_index(i).unwrap();
+                let name = e.name().to_string();
+                if !name.ends_with(".jar") {
+                    continue;
+                }
+                let mut bytes = Vec::new();
+                e.read_to_end(&mut bytes).unwrap();
+                let mut cur = std::io::Cursor::new(bytes.clone());
+                let nidx = jar::index_jar_reader(&mut cur).unwrap();
+                assert!(nidx.entries.iter().any(|x| x.class_name == "com.dep.Util"));
+                nested_map.insert("n1".into(), NestedJarData {
+                    id: "n1".into(), entry_path: name, name: "[nested] dep.jar|BOOT-INF/lib/dep.jar".into(),
+                    group_id: String::new(), artifact_id: "dep".into(), version: String::new(),
+                    bytes, entries: nidx.entries.clone(), tree: jar::build_tree(&nidx.entries), class_count: 1,
+                });
+            }
+        }
+        let mut class_names: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for e in &idx.entries { if e.kind == "class" { class_names.insert(e.class_name.clone()); } }
+        for n in nested_map.values() { for e in &n.entries { if e.kind == "class" { class_names.insert(e.class_name.clone()); } } }
+        assert!(class_names.contains("com.app.Main"));
+        assert!(class_names.contains("com.dep.Util"));
+
+        let ix = MemoryIndex {
+            project_id: "p".into(), name: "fat.jar".into(), jar_path: fat.display().to_string(),
+            jar_hash: idx.jar_hash.clone(), size: 0, class_count: idx.class_count, resource_count: idx.resource_count,
+            entries: idx.entries.clone(), main_tree: jar::build_tree(&idx.entries), nested: nested_map, class_names,
+        };
+        let (lib, entry) = ix.find_class("com.app.Main").expect("main class");
+        assert_eq!(lib, "");
+        assert_eq!(entry.entry_path, "BOOT-INF/classes/com/app/Main.class");
+        let (lib, entry) = ix.find_class("com.dep.Util").expect("nested class");
+        assert_eq!(lib, "n1");
+        let bytes = ix.read_class_bytes("n1", &entry.entry_path).unwrap();
+        assert!(bytes.starts_with(&[0xca, 0xfe, 0xba, 0xbe]));
+        let sib = dir.join("sib");
+        ix.extract_sibling_classes_to("", "BOOT-INF/classes/com/app/Main.class", &sib).ok();
+        assert!(sib.join("BOOT-INF/classes/com/app/Main.class").is_file());
+        println!("MEMORY-INDEX RESOLUTION PASS");
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

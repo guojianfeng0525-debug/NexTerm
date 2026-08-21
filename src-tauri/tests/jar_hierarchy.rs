@@ -219,7 +219,7 @@ fn class_ref_extraction() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// Method-location flow: decompile a class via CFR, extract method line
+/// Method-location flow: decompile a class via jd-core, extract method line
 /// numbers, and verify the exact method the user clicked resolves.
 #[test]
 #[ignore]
@@ -236,10 +236,10 @@ fn method_location_resolution() {
     assert!(std::process::Command::new(jdk.javac_path.as_deref().unwrap()).arg("-d").arg(&out).arg(src_dir.join("Calc.java")).status().unwrap().success());
     let bytes = std::fs::read(out.join("demo/Calc.class")).unwrap();
 
-    let cfr = nexterm_lib::decompile::find_cfr_jar().unwrap();
+    let jd = nexterm_lib::decompile::find_decompiler_jar().unwrap();
     let cf = dir.join("Calc.class");
     std::fs::write(&cf, &bytes).unwrap();
-    let source = nexterm_lib::decompile::decompile_class(&cf, &cfr, None).unwrap();
+    let source = nexterm_lib::decompile::decompile_class(&cf, &jd, "demo/Calc", None).unwrap();
     assert!(source.contains("class Calc"));
 
     let methods = jar::extract_methods(&source);
@@ -249,6 +249,54 @@ fn method_location_resolution() {
     assert!(add.line >= 1);
     assert!(mul.line > add.line, "mul line {} should be after add line {}", mul.line, add.line);
     println!("METHOD LOCATION PASS (add @{}, mul @{})", add.line, mul.line);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// JD-GUI ContainerLoader parity: a class with an inner class must decompile
+/// WITH the inner class body when the sibling-classes dir is supplied (the
+/// revert / method-location paths extract siblings like jar_decompile).
+#[test]
+#[ignore]
+fn inner_class_resolves_from_siblings() {
+    let dir = std::env::temp_dir().join(format!("jar-innersib-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let src_dir = dir.join("demo");
+    std::fs::create_dir_all(&src_dir).unwrap();
+    std::fs::write(
+        src_dir.join("Outer.java"),
+        "package demo;\npublic class Outer {\n  public class Inner { public int x = 1; }\n  public int use() { return new Inner().x; }\n}\n",
+    )
+    .unwrap();
+    let jdk = compile::detect_jdk();
+    assert!(jdk.found);
+    let out = dir.join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    assert!(std::process::Command::new(jdk.javac_path.as_deref().unwrap())
+        .arg("-d").arg(&out).arg(src_dir.join("Outer.java"))
+        .status().unwrap().success());
+    // demo/Outer.class and demo/Outer$Inner.class both exist.
+    let bytes = std::fs::read(out.join("demo/Outer.class")).unwrap();
+
+    let jd = nexterm_lib::decompile::find_decompiler_jar().unwrap();
+    let cf = dir.join("Outer.class");
+    std::fs::write(&cf, &bytes).unwrap();
+
+    // (a) WITHOUT the siblings classpath → inner class body is a placeholder.
+    let alone = nexterm_lib::decompile::decompile_class(&cf, &jd, "demo/Outer", None).unwrap();
+    let alone_has_inner = alone.contains("x = 1") || alone.contains("public class Inner");
+    // (b) WITH siblings (extract_sibling_classes, as revert/method-loc do) →
+    //     the inner class body must resolve.
+    let jar_path = dir.join("outer.jar");
+    assert!(std::process::Command::new("jar").arg("cf").arg(&jar_path).arg("-C").arg(&out).arg(".").status().unwrap().success());
+    let siblings = dir.join("siblings");
+    jar::extract_sibling_classes(&jar_path, "demo/Outer.class", &siblings).unwrap();
+    let with_sib = nexterm_lib::decompile::decompile_class_with_classpath(
+        &cf, &jd, &siblings.display().to_string(), "demo/Outer", None,
+    )
+    .unwrap();
+    assert!(with_sib.contains("public class Inner"), "inner class must resolve from siblings: {with_sib}");
+    assert!(with_sib.contains("x = 1"), "inner class body must be present: {with_sib}");
+    println!("INNER-CLASS-FROM-SIBLINGS PASS (alone_has_inner={alone_has_inner})");
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -269,10 +317,10 @@ fn class_view_methods_map() {
     assert!(std::process::Command::new(jdk.javac_path.as_deref().unwrap()).arg("-d").arg(&out).arg(src_dir.join("Self.java")).status().unwrap().success());
     let bytes = std::fs::read(out.join("demo/Self.class")).unwrap();
 
-    let cfr = nexterm_lib::decompile::find_cfr_jar().unwrap();
+    let jd = nexterm_lib::decompile::find_decompiler_jar().unwrap();
     let cf = dir.join("Self.class");
     std::fs::write(&cf, &bytes).unwrap();
-    let source = nexterm_lib::decompile::decompile_class(&cf, &cfr, None).unwrap();
+    let source = nexterm_lib::decompile::decompile_class(&cf, &jd, "demo/Self", None).unwrap();
 
     let methods = jar::extract_methods(&source);
     // `beta` must be at a later line than `alpha`; both present.

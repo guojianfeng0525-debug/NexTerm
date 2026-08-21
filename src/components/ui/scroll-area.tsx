@@ -13,7 +13,10 @@ const ScrollArea = React.forwardRef<
     <ScrollAreaPrimitive.Root
       ref={ref}
       data-slot="scroll-area"
-      className={cn("relative", className)}
+      // min-h-0: as a flex child the viewport must be allowed to shrink below
+      // its content height, otherwise long lists push the container open and
+      // get clipped by the parent instead of scrolling.
+      className={cn("relative min-h-0", className)}
       {...props}
     >
       <ScrollAreaPrimitive.Viewport

@@ -94,13 +94,13 @@ fn command_chain() {
     assert_eq!(all_classes.iter().filter(|c| c.kind == "meta-inf").count(), 1);
 
     // 2) Decompile App via CFR (JD-GUI: re-decompile, never cached in DB).
-    let cfr = decompile::find_cfr_jar().unwrap();
+    let jd = decompile::find_decompiler_jar().unwrap();
     let class_bytes = jar::read_entry_bytes(&jar_path, "com/app/App.class").unwrap();
     let scratch = dir.join("scratch");
     std::fs::create_dir_all(&scratch).unwrap();
     let cf = scratch.join("App.class");
     std::fs::write(&cf, &class_bytes).unwrap();
-    let source = decompile::decompile_class(&cf, &cfr, None).unwrap();
+    let source = decompile::decompile_class(&cf, &jd, "com/app/App", None).unwrap();
     assert!(source.contains("class App"));
 
     // 3) Save a modification: x * 2 → x * 3 (persisted; no version history).

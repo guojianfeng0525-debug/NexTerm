@@ -274,10 +274,13 @@ impl OsInfo {
         }
     }
 
-    /// Disk stats for root filesystem — `df -h` is universal.
+    /// Disk stats for root filesystem — `df -h /` is universal on POSIX, but
+    /// some minimal systems lack `awk`. We add a `sed`-based fallback that
+    /// works with plain `df -hP /` (POSIX-safe, no column wrapping).
     pub fn disk_cmd(&self) -> &'static str {
-        // df -h / works on all POSIX systems. Column layout is consistent.
-        "df -h / | awk 'NR==2{printf \"%s %s %s %s\", $2,$3,$4,$5}'"
+        // Primary: awk on `df -h /` (Size Used Avail Use%). Fallback: df -hP
+        // with sed when awk is missing; last resort: df without -h (bytes).
+        "df -h / | awk 'NR==2{printf \"%s %s %s %s\", $2,$3,$4,$5}' || df -hP / 2>/dev/null | sed -n '2{s/  */ /g;p;}' | awk '{printf \"%s %s %s %s\", $2,$3,$4,$5}' || df -P / 2>/dev/null | sed -n '2{s/  */ /g;p;}' | awk '{printf \"%s %s %s %s\", $2,$3,$4,$5}'"
     }
 
     /// Uptime command.

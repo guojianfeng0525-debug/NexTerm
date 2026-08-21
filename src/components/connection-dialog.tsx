@@ -725,7 +725,7 @@ const handleCancelConnectionAttempt = async () => {
             </TabsTrigger>
           </TabsList>
 
-          <TabsContent value="connection" className="flex-1 overflow-y-auto px-6 py-4 space-y-4 mt-0">
+          <TabsContent value="connection" className="flex-1 min-h-0 overflow-y-auto px-6 py-4 space-y-4 mt-0">
             <Card>
               <CardHeader>
                 <CardTitle className="flex items-center gap-2">
@@ -899,7 +899,7 @@ const handleCancelConnectionAttempt = async () => {
             </Card>
           </TabsContent>
 
-          <TabsContent value="authentication" className="flex-1 overflow-y-auto px-6 py-4 space-y-4 mt-0">
+          <TabsContent value="authentication" className="flex-1 min-h-0 overflow-y-auto px-6 py-4 space-y-4 mt-0">
             <Card>
               <CardHeader>
                 <CardTitle className="flex items-center gap-2">
@@ -1016,7 +1016,7 @@ const handleCancelConnectionAttempt = async () => {
             </Card>
           </TabsContent>
 
-          <TabsContent value="proxy" className="flex-1 overflow-y-auto px-6 py-4 space-y-4 mt-0">
+          <TabsContent value="proxy" className="flex-1 min-h-0 overflow-y-auto px-6 py-4 space-y-4 mt-0">
             <Card>
               <CardHeader>
                 <CardTitle className="flex items-center gap-2">
@@ -1242,7 +1242,7 @@ const handleCancelConnectionAttempt = async () => {
             )}
           </TabsContent>
 
-          <TabsContent value="advanced" className="flex-1 overflow-y-auto px-6 py-4 space-y-4 mt-0">
+          <TabsContent value="advanced" className="flex-1 min-h-0 overflow-y-auto px-6 py-4 space-y-4 mt-0">
             {(() => {
               const hiddenFields = getHiddenFields(config.protocol);
               const isCompHidden = hiddenFields.includes('compression');
