@@ -13,3 +13,28 @@ i18n.use(initReactI18next).init({
   interpolation: { escapeValue: false },
   returnNull: false,
 });
+
+// jsdom lacks ResizeObserver / matchMedia — provide minimal stubs so
+// components that use them (ScrollArea, responsive hooks) render in tests.
+if (typeof globalThis.ResizeObserver === 'undefined') {
+  class ResizeObserverStub {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  }
+  (globalThis as unknown as { ResizeObserver: unknown }).ResizeObserver = ResizeObserverStub;
+}
+if (typeof window !== 'undefined' && typeof window.matchMedia !== 'function') {
+  window.matchMedia = ((query: string) => ({
+    matches: false,
+    media: query,
+    onchange: null,
+    addListener() {},
+    removeListener() {},
+    addEventListener() {},
+    removeEventListener() {},
+    dispatchEvent() {
+      return false;
+    },
+  })) as typeof window.matchMedia;
+}

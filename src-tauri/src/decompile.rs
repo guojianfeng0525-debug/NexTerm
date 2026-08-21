@@ -15,7 +15,30 @@ use std::sync::Arc;
 /// 2. `resources/cfr/cfr-0.152.jar` next to the executable
 /// 3. `src-tauri/resources/cfr/cfr-0.152.jar` in dev (cwd-relative fallback)
 pub fn find_cfr_jar() -> Result<std::path::PathBuf, String> {
-    // Bundled via Tauri `bundle.resources`: <exe_dir>/cfr/cfr-0.152.jar
+    find_cfr_jar_with(None)
+}
+
+/// Locate the bundled CFR jar. `resource_dir` is the Tauri resource directory
+/// (Windows exe layout puts bundled resources there). Falls back to scanning
+/// exe-adjacent + dev paths so it works in dev, tests, and packaged builds.
+pub fn find_cfr_jar_with(resource_dir: Option<&std::path::Path>) -> Result<std::path::PathBuf, String> {
+    // 1) Tauri resource dir (most reliable across installers & portable exe).
+    if let Some(rd) = resource_dir {
+        let direct = rd.join("cfr/cfr-0.152.jar");
+        if direct.is_file() {
+            return Ok(direct);
+        }
+        // Some bundlers nest resources one level deeper (e.g. under _up_/).
+        if let Ok(entries) = std::fs::read_dir(rd) {
+            for e in entries.flatten() {
+                let p = e.path().join("cfr/cfr-0.152.jar");
+                if p.is_file() {
+                    return Ok(p);
+                }
+            }
+        }
+    }
+    // 2) Bundled via Tauri `bundle.resources`: <exe_dir>/cfr/cfr-0.152.jar
     if let Ok(exe) = std::env::current_exe() {
         let exe_dir = exe.parent().unwrap_or(Path::new("."));
         let candidates = [
@@ -29,7 +52,7 @@ pub fn find_cfr_jar() -> Result<std::path::PathBuf, String> {
             }
         }
     }
-    // Dev fallback: repo-relative (cwd = project root) or src-tauri-relative
+    // 3) Dev fallback: repo-relative (cwd = project root) or src-tauri-relative
     // (cwd = src-tauri, e.g. `cargo test`).
     let dev_candidates = [
         Path::new("src-tauri/resources/cfr/cfr-0.152.jar"),
@@ -41,7 +64,31 @@ pub fn find_cfr_jar() -> Result<std::path::PathBuf, String> {
             return Ok(c.to_path_buf());
         }
     }
-    Err("CFR jar not found. Expected cfr/cfr-0.152.jar bundled with the app or src-tauri/resources/cfr/cfr-0.152.jar in dev.".into())
+    // 4) Embedded CFR jar: the jar is compiled INTO the executable via
+    //    include_bytes!, so packaged builds never depend on external files.
+    extract_embedded_cfr()
+}
+
+/// The bundled CFR jar, embedded at compile time. 2.1 MB — acceptable binary
+/// bloat for a self-contained portable exe (no external jar to ship/lose).
+const EMBEDDED_CFR_JAR: &[u8] = include_bytes!("../resources/cfr/cfr-0.152.jar");
+
+/// Write the embedded jar to a cache path under the system temp dir and return
+/// it. Reuses the cached file (same byte length) so we only write once.
+fn extract_embedded_cfr() -> Result<std::path::PathBuf, String> {
+    let dir = std::env::temp_dir().join("nexterm-cfr");
+    let path = dir.join("cfr-0.152.jar");
+    if path.is_file() {
+        // Reuse if the cached copy matches the embedded size (cheap sanity).
+        if let Ok(meta) = std::fs::metadata(&path) {
+            if meta.len() == EMBEDDED_CFR_JAR.len() as u64 {
+                return Ok(path);
+            }
+        }
+    }
+    std::fs::create_dir_all(&dir).map_err(|e| format!("create cfr cache dir: {e}"))?;
+    std::fs::write(&path, EMBEDDED_CFR_JAR).map_err(|e| format!("write embedded cfr jar: {e}"))?;
+    Ok(path)
 }
 
 /// Find `java` (needed to run CFR). Prefer JAVA_HOME, then PATH.
@@ -264,4 +311,17 @@ mod tests {
         assert!(source.contains("hi"), "should contain method hi: {source}");
         std::fs::remove_dir_all(&tmp).ok();
     }
+    #[test]
+    fn embedded_cfr_extracts_to_cache() {
+        // Simulate a packaged build: no external jar anywhere → the embedded
+        // bytes must produce a usable jar via the temp-dir cache.
+        let path = extract_embedded_cfr().expect("embedded cfr extraction");
+        assert!(path.is_file(), "extracted jar must exist");
+        let meta = std::fs::metadata(&path).unwrap();
+        assert_eq!(meta.len(), EMBEDDED_CFR_JAR.len() as u64);
+        // Second call reuses the cache.
+        let path2 = extract_embedded_cfr().unwrap();
+        assert_eq!(path, path2);
+    }
+
 }

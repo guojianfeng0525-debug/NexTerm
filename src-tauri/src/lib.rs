@@ -419,6 +419,7 @@ pub fn run() {
                                 db_path: path.clone(),
                                 cancels: std::sync::Mutex::new(Default::default()),
                                 scratch: app.path().app_data_dir().unwrap_or_else(|_| dir.clone()).join("jar-scratch"),
+                                resource_dir: app.path().resource_dir().ok(),
                             });
                         }
                         Err(e) => tracing::warn!("Failed to open SQLite store at {:?}: {}", path, e),
@@ -441,6 +442,7 @@ pub fn run() {
                                         db_path: dir.join("nexterm.db"),
                                         cancels: std::sync::Mutex::new(Default::default()),
                                         scratch: dir.join("jar-scratch"),
+                                        resource_dir: app.path().resource_dir().ok(),
                                     });
                                 }
                                 Err(e) => tracing::warn!("Failed to open SQLite store: {}", e),
@@ -475,6 +477,7 @@ pub fn run() {
             commands::ssh_tab_complete,
             commands::get_system_stats,
             commands::probe_server_stats,
+            commands::probe_all_server_stats,
             documents::documents_list,
             documents::documents_import,
             documents::documents_export,

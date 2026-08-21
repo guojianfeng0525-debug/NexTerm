@@ -95,9 +95,9 @@ const PROTOCOL_COLORS: Record<string, string> = {
 };
 
 /** Live-session stats poll interval (connected servers). */
-const RESOURCES_POLL_MS = 2000;
+const RESOURCES_POLL_MS = 1000;
 /** Cadence for re-probing reachable unconnected SSH/SFTP servers. */
-const PROBE_INTERVAL_MS = 2000;
+const PROBE_INTERVAL_MS = 1000;
 /** Backoff after a failed probe, so dead hosts are not hammered every tick. */
 const PROBE_FAIL_BACKOFF_MS = 30_000;
 
@@ -242,29 +242,36 @@ export function ServersView({
   }, [showResources]);
 
   // Poll live resource stats when the toggle is on. Connected servers reuse
-  // their live session; unconnected SSH/SFTP servers are probed through a
-  // short-lived SSH connection on the same 2-second cadence, with a 30s
-  // backoff after failures. The probe reports all four metrics (CPU, memory,
-  // disk, network). Results are merged so last-known values survive a tick.
+  // their live session (collected in parallel); unconnected SSH/SFTP servers
+  // are probed through ONE batch command (parallel, bounded concurrency) on a
+  // 1-second cadence, with a 30s backoff after failures.
+  //
+  // Atomicity: every tick produces a complete result map and replaces the
+  // whole state — servers either show fresh values or the '—' placeholder,
+  // never a stale mix. Bandwidth is degraded independently: if only the
+  // bandwidth sample fails, CPU/memory/disk still render.
   useEffect(() => {
     if (!showResources) {
       setResources({});
       return;
     }
     let cancelled = false;
-    let busy = false;
+    let inFlight = false;
     const fetchAll = async () => {
-      if (busy) return;
-      busy = true;
+      if (inFlight) return; // skip a tick rather than queueing stale runs
+      inFlight = true;
       const map: Record<string, ServerStats> = {};
       try {
-        for (const server of allServers) {
-          const sessionId = connectionSessions[server.id];
-          if (sessionId) {
+        // ── 1) Connected servers: parallel live-session collection ──
+        const live = allServers.filter((s) => connectionSessions[s.id]);
+        await Promise.allSettled(
+          live.map(async (server) => {
+            const sessionId = connectionSessions[server.id];
             try {
               const stats = await invoke<ServerStats>('get_system_stats', {
                 connectionId: sessionId,
               });
+              // Bandwidth fails independently: keep CPU/mem/disk, mark bw null.
               try {
                 const bw = await invoke<{ success: boolean; bandwidth: { interface: string; rx_bytes_per_sec: number; tx_bytes_per_sec: number }[]; error?: string }>('get_network_bandwidth', {
                   connectionId: sessionId,
@@ -277,35 +284,53 @@ export function ServersView({
                   };
                 }
               } catch {
-                /* bandwidth unavailable */
+                /* bandwidth unavailable — CPU/mem/disk still shown */
               }
               map[server.id] = stats;
             } catch {
-              /* skip unreachable servers */
+              /* session died — server shows '—' this tick */
             }
-            continue;
-          }
-          // Offline probe: SSH/SFTP only, silently skipped on failure.
+          }),
+        );
+
+        // ── 2) Unconnected SSH/SFTP: one batch probe (all-or-nothing map) ──
+        const now = Date.now();
+        const toProbe: { server: typeof allServers[number]; conn: NonNullable<ReturnType<typeof ConnectionStorageManager.getConnection>> }[] = [];
+        for (const server of allServers) {
+          if (connectionSessions[server.id]) continue;
           const proto = (server.protocol || 'SSH').toUpperCase();
           if (proto !== 'SSH' && proto !== 'SFTP') continue;
-          const now = Date.now();
           if (now < (nextProbeRef.current[server.id] ?? 0)) continue;
           nextProbeRef.current[server.id] = now + PROBE_INTERVAL_MS;
           const conn = ConnectionStorageManager.getConnection(server.id);
           if (!conn) continue;
+          toProbe.push({ server, conn });
+        }
+        if (toProbe.length > 0) {
           try {
-            const stats = await invoke<ServerStats>('probe_server_stats', {
-              request: buildSshConnectRequest(server.id, conn),
+            const batch = await invoke<Record<string, ServerStats | { error: string }>>('probe_all_server_stats', {
+              requests: toProbe.map(({ server, conn }) => [server.id, buildSshConnectRequest(server.id, conn)] as [string, unknown]),
             });
-            map[server.id] = stats;
+            for (const [serverId, value] of Object.entries(batch)) {
+              if (value && typeof value === 'object' && 'error' in value) {
+                // Failed probe → back off; server keeps '—' this tick.
+                nextProbeRef.current[serverId] = Date.now() + PROBE_FAIL_BACKOFF_MS;
+              } else if (value) {
+                map[serverId] = value as ServerStats;
+              }
+            }
           } catch {
-            // Back off before retrying an unreachable / rejected host.
-            nextProbeRef.current[server.id] = Date.now() + PROBE_FAIL_BACKOFF_MS;
+            // Whole batch failed; back off every probed server.
+            for (const { server } of toProbe) {
+              nextProbeRef.current[server.id] = Date.now() + PROBE_FAIL_BACKOFF_MS;
+            }
           }
         }
-        if (!cancelled) setResources((prev) => ({ ...prev, ...map }));
+
+        // Atomic replace: no stale merge — every server is fresh or '—'.
+        if (!cancelled) setResources(map);
       } finally {
-        busy = false;
+        inFlight = false;
       }
     };
     void fetchAll();

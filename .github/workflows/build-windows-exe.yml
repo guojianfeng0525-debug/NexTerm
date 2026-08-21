@@ -114,14 +114,11 @@ jobs:
         run: |
           node scripts/build-windows-portable.mjs --runtime "$env:RUNNER_TEMP\webview2-runtime"
 
-      - name: Upload portable artifacts
+      - name: Upload portable artifact (single ZIP)
         uses: actions/upload-artifact@v4
         with:
           name: NexTerm-portable
-          path: |
-            dist/NexTerm-portable.zip
-            dist/NexTerm-portable/
-            src-tauri/target/release/nexterm.exe
+          path: dist/NexTerm-portable.zip
           if-no-files-found: error
 
       # Publish a GitHub Release when a version tag (v*) is pushed.
@@ -131,5 +128,4 @@ jobs:
         with:
           files: |
             dist/NexTerm-portable.zip
-            src-tauri/target/release/nexterm.exe
           generate_release_notes: true

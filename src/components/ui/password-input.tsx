@@ -7,8 +7,16 @@ import { cn } from "./utils";
 function PasswordInput({ className, type: _type, ...props }: React.ComponentProps<"input">) {
   const [show, setShow] = React.useState(false);
   // Passwords are ASCII — block IME composition (Chinese/Japanese/Korean) so
-  // the input method can never inject composed text into the field.
+  // the input method can never inject composed text into the field. Both the
+  // composition events AND beforeinput (fires on Windows when IME commits)
+  // are intercepted; anything non-ASCII is dropped.
   const blockIme = (e: React.CompositionEvent<HTMLInputElement>) => e.preventDefault();
+  const blockBeforeInput = (e: React.FormEvent<HTMLInputElement> & { data?: string | null }) => {
+    // Allow only plain ASCII keystrokes (letters, digits, common symbols).
+    if (e.data && !/^[\x20-\x7e]+$/.test(e.data)) {
+      e.preventDefault();
+    }
+  };
   return (
     <div className="relative">
       <Input
@@ -17,6 +25,7 @@ function PasswordInput({ className, type: _type, ...props }: React.ComponentProp
         onCompositionStart={blockIme}
         onCompositionUpdate={blockIme}
         onCompositionEnd={blockIme}
+        onBeforeInput={blockBeforeInput}
         {...props}
       />
       <Button

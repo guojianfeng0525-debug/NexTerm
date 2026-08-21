@@ -156,6 +156,31 @@ function normalizeTree(tree: Record<string, PackageNode>): Record<string, Packag
 }
 
 /**
+ * JD-GUI package aggregation: a package branch that is just a single chain of
+ * one-child packages (no classes along the way) collapses into one node whose
+ * label shows the joined dotted name (com → example → demo becomes
+ * "com.example.demo"). Mirrors PackageTreeNodeFactoryProvider's aggregation
+ * loop. The label rendering already shows the LAST segment; this keeps the
+ * tree from showing empty intermediate levels.
+ */
+function aggregatePackages(node: PackageNode): PackageNode {
+  // Recursively aggregate children first.
+  const packages: Record<string, PackageNode> = {};
+  for (const [name, sub] of Object.entries(node.packages)) {
+    packages[name] = aggregatePackages(sub);
+  }
+  let merged: PackageNode = { ...node, packages };
+  // If this node has no classes and exactly one child package, merge: the
+  // child's content inherits this node's name chain.
+  while (merged.classes.length === 0 && Object.keys(merged.packages).length === 1) {
+    const [childName, child] = Object.entries(merged.packages)[0];
+    const joined = merged.name ? `${merged.name}.${childName}` : childName;
+    merged = { ...child, name: joined };
+  }
+  return merged;
+}
+
+/**
  * JD-GUI style live tree filter: keep only package branches that contain a
  * class/resource whose name or path matches `q` (case-insensitive substring).
  */
@@ -1618,7 +1643,16 @@ export function ToolJarDecompiler() {
   }, [project, handleNavBack, handleNavForward]);
 
   const modifiedCount = modifiedSet.size;
-  const normalizedTree = useMemo(() => (tree ? normalizeTree(tree) : null), [tree]);
+  const normalizedTree = useMemo(() => {
+    if (!tree) return null;
+    const filtered = normalizeTree(tree);
+    // Aggregate single-chain packages (JD-GUI) at the top level.
+    const out: Record<string, PackageNode> = {};
+    for (const [name, node] of Object.entries(filtered)) {
+      out[name] = aggregatePackages(node);
+    }
+    return out;
+  }, [tree]);
 
   return (
     <div ref={rootRef} className="h-full flex flex-col overflow-hidden bg-background relative">

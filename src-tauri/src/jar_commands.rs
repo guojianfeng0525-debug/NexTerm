@@ -28,6 +28,16 @@ pub struct JarState {
     pub cancels: Mutex<HashMap<String, Arc<AtomicBool>>>,
     /// Where decompile/compile scratch dirs live.
     pub scratch: PathBuf,
+    /// Tauri resource dir (bundled cfr/ lives here). Resolved at startup so
+    /// the CFR jar is found on every platform, including Windows exe layout.
+    pub resource_dir: Option<std::path::PathBuf>,
+}
+
+impl JarState {
+    /// Locate the bundled CFR jar, preferring the Tauri resource dir.
+    pub fn cfr_jar(&self) -> Result<std::path::PathBuf, String> {
+        decompile::find_cfr_jar_with(self.resource_dir.as_deref())
+    }
 }
 
 impl JarState {
@@ -109,7 +119,7 @@ pub async fn jar_project_open(
         .await
         .map_err(|e| e.to_string())??;
 
-    let conn = state.conn()?;
+    let mut conn = state.conn()?;
 
     let name = path_buf
         .file_name()
@@ -143,24 +153,36 @@ pub async fn jar_project_open(
         };
         jar_db::upsert_project(&conn, &project)?;
 
-        for e in &idx.entries {
-            let row = jar_db::JarClassRow {
-                id: format!("{id}:{}", e.entry_path),
-                project_id: id.clone(),
-                library_id: "".into(),
-                entry_path: e.entry_path.clone(),
-                class_name: e.class_name.clone(),
-                package_name: e.package_name.clone(),
-                kind: e.kind.clone(),
-                is_inner_class: e.is_inner_class,
-                modified_source: None,
-                modified: false,
-                compile_status: "none".into(),
-                compile_output: None,
-                compile_timestamp: None,
-                source_hash: None,
-            };
-            jar_db::upsert_class(&conn, &row)?;
+        // Batch insert all classes in one transaction (large jars: thousands
+        // of rows — per-row autocommit is the main first-open cost).
+        {
+            let tx = conn
+                .transaction()
+                .map_err(|e| format!("begin tx: {e}"))?;
+            {
+                let mut insert = tx
+                    .prepare(
+                        "INSERT OR REPLACE INTO jar_classes
+                           (id, project_id, library_id, entry_path, class_name, package_name, kind, is_inner_class,
+                            modified_source, modified, compile_status, compile_output, compile_timestamp, source_hash)
+                         VALUES (?1, ?2, '', ?3, ?4, ?5, ?6, ?7, NULL, 0, 'none', NULL, NULL, NULL)",
+                    )
+                    .map_err(|e| format!("prepare insert: {e}"))?;
+                for e in &idx.entries {
+                    insert
+                        .execute(rusqlite::params![
+                            format!("{id}:{}", e.entry_path),
+                            id,
+                            e.entry_path,
+                            e.class_name,
+                            e.package_name,
+                            e.kind,
+                            e.is_inner_class,
+                        ])
+                        .map_err(|er| format!("insert class: {er}"))?;
+                }
+            }
+            tx.commit().map_err(|e| format!("commit tx: {e}"))?;
         }
     } else {
         jar_db::upsert_project(
@@ -181,76 +203,66 @@ pub async fn jar_project_open(
 
     // Index nested archives (Spring Boot BOOT-INF/lib/*.jar, WEB-INF/lib/*.jar).
     // Mirrors JD-GUI's recursive container model: nested jars become read-only
-    // libraries so their classes are navigable / searchable.
+    // libraries so their classes are navigable / searchable. Extraction +
+    // indexing run in parallel; inserts are batched in a transaction.
     if hash_changed {
         let main_path = path_buf.clone();
         let scratch_root = state.scratch.join(format!("{id}-nested"));
-        let _ = std::fs::remove_dir_all(&scratch_root);
         let nested = tauri::async_runtime::spawn_blocking(move || {
-            let entries = jar::list_nested_archives(&main_path)?;
-            let mut libs: Vec<(String, String)> = Vec::new(); // (name, extracted_path)
-            for (i, ename) in entries.iter().enumerate() {
-                let safe = ename.replace('/', "__").replace('\\', "__");
-                let dest = scratch_root.join(format!("{i}-{safe}"));
-                if jar::extract_entry(&main_path, ename, &dest).is_ok() {
-                    libs.push((ename.clone(), dest.display().to_string()));
-                }
-            }
-            Ok::<_, String>(libs)
+            jar::extract_and_index_nested(&main_path, &scratch_root)
         })
         .await
-        .map_err(|e| e.to_string())??;
+        .map_err(|e| e.to_string())?;
 
-        for (ename, extracted) in &nested {
-            // Index the extracted nested jar.
-            let p2 = PathBuf::from(extracted);
-            let nested_idx = match tauri::async_runtime::spawn_blocking({
-                let p = p2.clone();
-                move || jar::index_jar(&p)
-            })
-            .await
-            {
-                Ok(Ok(i)) => i,
-                _ => continue,
-            };
-            let lib_id = format!(
-                "{id}:nested:{}",
-                crate::jar::sha256_bytes(ename.as_bytes()).get(..12).unwrap_or("n")
-            );
-            let base_name = ename.rsplit('/').next().unwrap_or(ename);
-            let lib = jar_db::JarLibrary {
-                id: lib_id.clone(),
-                project_id: id.clone(),
-                name: format!("[nested] {base_name}|{ename}"),
-                group_id: String::new(),
-                artifact_id: base_name.replace(".jar", ""),
-                version: String::new(),
-                jar_path: extracted.clone(),
-                jar_hash: nested_idx.jar_hash.clone(),
-                class_count: nested_idx.class_count as i64,
-                editable: false,
-            };
-            jar_db::upsert_library(&conn, &lib)?;
-            for e in &nested_idx.entries {
-                let row = jar_db::JarClassRow {
-                    id: format!("{lib_id}:{}", e.entry_path),
+        let mut conn = state.conn()?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| format!("begin tx: {e}"))?;
+        {
+            let mut insert = tx
+                .prepare(
+                    "INSERT OR REPLACE INTO jar_classes
+                       (id, project_id, library_id, entry_path, class_name, package_name, kind, is_inner_class,
+                        modified_source, modified, compile_status, compile_output, compile_timestamp, source_hash)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL, 0, 'none', NULL, NULL, NULL)",
+                )
+                .map_err(|e| format!("prepare insert: {e}"))?;
+            for (ename, extracted, nested_idx) in &nested {
+                let lib_id = format!(
+                    "{id}:nested:{}",
+                    crate::jar::sha256_bytes(ename.as_bytes()).get(..12).unwrap_or("n")
+                );
+                let base_name = ename.rsplit('/').next().unwrap_or(ename);
+                let lib = jar_db::JarLibrary {
+                    id: lib_id.clone(),
                     project_id: id.clone(),
-                    library_id: lib_id.clone(),
-                    entry_path: e.entry_path.clone(),
-                    class_name: e.class_name.clone(),
-                    package_name: e.package_name.clone(),
-                    kind: e.kind.clone(),
-                    is_inner_class: e.is_inner_class,
-                    modified_source: None,
-                    modified: false,
-                    compile_status: "none".into(),
-                    compile_output: None,
-                    compile_timestamp: None,
-                    source_hash: None,
+                    name: format!("[nested] {base_name}|{ename}"),
+                    group_id: String::new(),
+                    artifact_id: base_name.replace(".jar", ""),
+                    version: String::new(),
+                    jar_path: extracted.clone(),
+                    jar_hash: nested_idx.jar_hash.clone(),
+                    class_count: nested_idx.class_count as i64,
+                    editable: false,
                 };
-                jar_db::upsert_class(&conn, &row)?;
+                jar_db::upsert_library(&tx, &lib)?;
+                for e in &nested_idx.entries {
+                    insert
+                        .execute(rusqlite::params![
+                            format!("{lib_id}:{}", e.entry_path),
+                            id,
+                            lib_id,
+                            e.entry_path,
+                            e.class_name,
+                            e.package_name,
+                            e.kind,
+                            e.is_inner_class,
+                        ])
+                        .map_err(|er| format!("insert class: {er}"))?;
+                }
             }
         }
+        tx.commit().map_err(|e| format!("commit tx: {e}"))?;
     }
 
     let tree = jar::build_tree(&idx.entries);
@@ -586,7 +598,7 @@ pub async fn jar_method_location(
     .await
     .map_err(|e| e.to_string())??;
 
-    let cfr = decompile::find_cfr_jar()?;
+    let cfr = state.cfr_jar()?;
     let scratch = state.scratch.join(&project_id);
     std::fs::create_dir_all(&scratch).map_err(|e| format!("scratch: {e}"))?;
     let class_file = scratch.join(format!("loc-{}.class", entry_path.replace('/', "_")));
@@ -903,7 +915,7 @@ pub async fn jar_decompile(
         ));
     }
 
-    let cfr_jar = decompile::find_cfr_jar()?;
+    let cfr_jar = state.cfr_jar()?;
     let cancel = state.cancel_flag(&project_id);
     cancel.store(false, Ordering::Relaxed);
 
@@ -1055,7 +1067,7 @@ pub async fn jar_class_revert(
     if !bytes.starts_with(&[0xca, 0xfe, 0xba, 0xbe]) {
         return Err(format!("Class {entry_path} is not a valid JVM class (missing CAFEBABE magic)."));
     }
-    let cfr = decompile::find_cfr_jar()?;
+    let cfr = state.cfr_jar()?;
     let scratch = state.scratch.join(&project_id);
     std::fs::create_dir_all(&scratch).map_err(|e| format!("scratch: {e}"))?;
     let class_file = scratch.join(format!("revert-{}.class", entry_path.replace('/', "_")));
@@ -1803,7 +1815,7 @@ pub async fn jar_export_all(
         out.clone()
     };
 
-    let cfr_jar = decompile::find_cfr_jar()?;
+    let cfr_jar = state.cfr_jar()?;
     let cancel = state.cancel_flag(&project_id);
     cancel.store(false, Ordering::Relaxed);
 

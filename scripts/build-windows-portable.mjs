@@ -6,13 +6,14 @@
  *
  *   dist/NexTerm-portable/
  *   ├── NexTerm.exe            (release binary, self-contained)
- *   ├── WebView2/              (Fixed Version WebView2 Runtime, x64)
- *   │   ├── msedgewebview2.exe
- *   │   ├── msedge.dll
- *   │   └── ...
- *   └── resources/             (optional extra resources)
+ *   └── WebView2/              (Fixed Version WebView2 Runtime, x64)
+ *       ├── msedgewebview2.exe
+ *       ├── msedge.dll
+ *       └── ...
  *
- * then validates it and produces dist/NexTerm-portable.zip.
+ * then validates it and produces dist/NexTerm-portable.zip. The ZIP's root
+ * holds exactly `NexTerm.exe` + `WebView2/` (no wrapper directory), so
+ * unzipping yields a directly runnable folder.
  *
  * Usage:
  *   node scripts/build-windows-portable.mjs [--exe <path>] [--runtime <dir>] [--out <dir>]
@@ -166,9 +167,6 @@ function main() {
   fs.copyFileSync(EXE_SOURCE, path.join(portableDir, 'NexTerm.exe'));
   copyDir(runtimeRoot, path.join(portableDir, 'WebView2'));
 
-  // resources/ (empty placeholder for now).
-  fs.mkdirSync(path.join(portableDir, 'resources'), { recursive: true });
-
   // 4. Write the runtime manifest with the actual version.
   const version = runtimeVersion(path.join(runtimeRoot, 'msedgewebview2.exe'));
   const manifest = {
@@ -200,18 +198,28 @@ function main() {
     }
   }
 
-  // 6. Create the ZIP.
+  // 6. Create the ZIP. The archive's ROOT contains exactly two entries —
+  //    `NexTerm.exe` and `WebView2/` — so a user unzips straight into a
+  //    runnable folder (no nested `NexTerm-portable/` wrapper directory).
   const zipPath = path.join(OUT_DIR, `${PORTABLE_NAME}.zip`);
   if (fs.existsSync(zipPath)) fs.rmSync(zipPath, { force: true });
   try {
-    // Prefer PowerShell Compress-Archive on Windows.
-    execSync(
-      `powershell -NoProfile -Command "Compress-Archive -Path '${portableDir.replace(/'/g, "''")}' -DestinationPath '${zipPath.replace(/'/g, "''")}' -CompressionLevel Optimal"`,
-      { stdio: 'inherit', timeout: 300000 },
-    );
+    // Prefer PowerShell Compress-Archive on Windows. Use `-Path` with the
+    // directory's children so the entries land at the archive root.
+    const ps = [
+      `Compress-Archive`,
+      `-Path '${path.join(portableDir, '*').replace(/'/g, "''")}'`,
+      `-DestinationPath '${zipPath.replace(/'/g, "''")}'`,
+      `-CompressionLevel Optimal`,
+    ].join(' ');
+    execSync(`powershell -NoProfile -Command "${ps.replace(/"/g, '\\"')}"`, {
+      stdio: 'inherit',
+      timeout: 300000,
+    });
   } catch {
-    // Fallback: system zip (macOS/Linux CI).
-    execSync(`cd "${OUT_DIR}" && zip -r "${PORTABLE_NAME}.zip" "${PORTABLE_NAME}"`, {
+    // Fallback: system zip (macOS/Linux CI). `zip -r <zip> .` from inside the
+    // directory keeps entries at the root instead of nesting the folder name.
+    execSync(`cd "${portableDir}" && zip -r "${zipPath}" .`, {
       stdio: 'inherit',
       timeout: 300000,
     });

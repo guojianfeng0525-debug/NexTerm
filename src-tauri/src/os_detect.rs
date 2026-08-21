@@ -304,6 +304,66 @@ impl OsInfo {
         "uptime | awk -F'load average:' '{print $2}' | xargs"
     }
 
+    /// One shell script that emits ALL system stats (cpu / memory / swap /
+    /// disk / uptime / cores / load) in one SSH round-trip, each section
+    /// prefixed with a unique marker. Cuts per-probe RTT from ~7 commands to 1.
+    pub fn all_in_one_stats_cmd(&self) -> String {
+        let mut script = String::new();
+        script.push_str("echo \"===CPU===\"; ");
+        script.push_str(self.cpu_cmd());
+        script.push_str("; echo \"===MEM===\"; ");
+        script.push_str(self.memory_cmd());
+        script.push_str("; echo \"===SWAP===\"; ");
+        script.push_str(self.swap_cmd());
+        script.push_str("; echo \"===DISK===\"; ");
+        script.push_str(self.disk_cmd());
+        script.push_str("; echo \"===UPTIME===\"; ");
+        script.push_str(self.uptime_cmd());
+        script.push_str("; echo \"===CORES===\"; nproc 2>/dev/null || grep -c ^processor /proc/cpuinfo 2>/dev/null || echo 1; ");
+        script.push_str("echo \"===LOAD===\"; ");
+        script.push_str(self.load_average_cmd());
+        script.push_str("; echo \"===END===\"");
+        script
+    }
+
+    /// Parse the output of [`all_in_one_stats_cmd`] back into its sections.
+    /// Returns (cpu, memory, swap, disk, uptime, cores, load).
+    pub fn parse_all_in_one_stats(&self, output: &str) -> Option<(String, String, String, String, String, u32, String)> {
+        let mut cpu = String::new();
+        let mut memory = String::new();
+        let mut swap = String::new();
+        let mut disk = String::new();
+        let mut uptime = String::new();
+        let mut cores: u32 = 1;
+        let mut load = String::new();
+        let mut section = "";
+        for line in output.lines() {
+            let t = line.trim();
+            if let Some(name) = t.strip_prefix("===").and_then(|s| s.strip_suffix("===")) {
+                section = name;
+                continue;
+            }
+            match section {
+                "CPU" => cpu.push_str(t),
+                "MEM" => memory.push_str(t),
+                "SWAP" => swap.push_str(t),
+                "DISK" => disk.push_str(t),
+                "UPTIME" => uptime.push_str(t),
+                "CORES" => {
+                    if let Ok(n) = t.parse::<u32>() {
+                        cores = n.max(1);
+                    }
+                }
+                "LOAD" => load.push_str(t),
+                _ => {}
+            }
+        }
+        if cpu.is_empty() && memory.is_empty() && disk.is_empty() {
+            return None;
+        }
+        Some((cpu, memory, swap, disk, uptime, cores, load))
+    }
+
     /// Process list command.
     ///
     /// `ps aux --sort` is a GNU/procps extension.
@@ -586,5 +646,45 @@ mod tests {
             info.list_files_cmd("/tmp/dir's folder"),
             "ls -la --time-style=long-iso '/tmp/dir'\"'\"'s folder'"
         );
+    }
+}
+
+#[cfg(test)]
+mod all_in_one_tests {
+    use super::*;
+
+    fn linux_os() -> OsInfo {
+        OsInfo {
+            family: OsFamily::Debian,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn script_contains_all_markers() {
+        let script = linux_os().all_in_one_stats_cmd();
+        for marker in ["===CPU===", "===MEM===", "===SWAP===", "===DISK===", "===UPTIME===", "===CORES===", "===LOAD==="] {
+            assert!(script.contains(marker), "missing {marker} in script");
+        }
+    }
+
+    #[test]
+    fn parses_realistic_output() {
+        let output = "===CPU===\n3.2\n===MEM===\n7865 2048 5817 5120\n===SWAP===\n2048 0 2048\n===DISK===\n98G 12G 81G 13%\n===UPTIME===\nup 3 days, 4:32\n===CORES===\n4\n===LOAD===\n0.15 0.10 0.08\n===END===";
+        let os = linux_os();
+        let (cpu, mem, swap, disk, uptime, cores, load) = os.parse_all_in_one_stats(output).unwrap();
+        assert_eq!(cpu, "3.2");
+        assert_eq!(mem, "7865 2048 5817 5120");
+        assert_eq!(swap, "2048 0 2048");
+        assert_eq!(disk, "98G 12G 81G 13%");
+        assert_eq!(uptime, "up 3 days, 4:32");
+        assert_eq!(cores, 4);
+        assert_eq!(load, "0.15 0.10 0.08");
+    }
+
+    #[test]
+    fn empty_output_is_none() {
+        let os = linux_os();
+        assert!(os.parse_all_in_one_stats("===END===").is_none());
     }
 }

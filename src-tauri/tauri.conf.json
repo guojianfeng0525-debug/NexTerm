@@ -41,9 +41,6 @@
    "webviewInstallMode": {
     "type": "skip"
    }
-  },
-  "resources": {
-   "resources/cfr/cfr-0.152.jar": "cfr/"
   }
  }
 }

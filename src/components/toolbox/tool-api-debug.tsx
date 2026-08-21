@@ -197,7 +197,12 @@ function buildJsonLines(text: string): JsonBlockLine[] {
   for (let i = 0; i < lines.length; i++) {
     const indent = /^\s*/.exec(lines[i])?.[0].length ?? 0;
     const trimmed = lines[i].trim();
-    const open = trimmed.endsWith('{') || trimmed.endsWith('[');
+    // A line OPENS a block when it contains an UNCLOSED '{' / '[' — covers
+    // `"nested": {` and inline `"obj": { "a": 1` (net-positive braces).
+    // Fully-closed lines (`"k": {}`) and standalone closers are not open.
+    const braces = (trimmed.match(/\{/g) ?? []).length - (trimmed.match(/\}/g) ?? []).length;
+    const brackets = (trimmed.match(/\[/g) ?? []).length - (trimmed.match(/\]/g) ?? []).length;
+    const open = braces > 0 || brackets > 0;
     const isClose = trimmed.startsWith('}') || trimmed.startsWith(']');
     if (isClose && stack.length > 0) {
       depth = Math.max(0, depth - 1);
@@ -279,7 +284,8 @@ const CollapsibleJson = React.memo(function CollapsibleJson({ text }: { text: st
         </div>,
       );
       if (isCollapsed) {
-        i = line.closeIndex + 1;
+        // Guard: a block whose closer was never matched must not loop forever.
+        i = line.closeIndex > i ? line.closeIndex + 1 : i + 1;
         continue;
       }
     } else {

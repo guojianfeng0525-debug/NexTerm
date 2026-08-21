@@ -185,6 +185,61 @@ fn build_ssh_config_from_request(request: &ConnectRequest) -> Result<SshConfig, 
 /// Collect system stats over an existing SSH client (shared by the connected
 /// path and the offline probe path).
 async fn collect_system_stats(client: &crate::ssh::SshClient, os_info: &OsInfo) -> SystemStats {
+    // Fast path: one shell script returning every metric in a single RTT.
+    if let Some(stats) = collect_system_stats_fast(client, os_info).await {
+        return stats;
+    }
+    // Fallback: per-metric commands (older hosts / exotic shells).
+    collect_system_stats_legacy(client, os_info).await
+}
+
+/// Fast single-round-trip stats collection using the combined script.
+async fn collect_system_stats_fast(client: &crate::ssh::SshClient, os_info: &OsInfo) -> Option<SystemStats> {
+    let script = os_info.all_in_one_stats_cmd();
+    let output = client.execute_command(&script).await.ok()?;
+    let (cpu, mem, swap, disk, uptime, cores, load) = os_info.parse_all_in_one_stats(&output)?;
+
+    let cpu_percent = cpu.trim().parse::<f64>().ok().unwrap_or(0.0);
+
+    let mem_parts: Vec<&str> = mem.split_whitespace().collect();
+    let memory = MemoryStats {
+        total: mem_parts.first().and_then(|s| s.parse().ok()).unwrap_or(0),
+        used: mem_parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0),
+        free: mem_parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0),
+        available: mem_parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(0),
+    };
+    let swap_parts: Vec<&str> = swap.split_whitespace().collect();
+    let swap_stats = MemoryStats {
+        total: swap_parts.first().and_then(|s| s.parse().ok()).unwrap_or(0),
+        used: swap_parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0),
+        free: swap_parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0),
+        available: 0,
+    };
+    let disk_parts: Vec<&str> = disk.trim().split_whitespace().collect();
+    let disk_stats = DiskStats {
+        total: disk_parts.get(0).unwrap_or(&"0").to_string(),
+        used: disk_parts.get(1).unwrap_or(&"0").to_string(),
+        available: disk_parts.get(2).unwrap_or(&"0").to_string(),
+        use_percent: disk_parts
+            .get(3)
+            .and_then(|s| s.trim_end_matches('%').parse().ok())
+            .unwrap_or(0.0),
+    };
+
+    Some(SystemStats {
+        cpu_percent,
+        cores,
+        memory,
+        swap: swap_stats,
+        disk: disk_stats,
+        uptime: uptime.trim().to_string(),
+        load_average: if load.trim().is_empty() { None } else { Some(load.trim().to_string()) },
+        bandwidth: None,
+    })
+}
+
+/// Original per-command collection (used as fallback).
+async fn collect_system_stats_legacy(client: &crate::ssh::SshClient, os_info: &OsInfo) -> SystemStats {
     // CPU usage (percentage)
     let cpu_percent = client
         .execute_command(os_info.cpu_cmd())
@@ -279,6 +334,58 @@ pub async fn probe_server_stats(request: ConnectRequest) -> Result<SystemStats, 
     }
     let _ = client.disconnect().await;
     Ok(stats)
+}
+
+/// Batch offline probe: opens temporary SSH connections for MANY servers in
+/// parallel (bounded concurrency), collects stats, closes them, and returns a
+/// complete map — every input gets a result or an error, so the frontend can
+/// render "all or nothing" per refresh tick.
+#[tauri::command]
+pub async fn probe_all_server_stats(
+    requests: Vec<(String, ConnectRequest)>, // (server_id, connect_request)
+    state: State<'_, Arc<ConnectionManager>>,
+) -> Result<std::collections::HashMap<String, serde_json::Value>, String> {
+    use futures::stream::{StreamExt, TryStreamExt};
+
+    // Bound concurrency to avoid hammering the network on huge server lists.
+    const MAX_CONCURRENT: usize = 6;
+
+    let out: std::collections::HashMap<String, serde_json::Value> = futures::stream::iter(requests)
+        .map(|(server_id, request)| async move {
+            let config = match build_ssh_config_from_request(&request) {
+                Ok(c) => c,
+                Err(e) => {
+                    return (
+                        server_id,
+                        serde_json::json!({ "error": e.to_string() }),
+                    );
+                }
+            };
+            let mut client = crate::ssh::SshClient::new();
+            if let Err(e) = client.connect(&config).await {
+                return (server_id, serde_json::json!({ "error": e.to_string() }));
+            }
+            let os_info = os_detect::detect_os(&client).await;
+            let stats = collect_system_stats(&client, &os_info).await;
+            let mut stats = serde_json::to_value(&stats).unwrap_or(serde_json::json!({}));
+            if let Some(bw) = collect_network_bandwidth(&client, &os_info).await {
+                if let Some(obj) = stats.as_object_mut() {
+                    obj.insert(
+                        "bandwidth".into(),
+                        serde_json::json!({
+                            "rx_bytes_per_sec": bw.rx_bytes_per_sec,
+                            "tx_bytes_per_sec": bw.tx_bytes_per_sec,
+                        }),
+                    );
+                }
+            }
+            let _ = client.disconnect().await;
+            (server_id, stats)
+        })
+        .buffer_unordered(MAX_CONCURRENT)
+        .collect()
+        .await;
+    Ok(out)
 }
 
 /// Map the proxy request fields into a `ProxyConfig`, or `None` when the

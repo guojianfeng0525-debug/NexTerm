@@ -326,6 +326,41 @@ pub fn extract_entry(jar_path: &Path, entry_name: &str, dest: &Path) -> Result<(
     Ok(())
 }
 
+/// Extract + index nested archives (BOOT-INF/lib/*.jar etc.) in PARALLEL.
+/// Returns (entry_name, extracted_path, JarIndex) for every archive that
+/// extracted and indexed successfully. Mirrors JD-GUI's recursive containers
+/// while keeping first-open latency acceptable for large fat jars.
+pub fn extract_and_index_nested(main_jar: &Path, scratch_root: &Path) -> Vec<(String, String, JarIndex)> {
+    let entries = match list_nested_archives(main_jar) {
+        Ok(e) => e,
+        Err(_) => return Vec::new(),
+    };
+    let _ = std::fs::remove_dir_all(scratch_root);
+    let handles: Vec<_> = entries
+        .into_iter()
+        .enumerate()
+        .map(|(i, ename)| {
+            let main_jar = main_jar.to_path_buf();
+            let scratch_root = scratch_root.to_path_buf();
+            std::thread::spawn(move || {
+                let safe = ename.replace('/', "__").replace('\\', "__");
+                let dest = scratch_root.join(format!("{i}-{safe}"));
+                if extract_entry(&main_jar, &ename, &dest).is_err() {
+                    return None;
+                }
+                match index_jar(&dest) {
+                    Ok(idx) => Some((ename, dest.display().to_string(), idx)),
+                    Err(_) => {
+                        let _ = std::fs::remove_file(&dest);
+                        None
+                    }
+                }
+            })
+        })
+        .collect();
+    handles.into_iter().filter_map(|h| h.join().ok().flatten()).collect()
+}
+
 fn package_name_from_path(path: &str) -> String {
     let without_ext = path.strip_suffix(".class").unwrap_or(path);
     match without_ext.rfind('/') {

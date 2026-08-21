@@ -518,6 +518,16 @@ export function PtyTerminal({
   const recordCommand = (command: string) => {
     const trimmed = command.trim();
     if (!trimmed) return;
+    // Only keep COMPLETE, meaningful commands: drop obvious junk — single
+    // characters (accidental keys), pure punctuation, and commands that end
+    // with a line continuation (they were split across lines / unfinished).
+    if (trimmed.length < 2) return;
+    if (trimmed.endsWith('\\')) return;
+    if (!/[a-zA-Z0-9_./-]/.test(trimmed)) return; // no command word at all
+    // A command that starts a new shell/editor (interactive session) is not a
+    // recordable one-shot — the user keeps typing inside it.
+    const interactive = ['ssh ', 'sftp ', 'mysql ', 'psql ', 'redis-cli', 'vim ', 'vi ', 'nano ', 'top', 'htop', 'python', 'python3', 'node', 'bash', 'sh ', 'zsh', 'fish'];
+    if (interactive.some((p) => trimmed === p.trim() || trimmed.startsWith(`${p} `))) return;
     try {
       recordUse(trimmed, connScope, cwdScopeRef.current);
       // Also persist to the command-history view (command_usage/history tables).

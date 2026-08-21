@@ -603,6 +603,7 @@ const handleCancelConnectionAttempt = async () => {
       domain: config.domain,
       rdpResolution: config.rdpResolution,
       vncColorDepth: config.vncColorDepth,
+      defaultDirectory: config.defaultDirectory,
     });
 
     // Notify parent to update tab display info (e.g. tab title)

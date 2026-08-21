@@ -39,6 +39,9 @@ const ScrollBar = React.forwardRef<
       ref={ref}
       data-slot="scroll-area-scrollbar"
       orientation={orientation}
+      // Always render the scrollbar so lists visibly afford scrolling
+      // (Radix hides it until hover/scroll by default).
+      forceMount
       className={cn(
         "flex touch-none p-px transition-colors select-none",
         orientation === "vertical" &&
@@ -51,7 +54,7 @@ const ScrollBar = React.forwardRef<
     >
       <ScrollAreaPrimitive.ScrollAreaThumb
         data-slot="scroll-area-thumb"
-        className="bg-gray-400/50 dark:bg-gray-600/80 hover:bg-gray-400/70 dark:hover:bg-gray-500/90 relative flex-1 rounded-full"
+        className="bg-muted-foreground/40 hover:bg-muted-foreground/60 dark:bg-muted-foreground/50 dark:hover:bg-muted-foreground/70 relative flex-1 rounded-full"
       />
     </ScrollAreaPrimitive.ScrollAreaScrollbar>
   );
