@@ -3,7 +3,7 @@ import react from "@vitejs/plugin-react";
 import path from "path";
 import { fileURLToPath } from 'url';
 
-const host = process.env.TAURI_DEV_HOST;
+const host = process.env.TAURI_DEV_HOST || '127.0.0.1';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -25,14 +25,15 @@ export default defineConfig(async () => ({
   server: {
     port: 1420,
     strictPort: true,
-    host: host || false,
-    hmr: host
-      ? {
-          protocol: "ws",
-          host,
-          port: 1421,
-        }
-      : undefined,
+    host,
+    // WKWebView can resolve localhost to IPv6 while Vite listens on IPv4 (or
+    // vice versa). Pin both the page and HMR client to one reachable endpoint.
+    hmr: {
+      protocol: "ws",
+      host,
+      port: 1420,
+      clientPort: 1420,
+    },
     watch: {
       // 3. tell Vite to ignore watching `src-tauri`
       ignored: ["**/src-tauri/**"],

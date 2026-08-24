@@ -894,8 +894,17 @@ export class ConnectionStorageManager {
         throw new Error('Invalid JSON format');
       }
 
-      const connections = merge ? this.getConnections() : [];
-      const folders = merge ? this.getFolders() : [];
+      const existingConnections = this.getConnections();
+      const existingFolders = this.getFolders();
+      const connections = merge ? existingConnections : [];
+      const folders = merge ? existingFolders : [];
+
+      // A replacement import must remove rows omitted by the archive; otherwise
+      // they return after the next cache hydration.
+      if (!merge) {
+        for (const connection of existingConnections) void rowDelete('connections', connection.id);
+        for (const folder of existingFolders) void rowDelete('folders', folder.id);
+      }
 
       // Import folders with new IDs
       if (imported.folders) {

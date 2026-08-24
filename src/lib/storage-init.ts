@@ -15,7 +15,7 @@ import { hydrateVaultStorage } from './toolbox/vault-crypto';
 import { hydrateCommandHistory, getCommandHistory, getCommandUsage } from './command-history';
 import { hydrateSuggestionStore } from './suggestion/store';
 import { hydrateApiDebugStorage } from './toolbox/api-debug-storage';
-import { initializeDocumentsStore } from './toolbox/documents-storage';
+import { compactDocumentHistory, initializeDocumentsStore } from './toolbox/documents-storage';
 import { hydrateWorkspace } from './terminal-group-serializer';
 import { migrateLegacyStorage } from './migration';
 import { hydrateJarStorage } from './toolbox/jar-storage';
@@ -46,6 +46,8 @@ export async function initializeAllStorage(): Promise<void> {
     initializeDocumentsStore(),
     hydrateJarStorage(),
   ]);
+  // Run after all initial reads finish because VACUUM requires an exclusive lock.
+  await compactDocumentHistory();
   // Suggestion store migrates the (now hydrated) legacy usage/history as its
   // initial global frequency data — must run after hydrateCommandHistory.
   await hydrateSuggestionStore(getCommandUsage(), getCommandHistory());

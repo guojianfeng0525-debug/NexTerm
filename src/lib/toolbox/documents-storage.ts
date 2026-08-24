@@ -39,6 +39,10 @@ export interface DocumentVersion {
 let cache: DocumentMeta[] = [];
 let initialized = false;
 
+function str(value: unknown): string {
+  return typeof value === 'string' ? value : '';
+}
+
 export function isDocumentsStoreInitialized(): boolean {
   return initialized;
 }
@@ -53,8 +57,8 @@ export async function initializeDocumentsStore(): Promise<void> {
   try {
     const rows = await rowList('documents');
     cache = rows.map((r) => ({
-      id: String(r.id ?? ''),
-      name: String(r.name ?? ''),
+      id: str(r.id),
+      name: str(r.name),
       kind: (r.kind as DocumentKind) ?? 'xlsx',
       size: (r.size as number) ?? 0,
       headVersion: (r.head_version as number) ?? 0,
@@ -65,6 +69,12 @@ export async function initializeDocumentsStore(): Promise<void> {
     cache = [];
   }
   initialized = true;
+}
+
+/** Enforce the current three-version retention policy and reclaim freed pages. */
+export async function compactDocumentHistory(): Promise<void> {
+  const removed = await invoke<number>('documents_prune_versions');
+  if (removed > 0) await invoke('database_vacuum');
 }
 
 /** All documents, newest first. */

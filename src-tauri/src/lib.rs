@@ -1,4 +1,5 @@
 mod commands;
+mod config_archive;
 mod connection_manager;
 pub mod db;
 mod desktop_protocol;
@@ -164,73 +165,6 @@ fn build_app_menu<F: Fn(&str) -> String>(
         ],
     )?;
 
-    // ── Toolbox menus — one top-level menu per tool ───────────────────────────
-    let apps_menu = Submenu::with_id_and_items(
-        app,
-        "m_tool_apps",
-        &t("toolbox.apps.title"),
-        true,
-        &[&MenuItem::with_id(
-            app,
-            "tool_apps",
-            &t("toolbox.apps.open"),
-            true,
-            None::<&str>,
-        )?],
-    )?;
-    let vault_menu = Submenu::with_id_and_items(
-        app,
-        "m_tool_vault",
-        &t("toolbox.vault.title"),
-        true,
-        &[&MenuItem::with_id(
-            app,
-            "tool_vault",
-            &t("toolbox.vault.open"),
-            true,
-            None::<&str>,
-        )?],
-    )?;
-    let tunnels_menu = Submenu::with_id_and_items(
-        app,
-        "m_tool_tunnels",
-        &t("toolbox.tunnels.title"),
-        true,
-        &[&MenuItem::with_id(
-            app,
-            "tool_tunnels",
-            &t("toolbox.tunnels.open"),
-            true,
-            None::<&str>,
-        )?],
-    )?;
-    let services_menu = Submenu::with_id_and_items(
-        app,
-        "m_tool_services",
-        &t("toolbox.services.title"),
-        true,
-        &[&MenuItem::with_id(
-            app,
-            "tool_services",
-            &t("toolbox.services.open"),
-            true,
-            None::<&str>,
-        )?],
-    )?;
-    let notes_menu = Submenu::with_id_and_items(
-        app,
-        "m_tool_notes",
-        &t("toolbox.notes.title"),
-        true,
-        &[&MenuItem::with_id(
-            app,
-            "tool_notes",
-            &t("toolbox.notes.open"),
-            true,
-            None::<&str>,
-        )?],
-    )?;
-
     // ── Window menu ───────────────────────────────────────────────────────────
     let window_menu = Submenu::with_id_and_items(
         app,
@@ -251,11 +185,6 @@ fn build_app_menu<F: Fn(&str) -> String>(
             &servers_menu,
             &terminal_menu,
             &edit_menu,
-            &apps_menu,
-            &vault_menu,
-            &tunnels_menu,
-            &services_menu,
-            &notes_menu,
             &window_menu,
         ],
     )
@@ -602,6 +531,9 @@ pub fn run() {
             db::row_delete,
             db::row_clear,
             db::database_vacuum,
+            db::documents_prune_versions,
+            db::export_encrypted_backup,
+            db::restore_encrypted_backup,
             db::prune_command_stats,
             db::legacy_db_get,
             db::drop_legacy_tables,
@@ -615,6 +547,8 @@ pub fn run() {
             toolbox::service_stop,
             toolbox::service_list,
             toolbox::service_logs,
+            config_archive::write_config_archive,
+            config_archive::read_config_archive,
             // API debugger commands
             toolbox::api_request,
             toolbox::api_ws_connect,

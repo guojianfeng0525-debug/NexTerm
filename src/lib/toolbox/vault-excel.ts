@@ -121,7 +121,7 @@ export async function buildVaultExcel(rows: VaultExcelRow[]): Promise<Uint8Array
   const sheet = XLSX.utils.aoa_to_sheet(aoa);
   const workbook = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(workbook, sheet, '记录本');
-  return XLSX.write(workbook, { type: 'array', bookType: 'xlsx' }) as Uint8Array;
+  return new Uint8Array(XLSX.write(workbook, { type: 'array', bookType: 'xlsx' }) as ArrayBuffer);
 }
 
 /** Build the empty template workbook (header + one example row). */

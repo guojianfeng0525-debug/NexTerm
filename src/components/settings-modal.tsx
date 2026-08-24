@@ -78,6 +78,8 @@ export function SettingsModal({ open, onOpenChange, onAppearanceChange }: Settin
   const [importMerge, setImportMerge] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
   const [isImporting, setIsImporting] = useState(false);
+  const [exportPasswordOpen, setExportPasswordOpen] = useState(false);
+  const [exportPassword, setExportPassword] = useState('');
   
   const [settings, setSettings] = useState({
     // Terminal settings
@@ -143,12 +145,19 @@ export function SettingsModal({ open, onOpenChange, onAppearanceChange }: Settin
     }
   }, [open]);
 
-  const handleExportConfig = async () => {
+  const handleExportConfig = () => {
+    setExportPassword('');
+    setExportPasswordOpen(true);
+  };
+
+  const confirmExportConfig = async () => {
+    if (!exportPassword) return;
     setIsExporting(true);
     try {
-      const saved = await exportAllConfig();
+      const saved = await exportAllConfig(exportPassword);
       if (saved) {
         toast.success(t('settings.advanced.exportSuccess'));
+        setExportPasswordOpen(false);
       } else {
         toast.info(t('settings.advanced.exportCancelled'));
       }
@@ -163,21 +172,15 @@ export function SettingsModal({ open, onOpenChange, onAppearanceChange }: Settin
   };
 
   const handleImportConfig = async () => {
+    if (!importMerge && !window.confirm(t('settings.advanced.importReplaceConfirm'))) return;
     setIsImporting(true);
     try {
-      const result = await importAllConfig(importMerge);
-      if (result) {
+      const restored = await importAllConfig(importMerge);
+      if (restored) {
         toast.success(t('settings.advanced.importSuccess'), {
-          description: t('settings.advanced.importSuccessDesc', {
-            connections: result.connections,
-            profiles: result.profiles,
-          }),
+          description: t('settings.advanced.importRestarting'),
         });
-        // Reload settings that may have changed
-        const appearance = loadAppearanceSettings();
-        setTerminalAppearance(appearance);
-        setEditorConfig(loadEditorConfig());
-        if (onAppearanceChange) onAppearanceChange(appearance);
+        window.setTimeout(() => window.location.reload(), 500);
       } else {
         toast.info(t('settings.advanced.importCancelled'));
       }
@@ -1386,6 +1389,33 @@ export function SettingsModal({ open, onOpenChange, onAppearanceChange }: Settin
               <KeyRound className="mr-1.5 h-4 w-4" />
             )}
             {t('common.save')}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+
+    <Dialog open={exportPasswordOpen} onOpenChange={setExportPasswordOpen}>
+      <DialogContent className="top-[50%] left-[50%] -translate-x-1/2 -translate-y-1/2 sm:max-w-sm">
+        <DialogHeader>
+          <DialogTitle>{t('settings.advanced.exportConfig')}</DialogTitle>
+          <DialogDescription>{t('settings.advanced.passwordWarning')}</DialogDescription>
+        </DialogHeader>
+        <div className="space-y-1.5 py-1">
+          <Label htmlFor="export-config-password">{t('settings.security.lockCurrentPassword')}</Label>
+          <PasswordInput
+            id="export-config-password"
+            value={exportPassword}
+            onChange={(event) => setExportPassword(event.target.value)}
+            onKeyDown={(event) => { if (event.key === 'Enter') void confirmExportConfig(); }}
+            autoFocus
+            autoComplete="current-password"
+          />
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => setExportPasswordOpen(false)} disabled={isExporting}>{t('common.cancel')}</Button>
+          <Button onClick={() => void confirmExportConfig()} disabled={isExporting || !exportPassword}>
+            {isExporting && <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />}
+            {t('settings.advanced.exportConfig')}
           </Button>
         </DialogFooter>
       </DialogContent>

@@ -319,9 +319,13 @@ export const TunnelsStorage = {
     return list<TunnelConfig>('tunnels');
   },
   save(items: TunnelConfig[]): void {
+    const removed = cache.tunnels as TunnelConfig[];
     cache.tunnels = items;
     for (const item of items) {
       void tunnelToRowEncrypted(item).then((row) => commitUpsert('tunnels', row));
+    }
+    for (const item of removed) {
+      if (!items.some((next) => next.id === item.id)) commitDelete('tunnels', item.id);
     }
     notifyToolboxChanged('tunnels');
   },
@@ -382,9 +386,13 @@ export const NotesStorage = {
     return list<NoteItem>('notes');
   },
   save(items: NoteItem[]): void {
+    const removed = cache.notes as NoteItem[];
     cache.notes = items;
     for (const item of items) {
       void noteToRowEncrypted(item).then((row) => commitUpsert('notes', row));
+    }
+    for (const item of removed) {
+      if (!items.some((next) => next.id === item.id)) commitDelete('notes', item.id);
     }
     notifyToolboxChanged('notes');
   },

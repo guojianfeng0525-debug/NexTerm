@@ -1,233 +1,203 @@
-/**
- * Config Export / Import
- *
- * Bundles every piece of user-configurable state (connections, folders,
- * profiles, terminal appearance, editor config, app settings, language)
- * into a single JSON file so the user can move their setup to another
- * machine with one click.
- */
-
-import { save, open as tauriOpen } from '@tauri-apps/plugin-dialog';
-import { readTextFile, writeTextFile } from '@tauri-apps/plugin-fs';
-import {
-  ConnectionStorageManager,
-  type ConnectionData,
-  type ConnectionFolder,
-} from './connection-storage';
+/** Plaintext ZIP configuration archive import/export. */
+import { invoke } from '@tauri-apps/api/core';
+import { open as tauriOpen, save } from '@tauri-apps/plugin-dialog';
+import { ConnectionStorageManager } from './connection-storage';
 import { ConnectionProfileManager, type ConnectionProfile } from './connection-profiles';
-import {
-  loadAppearanceSettings,
-  saveAppearanceSettings,
-  type TerminalAppearanceSettings,
-} from './terminal-config';
-import {
-  loadEditorConfig,
-  saveEditorConfig,
-  dispatchEditorConfigChanged,
-  type EditorConfig,
-} from './editor-config';
-import {
-  APP_SETTINGS_STORAGE_KEY,
-  APP_SETTINGS_CHANGED_EVENT,
-} from './keyboard-shortcuts';
-import { prefGet, prefGetRaw, prefSet, prefSetRaw } from './preferences';
+import { prefGet, prefSet } from './preferences';
+import { verifyAppLock, getAppLockKey } from './toolbox/app-lock';
+import { AppsStorage, OrchestrationsStorage, ServicesStorage, TunnelsStorage, NotesStorage, generateId } from './toolbox/toolbox-storage';
+import type { NoteItem, ServiceConfig, ServiceOrchestration, ToolboxApp } from './toolbox/toolbox-types';
+import { buildVaultExcel, parseVaultExcel } from './toolbox/vault-excel';
+import { loadRecords, saveRecords } from './toolbox/records-storage';
+import { listDocuments, exportDocument, importDocument, deleteDocument } from './toolbox/documents-storage';
 
-// ── Constants ────────────────────────────────────────────────────────────────
+interface ArchiveEntry {
+  path: string;
+  data: number[];
+}
 
-const SCHEMA_VERSION = 1;
-const LANGUAGE_STORAGE_KEY = 'nexterm-language';
-
-// ── Types ────────────────────────────────────────────────────────────────────
-
-export interface ConfigBundle {
-  version: number;
+interface ArchiveManifest {
+  format: 'nexterm-config-archive';
+  version: 1;
   exportedAt: string;
-  appVersion: string;
-  data: {
-    connections?: {
-      connections: ConnectionData[];
-      folders: ConnectionFolder[];
-    };
-    profiles?: ConnectionProfile[];
-    terminalAppearance?: TerminalAppearanceSettings;
-    editorConfig?: EditorConfig;
-    appSettings?: Record<string, unknown>;
-    language?: string;
+  documents: Array<{ path: string; name: string }>;
+}
+
+interface AppConfig {
+  settings: Record<string, unknown>;
+  layout: Record<string, unknown>;
+  appearance: Record<string, unknown>;
+  editor: Record<string, unknown>;
+  language: string;
+  apps: ToolboxApp[];
+  services: ServiceConfig[];
+  orchestrations: ServiceOrchestration[];
+  profiles: ConnectionProfile[];
+}
+
+const encoder = new TextEncoder();
+const decoder = new TextDecoder();
+
+function jsonEntry(path: string, value: unknown): ArchiveEntry {
+  return { path, data: Array.from(encoder.encode(JSON.stringify(value, null, 2))) };
+}
+
+function parseJson<T>(entries: Map<string, Uint8Array>, path: string): T {
+  const bytes = entries.get(path);
+  if (!bytes) throw new Error(`Archive is missing ${path}`);
+  return JSON.parse(decoder.decode(bytes)) as T;
+}
+
+function validateManifest(manifest: ArchiveManifest): void {
+  if (manifest.format !== 'nexterm-config-archive' || manifest.version !== 1) {
+    throw new Error('Unsupported configuration archive');
+  }
+}
+
+function noteRows(notes: NoteItem[]): unknown[][] {
+  return [
+    ['Title', 'Language', 'Content', 'Pinned', 'Created At', 'Updated At'],
+    ...notes.map((note) => [note.title, note.language, note.content, !!note.pinned, note.createdAt, note.updatedAt]),
+  ];
+}
+
+async function buildNotesExcel(notes: NoteItem[]): Promise<Uint8Array> {
+  const XLSX = await import('xlsx');
+  const workbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet(noteRows(notes)), 'Notes');
+  return new Uint8Array(XLSX.write(workbook, { type: 'array', bookType: 'xlsx' }) as ArrayBuffer);
+}
+
+async function parseNotesExcel(bytes: Uint8Array): Promise<NoteItem[]> {
+  const XLSX = await import('xlsx');
+  const workbook = XLSX.read(bytes, { type: 'array' });
+  const sheet = workbook.Sheets[workbook.SheetNames[0] ?? ''];
+  const rows = sheet ? XLSX.utils.sheet_to_json<unknown[]>(sheet, { header: 1, defval: '' }) : [];
+  const headers = rows[0];
+  if (!Array.isArray(headers) || headers.join('|') !== 'Title|Language|Content|Pinned|Created At|Updated At') {
+    throw new Error('Invalid notes workbook');
+  }
+  return rows.slice(1).flatMap((row): NoteItem[] => {
+    const title = typeof row[0] === 'string' ? row[0].trim() : '';
+    if (!title) return [];
+    const now = Date.now();
+    return [{
+      id: generateId('note'), title,
+      language: typeof row[1] === 'string' ? row[1] as NoteItem['language'] : 'plain',
+      content: typeof row[2] === 'string' ? row[2] : '',
+      pinned: row[3] === true || row[3] === 'true' || row[3] === 1,
+      createdAt: typeof row[4] === 'number' ? row[4] : now,
+      updatedAt: typeof row[5] === 'number' ? row[5] : now,
+    }];
+  });
+}
+
+/** Export a plaintext ZIP after verifying the existing app-lock password. */
+export async function exportAllConfig(password: string): Promise<boolean> {
+  if (!(await verifyAppLock(password))) throw new Error('Incorrect app-lock password');
+  const outputPath = await save({
+    defaultPath: `nexterm-config-${new Date().toISOString().slice(0, 10)}.zip`,
+    filters: [{ name: 'NexTerm Configuration Archive', extensions: ['zip'] }],
+  });
+  if (!outputPath) return false;
+
+  const key = getAppLockKey();
+  if (!key) throw new Error('App lock is not unlocked');
+  const documents = listDocuments();
+  const documentEntries = await Promise.all(documents.map(async (document) => {
+    const path = `documents/${document.id}.${document.kind}`;
+    return { path, data: Array.from(await exportDocument(document.id)) };
+  }));
+  const appConfig: AppConfig = {
+    settings: prefGet('sshClientSettings', {}), layout: prefGet('nexterm-layout-config', {}),
+    appearance: prefGet('terminalAppearance', {}), editor: prefGet('nexterm-editor-config', {}),
+    language: prefGet('nexterm-language', 'auto'),
+    apps: AppsStorage.load(), services: ServicesStorage.load(), orchestrations: OrchestrationsStorage.load(),
+    profiles: ConnectionProfileManager.getProfiles(),
   };
+  const vaultRows = (await loadRecords(key)).map(({ record }) => ({
+    name: record.name, address: record.address, username: record.username, password: record.password,
+    category: record.category ?? '', notes: record.notes ?? '', favorite: record.favorite ?? false,
+  }));
+  const manifest: ArchiveManifest = {
+    format: 'nexterm-config-archive', version: 1, exportedAt: new Date().toISOString(),
+    documents: documents.map((document) => ({ path: `documents/${document.id}.${document.kind}`, name: document.name })),
+  };
+  await invoke('write_config_archive', { outputPath, entries: [
+    jsonEntry('manifest.json', manifest),
+    jsonEntry('connections.json', JSON.parse(ConnectionStorageManager.exportConnections())),
+    jsonEntry('tunnels.json', TunnelsStorage.load()), jsonEntry('app-config.json', appConfig),
+    { path: 'vault.xlsx', data: Array.from(await buildVaultExcel(vaultRows)) },
+    { path: 'notes.xlsx', data: Array.from(await buildNotesExcel(NotesStorage.load())) },
+    ...documentEntries,
+  ] satisfies ArchiveEntry[] });
+  return true;
 }
 
-export interface ImportResult {
-  connections: number;
-  profiles: number;
-  terminalAppearance: boolean;
-  editorConfig: boolean;
-  appSettings: boolean;
-  language: boolean;
-}
+/** Import a plaintext ZIP. `merge` retains existing entries; false replaces them. */
+export async function importAllConfig(merge = false): Promise<boolean> {
+  const inputPath = await tauriOpen({ filters: [{ name: 'NexTerm Configuration Archive', extensions: ['zip'] }], multiple: false, directory: false });
+  if (!inputPath || Array.isArray(inputPath)) return false;
+  const rawEntries = await invoke<ArchiveEntry[]>('read_config_archive', { inputPath });
+  const entries = new Map(rawEntries.map((entry) => [entry.path, new Uint8Array(entry.data)]));
+  const manifest = parseJson<ArchiveManifest>(entries, 'manifest.json');
+  validateManifest(manifest);
+  const key = getAppLockKey();
+  if (!key) throw new Error('App lock is not unlocked');
 
-// ── Export ────────────────────────────────────────────────────────────────────
-
-/**
- * Collect all config from the SQLite stores, show a save-dialog, and write the
- * JSON bundle to disk.  Returns `true` when the file was written, `false`
- * when the user cancelled the dialog.
- */
-export async function exportAllConfig(): Promise<boolean> {
-  try {
-    // 1. Build the bundle -------------------------------------------------------
-    const bundle: ConfigBundle = {
-      version: SCHEMA_VERSION,
-      exportedAt: new Date().toISOString(),
-      appVersion: getAppVersion(),
-      data: {},
-    };
-
-    // Connections + folders
-    const connections = ConnectionStorageManager.getConnections();
-    const folders = ConnectionStorageManager.getFolders();
-    if (connections.length || folders.length) {
-      bundle.data.connections = { connections, folders };
-    }
-
-    // Connection profiles
-    const profiles = ConnectionProfileManager.getProfiles();
-    if (profiles.length) {
-      bundle.data.profiles = profiles;
-    }
-
-    // Terminal appearance
-    const termAppearance = loadAppearanceSettings();
-    bundle.data.terminalAppearance = termAppearance;
-
-    // Editor config
-    const editorCfg = loadEditorConfig();
-    bundle.data.editorConfig = editorCfg;
-
-    // App settings (SQLite preferences blob)
-    const appSettings = prefGet<Record<string, unknown> | null>(APP_SETTINGS_STORAGE_KEY, null);
-    if (appSettings) bundle.data.appSettings = appSettings;
-
-    // Language preference
-    const lang = prefGetRaw(LANGUAGE_STORAGE_KEY);
-    if (lang) bundle.data.language = lang;
-
-    // 2. Ask where to save -----------------------------------------------------
-    const dateStr = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
-    const filePath = await save({
-      defaultPath: `nexterm-config-${dateStr}.json`,
-      filters: [{ name: 'NexTerm Config', extensions: ['json'] }],
-    });
-
-    if (!filePath) return false; // cancelled
-
-    // 3. Write ------------------------------------------------------------------
-    await writeTextFile(filePath, JSON.stringify(bundle, null, 2));
-    return true;
-  } catch (error) {
-    console.error('[config-export] Failed:', error);
-    throw error;
+  const connections = parseJson<{ connections: unknown[]; folders?: unknown[] }>(entries, 'connections.json');
+  ConnectionStorageManager.importConnections(JSON.stringify(connections), merge);
+  const tunnels = parseJson<ReturnType<typeof TunnelsStorage.load>>(entries, 'tunnels.json');
+  if (!merge) {
+    TunnelsStorage.load().forEach((item) => TunnelsStorage.remove(item.id));
+    AppsStorage.load().forEach((item) => AppsStorage.remove(item.id));
+    ServicesStorage.load().forEach((item) => ServicesStorage.remove(item.id));
+    OrchestrationsStorage.load().forEach((item) => OrchestrationsStorage.remove(item.id));
+    NotesStorage.load().forEach((item) => NotesStorage.remove(item.id));
   }
+  TunnelsStorage.save(merge ? mergeById(TunnelsStorage.load(), tunnels) : tunnels);
+  const config = parseJson<AppConfig>(entries, 'app-config.json');
+  prefSet('sshClientSettings', config.settings);
+  prefSet('nexterm-layout-config', config.layout);
+  prefSet('terminalAppearance', config.appearance);
+  prefSet('nexterm-editor-config', config.editor);
+  prefSet('nexterm-language', config.language);
+  ConnectionProfileManager.importProfiles(JSON.stringify(config.profiles ?? []), merge);
+  AppsStorage.save(merge ? mergeById(AppsStorage.load(), config.apps ?? []) : (config.apps ?? []));
+  ServicesStorage.save(merge ? mergeById(ServicesStorage.load(), config.services ?? []) : (config.services ?? []));
+  OrchestrationsStorage.save(merge ? mergeById(OrchestrationsStorage.load(), config.orchestrations ?? []) : (config.orchestrations ?? []));
+
+  const vaultBytes = entries.get('vault.xlsx');
+  if (!vaultBytes) throw new Error('Archive is missing vault.xlsx');
+  const vaultRows = await parseVaultExcel(vaultBytes);
+  const currentRecords = merge ? await loadRecords(key) : [];
+  const names = new Set(currentRecords.map((entry) => entry.record.name));
+  const now = Date.now();
+  for (const row of vaultRows) {
+    if (merge && names.has(row.name)) continue;
+    const id = generateId('record');
+    currentRecords.push({ id, createdAt: now, updatedAt: now, record: {
+      id, createdAt: now, updatedAt: now, name: row.name, address: row.address, username: row.username,
+      password: row.password, category: row.category || undefined, notes: row.notes || undefined, favorite: row.favorite,
+    } });
+    names.add(row.name);
+  }
+  await saveRecords(key, currentRecords);
+  const notesBytes = entries.get('notes.xlsx');
+  if (!notesBytes) throw new Error('Archive is missing notes.xlsx');
+  const notes = await parseNotesExcel(notesBytes);
+  NotesStorage.save(merge ? [...NotesStorage.load(), ...notes] : notes);
+  if (!merge) await Promise.all(listDocuments().map((document) => deleteDocument(document.id)));
+  for (const document of manifest.documents) {
+    const bytes = entries.get(document.path);
+    if (!bytes) throw new Error(`Archive is missing ${document.path}`);
+    await importDocument(document.name, bytes);
+  }
+  return true;
 }
 
-// ── Import ────────────────────────────────────────────────────────────────────
-
-/**
- * Open a file-dialog, parse the JSON bundle, optionally merge connections,
- * and write every category into the SQLite stores.  Returns a summary of what
- * was imported, or `null` when the user cancelled.
- */
-export async function importAllConfig(
-  merge: boolean = false,
-): Promise<ImportResult | null> {
-  try {
-    // 1. Pick file --------------------------------------------------------------
-    const filePath = await tauriOpen({
-      filters: [{ name: 'NexTerm Config', extensions: ['json'] }],
-      multiple: false,
-      directory: false,
-    });
-
-    if (!filePath) return null; // cancelled
-
-    // 2. Read & parse -----------------------------------------------------------
-    const raw = await readTextFile(filePath);
-    const bundle = JSON.parse(raw) as ConfigBundle;
-
-    if (typeof bundle.version !== 'number' || !bundle.data) {
-      throw new Error('Invalid config file: missing version or data block.');
-    }
-
-    const result: ImportResult = {
-      connections: 0,
-      profiles: 0,
-      terminalAppearance: false,
-      editorConfig: false,
-      appSettings: false,
-      language: false,
-    };
-
-    const { data } = bundle;
-
-    // 3a. Connections + folders -------------------------------------------------
-    if (data.connections) {
-      const importedCount = ConnectionStorageManager.importConnections(
-        JSON.stringify(data.connections),
-        merge,
-      );
-      result.connections = importedCount;
-    }
-
-    // 3b. Connection profiles ---------------------------------------------------
-    if (data.profiles && Array.isArray(data.profiles)) {
-      const importedCount = ConnectionProfileManager.importProfiles(
-        JSON.stringify(data.profiles),
-        merge,
-      );
-      result.profiles = importedCount;
-    }
-
-    // 3c. Terminal appearance ---------------------------------------------------
-    if (data.terminalAppearance) {
-      saveAppearanceSettings(data.terminalAppearance);
-      result.terminalAppearance = true;
-    }
-
-    // 3d. Editor config ---------------------------------------------------------
-    if (data.editorConfig) {
-      saveEditorConfig(data.editorConfig);
-      dispatchEditorConfigChanged();
-      result.editorConfig = true;
-    }
-
-    // 3e. App settings ----------------------------------------------------------
-    if (data.appSettings) {
-      prefSet(APP_SETTINGS_STORAGE_KEY, data.appSettings);
-      window.dispatchEvent(new Event(APP_SETTINGS_CHANGED_EVENT));
-      result.appSettings = true;
-    }
-
-    // 3f. Language --------------------------------------------------------------
-    if (data.language) {
-      prefSetRaw(LANGUAGE_STORAGE_KEY, data.language);
-      result.language = true;
-    }
-
-    return result;
-  } catch (error) {
-    console.error('[config-import] Failed:', error);
-    throw error;
-  }
-}
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-function getAppVersion(): string {
-  try {
-    // Vite exposes the package version via import.meta.env when configured;
-    // fall back to a sensible default.
-    return (import.meta as { env?: { PACKAGE_VERSION?: string } }).env
-      ?.PACKAGE_VERSION ?? 'unknown';
-  } catch {
-    return 'unknown';
-  }
+function mergeById<T extends { id: string }>(current: T[], imported: T[]): T[] {
+  const next = new Map(current.map((item) => [item.id, item]));
+  for (const item of imported) next.set(item.id, item);
+  return [...next.values()];
 }

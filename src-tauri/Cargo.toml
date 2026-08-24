@@ -45,13 +45,17 @@ open = "5"
 base64 = "0.22"
 sys-locale = "0.3"
 reqwest = { version = "0.12", features = ["json", "stream", "blocking"] }
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.32", features = ["bundled", "backup"] }
 betteroffice-docx = "0.1.0"
 betteroffice-xlsx = "0.1.0"
 docx-parse = { package = "betteroffice-docx-parse", version = "0.1.0" }
 ooxml-opc = { package = "betteroffice-opc", version = "0.1.0" }
 xlsx-model = { package = "betteroffice-xlsx-model", version = "0.1.0" }
 sha2 = "0.11.0"
+sha2_10 = { package = "sha2", version = "0.10" }
+aes-gcm = "0.10"
+pbkdf2 = "0.12"
+rand = "0.8"
 hex = "0.4"
 regex = "1"
 # zip: keep only pure-Rust features so the Windows CI build has no native

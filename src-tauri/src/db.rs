@@ -13,8 +13,12 @@
 //! migrate its data into the normalized tables before `drop_legacy_tables`
 //! removes them.
 
+use aes_gcm::{aead::{Aead, KeyInit}, Aes256Gcm, Nonce};
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+use pbkdf2::pbkdf2_hmac;
+use rand::{rngs::OsRng, RngCore};
 use rusqlite::types::{Value as SqlValue, ValueRef};
-use rusqlite::{params_from_iter, Connection, Row};
+use rusqlite::{params_from_iter, Connection, DatabaseName, Row};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 use std::sync::{Arc, Mutex};
 use tauri::State;
@@ -90,6 +94,17 @@ const LEGACY_TABLES: [&str; 9] = [
 
 pub struct DbState {
     conn: Mutex<Connection>,
+}
+
+const BACKUP_ITERATIONS: u32 = 150_000;
+const BACKUP_MAGIC: &str = "nexterm-encrypted-backup";
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct EncryptedBackup {
+    format: String,
+    version: u8,
+    salt: String,
+    payload: String,
 }
 
 impl DbState {
@@ -224,7 +239,7 @@ impl DbState {
         // useful undo history instead of retaining every snapshot forever.
         tx.execute(
             "DELETE FROM document_versions WHERE document_id = ?1 AND version <= ?2",
-            rusqlite::params![id, version.saturating_sub(10)],
+            rusqlite::params![id, version.saturating_sub(3)],
         )
         .map_err(|e| format!("prune document_versions: {e}"))?;
 
@@ -248,6 +263,109 @@ impl DbState {
         }
 
         tx.commit().map_err(|e| e.to_string())
+    }
+
+    /// Remove all but the newest document versions, returning the deleted row count.
+    pub fn documents_prune_versions(&self, keep: u32) -> Result<usize, String> {
+        let conn = self.conn.lock().map_err(|_| "db lock poisoned".to_string())?;
+        conn.execute(
+            "DELETE FROM document_versions WHERE id IN (
+                SELECT id FROM (
+                    SELECT id, ROW_NUMBER() OVER (
+                        PARTITION BY document_id ORDER BY version DESC
+                    ) AS rank
+                    FROM document_versions
+                ) WHERE rank > ?1
+            )",
+            [keep],
+        )
+        .map_err(|e| format!("prune document versions: {e}"))
+    }
+
+    fn backup_key(password: &str, salt: &[u8]) -> [u8; 32] {
+        let mut key = [0u8; 32];
+        pbkdf2_hmac::<sha2_10::Sha256>(password.as_bytes(), salt, BACKUP_ITERATIONS, &mut key);
+        key
+    }
+
+    fn temp_backup_path(prefix: &str) -> std::path::PathBuf {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        std::env::temp_dir().join(format!("{prefix}-{}-{stamp}.db", std::process::id()))
+    }
+
+    /// Create a consistent SQLite snapshot and encrypt it directly to a backup file.
+    pub fn export_encrypted_backup(&self, password: &str, output_path: &std::path::Path) -> Result<(), String> {
+        if password.len() < 8 {
+            return Err("backup password must be at least 8 characters".to_string());
+        }
+        let temp = Self::temp_backup_path("nexterm-backup");
+        let result = (|| {
+            let conn = self.conn.lock().map_err(|_| "db lock poisoned".to_string())?;
+            conn.backup(DatabaseName::Main, &temp, None)
+                .map_err(|e| format!("snapshot database: {e}"))?;
+            let bytes = std::fs::read(&temp).map_err(|e| format!("read snapshot: {e}"))?;
+            let mut salt = [0u8; 16];
+            let mut nonce = [0u8; 12];
+            OsRng.fill_bytes(&mut salt);
+            OsRng.fill_bytes(&mut nonce);
+            let key = Self::backup_key(password, &salt);
+            let encrypted = Aes256Gcm::new_from_slice(&key)
+                .map_err(|e| format!("create cipher: {e}"))?
+                .encrypt(Nonce::from_slice(&nonce), bytes.as_ref())
+                .map_err(|_| "encrypt backup".to_string())?;
+            let mut payload = nonce.to_vec();
+            payload.extend(encrypted);
+            let envelope = EncryptedBackup {
+                format: BACKUP_MAGIC.to_string(),
+                version: 1,
+                salt: BASE64.encode(salt),
+                payload: BASE64.encode(payload),
+            };
+            let json = serde_json::to_vec(&envelope).map_err(|e| format!("serialize backup: {e}"))?;
+            std::fs::write(output_path, json).map_err(|e| format!("write backup: {e}"))
+        })();
+        let _ = std::fs::remove_file(&temp);
+        result
+    }
+
+    /// Restore a complete encrypted SQLite snapshot. The caller must relaunch
+    /// afterwards so the source backup's app-lock metadata is reloaded.
+    pub fn restore_encrypted_backup(&self, password: &str, input_path: &std::path::Path) -> Result<(), String> {
+        let raw = std::fs::read(input_path).map_err(|e| format!("read backup: {e}"))?;
+        let envelope: EncryptedBackup = serde_json::from_slice(&raw).map_err(|_| "invalid backup file".to_string())?;
+        if envelope.format != BACKUP_MAGIC || envelope.version != 1 {
+            return Err("unsupported backup format".to_string());
+        }
+        let salt = BASE64.decode(envelope.salt).map_err(|_| "invalid backup salt".to_string())?;
+        let payload = BASE64.decode(envelope.payload).map_err(|_| "invalid backup payload".to_string())?;
+        if salt.len() != 16 || payload.len() <= 12 {
+            return Err("invalid backup data".to_string());
+        }
+        let key = Self::backup_key(password, &salt);
+        let bytes = Aes256Gcm::new_from_slice(&key)
+            .map_err(|e| format!("create cipher: {e}"))?
+            .decrypt(Nonce::from_slice(&payload[..12]), &payload[12..])
+            .map_err(|_| "incorrect backup password or corrupted backup".to_string())?;
+        let temp = Self::temp_backup_path("nexterm-restore");
+        let result = (|| {
+            std::fs::write(&temp, bytes).map_err(|e| format!("stage backup: {e}"))?;
+            let source = Connection::open(&temp).map_err(|e| format!("open backup: {e}"))?;
+            let integrity: String = source
+                .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+                .map_err(|e| format!("verify backup: {e}"))?;
+            if integrity != "ok" {
+                return Err("backup integrity check failed".to_string());
+            }
+            drop(source);
+            let mut conn = self.conn.lock().map_err(|_| "db lock poisoned".to_string())?;
+            conn.restore(DatabaseName::Main, &temp, None::<fn(rusqlite::backup::Progress)>)
+                .map_err(|e| format!("restore database: {e}"))
+        })();
+        let _ = std::fs::remove_file(&temp);
+        result
     }
 
     /// Document kind ('docx' | 'xlsx'), if present.
@@ -758,6 +876,29 @@ pub fn database_vacuum(state: State<'_, Arc<DbState>>) -> Result<(), String> {
         .lock()
         .map_err(|_| "db lock poisoned".to_string())?;
     conn.execute_batch("VACUUM").map_err(|e| format!("vacuum: {e}"))
+}
+
+#[tauri::command]
+pub fn documents_prune_versions(state: State<'_, Arc<DbState>>) -> Result<usize, String> {
+    state.documents_prune_versions(3)
+}
+
+#[tauri::command]
+pub fn export_encrypted_backup(
+    password: String,
+    output_path: String,
+    state: State<'_, Arc<DbState>>,
+) -> Result<(), String> {
+    state.export_encrypted_backup(&password, std::path::Path::new(&output_path))
+}
+
+#[tauri::command]
+pub fn restore_encrypted_backup(
+    password: String,
+    input_path: String,
+    state: State<'_, Arc<DbState>>,
+) -> Result<(), String> {
+    state.restore_encrypted_backup(&password, std::path::Path::new(&input_path))
 }
 
 /// Retain only the most recently used learned command rows. This avoids
@@ -1398,5 +1539,40 @@ mod upsert_tests {
         assert_eq!(count, 1);
         drop(conn);
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn encrypted_backup_round_trips_without_plaintext() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("source.db");
+        let backup_path = dir.path().join("backup.nexbackup");
+        let state = DbState::open(&db_path).unwrap();
+        {
+            let conn = state.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO command_usage (command, count) VALUES (?1, 1)",
+                ["sensitive test command"],
+            )
+            .unwrap();
+        }
+
+        state
+            .export_encrypted_backup("correct horse battery staple", &backup_path)
+            .unwrap();
+        let exported = std::fs::read_to_string(&backup_path).unwrap();
+        assert!(!exported.contains("sensitive test command"));
+
+        {
+            let conn = state.conn.lock().unwrap();
+            conn.execute("DELETE FROM command_usage", []).unwrap();
+        }
+        state
+            .restore_encrypted_backup("correct horse battery staple", &backup_path)
+            .unwrap();
+        let conn = state.conn.lock().unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM command_usage", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
     }
 }
