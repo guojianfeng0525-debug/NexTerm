@@ -2,8 +2,10 @@ name: Build Windows Portable (Fixed WebView2)
 
 on:
   push:
-    branches: [main]
-    tags: ['v*']
+    branches:
+      - main
+    tags:
+      - 'v*'
   workflow_dispatch:
 
 permissions:
@@ -12,22 +14,39 @@ permissions:
 jobs:
   build-windows-portable:
     runs-on: windows-latest
+
     steps:
-      - name: Checkout
+      # ------------------------------------------------------------
+      # Checkout
+      # ------------------------------------------------------------
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup pnpm (version from packageManager field)
+      # ------------------------------------------------------------
+      # pnpm
+      # version will be read from package.json -> packageManager
+      # ------------------------------------------------------------
+      - name: Setup pnpm
         uses: pnpm/action-setup@v4
 
+      # ------------------------------------------------------------
+      # Node.js
+      # ------------------------------------------------------------
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: pnpm
 
+      # ------------------------------------------------------------
+      # Rust
+      # ------------------------------------------------------------
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
+      # ------------------------------------------------------------
+      # Rust/Cargo cache
+      # ------------------------------------------------------------
       - name: Cache cargo registry
         uses: actions/cache@v4
         with:
@@ -36,96 +55,289 @@ jobs:
             ~/.cargo/git
             src-tauri/target
           key: ${{ runner.os }}-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
 
+      # ------------------------------------------------------------
+      # Install frontend/node dependencies
+      # ------------------------------------------------------------
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      # russh 0.62 uses aws-lc-rs (default feature), which builds from C
-      # sources on Windows and needs CMake. GitHub's windows-latest image
-      # ships CMake, Perl and NASM — verify they are present so a missing
-      # toolchain fails early with a clear message.
-      - name: Verify Windows build toolchain (CMake + Perl + NASM)
+      # ------------------------------------------------------------
+      # Verify Windows build tools
+      #
+      # russh 0.62 -> aws-lc-rs -> C compilation
+      # Requires:
+      #   CMake
+      #   Perl
+      #   NASM
+      # ------------------------------------------------------------
+      - name: Verify Windows build toolchain
         shell: pwsh
         run: |
+          Write-Host "CMake:"
           cmake --version | Select-Object -First 1
-          perl --version | Select-Object -First 1
+
+          Write-Host "Perl:"
+          perl --version | Select-Object -First 2
+
+          Write-Host "NASM:"
           nasm -v
 
-      # Download the official WebView2 Fixed Version Runtime (.cab, x64) and
-      # expand it. This is Microsoft's distribution format for fixed-version
-      # runtimes — the extracted folder contains msedge.exe + msedge.dll and is
-      # used as the Fixed Runtime for the portable build. The exact version is
-      # captured into the runtime manifest by the packaging script, so every
-      # build artifact pins the version it was built against.
+      # ------------------------------------------------------------
+      # Download WebView2 Fixed Version Runtime
+      #
+      # Downloads Microsoft's x64 fixed runtime CAB and extracts it
+      # into:
+      #
+      #   $env:RUNNER_TEMP\webview2-runtime
+      #
+      # ------------------------------------------------------------
       - name: Download & expand WebView2 Fixed Runtime (x64)
         shell: pwsh
         run: |
-          $outDir = "$env:RUNNER_TEMP\webview2-runtime"
-          New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+          $ErrorActionPreference = "Stop"
 
-          Write-Host "Resolving the official Fixed Version .cab (x64) link..."
-          $page = (Invoke-WebRequest -Uri "https://developer.microsoft.com/en-us/microsoft-edge/webview2/" -UseBasicParsing).Content
+          $outDir = "$env:RUNNER_TEMP\webview2-runtime"
+
+          Write-Host "Creating WebView2 runtime directory:"
+          Write-Host $outDir
+
+          New-Item `
+            -ItemType Directory `
+            -Force `
+            -Path $outDir | Out-Null
+
+          Write-Host ""
+          Write-Host "Resolving official WebView2 Fixed Version Runtime URL..."
+
+          $page = (
+            Invoke-WebRequest `
+              -Uri "https://developer.microsoft.com/en-us/microsoft-edge/webview2/" `
+              -UseBasicParsing
+          ).Content
+
           $pattern = 'https:\\u002F\\u002F[^"'']*?Microsoft\.WebView2\.FixedVersionRuntime\.\d+\.\d+\.\d+\.\d+\.x64\.cab'
+
           $m = [regex]::Match($page, $pattern)
+
           if (-not $m.Success) {
-            Write-Error "Could not locate the WebView2 Fixed Version .cab (x64) link on the official page"
+            Write-Error "Could not locate WebView2 Fixed Version Runtime x64 CAB URL."
             exit 1
           }
+
           $cabUrl = $m.Value.Replace('\u002F', '/')
-          Write-Host "Fixed Runtime cab: $cabUrl"
+
+          Write-Host ""
+          Write-Host "WebView2 Fixed Runtime:"
+          Write-Host $cabUrl
 
           $cab = "$env:RUNNER_TEMP\webview2-runtime.cab"
-          Write-Host "Downloading runtime (about 130MB)..."
-          Invoke-WebRequest -Uri $cabUrl -OutFile $cab
 
-          Write-Host "Expanding runtime files..."
-          # 7-Zip handles standard .cab archives natively and writes to an
-          # explicit output directory (no destination ambiguity).
-          $7z = "C:\Program Files\7-Zip\7z.exe"
-          if (Test-Path $7z) {
-            & $7z x $cab "-o$outDir" -y | Out-Null
-            if ($LASTEXITCODE -ne 0) { Write-Error "7z cab extraction failed with exit $LASTEXITCODE"; exit 1 }
-          } else {
-            # Fallback: expand with an explicit directory destination.
-            expand -F:* $cab "$outDir\"
-            if ($LASTEXITCODE -ne 0) { Write-Error "expand failed with exit $LASTEXITCODE"; exit 1 }
-          }
+          Write-Host ""
+          Write-Host "Downloading WebView2 runtime..."
 
-          # Verify the runtime is actually usable before continuing.
-          $msedge = Get-ChildItem $outDir -Recurse -Filter msedgewebview2.exe -ErrorAction SilentlyContinue | Select-Object -First 1
-          if (-not $msedge) {
-            Write-Host "outDir listing:"
-            Get-ChildItem $outDir -Force -ErrorAction SilentlyContinue | Select-Object -First 20 Name
-            Write-Host "Searching RUNNER_TEMP for msedge.exe..."
-            Get-ChildItem $env:RUNNER_TEMP -Recurse -Filter msedgewebview2.exe -ErrorAction SilentlyContinue |
-              Select-Object -First 5 FullName
-            Write-Error "WebView2 runtime extraction failed: msedgewebview2.exe not found"
+          Invoke-WebRequest `
+            -Uri $cabUrl `
+            -OutFile $cab
+
+          if (-not (Test-Path $cab)) {
+            Write-Error "WebView2 CAB was not downloaded."
             exit 1
           }
-          Write-Host "runtime msedge.exe: $($msedge.FullName)"
-          Get-ChildItem (Split-Path $msedge.FullName) -Name | Select-Object -First 10
 
+          $cabSize = (Get-Item $cab).Length
+
+          Write-Host "CAB size:"
+          Write-Host "$([math]::Round($cabSize / 1MB, 2)) MB"
+
+          Write-Host ""
+          Write-Host "Extracting runtime..."
+
+          $7z = "C:\Program Files\7-Zip\7z.exe"
+
+          if (Test-Path $7z) {
+
+            Write-Host "Using 7-Zip"
+
+            & $7z x $cab "-o$outDir" -y | Out-Null
+
+            if ($LASTEXITCODE -ne 0) {
+              Write-Error "7-Zip extraction failed with exit code $LASTEXITCODE"
+              exit 1
+            }
+
+          } else {
+
+            Write-Host "7-Zip not found. Using Windows expand.exe"
+
+            expand -F:* $cab "$outDir\"
+
+            if ($LASTEXITCODE -ne 0) {
+              Write-Error "expand.exe failed with exit code $LASTEXITCODE"
+              exit 1
+            }
+          }
+
+          Write-Host ""
+          Write-Host "Checking WebView2 runtime..."
+
+          $msedge = Get-ChildItem `
+            $outDir `
+            -Recurse `
+            -Filter msedgewebview2.exe `
+            -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+
+          if (-not $msedge) {
+
+            Write-Host ""
+            Write-Host "Runtime directory:"
+            Get-ChildItem `
+              $outDir `
+              -Force `
+              -ErrorAction SilentlyContinue |
+              Select-Object -First 30 FullName
+
+            Write-Host ""
+            Write-Host "Searching RUNNER_TEMP..."
+
+            Get-ChildItem `
+              $env:RUNNER_TEMP `
+              -Recurse `
+              -Filter msedgewebview2.exe `
+              -ErrorAction SilentlyContinue |
+              Select-Object -First 10 FullName
+
+            Write-Error "WebView2 runtime extraction failed: msedgewebview2.exe not found."
+            exit 1
+          }
+
+          Write-Host ""
+          Write-Host "WebView2 runtime found:"
+          Write-Host $msedge.FullName
+
+          Write-Host ""
+          Write-Host "Runtime contents:"
+
+          Get-ChildItem `
+            (Split-Path $msedge.FullName) `
+            -Name |
+            Select-Object -First 20
+
+      # ------------------------------------------------------------
+      # Build Tauri release executable
+      #
+      # --no-bundle:
+      # do not generate installer here because this Workflow builds
+      # our custom portable package.
+      # ------------------------------------------------------------
       - name: Build release binary
         shell: pwsh
-        run: pnpm tauri build --no-bundle
+        run: |
+          pnpm tauri build --no-bundle
 
+      # ------------------------------------------------------------
+      # Assemble portable package
+      #
+      # Expected output:
+      #
+      #   dist/NexTerm-portable.zip
+      #
+      # ------------------------------------------------------------
       - name: Assemble portable distribution + ZIP
         shell: pwsh
         run: |
-          node scripts/build-windows-portable.mjs --runtime "$env:RUNNER_TEMP\webview2-runtime"
+          node scripts/build-windows-portable.mjs `
+            --runtime "$env:RUNNER_TEMP\webview2-runtime"
 
-      - name: Upload portable artifact (single ZIP)
-        uses: actions/upload-artifact@v4
-        with:
-          name: NexTerm-portable
-          path: dist/NexTerm-portable.zip
-          if-no-files-found: error
+      # ------------------------------------------------------------
+      # Verify final ZIP before publishing
+      # ------------------------------------------------------------
+      - name: Verify portable ZIP
+        shell: pwsh
+        run: |
+          $zip = "dist/NexTerm-portable.zip"
 
-      # Publish a GitHub Release when a version tag (v*) is pushed.
-      - name: Publish Release
+          if (-not (Test-Path $zip)) {
+            Write-Error "Portable ZIP does not exist: $zip"
+            exit 1
+          }
+
+          $size = (Get-Item $zip).Length
+
+          Write-Host ""
+          Write-Host "Portable ZIP:"
+          Write-Host $zip
+
+          Write-Host ""
+          Write-Host "File size:"
+          Write-Host "$([math]::Round($size / 1MB, 2)) MB"
+
+          Write-Host ""
+          Write-Host "SHA256:"
+          Get-FileHash `
+            $zip `
+            -Algorithm SHA256 |
+            Format-List
+
+      # ------------------------------------------------------------
+      # Publish directly to GitHub Release
+      #
+      # IMPORTANT:
+      #
+      # We intentionally DO NOT use:
+      #
+      #   actions/upload-artifact
+      #
+      # This avoids GitHub Actions Artifact storage quota.
+      #
+      # Only runs when triggered by a version tag such as:
+      #
+      #   v1.0.0
+      #   v1.2.3
+      #
+      # ------------------------------------------------------------
+      - name: Publish portable ZIP to GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           files: |
             dist/NexTerm-portable.zip
           generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # ------------------------------------------------------------
+      # Information for normal main branch builds
+      #
+      # main branch builds are compiled for verification only.
+      # Since GitHub-hosted runners are temporary and we intentionally
+      # do not use Artifact storage, there will be no downloadable ZIP
+      # after a normal main push.
+      # ------------------------------------------------------------
+      - name: Main branch build notice
+        if: github.ref == 'refs/heads/main'
+        shell: pwsh
+        run: |
+          Write-Host ""
+          Write-Host "=========================================="
+          Write-Host "Portable build completed successfully."
+          Write-Host ""
+          Write-Host "This build was triggered from branch:"
+          Write-Host "main"
+          Write-Host ""
+          Write-Host "The ZIP was NOT uploaded because this"
+          Write-Host "workflow publishes downloadable binaries"
+          Write-Host "only for version tags."
+          Write-Host ""
+          Write-Host "Create a tag such as:"
+          Write-Host ""
+          Write-Host "  git tag v1.0.0"
+          Write-Host "  git push origin v1.0.0"
+          Write-Host ""
+          Write-Host "Then download NexTerm-portable.zip from:"
+          Write-Host ""
+          Write-Host "GitHub -> Releases -> v1.0.0 -> Assets"
+          Write-Host "=========================================="
