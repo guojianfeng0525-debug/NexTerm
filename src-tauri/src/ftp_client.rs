@@ -465,7 +465,9 @@ fn is_date_field(s: Option<&&str>) -> bool {
         // HH:MM — two colon-separated numeric parts.
         let parts: Vec<&str> = s.split(':').collect();
         parts.len() == 2
-            && parts.iter().all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+            && parts
+                .iter()
+                .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
     } else {
         // YYYY — a 4-digit year.
         s.len() == 4 && s.bytes().all(|b| b.is_ascii_digit())
@@ -475,9 +477,18 @@ fn is_date_field(s: Option<&&str>) -> bool {
 /// Parse FTP `ls` date fields ("Mon DD HH:MM" or "Mon DD YYYY") into "yyyy-mm-dd hh:mm:ss".
 fn parse_ftp_modified(month_str: &str, day_str: &str, time_or_year: &str) -> Option<String> {
     let month_num = match month_str {
-        "Jan" => 1u32, "Feb" => 2, "Mar" => 3, "Apr" => 4,
-        "May" => 5, "Jun" => 6, "Jul" => 7, "Aug" => 8,
-        "Sep" => 9, "Oct" => 10, "Nov" => 11, "Dec" => 12,
+        "Jan" => 1u32,
+        "Feb" => 2,
+        "Mar" => 3,
+        "Apr" => 4,
+        "May" => 5,
+        "Jun" => 6,
+        "Jul" => 7,
+        "Aug" => 8,
+        "Sep" => 9,
+        "Oct" => 10,
+        "Nov" => 11,
+        "Dec" => 12,
         _ => return None,
     };
     let day: u32 = day_str.parse().unwrap_or(1);
@@ -497,13 +508,18 @@ fn parse_ftp_modified(month_str: &str, day_str: &str, time_or_year: &str) -> Opt
             let mut rem = days as i64;
             loop {
                 let dy = if is_leap_year(y) { 366 } else { 365 };
-                if rem < dy { break; }
+                if rem < dy {
+                    break;
+                }
                 rem -= dy;
                 y += 1;
             }
             y as u32
         };
-        Some(format!("{:04}-{:02}-{:02} {:02}:{:02}:00", current_year, month_num, day, hh, mm))
+        Some(format!(
+            "{:04}-{:02}-{:02} {:02}:{:02}:00",
+            current_year, month_num, day, hh, mm
+        ))
     } else {
         // Older file: "YYYY" — time is 00:00:00
         let year: u32 = time_or_year.parse().unwrap_or(1970);
@@ -799,7 +815,11 @@ mod tests {
         assert_eq!(entry.size, 4096);
         // Time-format date must keep its time-of-day, not bleed into the name.
         assert!(
-            entry.modified.as_deref().unwrap_or("").ends_with(" 12:32:00"),
+            entry
+                .modified
+                .as_deref()
+                .unwrap_or("")
+                .ends_with(" 12:32:00"),
             "modified should keep 12:32:00, got: {:?}",
             entry.modified
         );

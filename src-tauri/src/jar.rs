@@ -90,18 +90,23 @@ pub fn unescape_unicode_literals(src: &str) -> String {
 
 /// Read the raw bytes of a single entry from the JAR (lazy).
 pub fn read_entry_bytes(jar_path: &Path, entry_path: &str) -> Result<Vec<u8>, String> {
-    let file = std::fs::File::open(jar_path).map_err(|e| format!("open jar {}: {e}", jar_path.display()))?;
+    let file = std::fs::File::open(jar_path)
+        .map_err(|e| format!("open jar {}: {e}", jar_path.display()))?;
     let mut archive = ZipArchive::new(file).map_err(|e| format!("read zip: {e}"))?;
-    let mut entry = archive
-        .by_name(entry_path)
-        .map_err(|e| format!("entry {entry_path} not found in {}: {e}", jar_path.display()))?;
+    let mut entry = archive.by_name(entry_path).map_err(|e| {
+        format!(
+            "entry {entry_path} not found in {}: {e}",
+            jar_path.display()
+        )
+    })?;
     let mut buf = Vec::with_capacity(entry.size() as usize);
     std::io::Read::read_to_end(&mut entry, &mut buf).map_err(|e| format!("read entry: {e}"))?;
     Ok(buf)
 }
 
 /// Compute the SHA-256 of the whole jar file (streamed).
-pub fn hash_jar(jar_path: &Path) -> Result<String, String> {    let mut file = std::fs::File::open(jar_path).map_err(|e| format!("open jar: {e}"))?;
+pub fn hash_jar(jar_path: &Path) -> Result<String, String> {
+    let mut file = std::fs::File::open(jar_path).map_err(|e| format!("open jar: {e}"))?;
     let mut h = Sha256::new();
     let mut buf = [0u8; 65536];
     loop {
@@ -263,7 +268,11 @@ pub fn parse_class_pool(bytes: &[u8]) -> Result<ClassPool, String> {
     let _ = read_u2(&mut off)?;
     let this_idx = read_u2(&mut off)? as usize;
     let super_idx = read_u2(&mut off)? as usize;
-    let super_name = if super_idx == 0 { None } else { resolve_class(super_idx) };
+    let super_name = if super_idx == 0 {
+        None
+    } else {
+        resolve_class(super_idx)
+    };
     let iface_count = read_u2(&mut off)? as usize;
     let mut interfaces = Vec::new();
     for _ in 0..iface_count {
@@ -305,13 +314,20 @@ pub fn parse_class_pool(bytes: &[u8]) -> Result<ClassPool, String> {
                         pool.method_refs.push(name.clone());
                     }
                     // Resolve the owner class via its CONSTANT_Class → utf8.
-                    let owner = class_name.get(class_idx).and_then(|v| *v).and_then(|ui| utf8.get(ui).and_then(|v| v.clone()));
+                    let owner = class_name
+                        .get(class_idx)
+                        .and_then(|v| *v)
+                        .and_then(|ui| utf8.get(ui).and_then(|v| v.clone()));
                     let desc = nat_desc.get(nt).and_then(|v| v.clone());
                     if let Some(owner) = owner {
                         pool.refs.push(ClassRef {
                             internal_type_name: owner,
                             name: Some(name),
-                            kind: if tag == 9 { "field".into() } else { "method".into() },
+                            kind: if tag == 9 {
+                                "field".into()
+                            } else {
+                                "method".into()
+                            },
                             descriptor: desc,
                             owner: None,
                             offset: 0,
@@ -407,7 +423,12 @@ pub fn inner_classes_of(bytes: &[u8]) -> Vec<String> {
         if *off + 4 > bytes.len() {
             return None;
         }
-        let v = u32::from_be_bytes([bytes[*off], bytes[*off + 1], bytes[*off + 2], bytes[*off + 3]]);
+        let v = u32::from_be_bytes([
+            bytes[*off],
+            bytes[*off + 1],
+            bytes[*off + 2],
+            bytes[*off + 3],
+        ]);
         *off += 4;
         Some(v)
     };
@@ -490,7 +511,10 @@ pub fn inner_classes_of(bytes: &[u8]) -> Vec<String> {
         for _ in 0..attr_count {
             let name_idx = read_u2(&mut off)? as usize;
             let len = read_u4(&mut off)? as usize;
-            let is_inner = utf8.get(name_idx).map(|v| v.as_deref() == Some("InnerClasses")).unwrap_or(false);
+            let is_inner = utf8
+                .get(name_idx)
+                .map(|v| v.as_deref() == Some("InnerClasses"))
+                .unwrap_or(false);
             if off + len > bytes.len() {
                 return None;
             }
@@ -556,7 +580,12 @@ pub fn class_members(bytes: &[u8]) -> ClassMembers {
         if *off + 4 > bytes.len() {
             return None;
         }
-        let v = u32::from_be_bytes([bytes[*off], bytes[*off + 1], bytes[*off + 2], bytes[*off + 3]]);
+        let v = u32::from_be_bytes([
+            bytes[*off],
+            bytes[*off + 1],
+            bytes[*off + 2],
+            bytes[*off + 3],
+        ]);
         *off += 4;
         Some(v)
     };
@@ -628,14 +657,19 @@ pub fn class_members(bytes: &[u8]) -> ClassMembers {
             for _ in 0..attr_count {
                 let attr_name_idx = read_u2(&mut off)? as usize;
                 let len = read_u4(&mut off)? as usize;
-                let attr_name = utf8.get(attr_name_idx).and_then(|v| v.clone()).unwrap_or_default();
+                let attr_name = utf8
+                    .get(attr_name_idx)
+                    .and_then(|v| v.clone())
+                    .unwrap_or_default();
                 if attr_name == "Signature" && off + 2 <= bytes.len() {
                     let sig_idx = read_u2(&mut off)? as usize;
                     if let Some(sig) = utf8.get(sig_idx).and_then(|v| v.clone()) {
                         extract_signature_types(&sig, &mut members.signature_types);
                     }
                     skip(&mut off, len.saturating_sub(2))?;
-                } else if attr_name == "RuntimeVisibleAnnotations" || attr_name == "RuntimeInvisibleAnnotations" {
+                } else if attr_name == "RuntimeVisibleAnnotations"
+                    || attr_name == "RuntimeInvisibleAnnotations"
+                {
                     {
                         let astart = off;
                         let aend = astart + len as usize;
@@ -688,7 +722,10 @@ pub fn class_members(bytes: &[u8]) -> ClassMembers {
             for _ in 0..attr_count {
                 let attr_name_idx = read_u2(&mut off)? as usize;
                 let len = read_u4(&mut off)? as usize;
-                let attr_name = utf8.get(attr_name_idx).and_then(|v| v.clone()).unwrap_or_default();
+                let attr_name = utf8
+                    .get(attr_name_idx)
+                    .and_then(|v| v.clone())
+                    .unwrap_or_default();
                 if attr_name == "Exceptions" {
                     // Exceptions_attribute { u2 number_of_exceptions; u2 exception_index_table[number]; }
                     if off + 2 <= bytes.len() {
@@ -716,7 +753,9 @@ pub fn class_members(bytes: &[u8]) -> ClassMembers {
                         extract_signature_types(&sig, &mut members.signature_types);
                     }
                     skip(&mut off, len.saturating_sub(2))?;
-                } else if attr_name == "RuntimeVisibleAnnotations" || attr_name == "RuntimeInvisibleAnnotations" {
+                } else if attr_name == "RuntimeVisibleAnnotations"
+                    || attr_name == "RuntimeInvisibleAnnotations"
+                {
                     // JD-GUI AnnotationIndexer: annotation descriptors are
                     // type references. Structure: u2 num_annotations; then
                     // per annotation: u2 type_index; u2 num_pairs; pairs…
@@ -755,8 +794,13 @@ pub fn class_members(bytes: &[u8]) -> ClassMembers {
         for _ in 0..class_attr_count {
             let attr_name_idx = read_u2(&mut off)? as usize;
             let len = read_u4(&mut off)? as usize;
-            let attr_name = utf8.get(attr_name_idx).and_then(|v| v.clone()).unwrap_or_default();
-            if attr_name == "RuntimeVisibleAnnotations" || attr_name == "RuntimeInvisibleAnnotations" {
+            let attr_name = utf8
+                .get(attr_name_idx)
+                .and_then(|v| v.clone())
+                .unwrap_or_default();
+            if attr_name == "RuntimeVisibleAnnotations"
+                || attr_name == "RuntimeInvisibleAnnotations"
+            {
                 let astart = off;
                 let aend = astart + len as usize;
                 let num = read_u2(&mut off)? as usize;
@@ -860,8 +904,22 @@ pub fn module_name_from_bytes(bytes: &[u8]) -> Option<String> {
                 off += len;
                 // A module name is a dotted identifier without '/' (class
                 // paths contain '/') and not a JVM keyword.
-                if s.contains('.') && !s.contains('/')
-                    && !matches!(s.as_str(), "module" | "requires" | "exports" | "opens" | "uses" | "provides" | "with" | "to" | "transitive" | "static" | "java")
+                if s.contains('.')
+                    && !s.contains('/')
+                    && !matches!(
+                        s.as_str(),
+                        "module"
+                            | "requires"
+                            | "exports"
+                            | "opens"
+                            | "uses"
+                            | "provides"
+                            | "with"
+                            | "to"
+                            | "transitive"
+                            | "static"
+                            | "java"
+                    )
                 {
                     if best.as_ref().map(|b| s.len() > b.len()).unwrap_or(true) {
                         best = Some(s);
@@ -917,14 +975,20 @@ fn class_name_from_path(path: &str) -> String {
 pub fn list_nested_archives(jar_path: &Path) -> Result<Vec<String>, String> {
     let file = std::fs::File::open(jar_path)
         .map_err(|e| format!("Cannot open JAR {}: {e}", jar_path.display()))?;
-    let mut archive = ZipArchive::new(file).map_err(|e| format!("Invalid JAR (zip) format: {e}"))?;
+    let mut archive =
+        ZipArchive::new(file).map_err(|e| format!("Invalid JAR (zip) format: {e}"))?;
     let mut out = Vec::new();
     for i in 0..archive.len() {
-        let entry = archive.by_index(i).map_err(|e| format!("read zip entry {i}: {e}"))?;
+        let entry = archive
+            .by_index(i)
+            .map_err(|e| format!("read zip entry {i}: {e}"))?;
         let name = entry.name().to_string();
         let lower = name.to_lowercase();
         if !entry.is_dir()
-            && (lower.ends_with(".jar") || lower.ends_with(".war") || lower.ends_with(".ear") || lower.ends_with(".zip"))
+            && (lower.ends_with(".jar")
+                || lower.ends_with(".war")
+                || lower.ends_with(".ear")
+                || lower.ends_with(".zip"))
             && !name.starts_with("META-INF/")
         {
             out.push(name);
@@ -937,7 +1001,8 @@ pub fn list_nested_archives(jar_path: &Path) -> Result<Vec<String>, String> {
 pub fn extract_entry(jar_path: &Path, entry_name: &str, dest: &Path) -> Result<(), String> {
     let file = std::fs::File::open(jar_path)
         .map_err(|e| format!("Cannot open JAR {}: {e}", jar_path.display()))?;
-    let mut archive = ZipArchive::new(file).map_err(|e| format!("Invalid JAR (zip) format: {e}"))?;
+    let mut archive =
+        ZipArchive::new(file).map_err(|e| format!("Invalid JAR (zip) format: {e}"))?;
     let mut entry = archive
         .by_name(entry_name)
         .map_err(|e| format!("entry {entry_name}: {e}"))?;
@@ -953,15 +1018,24 @@ pub fn extract_entry(jar_path: &Path, entry_name: &str, dest: &Path) -> Result<(
 /// `dest_root` (preserving the package path). Mirrors JD-GUI's
 /// ContainerLoader: CFR is given this dir as an extra classpath so it can
 /// resolve same-package and inner classes while decompiling one file.
-pub fn extract_sibling_classes(jar_path: &Path, entry_path: &str, dest_root: &Path) -> Result<(), String> {
+pub fn extract_sibling_classes(
+    jar_path: &Path,
+    entry_path: &str,
+    dest_root: &Path,
+) -> Result<(), String> {
     let file = std::fs::File::open(jar_path)
         .map_err(|e| format!("Cannot open JAR {}: {e}", jar_path.display()))?;
-    let mut archive = ZipArchive::new(file).map_err(|e| format!("Invalid JAR (zip) format: {e}"))?;
+    let mut archive =
+        ZipArchive::new(file).map_err(|e| format!("Invalid JAR (zip) format: {e}"))?;
     let dir = match entry_path.rfind('/') {
         Some(i) => &entry_path[..i],
         None => "",
     };
-    let prefix = if dir.is_empty() { String::new() } else { format!("{dir}/") };
+    let prefix = if dir.is_empty() {
+        String::new()
+    } else {
+        format!("{dir}/")
+    };
     // Collect names first (borrow ends), then read each by name.
     let mut names: Vec<String> = Vec::new();
     for i in 0..archive.len() {
@@ -1004,7 +1078,8 @@ pub fn extract_sibling_classes(jar_path: &Path, entry_path: &str, dest_root: &Pa
 pub fn extract_all_classes(jar_path: &Path, dest_root: &Path) -> Result<(), String> {
     let file = std::fs::File::open(jar_path)
         .map_err(|e| format!("Cannot open JAR {}: {e}", jar_path.display()))?;
-    let mut archive = ZipArchive::new(file).map_err(|e| format!("Invalid JAR (zip) format: {e}"))?;
+    let mut archive =
+        ZipArchive::new(file).map_err(|e| format!("Invalid JAR (zip) format: {e}"))?;
     use std::io::Write;
     for i in 0..archive.len() {
         let mut entry = match archive.by_index(i) {
@@ -1035,7 +1110,10 @@ pub fn extract_all_classes(jar_path: &Path, dest_root: &Path) -> Result<(), Stri
 /// Returns (entry_name, extracted_path, JarIndex) for every archive that
 /// extracted and indexed successfully. Mirrors JD-GUI's recursive containers
 /// while keeping first-open latency acceptable for large fat jars.
-pub fn extract_and_index_nested(main_jar: &Path, scratch_root: &Path) -> Vec<(String, String, JarIndex)> {
+pub fn extract_and_index_nested(
+    main_jar: &Path,
+    scratch_root: &Path,
+) -> Vec<(String, String, JarIndex)> {
     let entries = match list_nested_archives(main_jar) {
         Ok(e) => e,
         Err(_) => return Vec::new(),
@@ -1063,7 +1141,10 @@ pub fn extract_and_index_nested(main_jar: &Path, scratch_root: &Path) -> Vec<(St
             })
         })
         .collect();
-    handles.into_iter().filter_map(|h| h.join().ok().flatten()).collect()
+    handles
+        .into_iter()
+        .filter_map(|h| h.join().ok().flatten())
+        .collect()
 }
 
 fn package_name_from_path(path: &str) -> String {
@@ -1078,9 +1159,7 @@ fn package_name_from_path(path: &str) -> String {
 pub fn index_jar(jar_path: &Path) -> Result<JarIndex, String> {
     let file = std::fs::File::open(jar_path)
         .map_err(|e| format!("Cannot open JAR {}: {e}", jar_path.display()))?;
-    let meta = file
-        .metadata()
-        .map_err(|e| format!("stat jar: {e}"))?;
+    let meta = file.metadata().map_err(|e| format!("stat jar: {e}"))?;
     let mut idx = index_jar_reader(&mut std::io::BufReader::new(file))?;
     idx.jar_hash = hash_jar(jar_path)?;
     idx.size = meta.len();
@@ -1090,8 +1169,11 @@ pub fn index_jar(jar_path: &Path) -> Result<JarIndex, String> {
 /// Index a JAR from any reader (memory `Cursor`, nested jars inside a fat jar,
 /// etc.) — JD-GUI indexes jars in memory, never persisting to a database.
 /// `jar_hash`/`size` are left empty (caller computes from the file).
-pub fn index_jar_reader<R: std::io::Read + std::io::Seek>(reader: &mut R) -> Result<JarIndex, String> {
-    let mut archive = zip::ZipArchive::new(reader).map_err(|e| format!("Invalid JAR (zip) format: {e}"))?;
+pub fn index_jar_reader<R: std::io::Read + std::io::Seek>(
+    reader: &mut R,
+) -> Result<JarIndex, String> {
+    let mut archive =
+        zip::ZipArchive::new(reader).map_err(|e| format!("Invalid JAR (zip) format: {e}"))?;
     let mut raw: Vec<(String, u64, u64)> = Vec::new(); // (name, size, csize)
     for i in 0..archive.len() {
         let entry = archive
@@ -1120,7 +1202,8 @@ pub fn index_jar_reader<R: std::io::Read + std::io::Seek>(reader: &mut R) -> Res
 
     // Read every potential outer class's InnerClasses attribute: those names
     // are the real inner classes (JD-GUI populateInnerTypePaths).
-    let mut inner_type_paths: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut inner_type_paths: std::collections::BTreeSet<String> =
+        std::collections::BTreeSet::new();
     for outer in &potential_outer {
         let bytes = {
             let mut e = match archive.by_name(outer) {
@@ -1235,7 +1318,12 @@ pub fn build_tree(entries: &[JarEntryInfo]) -> BTreeMap<String, PackageNode> {
                 .push(e.clone());
         } else {
             // Directory = everything before the last '/'.
-            let dir = e.entry_path.rfind('/').map(|i| &e.entry_path[..i]).unwrap_or("").to_string();
+            let dir = e
+                .entry_path
+                .rfind('/')
+                .map(|i| &e.entry_path[..i])
+                .unwrap_or("")
+                .to_string();
             resource_dirs.entry(dir).or_default().push(e);
         }
     }
@@ -1249,13 +1337,13 @@ pub fn build_tree(entries: &[JarEntryInfo]) -> BTreeMap<String, PackageNode> {
         root: &'a mut BTreeMap<String, PackageNode>,
         parts: &[&str],
     ) -> &'a mut PackageNode {
-        let mut cur: &mut PackageNode = root
-            .entry(parts[0].to_string())
-            .or_insert_with(|| PackageNode {
-                name: parts[0].to_string(),
-                classes: Vec::new(),
-                packages: BTreeMap::new(),
-            });
+        let mut cur: &mut PackageNode =
+            root.entry(parts[0].to_string())
+                .or_insert_with(|| PackageNode {
+                    name: parts[0].to_string(),
+                    classes: Vec::new(),
+                    packages: BTreeMap::new(),
+                });
         for part in &parts[1..] {
             let seg = part.to_string();
             cur = cur
@@ -1276,11 +1364,13 @@ pub fn build_tree(entries: &[JarEntryInfo]) -> BTreeMap<String, PackageNode> {
         res.sort_by(|a, b| a.entry_path.cmp(&b.entry_path));
         if dir.is_empty() {
             // Root-level resources: attach to a "(resources)" node at root.
-            let node = root.entry("(resources)".to_string()).or_insert_with(|| PackageNode {
-                name: "(resources)".to_string(),
-                classes: Vec::new(),
-                packages: BTreeMap::new(),
-            });
+            let node = root
+                .entry("(resources)".to_string())
+                .or_insert_with(|| PackageNode {
+                    name: "(resources)".to_string(),
+                    classes: Vec::new(),
+                    packages: BTreeMap::new(),
+                });
             node.classes = res.into_iter().cloned().collect();
             continue;
         }
@@ -1319,7 +1409,8 @@ mod tests {
     fn make_jar(path: &std::path::Path, files: &[(&str, &[u8])]) {
         let file = std::fs::File::create(path).unwrap();
         let mut zip = zip::ZipWriter::new(file);
-        let opts = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        let opts = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
         for (name, data) in files {
             zip.start_file(*name, opts).unwrap();
             use std::io::Write;
@@ -1356,13 +1447,25 @@ mod tests {
         let idx = index_jar(&path).unwrap();
         assert_eq!(idx.class_count, 3);
         assert_eq!(idx.resource_count, 2);
-        let foo = idx.entries.iter().find(|e| e.entry_path == "com/example/Foo.class").unwrap();
+        let foo = idx
+            .entries
+            .iter()
+            .find(|e| e.entry_path == "com/example/Foo.class")
+            .unwrap();
         assert_eq!(foo.class_name, "com.example.Foo");
         assert_eq!(foo.package_name, "com.example");
         assert!(!foo.is_inner_class);
-        let inner = idx.entries.iter().find(|e| e.entry_path == "com/example/Foo$Inner.class").unwrap();
+        let inner = idx
+            .entries
+            .iter()
+            .find(|e| e.entry_path == "com/example/Foo$Inner.class")
+            .unwrap();
         assert!(inner.is_inner_class);
-        let obj = idx.entries.iter().find(|e| e.entry_path == "com/example/Obj.class").unwrap();
+        let obj = idx
+            .entries
+            .iter()
+            .find(|e| e.entry_path == "com/example/Obj.class")
+            .unwrap();
         assert!(!obj.is_inner_class);
 
         // Tree: package com.example with 3 classes. Each node shows its OWN
@@ -1401,7 +1504,10 @@ mod tests {
         assert_eq!(idx.class_count, 1);
         let e = &idx.entries[0];
         assert_eq!(e.entry_path, "com/example/Weird$NotInner.class");
-        assert!(!e.is_inner_class, "a $ name without InnerClasses declaration must stay visible");
+        assert!(
+            !e.is_inner_class,
+            "a $ name without InnerClasses declaration must stay visible"
+        );
         std::fs::remove_file(&path).ok();
     }
 
@@ -1410,7 +1516,10 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("jar-read-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("test.jar");
-        make_jar(&path, &[("a/b/C.class", b"CLASSBYTES"), ("m.txt", b"hello")]);
+        make_jar(
+            &path,
+            &[("a/b/C.class", b"CLASSBYTES"), ("m.txt", b"hello")],
+        );
         let bytes = read_entry_bytes(&path, "m.txt").unwrap();
         assert_eq!(bytes, b"hello");
         let cb = read_entry_bytes(&path, "a/b/C.class").unwrap();
@@ -1459,9 +1568,14 @@ pub fn extract_methods(source: &str) -> Vec<MethodSymbol> {
         }
         // A method declaration line contains '(' and typically a modifier or
         // return type before a name, ending with '{' (possibly after parens).
-        if trimmed.contains('(') && !trimmed.starts_with("if ") && !trimmed.starts_with("for ")
-            && !trimmed.starts_with("while ") && !trimmed.starts_with("switch ")
-            && !trimmed.starts_with("catch") && !trimmed.starts_with("return ") {
+        if trimmed.contains('(')
+            && !trimmed.starts_with("if ")
+            && !trimmed.starts_with("for ")
+            && !trimmed.starts_with("while ")
+            && !trimmed.starts_with("switch ")
+            && !trimmed.starts_with("catch")
+            && !trimmed.starts_with("return ")
+        {
             // Collect a multi-line signature.
             let mut sig = trimmed.to_string();
             let mut j = i;
@@ -1485,7 +1599,11 @@ pub fn extract_methods(source: &str) -> Vec<MethodSymbol> {
             // Name: word before first '('.
             if let Some(name) = method_name_from_sig(&sig) {
                 if (has_body || is_abstract) && !is_field_decl(&sig) {
-                    out.push(MethodSymbol { name, line: i + 1, signature: sig.clone() });
+                    out.push(MethodSymbol {
+                        name,
+                        line: i + 1,
+                        signature: sig.clone(),
+                    });
                 }
             }
             i = j + 1;
@@ -1512,7 +1630,12 @@ fn method_name_from_sig(sig: &str) -> Option<String> {
     }
     // Reject if it looks like a type (starts uppercase) unless followed by (
     // e.g. `Foo()` constructor — keep those.
-    if name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+    if name
+        .chars()
+        .next()
+        .map(|c| c.is_uppercase())
+        .unwrap_or(false)
+    {
         // Constructor: name matches class — keep.
     }
     Some(name.to_string())
@@ -1577,12 +1700,24 @@ public class Foo {
         let methods = extract_methods(src);
         let names: Vec<&str> = methods.iter().map(|m| m.name.as_str()).collect();
         assert!(names.contains(&"alpha"), "one-line body missed: {names:?}");
-        assert!(names.contains(&"beta"), "single-line {{}} missed: {names:?}");
-        assert!(names.contains(&"gamma"), "single-line {{ }} missed: {names:?}");
+        assert!(
+            names.contains(&"beta"),
+            "single-line {{}} missed: {names:?}"
+        );
+        assert!(
+            names.contains(&"gamma"),
+            "single-line {{ }} missed: {names:?}"
+        );
         // An anonymous-class field initializer must NOT be a method.
         let src2 = "public class X {\n  private Runnable r = new Runnable() { public void run() {} };\n}\n";
         let methods2 = extract_methods(src2);
-        assert!(methods2.iter().all(|m| m.name != "run" && m.name != "Runnable"), "anonymous field leaked: {:?}", methods2);
+        assert!(
+            methods2
+                .iter()
+                .all(|m| m.name != "run" && m.name != "Runnable"),
+            "anonymous field leaked: {:?}",
+            methods2
+        );
     }
 
     #[test]
@@ -1593,10 +1728,22 @@ public class Foo {
         // annotation descriptors).
         let ann: Vec<u8> = hex::decode("cafebabe0000003d00150a000200030700040c000500060100106a6176612f6c616e672f4f626a6563740100063c696e69743e01000328295607000801000864656d6f2f416e6e0100017801000149010004436f646501000f4c696e654e756d6265725461626c650100016d010015284c6a6176612f6c616e672f537472696e673b295601000a4465707265636174656401001952756e74696d6556697369626c65416e6e6f746174696f6e730100164c6a6176612f6c616e672f446570726563617465643b01002252756e74696d6556697369626c65506172616d65746572416e6e6f746174696f6e7301000a536f7572636546696c65010008416e6e2e6a6176610021000700020000000100020009000a000000020001000500060001000b0000001d00010001000000052ab70001b100000001000c000000060001000000030001000d000e0004000b000000190000000200000001b100000001000c00000006000100000007000f000000000010000000060001001100000012000000070100010011000000030013000000020014000f00000000001000000006000100110000").unwrap();
         let members = class_members(&ann);
-        assert!(members.signature_types.iter().any(|t| t == "java/lang/Deprecated"),
-            "annotation type missing: {:?}", members.signature_types);
-        assert!(members.signature_types.iter().any(|t| t == "java/lang/String"),
-            "descriptor type missing: {:?}", members.signature_types);
+        assert!(
+            members
+                .signature_types
+                .iter()
+                .any(|t| t == "java/lang/Deprecated"),
+            "annotation type missing: {:?}",
+            members.signature_types
+        );
+        assert!(
+            members
+                .signature_types
+                .iter()
+                .any(|t| t == "java/lang/String"),
+            "descriptor type missing: {:?}",
+            members.signature_types
+        );
     }
 }
 
@@ -1608,7 +1755,10 @@ mod unescape_tests {
     fn converts_unicode_escapes_to_characters() {
         // CFR output for "你好，世界！"
         let src = r#"private String greeting = "\u4f60\u597d\uff0c\u4e16\u754c\uff01";"#;
-        assert_eq!(unescape_unicode_literals(src), "private String greeting = \"你好，世界！\";");
+        assert_eq!(
+            unescape_unicode_literals(src),
+            "private String greeting = \"你好，世界！\";"
+        );
     }
 
     #[test]
@@ -1620,7 +1770,10 @@ mod unescape_tests {
 
     #[test]
     fn keeps_ascii_and_non_hex_u() {
-        assert_eq!(unescape_unicode_literals("hello \\q world"), "hello \\q world");
+        assert_eq!(
+            unescape_unicode_literals("hello \\q world"),
+            "hello \\q world"
+        );
         assert_eq!(unescape_unicode_literals("plain"), "plain");
     }
 }
@@ -1686,8 +1839,12 @@ mod class_super_tests {
         // Constant pool: build entries for each distinct string.
         // We hand-craft: cp[1]=this "com/demo/Foo", cp[2]=super, cp[3..]=ifaces.
         let mut names: Vec<String> = vec!["com/demo/Foo".into()];
-        if let Some(s) = super_name { names.push(s.into()); }
-        for i in interfaces { names.push((*i).into()); }
+        if let Some(s) = super_name {
+            names.push(s.into());
+        }
+        for i in interfaces {
+            names.push((*i).into());
+        }
         // 1 (index 0) + names.len() utf8 entries + names.len() class entries
         let cp_count = 1 + names.len() * 2;
         b.extend_from_slice(&(cp_count as u16).to_be_bytes());
@@ -1715,7 +1872,11 @@ mod class_super_tests {
         // access_flags, this_class, super_class
         b.extend_from_slice(&0x0021u16.to_be_bytes()); // ACC_PUBLIC|ACC_SUPER
         b.extend_from_slice(&(class_idx[0] as u16).to_be_bytes());
-        let super_cp = if super_name.is_some() { class_idx[1] } else { 0 };
+        let super_cp = if super_name.is_some() {
+            class_idx[1]
+        } else {
+            0
+        };
         b.extend_from_slice(&(super_cp as u16).to_be_bytes());
         // interfaces
         b.extend_from_slice(&(interfaces.len() as u16).to_be_bytes());
@@ -1757,7 +1918,10 @@ mod module_name_tests {
     #[test]
     fn extracts_module_name() {
         let bytes = hex::decode(MODULE_INFO).unwrap();
-        assert_eq!(module_name_from_bytes(&bytes).as_deref(), Some("com.example.mymod"));
+        assert_eq!(
+            module_name_from_bytes(&bytes).as_deref(),
+            Some("com.example.mymod")
+        );
     }
 
     #[test]
@@ -1773,9 +1937,18 @@ mod unpack_array_tests {
 
     #[test]
     fn unpacks_arrays_recursively() {
-        assert_eq!(unpack_array_type("com/foo/Bar").as_deref(), Some("com/foo/Bar"));
-        assert_eq!(unpack_array_type("[Lcom/foo/Bar;").as_deref(), Some("com/foo/Bar"));
-        assert_eq!(unpack_array_type("[[Ljava/lang/String;").as_deref(), Some("java/lang/String"));
+        assert_eq!(
+            unpack_array_type("com/foo/Bar").as_deref(),
+            Some("com/foo/Bar")
+        );
+        assert_eq!(
+            unpack_array_type("[Lcom/foo/Bar;").as_deref(),
+            Some("com/foo/Bar")
+        );
+        assert_eq!(
+            unpack_array_type("[[Ljava/lang/String;").as_deref(),
+            Some("java/lang/String")
+        );
         assert_eq!(unpack_array_type("[[[Ldemo/X;").as_deref(), Some("demo/X"));
         assert_eq!(unpack_array_type("[I"), None); // primitive array
         assert_eq!(unpack_array_type("[[I"), None);

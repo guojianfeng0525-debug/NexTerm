@@ -178,14 +178,16 @@ export const jarApi = {
     return withTimeout(invoke('jar_resource_bytes', { projectId, entryPath, libraryId: libraryId ?? null }), 60000);
   },
   exportAll(projectId: string, outputDir: string, opts?: { writeMetadata?: boolean; writeLineNumbers?: boolean; escapeUnicode?: boolean | null; realign?: boolean | null }): Promise<{ exported: number; total: number; failed: number; failedClasses: string[]; outputDir: string }> {
-    return withTimeout(invoke('jar_export_all', {
+    // Exports can legitimately run longer than a fixed client-side deadline.
+    // Progress and cancellation are delivered through jar://export-progress.
+    return invoke('jar_export_all', {
       projectId,
       outputDir,
       writeMetadata: opts?.writeMetadata ?? true,
       writeLineNumbers: opts?.writeLineNumbers ?? true,
       escapeUnicode: opts?.escapeUnicode ?? null,
       realign: opts?.realign ?? null,
-    }), 300000);
+    });
   },
   classInfo(projectId: string, entryPath: string, libraryId?: string): Promise<{ className: string; javaVersion: string; major: number; minor: number; size: number }> {
     return withTimeout(invoke('jar_class_info', { projectId, entryPath, libraryId: libraryId ?? null }), 30000);

@@ -194,7 +194,10 @@ async fn collect_system_stats(client: &crate::ssh::SshClient, os_info: &OsInfo) 
 }
 
 /// Fast single-round-trip stats collection using the combined script.
-async fn collect_system_stats_fast(client: &crate::ssh::SshClient, os_info: &OsInfo) -> Option<SystemStats> {
+async fn collect_system_stats_fast(
+    client: &crate::ssh::SshClient,
+    os_info: &OsInfo,
+) -> Option<SystemStats> {
     let script = os_info.all_in_one_stats_cmd();
     let output = client.execute_command(&script).await.ok()?;
     let (cpu, mem, swap, disk, uptime, cores, load) = os_info.parse_all_in_one_stats(&output)?;
@@ -233,13 +236,20 @@ async fn collect_system_stats_fast(client: &crate::ssh::SshClient, os_info: &OsI
         swap: swap_stats,
         disk: disk_stats,
         uptime: uptime.trim().to_string(),
-        load_average: if load.trim().is_empty() { None } else { Some(load.trim().to_string()) },
+        load_average: if load.trim().is_empty() {
+            None
+        } else {
+            Some(load.trim().to_string())
+        },
         bandwidth: None,
     })
 }
 
 /// Original per-command collection (used as fallback).
-async fn collect_system_stats_legacy(client: &crate::ssh::SshClient, os_info: &OsInfo) -> SystemStats {
+async fn collect_system_stats_legacy(
+    client: &crate::ssh::SshClient,
+    os_info: &OsInfo,
+) -> SystemStats {
     // CPU usage (percentage)
     let cpu_percent = client
         .execute_command(os_info.cpu_cmd())
@@ -249,7 +259,10 @@ async fn collect_system_stats_legacy(client: &crate::ssh::SshClient, os_info: &O
         .unwrap_or(0.0);
 
     // Memory stats (in MB)
-    let mem_output = client.execute_command(os_info.memory_cmd()).await.unwrap_or_default();
+    let mem_output = client
+        .execute_command(os_info.memory_cmd())
+        .await
+        .unwrap_or_default();
     let mem_parts: Vec<&str> = mem_output.split_whitespace().collect();
     let memory = MemoryStats {
         total: mem_parts.first().and_then(|s| s.parse().ok()).unwrap_or(0),
@@ -259,7 +272,10 @@ async fn collect_system_stats_legacy(client: &crate::ssh::SshClient, os_info: &O
     };
 
     // Swap stats (in MB)
-    let swap_output = client.execute_command(os_info.swap_cmd()).await.unwrap_or_default();
+    let swap_output = client
+        .execute_command(os_info.swap_cmd())
+        .await
+        .unwrap_or_default();
     let swap_parts: Vec<&str> = swap_output.split_whitespace().collect();
     let swap = MemoryStats {
         total: swap_parts.first().and_then(|s| s.parse().ok()).unwrap_or(0),
@@ -269,7 +285,10 @@ async fn collect_system_stats_legacy(client: &crate::ssh::SshClient, os_info: &O
     };
 
     // Disk stats for root filesystem
-    let disk_output = client.execute_command(os_info.disk_cmd()).await.unwrap_or_default();
+    let disk_output = client
+        .execute_command(os_info.disk_cmd())
+        .await
+        .unwrap_or_default();
     let disk_parts: Vec<&str> = disk_output.trim().split_whitespace().collect();
     let disk = DiskStats {
         total: disk_parts.get(0).unwrap_or(&"0").to_string(),
@@ -291,7 +310,9 @@ async fn collect_system_stats_legacy(client: &crate::ssh::SshClient, os_info: &O
 
     // CPU core count
     let cores = client
-        .execute_command("nproc 2>/dev/null || grep -c ^processor /proc/cpuinfo 2>/dev/null || echo 1")
+        .execute_command(
+            "nproc 2>/dev/null || grep -c ^processor /proc/cpuinfo 2>/dev/null || echo 1",
+        )
         .await
         .ok()
         .and_then(|s| s.trim().parse::<u32>().ok())
@@ -355,10 +376,7 @@ pub async fn probe_all_server_stats(
             let config = match build_ssh_config_from_request(&request) {
                 Ok(c) => c,
                 Err(e) => {
-                    return (
-                        server_id,
-                        serde_json::json!({ "error": e.to_string() }),
-                    );
+                    return (server_id, serde_json::json!({ "error": e.to_string() }));
                 }
             };
             let mut client = crate::ssh::SshClient::new();
@@ -651,7 +669,6 @@ pub async fn get_system_stats(
     let os_info = get_os_info(&connection_id, &client, state.inner()).await;
 
     Ok(collect_system_stats(&client, &os_info).await)
-
 }
 
 #[tauri::command]
@@ -1720,10 +1737,7 @@ fn parse_bandwidth_output(output: &str) -> Vec<NetworkBandwidth> {
         let before_parts: Vec<&str> = before_line.split(',').collect();
         let after_parts: Vec<&str> = after_line.split(',').collect();
 
-        if before_parts.len() == 3
-            && after_parts.len() == 3
-            && before_parts[0] == after_parts[0]
-        {
+        if before_parts.len() == 3 && after_parts.len() == 3 && before_parts[0] == after_parts[0] {
             if let (Ok(rx1), Ok(tx1), Ok(rx2), Ok(tx2)) = (
                 before_parts[1].parse::<f64>(),
                 before_parts[2].parse::<f64>(),
@@ -2001,11 +2015,17 @@ pub async fn ssh_tab_complete(
         if word_to_complete.is_empty() {
             format!("compgen -c 2>/dev/null {} || echo", head)
         } else {
-            format!("compgen -c {} 2>/dev/null {} || echo", word_to_complete, head)
+            format!(
+                "compgen -c {} 2>/dev/null {} || echo",
+                word_to_complete, head
+            )
         }
     } else if is_directory_cmd {
         // Directory completion for cd/pushd/popd
-        format!("compgen -d {} 2>/dev/null {} || echo", word_to_complete, head)
+        format!(
+            "compgen -d {} 2>/dev/null {} || echo",
+            word_to_complete, head
+        )
     } else {
         // File/directory completion: use compgen -f for files
         format!(
@@ -2839,7 +2859,14 @@ pub async fn download_remote_file(
     on_progress: tauri::ipc::Channel<TransferProgress>,
     state: State<'_, Arc<ConnectionManager>>,
 ) -> Result<FileTransferResponse, String> {
-    download_remote_file_to_path(&connection_id, &remote_path, &local_path, state.inner(), on_progress).await
+    download_remote_file_to_path(
+        &connection_id,
+        &remote_path,
+        &local_path,
+        state.inner(),
+        on_progress,
+    )
+    .await
 }
 
 #[tauri::command]
@@ -2870,7 +2897,14 @@ pub async fn download_remote_file_confined(
         )
     };
 
-    download_remote_file_to_path(&connection_id, &remote_path, local_path, state.inner(), on_progress).await
+    download_remote_file_to_path(
+        &connection_id,
+        &remote_path,
+        local_path,
+        state.inner(),
+        on_progress,
+    )
+    .await
 }
 
 #[tauri::command]
@@ -3357,9 +3391,28 @@ fn sanitize_local_component(component: &str) -> String {
     let upper = stem.to_ascii_uppercase();
     if matches!(
         upper.as_str(),
-        "CON" | "PRN" | "AUX" | "NUL" | "COM1" | "COM2" | "COM3" | "COM4" | "COM5" | "COM6"
-            | "COM7" | "COM8" | "COM9" | "LPT1" | "LPT2" | "LPT3" | "LPT4" | "LPT5" | "LPT6"
-            | "LPT7" | "LPT8" | "LPT9"
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
     ) {
         out = format!("_{out}");
     }

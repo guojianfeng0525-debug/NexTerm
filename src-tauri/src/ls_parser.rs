@@ -143,9 +143,7 @@ fn locate_date(tokens: &[&str]) -> Option<(usize, usize, Option<String>)> {
 fn find_long_iso_date(tokens: &[&str]) -> Option<usize> {
     // Need at least: [.., date, time, name] → 1 token after the pair.
     let upper = tokens.len().saturating_sub(2);
-    (0..upper).find(|&i| {
-        is_long_iso_date(tokens[i]) && is_hh_mm(tokens.get(i + 1).copied())
-    })
+    (0..upper).find(|&i| is_long_iso_date(tokens[i]) && is_hh_mm(tokens.get(i + 1).copied()))
 }
 
 /// Find a BusyBox/BSD date triple (`Mon` at `i`, day at `i+1`, time/year at `i+2`).
@@ -177,8 +175,7 @@ fn is_hh_mm(s: Option<&str>) -> bool {
     if bytes.len() != 5 || bytes[2] != b':' {
         return false;
     }
-    bytes[0..2].iter().all(|b| b.is_ascii_digit())
-        && bytes[3..5].iter().all(|b| b.is_ascii_digit())
+    bytes[0..2].iter().all(|b| b.is_ascii_digit()) && bytes[3..5].iter().all(|b| b.is_ascii_digit())
 }
 
 fn is_month_abbr(s: &str) -> bool {
@@ -213,7 +210,9 @@ fn is_time_or_year_token(s: Option<&str>) -> bool {
         // HH:MM
         let parts: Vec<&str> = s.split(':').collect();
         parts.len() == 2
-            && parts.iter().all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+            && parts
+                .iter()
+                .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
     } else {
         // YYYY — 4-digit year.
         s.len() == 4 && s.bytes().all(|b| b.is_ascii_digit())
@@ -341,7 +340,11 @@ mod tests {
         assert_eq!(entry.size, 4096);
         // Recent file → current year, time preserved.
         assert!(
-            entry.modified.as_deref().unwrap_or("").ends_with("-01-15 12:32:00"),
+            entry
+                .modified
+                .as_deref()
+                .unwrap_or("")
+                .ends_with("-01-15 12:32:00"),
             "modified should preserve Jan 15 12:32, got: {:?}",
             entry.modified
         );
@@ -414,8 +417,7 @@ mod tests {
     #[test]
     fn test_selinux_context_with_long_iso() {
         // SELinux context column + GNU long-iso date.
-        let line =
-            "drwxr-xr-x. 2 root root system_u:object_r:default_t 4096 2025-01-15 12:32 dev";
+        let line = "drwxr-xr-x. 2 root root system_u:object_r:default_t 4096 2025-01-15 12:32 dev";
         let entry = parse_ls_long_line(line).expect("should parse");
         assert_eq!(entry.name, "dev");
         assert_eq!(entry.size, 4096);

@@ -331,7 +331,10 @@ impl OsInfo {
 
     /// Parse the output of [`all_in_one_stats_cmd`] back into its sections.
     /// Returns (cpu, memory, swap, disk, uptime, cores, load).
-    pub fn parse_all_in_one_stats(&self, output: &str) -> Option<(String, String, String, String, String, u32, String)> {
+    pub fn parse_all_in_one_stats(
+        &self,
+        output: &str,
+    ) -> Option<(String, String, String, String, String, u32, String)> {
         let mut cpu = String::new();
         let mut memory = String::new();
         let mut swap = String::new();
@@ -666,7 +669,15 @@ mod all_in_one_tests {
     #[test]
     fn script_contains_all_markers() {
         let script = linux_os().all_in_one_stats_cmd();
-        for marker in ["===CPU===", "===MEM===", "===SWAP===", "===DISK===", "===UPTIME===", "===CORES===", "===LOAD==="] {
+        for marker in [
+            "===CPU===",
+            "===MEM===",
+            "===SWAP===",
+            "===DISK===",
+            "===UPTIME===",
+            "===CORES===",
+            "===LOAD===",
+        ] {
             assert!(script.contains(marker), "missing {marker} in script");
         }
     }
@@ -675,7 +686,8 @@ mod all_in_one_tests {
     fn parses_realistic_output() {
         let output = "===CPU===\n3.2\n===MEM===\n7865 2048 5817 5120\n===SWAP===\n2048 0 2048\n===DISK===\n98G 12G 81G 13%\n===UPTIME===\nup 3 days, 4:32\n===CORES===\n4\n===LOAD===\n0.15 0.10 0.08\n===END===";
         let os = linux_os();
-        let (cpu, mem, swap, disk, uptime, cores, load) = os.parse_all_in_one_stats(output).unwrap();
+        let (cpu, mem, swap, disk, uptime, cores, load) =
+            os.parse_all_in_one_stats(output).unwrap();
         assert_eq!(cpu, "3.2");
         assert_eq!(mem, "7865 2048 5817 5120");
         assert_eq!(swap, "2048 0 2048");

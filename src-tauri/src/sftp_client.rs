@@ -1,6 +1,6 @@
 use anyhow::Result;
-use russh::*;
 use russh::keys as russh_keys;
+use russh::*;
 use russh_sftp::client::SftpSession;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -149,7 +149,12 @@ impl StandaloneSftpClient {
                 )
             })?
             .map_err(|e| {
-                anyhow::anyhow!("Failed to connect to {}:{}: {}", config.host, config.port, e)
+                anyhow::anyhow!(
+                    "Failed to connect to {}:{}: {}",
+                    config.host,
+                    config.port,
+                    e
+                )
             })?
         } else {
             tokio::time::timeout(
@@ -297,7 +302,11 @@ impl StandaloneSftpClient {
             .open(remote_path)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to open remote file '{}': {}", remote_path, e))?;
-        let total = remote_file.metadata().await.map(|m| m.size.unwrap_or(0)).unwrap_or(0);
+        let total = remote_file
+            .metadata()
+            .await
+            .map(|m| m.size.unwrap_or(0))
+            .unwrap_or(0);
 
         let mut temp_buf = vec![0u8; 32768];
         let mut transferred: u64 = 0;

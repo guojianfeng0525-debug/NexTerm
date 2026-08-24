@@ -57,17 +57,25 @@ pub fn detect_jdk() -> JdkInfo {
     for cand in &candidates {
         if let Ok(output) = Command::new(cand).arg("-version").output() {
             if output.status.success() {
-                let version = String::from_utf8_lossy(&output.stderr)
-                    .trim()
-                    .to_string();
-                let home = if cand.file_name().map(|n| n == "javac" || n == "javac.exe").unwrap_or(false)
-                    && std::env::var("JAVA_HOME").map(|h| !h.is_empty()).unwrap_or(false)
+                let version = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                let home = if cand
+                    .file_name()
+                    .map(|n| n == "javac" || n == "javac.exe")
+                    .unwrap_or(false)
+                    && std::env::var("JAVA_HOME")
+                        .map(|h| !h.is_empty())
+                        .unwrap_or(false)
                 {
                     std::env::var("JAVA_HOME").ok()
-                } else if cand.file_name().map(|n| n == "javac" || n == "javac.exe").unwrap_or(false)
+                } else if cand
+                    .file_name()
+                    .map(|n| n == "javac" || n == "javac.exe")
+                    .unwrap_or(false)
                 {
                     // Derive home from javac path: bin/javac → up two.
-                    cand.parent().and_then(|bin| bin.parent()).map(|p| p.display().to_string())
+                    cand.parent()
+                        .and_then(|bin| bin.parent())
+                        .map(|p| p.display().to_string())
                 } else {
                     None
                 };
@@ -115,7 +123,10 @@ fn parse_diagnostics(stderr: &str, base_dir: &Path) -> Vec<CompileDiagnostic> {
             out.push(CompileDiagnostic {
                 file: display,
                 line: caps.name("line").unwrap().as_str().parse().unwrap_or(0),
-                column: caps.name("col").map(|c| c.as_str().parse().unwrap_or(0)).unwrap_or(0),
+                column: caps
+                    .name("col")
+                    .map(|c| c.as_str().parse().unwrap_or(0))
+                    .unwrap_or(0),
                 level: caps.name("level").unwrap().as_str().to_string(),
                 message: caps.name("msg").unwrap().as_str().to_string(),
             });
@@ -145,7 +156,8 @@ pub fn compile_sources(
     for (rel, content) in sources {
         let p = src_dir.join(rel);
         if let Some(parent) = p.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| format!("mk dir {}: {e}", parent.display()))?;
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("mk dir {}: {e}", parent.display()))?;
         }
         std::fs::write(&p, content).map_err(|e| format!("write {}: {e}", p.display()))?;
         file_paths.push(p);
@@ -261,7 +273,10 @@ mod tests {
         )
         .unwrap();
         assert!(ok.success, "compile should succeed: {:?}", ok.diagnostics);
-        assert!(ok.classes.iter().any(|(p, _)| p == "com/example/Hello.class"));
+        assert!(ok
+            .classes
+            .iter()
+            .any(|(p, _)| p == "com/example/Hello.class"));
 
         // Invalid source → error diagnostics, no classes.
         let bad = compile_sources(

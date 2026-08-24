@@ -200,7 +200,11 @@ pub fn upsert_class(conn: &Connection, c: &JarClassRow) -> Result<(), String> {
     Ok(())
 }
 
-pub fn get_class(conn: &Connection, project_id: &str, entry_path: &str) -> Result<Option<JarClassRow>, String> {
+pub fn get_class(
+    conn: &Connection,
+    project_id: &str,
+    entry_path: &str,
+) -> Result<Option<JarClassRow>, String> {
     conn.query_row(
         "SELECT id, project_id, library_id, entry_path, class_name, package_name, kind, is_inner_class,
                 modified_source, modified, compile_status, compile_output, compile_timestamp, source_hash
@@ -289,7 +293,10 @@ pub fn list_classes(conn: &Connection, project_id: &str) -> Result<Vec<JarClassR
     Ok(rows)
 }
 
-pub fn list_modified_classes(conn: &Connection, project_id: &str) -> Result<Vec<JarClassRow>, String> {
+pub fn list_modified_classes(
+    conn: &Connection,
+    project_id: &str,
+) -> Result<Vec<JarClassRow>, String> {
     Ok(list_classes(conn, project_id)?
         .into_iter()
         .filter(|c| c.modified && c.kind == "class")
@@ -297,8 +304,11 @@ pub fn list_modified_classes(conn: &Connection, project_id: &str) -> Result<Vec<
 }
 
 pub fn delete_classes_for_project(conn: &Connection, project_id: &str) -> Result<(), String> {
-    conn.execute("DELETE FROM jar_classes WHERE project_id = ?1", [project_id])
-        .map_err(|e| format!("delete classes: {e}"))?;
+    conn.execute(
+        "DELETE FROM jar_classes WHERE project_id = ?1",
+        [project_id],
+    )
+    .map_err(|e| format!("delete classes: {e}"))?;
     Ok(())
 }
 
@@ -317,12 +327,17 @@ pub fn insert_build(
     Ok(())
 }
 
-pub fn list_builds(conn: &Connection, project_id: &str) -> Result<Vec<(String, i64, String, Option<String>)>, String> {
+pub fn list_builds(
+    conn: &Connection,
+    project_id: &str,
+) -> Result<Vec<(String, i64, String, Option<String>)>, String> {
     let mut stmt = conn
         .prepare("SELECT output_path, built_at, result, detail FROM jar_builds WHERE project_id = ?1 ORDER BY built_at DESC LIMIT 50")
         .map_err(|e| format!("prepare builds: {e}"))?;
     let rows = stmt
-        .query_map([project_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+        .query_map([project_id], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        })
         .map_err(|e| format!("query builds: {e}"))?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| format!("collect builds: {e}"))?;
@@ -471,9 +486,14 @@ mod tests {
             ..c.clone()
         };
         upsert_class(&conn, &c2).unwrap();
-        let got = get_class(&conn, "p1", "com/example/Foo.class").unwrap().unwrap();
+        let got = get_class(&conn, "p1", "com/example/Foo.class")
+            .unwrap()
+            .unwrap();
         assert!(got.modified);
-        assert_eq!(got.modified_source.as_deref(), Some("public class Foo { int x; }"));
+        assert_eq!(
+            got.modified_source.as_deref(),
+            Some("public class Foo { int x; }")
+        );
         assert_eq!(list_modified_classes(&conn, "p1").unwrap().len(), 1);
     }
 }
@@ -530,7 +550,11 @@ pub fn list_libraries(conn: &Connection, project_id: &str) -> Result<Vec<JarLibr
     Ok(rows)
 }
 
-pub fn get_library(conn: &Connection, project_id: &str, id: &str) -> Result<Option<JarLibrary>, String> {
+pub fn get_library(
+    conn: &Connection,
+    project_id: &str,
+    id: &str,
+) -> Result<Option<JarLibrary>, String> {
     conn.query_row(
         "SELECT id, project_id, name, group_id, artifact_id, version, jar_path, jar_hash, class_count, editable FROM jar_libraries WHERE project_id = ?1 AND id = ?2",
         params![project_id, id],
@@ -554,8 +578,11 @@ pub fn get_library(conn: &Connection, project_id: &str, id: &str) -> Result<Opti
 }
 
 pub fn delete_libraries_for_project(conn: &Connection, project_id: &str) -> Result<(), String> {
-    conn.execute("DELETE FROM jar_libraries WHERE project_id = ?1", [project_id])
-        .map_err(|e| format!("delete libraries: {e}"))?;
+    conn.execute(
+        "DELETE FROM jar_libraries WHERE project_id = ?1",
+        [project_id],
+    )
+    .map_err(|e| format!("delete libraries: {e}"))?;
     Ok(())
 }
 
@@ -568,7 +595,15 @@ pub fn upsert_symbol(conn: &Connection, s: &JarSymbol) -> Result<(), String> {
          ON CONFLICT(id) DO UPDATE SET
            class_id = excluded.class_id, name = excluded.name, kind = excluded.kind,
            line = excluded.line, signature = excluded.signature",
-        params![s.id, s.class_id, s.project_id, s.name, s.kind, s.line, s.signature],
+        params![
+            s.id,
+            s.class_id,
+            s.project_id,
+            s.name,
+            s.kind,
+            s.line,
+            s.signature
+        ],
     )
     .map_err(|e| format!("upsert jar_symbols: {e}"))?;
     Ok(())
@@ -582,8 +617,11 @@ pub fn delete_symbols_for_class(conn: &Connection, class_id: &str) -> Result<(),
 
 /// Delete every symbol row of a project (used before re-indexing).
 pub fn delete_symbols_for_project(conn: &Connection, project_id: &str) -> Result<(), String> {
-    conn.execute("DELETE FROM jar_symbols WHERE project_id = ?1", [project_id])
-        .map_err(|e| format!("delete symbols: {e}"))?;
+    conn.execute(
+        "DELETE FROM jar_symbols WHERE project_id = ?1",
+        [project_id],
+    )
+    .map_err(|e| format!("delete symbols: {e}"))?;
     Ok(())
 }
 
@@ -648,7 +686,11 @@ pub fn list_symbols_for_class(conn: &Connection, class_id: &str) -> Result<Vec<J
 }
 
 /// Find symbols by name across a project (for click-to-navigate).
-pub fn find_symbols_by_name(conn: &Connection, project_id: &str, name: &str) -> Result<Vec<serde_json::Value>, String> {
+pub fn find_symbols_by_name(
+    conn: &Connection,
+    project_id: &str,
+    name: &str,
+) -> Result<Vec<serde_json::Value>, String> {
     let mut stmt = conn
         .prepare("SELECT s.id, s.class_id, s.project_id, s.name, s.kind, s.line, s.signature, c.class_name, c.entry_path, c.library_id
                   FROM jar_symbols s JOIN jar_classes c ON c.id = s.class_id
@@ -678,8 +720,11 @@ pub fn find_symbols_by_name(conn: &Connection, project_id: &str, name: &str) -> 
 
 /// Clear the subtype index of a project (before re-indexing).
 pub fn delete_subtypes_for_project(conn: &Connection, project_id: &str) -> Result<(), String> {
-    conn.execute("DELETE FROM jar_subtypes WHERE project_id = ?1", [project_id])
-        .map_err(|e| format!("delete subtypes: {e}"))?;
+    conn.execute(
+        "DELETE FROM jar_subtypes WHERE project_id = ?1",
+        [project_id],
+    )
+    .map_err(|e| format!("delete subtypes: {e}"))?;
     Ok(())
 }
 
@@ -711,7 +756,11 @@ pub fn insert_subtype_edges_batch(
 }
 
 /// Subtypes of a type (its direct children) across the project.
-pub fn list_subtype_names(conn: &Connection, project_id: &str, super_name: &str) -> Result<Vec<String>, String> {
+pub fn list_subtype_names(
+    conn: &Connection,
+    project_id: &str,
+    super_name: &str,
+) -> Result<Vec<String>, String> {
     let mut stmt = conn
         .prepare("SELECT sub_name FROM jar_subtypes WHERE project_id = ?1 AND super_name = ?2 ORDER BY sub_name")
         .map_err(|e| format!("prepare list subtypes: {e}"))?;
@@ -724,7 +773,11 @@ pub fn list_subtype_names(conn: &Connection, project_id: &str, super_name: &str)
 }
 
 /// The superclass of a type (single edge; used for the parent chain).
-pub fn list_super_names(conn: &Connection, project_id: &str, sub_name: &str) -> Result<Vec<String>, String> {
+pub fn list_super_names(
+    conn: &Connection,
+    project_id: &str,
+    sub_name: &str,
+) -> Result<Vec<String>, String> {
     let mut stmt = conn
         .prepare("SELECT super_name FROM jar_subtypes WHERE project_id = ?1 AND sub_name = ?2")
         .map_err(|e| format!("prepare list supers: {e}"))?;

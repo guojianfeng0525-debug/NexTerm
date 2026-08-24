@@ -54,7 +54,8 @@ pub fn build_jar(
     let out_file = std::fs::File::create(&tmp_path).map_err(|e| format!("create temp out: {e}"))?;
     let mut zip = zip::ZipWriter::new(out_file);
 
-    let opts = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+    let opts = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
 
     // 1) Copy all original entries (with overrides/deletions applied).
     for i in 0..archive.len() {
@@ -80,14 +81,16 @@ pub fn build_jar(
 
         zip.start_file(&name, opts)
             .map_err(|e| format!("start entry {name}: {e}"))?;
-        zip.write_all(&payload).map_err(|e| format!("write entry {name}: {e}"))?;
+        zip.write_all(&payload)
+            .map_err(|e| format!("write entry {name}: {e}"))?;
     }
 
     // 2) Additions (new classes / files).
     for (name, bytes) in additions {
         zip.start_file(name, opts)
             .map_err(|e| format!("start addition {name}: {e}"))?;
-        zip.write_all(bytes).map_err(|e| format!("write addition {name}: {e}"))?;
+        zip.write_all(bytes)
+            .map_err(|e| format!("write addition {name}: {e}"))?;
     }
 
     zip.finish().map_err(|e| format!("finish zip: {e}"))?;
@@ -109,7 +112,8 @@ mod tests {
     fn make_jar(path: &Path, files: &[(&str, &[u8])]) {
         let file = std::fs::File::create(path).unwrap();
         let mut zip = zip::ZipWriter::new(file);
-        let opts = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        let opts = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
         for (name, data) in files {
             zip.start_file(*name, opts).unwrap();
             zip.write_all(data).unwrap();
@@ -171,8 +175,15 @@ mod tests {
 
     #[test]
     fn build_missing_original_fails() {
-        let out = std::env::temp_dir().join(format!("jar-build-missing-{}.jar", std::process::id()));
-        let res = build_jar(Path::new("/nonexistent/x.jar"), &HashMap::new(), &[], &[], &out);
+        let out =
+            std::env::temp_dir().join(format!("jar-build-missing-{}.jar", std::process::id()));
+        let res = build_jar(
+            Path::new("/nonexistent/x.jar"),
+            &HashMap::new(),
+            &[],
+            &[],
+            &out,
+        );
         assert!(res.is_err());
     }
 }

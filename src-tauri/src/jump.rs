@@ -98,16 +98,24 @@ pub async fn connect_via_jump(
     // 3) Open a direct-tcpip channel to the target and expose it as a stream.
     let channel = tokio::time::timeout(
         connection_timeout,
-        jump_session.channel_open_direct_tcpip(
-            target_host,
-            target_port as u32,
-            "127.0.0.1",
-            0,
-        ),
+        jump_session.channel_open_direct_tcpip(target_host, target_port as u32, "127.0.0.1", 0),
     )
     .await
-    .map_err(|_| anyhow::anyhow!("Timed out opening the jump channel to {}:{}", target_host, target_port))?
-    .map_err(|e| anyhow::anyhow!("Failed to open the jump channel to {}:{}: {}", target_host, target_port, e))?;
+    .map_err(|_| {
+        anyhow::anyhow!(
+            "Timed out opening the jump channel to {}:{}",
+            target_host,
+            target_port
+        )
+    })?
+    .map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to open the jump channel to {}:{}: {}",
+            target_host,
+            target_port,
+            e
+        )
+    })?;
 
     Ok(JumpTunnel {
         stream: channel.into_stream(),

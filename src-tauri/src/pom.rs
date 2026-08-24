@@ -55,10 +55,19 @@ pub fn local_repo_root() -> PathBuf {
 
 /// Resolve a dependency to its jar in the local repo.
 /// Path: <repo>/<group path>/<artifact>/<version>/<artifact>-<version>.jar
-pub fn resolve_dependency_jar(repo: &Path, group_id: &str, artifact_id: &str, version: &str) -> Option<PathBuf> {
+pub fn resolve_dependency_jar(
+    repo: &Path,
+    group_id: &str,
+    artifact_id: &str,
+    version: &str,
+) -> Option<PathBuf> {
     let group_path: PathBuf = group_id.split('.').collect();
     let jar_name = format!("{artifact_id}-{version}.jar");
-    let candidate = repo.join(&group_path).join(artifact_id).join(version).join(&jar_name);
+    let candidate = repo
+        .join(&group_path)
+        .join(artifact_id)
+        .join(version)
+        .join(&jar_name);
     if candidate.is_file() {
         Some(candidate)
     } else {
@@ -150,10 +159,22 @@ pub fn parse_pom(xml: &str) -> PomInfo {
     let mut resolved = 0usize;
 
     for block in extract_dependency_blocks(xml) {
-        let g = extract_tag(&block, "groupId").unwrap_or("").trim().to_string();
-        let a = extract_tag(&block, "artifactId").unwrap_or("").trim().to_string();
-        let v = extract_tag(&block, "version").unwrap_or("").trim().to_string();
-        let scope = extract_tag(&block, "scope").unwrap_or("compile").trim().to_string();
+        let g = extract_tag(&block, "groupId")
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let a = extract_tag(&block, "artifactId")
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let v = extract_tag(&block, "version")
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let scope = extract_tag(&block, "scope")
+            .unwrap_or("compile")
+            .trim()
+            .to_string();
         if g.is_empty() || a.is_empty() {
             continue;
         }
@@ -166,7 +187,13 @@ pub fn parse_pom(xml: &str) -> PomInfo {
             v.clone()
         };
         if resolved_version.is_empty() {
-            dependencies.push(PomDependency { group_id: g, artifact_id: a, version: v, scope, jar_path: None });
+            dependencies.push(PomDependency {
+                group_id: g,
+                artifact_id: a,
+                version: v,
+                scope,
+                jar_path: None,
+            });
             continue;
         }
         let jar = resolve_dependency_jar(&repo, &g, &a, &resolved_version);
@@ -182,7 +209,13 @@ pub fn parse_pom(xml: &str) -> PomInfo {
         });
     }
 
-    PomInfo { group_id, artifact_id, version, dependencies, resolved_count: resolved }
+    PomInfo {
+        group_id,
+        artifact_id,
+        version,
+        dependencies,
+        resolved_count: resolved,
+    }
 }
 
 /// Read a pom file and parse it.

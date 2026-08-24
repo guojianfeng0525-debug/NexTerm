@@ -91,7 +91,8 @@ fn extract_embedded_jd() -> Result<std::path::PathBuf, String> {
         }
     }
     std::fs::create_dir_all(&dir).map_err(|e| format!("create jdcore cache dir: {e}"))?;
-    std::fs::write(&path, EMBEDDED_JD_JAR).map_err(|e| format!("write embedded jdcore jar: {e}"))?;
+    std::fs::write(&path, EMBEDDED_JD_JAR)
+        .map_err(|e| format!("write embedded jdcore jar: {e}"))?;
     Ok(path)
 }
 
@@ -210,7 +211,14 @@ pub fn decompile_class(
     internal_name: &str,
     cancel: Option<Arc<AtomicBool>>,
 ) -> Result<DecompileResult, String> {
-    decompile_class_with_options(class_file, decompiler_jar, "", internal_name, DecompileOptions::default(), cancel)
+    decompile_class_with_options(
+        class_file,
+        decompiler_jar,
+        "",
+        internal_name,
+        DecompileOptions::default(),
+        cancel,
+    )
 }
 
 /// Like `decompile_class` but lets the caller supply a sibling-classes dir
@@ -222,7 +230,14 @@ pub fn decompile_class_with_classpath(
     internal_name: &str,
     cancel: Option<Arc<AtomicBool>>,
 ) -> Result<DecompileResult, String> {
-    decompile_class_with_options(class_file, decompiler_jar, classpath, internal_name, DecompileOptions::default(), cancel)
+    decompile_class_with_options(
+        class_file,
+        decompiler_jar,
+        classpath,
+        internal_name,
+        DecompileOptions::default(),
+        cancel,
+    )
 }
 
 /// Result of a jd-core run: the source text plus JD-GUI-style position-bound
@@ -254,7 +269,10 @@ fn json_str(raw: &str) -> String {
         return String::new();
     }
     let s = raw.trim();
-    let s = s.strip_prefix('"').and_then(|r| r.strip_suffix('"')).unwrap_or(s);
+    let s = s
+        .strip_prefix('"')
+        .and_then(|r| r.strip_suffix('"'))
+        .unwrap_or(s);
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars();
     while let Some(c) = chars.next() {
@@ -284,7 +302,11 @@ fn json_str(raw: &str) -> String {
 
 fn opt_json_str(raw: Option<&str>) -> Option<String> {
     let v = json_str(raw.unwrap_or("null"));
-    if v.is_empty() { None } else { Some(v) }
+    if v.is_empty() {
+        None
+    } else {
+        Some(v)
+    }
 }
 
 /// Parse the wrapper's JDREFS lines (jd-core Printer type constants:
@@ -292,7 +314,9 @@ fn opt_json_str(raw: Option<&str>) -> Option<String> {
 fn parse_jdrefs(stderr: &str) -> Vec<crate::jar::ClassRef> {
     let mut out = Vec::new();
     for line in stderr.lines() {
-        let Some(rest) = line.strip_prefix("JDREFS\t") else { continue };
+        let Some(rest) = line.strip_prefix("JDREFS\t") else {
+            continue;
+        };
         let parts: Vec<&str> = rest.split('\t').collect();
         if parts.len() < 6 {
             continue;
@@ -368,28 +392,35 @@ pub fn decompile_class_with_options(
     // If a cancel flag is set, spawn a watcher that kills the child.
     if let Some(cancel) = cancel {
         let pid = child.id();
+        let finished = Arc::new(AtomicBool::new(false));
+        let watcher_finished = Arc::clone(&finished);
         std::thread::spawn(move || {
-            let mut waited = false;
-            for _ in 0..1200 {
+            while !watcher_finished.load(Ordering::Relaxed) {
                 if cancel.load(Ordering::Relaxed) {
                     // Kill on all platforms.
                     let _ = kill_process(pid);
-                    waited = true;
                     break;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
-            if !waited {
-                // Also stop watching if the process would outlive us (60s cap).
-                let _ = kill_process(pid);
-            }
         });
+        let output = child.wait_with_output();
+        finished.store(true, Ordering::Relaxed);
+        let output = output.map_err(|e| format!("failed waiting for jd-core: {e}"))?;
+        return decompile_output(output, class_file);
     }
 
     let output = child
         .wait_with_output()
         .map_err(|e| format!("failed waiting for jd-core: {e}"))?;
 
+    decompile_output(output, class_file)
+}
+
+fn decompile_output(
+    output: std::process::Output,
+    class_file: &Path,
+) -> Result<DecompileResult, String> {
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
 
@@ -451,7 +482,11 @@ mod tests {
     #[test]
     fn decompiler_jar_is_present() {
         let jar = find_decompiler_jar();
-        assert!(jar.is_ok(), "jd-core wrapper jar should be bundled: {:?}", jar.err());
+        assert!(
+            jar.is_ok(),
+            "jd-core wrapper jar should be bundled: {:?}",
+            jar.err()
+        );
     }
 
     #[test]
@@ -520,15 +555,9 @@ mod tests {
 
         let class = out.join("Saver.class");
         let jd = find_decompiler_jar().unwrap();
-        let source = decompile_class_with_options(
-            &class,
-            &jd,
-            "",
-            "Saver",
-            DecompileOptions::saver(),
-            None,
-        )
-        .unwrap();
+        let source =
+            decompile_class_with_options(&class, &jd, "", "Saver", DecompileOptions::saver(), None)
+                .unwrap();
         assert!(
             source.contains("/* 1 */") || source.contains("/* 2 */"),
             "saver mode should emit line prefixes: {source}"

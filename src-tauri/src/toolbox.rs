@@ -67,19 +67,13 @@ pub struct ToolboxState {
 impl ToolboxState {
     /// Cancel all tunnels and stop all services. Called on app exit.
     pub fn shutdown_all(&self) {
-        let mut tunnels = self
-            .tunnels
-            .lock()
-            .expect("tunnel state poisoned");
+        let mut tunnels = self.tunnels.lock().expect("tunnel state poisoned");
         for (_, handle) in tunnels.drain() {
             handle.token.cancel();
             handle.task.abort();
         }
 
-        let mut services = self
-            .services
-            .lock()
-            .expect("service state poisoned");
+        let mut services = self.services.lock().expect("service state poisoned");
         for (_, handle) in services.drain() {
             let _ = handle.stop_tx.try_send(());
             // Kill the process tree (taskkill /T /F on Windows) BEFORE aborting
@@ -268,12 +262,12 @@ pub async fn launch_app(request: LaunchAppRequest) -> Result<(), String> {
                 if let Some(cwd) = &request.cwd {
                     start.current_dir(cwd);
                 }
-                return start
-                    .spawn()
-                    .map(|_| ())
-                    .map_err(|e2| {
-                        format!("Failed to launch '{}': {} (fallback 'cmd /C start' also failed: {})", path, e, e2)
-                    });
+                return start.spawn().map(|_| ()).map_err(|e2| {
+                    format!(
+                        "Failed to launch '{}': {} (fallback 'cmd /C start' also failed: {})",
+                        path, e, e2
+                    )
+                });
             }
             #[cfg(not(target_os = "windows"))]
             {
@@ -290,7 +284,10 @@ pub async fn launch_app(request: LaunchAppRequest) -> Result<(), String> {
                         .spawn()
                         .map(|_| ())
                         .map_err(|e2| {
-                            format!("Failed to launch '{}': {} (fallback '{}' also failed: {})", path, e, program, e2)
+                            format!(
+                                "Failed to launch '{}': {} (fallback '{}' also failed: {})",
+                                path, e, program, e2
+                            )
                         }),
                     None => Err(format!("Failed to launch '{}': {}", path, e)),
                 }
@@ -322,10 +319,7 @@ pub struct TunnelStartRequest {
 /// Map the tunnel request's jump fields into a `JumpConfig`, or `None` when
 /// no jump host is configured. The jump host authenticates with a password.
 fn build_tunnel_jump(request: &TunnelStartRequest) -> Result<Option<JumpConfig>, String> {
-    let host = request
-        .jump_host
-        .clone()
-        .filter(|h| !h.trim().is_empty());
+    let host = request.jump_host.clone().filter(|h| !h.trim().is_empty());
     let Some(host) = host else {
         return Ok(None);
     };
@@ -504,18 +498,14 @@ pub async fn tunnel_start(
         tracing::info!("Tunnel '{}' ({}) stopped", task_name, task_id);
     });
 
-    state
-        .tunnels
-        .lock()
-        .expect("tunnel state poisoned")
-        .insert(
-            request.id.clone(),
-            TunnelHandle {
-                token,
-                task,
-                conn_tasks,
-            },
-        );
+    state.tunnels.lock().expect("tunnel state poisoned").insert(
+        request.id.clone(),
+        TunnelHandle {
+            token,
+            task,
+            conn_tasks,
+        },
+    );
 
     tracing::info!("Tunnel '{}' started: {} → {}", name, bind_addr, remote_addr);
     Ok(TunnelStatus {
@@ -736,7 +726,8 @@ pub async fn service_start(
             // detached (typical for GUI-subsystem services on Windows).
             tracing::info!(
                 "service '{}' ({}): cmd wrapper exited 0 immediately; assuming detached service",
-                request.name, request.id
+                request.name,
+                request.id
             );
         } else {
             let mut reason = String::new();
@@ -751,7 +742,11 @@ pub async fn service_start(
                 "'{}' exited immediately with status {}: {}",
                 full_command,
                 status,
-                if reason.is_empty() { "check the command path and arguments".to_string() } else { reason }
+                if reason.is_empty() {
+                    "check the command path and arguments".to_string()
+                } else {
+                    reason
+                }
             ));
         }
     }
@@ -847,7 +842,11 @@ pub async fn service_start(
         }
         let _ = emit_app.emit(
             "service://exited",
-            ServiceOutputPayload { id: id.clone(), line: "process exited".to_string(), stream: "stderr".to_string() },
+            ServiceOutputPayload {
+                id: id.clone(),
+                line: "process exited".to_string(),
+                stream: "stderr".to_string(),
+            },
         );
         tracing::info!("Service '{}' stopped", name);
     });
@@ -927,7 +926,10 @@ pub async fn service_list(state: State<'_, ToolboxState>) -> Result<Vec<ServiceS
 
 /// Return the most recent buffered output lines of a service.
 #[tauri::command]
-pub async fn service_logs(id: String, state: State<'_, ToolboxState>) -> Result<Vec<ServiceLogLine>, String> {
+pub async fn service_logs(
+    id: String,
+    state: State<'_, ToolboxState>,
+) -> Result<Vec<ServiceLogLine>, String> {
     let services = state.services.lock().expect("service state poisoned");
     match services.get(&id) {
         Some(handle) => {
@@ -999,7 +1001,10 @@ pub async fn api_request(request: ApiRequest) -> Result<ApiResponse, String> {
     req = req.timeout(timeout);
 
     let start = Instant::now();
-    let resp = req.send().await.map_err(|e| format!("Request failed: {}", e))?;
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| format!("Request failed: {}", e))?;
     let status = resp.status();
     let headers: Vec<(String, String)> = resp
         .headers()
@@ -1019,7 +1024,10 @@ pub async fn api_request(request: ApiRequest) -> Result<ApiResponse, String> {
 
     let (body, body_is_base64) = match String::from_utf8(bytes.to_vec()) {
         Ok(text) => (text, false),
-        Err(_) => (base64::engine::general_purpose::STANDARD.encode(&bytes), true),
+        Err(_) => (
+            base64::engine::general_purpose::STANDARD.encode(&bytes),
+            true,
+        ),
     };
 
     Ok(ApiResponse {
@@ -1080,7 +1088,11 @@ pub async fn api_ws_connect(
     let task = tauri::async_runtime::spawn(async move {
         let _ = emit_app.emit(
             "api://ws-status",
-            WsStatusPayload { id: task_id.clone(), status: "connected".into(), error: None },
+            WsStatusPayload {
+                id: task_id.clone(),
+                status: "connected".into(),
+                error: None,
+            },
         );
         loop {
             tokio::select! {
@@ -1114,20 +1126,29 @@ pub async fn api_ws_connect(
         }
         let _ = emit_app2.emit(
             "api://ws-status",
-            WsStatusPayload { id: task_id.clone(), status: "closed".into(), error: None },
+            WsStatusPayload {
+                id: task_id.clone(),
+                status: "closed".into(),
+                error: None,
+            },
         );
     });
 
-    state.ws.lock().expect("ws state poisoned").insert(
-        id,
-        WsHandle { tx, token, task },
-    );
+    state
+        .ws
+        .lock()
+        .expect("ws state poisoned")
+        .insert(id, WsHandle { tx, token, task });
     Ok(())
 }
 
 /// Send a text message on an open WebSocket connection.
 #[tauri::command]
-pub async fn api_ws_send(id: String, message: String, state: State<'_, ToolboxState>) -> Result<(), String> {
+pub async fn api_ws_send(
+    id: String,
+    message: String,
+    state: State<'_, ToolboxState>,
+) -> Result<(), String> {
     // Clone the sender and drop the lock before awaiting so the future stays Send.
     let tx = {
         let ws = state.ws.lock().expect("ws state poisoned");
@@ -1136,7 +1157,9 @@ pub async fn api_ws_send(id: String, message: String, state: State<'_, ToolboxSt
             None => return Err("WebSocket connection not found".into()),
         }
     };
-    tx.send(message).await.map_err(|_| "WebSocket is closed".into())
+    tx.send(message)
+        .await
+        .map_err(|_| "WebSocket is closed".into())
 }
 
 /// Close a WebSocket connection.
@@ -1180,15 +1203,22 @@ pub async fn extract_app_icon(path: String) -> Result<String, String> {
     }
     // macOS `.app` bundles are directories — allow them through so the
     // bundle-icon branch below can run; any other directory is rejected.
-    let is_macos_app = cfg!(target_os = "macos")
-        && p.extension().and_then(|e| e.to_str()) == Some("app");
+    let is_macos_app =
+        cfg!(target_os = "macos") && p.extension().and_then(|e| e.to_str()) == Some("app");
     if p.is_dir() && !is_macos_app {
         return Err(format!("Expected a file, got a directory: {}", path));
     }
 
     // Common image extensions can be served directly.
-    if let Some(ext) = p.extension().and_then(|e| e.to_str()).map(|e| e.to_lowercase()) {
-        if matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp") {
+    if let Some(ext) = p
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_lowercase())
+    {
+        if matches!(
+            ext.as_str(),
+            "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp"
+        ) {
             return file_data_url(p);
         }
     }
@@ -1228,7 +1258,10 @@ pub async fn extract_app_icon(path: String) -> Result<String, String> {
             .output()
             .map_err(|e| e.to_string())?;
         if !out.status.success() {
-            return Err(format!("sips failed: {}", String::from_utf8_lossy(&out.stderr)));
+            return Err(format!(
+                "sips failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            ));
         }
         if !tmp.exists() {
             return Err("sips produced no output".into());
@@ -1250,7 +1283,10 @@ pub async fn extract_app_icon(path: String) -> Result<String, String> {
             .output()
             .map_err(|e| e.to_string())?;
         if !out.status.success() {
-            return Err(format!("icon extraction failed: {}", String::from_utf8_lossy(&out.stderr)));
+            return Err(format!(
+                "icon extraction failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            ));
         }
         if !tmp.exists() {
             return Err("Failed to extract icon from the file".into());
@@ -1292,12 +1328,11 @@ mod icon_tests {
     async fn extract_app_icon_serves_plain_png_directly() {
         // A tiny 1x1 transparent PNG.
         let png = [
-            0x89u8, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49,
-            0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06,
-            0x00, 0x00, 0x00, 0x1F, 0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x44,
-            0x41, 0x54, 0x78, 0x9C, 0x63, 0x00, 0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D,
-            0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42,
-            0x60, 0x82,
+            0x89u8, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00,
+            0x00, 0x1F, 0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x44, 0x41, 0x54, 0x78,
+            0x9C, 0x63, 0x00, 0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00,
+            0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
         ];
         let path = std::env::temp_dir().join("nexterm-icon-test.png");
         std::fs::write(&path, png).expect("write test png");
@@ -1305,7 +1340,11 @@ mod icon_tests {
             .await
             .expect("should read png directly");
         let _ = std::fs::remove_file(&path);
-        assert!(data_url.starts_with("data:image/png;base64,"), "got prefix: {}", &data_url[..40.min(data_url.len())]);
+        assert!(
+            data_url.starts_with("data:image/png;base64,"),
+            "got prefix: {}",
+            &data_url[..40.min(data_url.len())]
+        );
     }
 }
 
@@ -1394,7 +1433,10 @@ mod batch_script_tests {
         // Path with spaces → quoted, wrapped in `call`.
         let args = ["--port", "3000"].map(String::from).to_vec();
         let cmd = batch_invocation("C:\\Program Files\\App\\start.bat", &args);
-        assert_eq!(cmd, "call \"C:\\Program Files\\App\\start.bat\" --port 3000");
+        assert_eq!(
+            cmd,
+            "call \"C:\\Program Files\\App\\start.bat\" --port 3000"
+        );
 
         // Simple path, no args.
         assert_eq!(batch_invocation("run.bat", &[]), "call run.bat");
@@ -1410,7 +1452,10 @@ mod batch_script_tests {
     #[test]
     fn split_args_handles_quotes() {
         assert_eq!(split_args("--port 3000 -v"), vec!["--port", "3000", "-v"]);
-        assert_eq!(split_args("\"my script.js\" --flag"), vec!["my script.js", "--flag"]);
+        assert_eq!(
+            split_args("\"my script.js\" --flag"),
+            vec!["my script.js", "--flag"]
+        );
         assert_eq!(split_args(""), Vec::<String>::new());
         assert_eq!(split_args("  "), Vec::<String>::new());
     }

@@ -520,12 +520,11 @@ mod tests {
         let mut proxy = test_proxy(ProxyType::Http);
         proxy.port = addr.port();
 
-        let err = match connect_via_proxy(&proxy, "example.com", 443, Duration::from_millis(100))
-            .await
-        {
-            Ok(_) => panic!("expected the handshake to time out"),
-            Err(e) => e,
-        };
+        let err =
+            match connect_via_proxy(&proxy, "example.com", 443, Duration::from_millis(100)).await {
+                Ok(_) => panic!("expected the handshake to time out"),
+                Err(e) => e,
+            };
         assert!(
             err.to_string().contains("timed out"),
             "error should mention the timeout: {err}"

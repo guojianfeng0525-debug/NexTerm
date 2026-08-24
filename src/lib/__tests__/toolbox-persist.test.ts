@@ -13,6 +13,7 @@ const DB: Record<string, Record<string, unknown>[]> = {
   toolbox_apps: [],
   services: [],
   tunnels: [],
+  api_collections: [],
 };
 const invokeMock = vi.fn();
 
@@ -132,5 +133,29 @@ describe('toolbox persistence', () => {
     expect(reloaded[0].listenPort).toBe(3307);
     expect(reloaded[0].jumpHost).toBe('bastion.example.com');
     expect(reloaded[0].jumpPassword).toBe('s3cret-jump');
+  });
+
+  it('keeps distinct saved API request IDs instead of overwriting one request', async () => {
+    const { setCollection, hydrateApiDebugStorage, getCollection } = await import('../toolbox/api-debug-storage');
+    const request = (id: string, name: string) => ({
+      id,
+      name,
+      group: '',
+      method: 'GET',
+      url: `https://example.test/${id}`,
+      params: [],
+      headers: [],
+      bodyType: 'none' as const,
+      bodyText: '',
+      auth: { type: 'none' as const, username: '', password: '', token: '', apiKeyName: '', apiKeyValue: '', apiKeyIn: 'header' as const },
+      timeoutMs: 30000,
+      updatedAt: Date.now(),
+    });
+    setCollection([request('api-a', 'A'), request('api-b', 'B')]);
+    await flush();
+    expect(DB.api_collections).toHaveLength(2);
+
+    await hydrateApiDebugStorage();
+    expect(getCollection().map((item) => item.id).sort()).toEqual(['api-a', 'api-b']);
   });
 });

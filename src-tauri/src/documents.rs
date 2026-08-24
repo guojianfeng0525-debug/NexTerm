@@ -4,8 +4,8 @@
 //! model for XLSX) plus non-editor package parts as BLOBs. The original file
 //! bytes are never persisted — they are rebuilt from the model on export.
 
-use std::sync::Arc;
 use sha2::{Digest, Sha256};
+use std::sync::Arc;
 use tauri::State;
 
 use crate::db::DbState;
@@ -123,13 +123,22 @@ fn dto_to_workbook(dto: XlsxModelDto) -> betteroffice_xlsx::WorkbookModel {
 pub fn detect_ooxml_kind(bytes: &[u8], name: &str) -> Result<&'static str, String> {
     let lower = name.to_lowercase();
     // ZIP/Office Open XML starts with "PK\x03\x04".
-    let is_zip = bytes.len() >= 4 && bytes[0] == 0x50 && bytes[1] == 0x4b
-        && bytes[2] == 0x03 && bytes[3] == 0x04;
+    let is_zip = bytes.len() >= 4
+        && bytes[0] == 0x50
+        && bytes[1] == 0x4b
+        && bytes[2] == 0x03
+        && bytes[3] == 0x04;
     if !is_zip {
         // OLE2 (legacy .doc/.xls) starts with D0 CF 11 E0.
         let is_ole = bytes.len() >= 8
-            && bytes[0] == 0xd0 && bytes[1] == 0xcf && bytes[2] == 0x11 && bytes[3] == 0xe0
-            && bytes[4] == 0xa1 && bytes[5] == 0xb1 && bytes[6] == 0x1a && bytes[7] == 0xe1;
+            && bytes[0] == 0xd0
+            && bytes[1] == 0xcf
+            && bytes[2] == 0x11
+            && bytes[3] == 0xe0
+            && bytes[4] == 0xa1
+            && bytes[5] == 0xb1
+            && bytes[6] == 0x1a
+            && bytes[7] == 0xe1;
         if is_ole {
             return Err("legacy OLE format (.doc/.xls) is not supported — save the file as .docx/.xlsx first".to_string());
         }
@@ -221,7 +230,11 @@ fn docx_parse_limits() -> docx_parse::xml::ParseLimits {
 }
 
 /// Parse DOCX (pure, may be slow on hostile input — caller wraps in a timeout).
-fn parse_docx(bytes: &[u8], name: &str, id: &str) -> Result<(String, Vec<ResourceRow>, i64), String> {
+fn parse_docx(
+    bytes: &[u8],
+    name: &str,
+    id: &str,
+) -> Result<(String, Vec<ResourceRow>, i64), String> {
     let doc = betteroffice_docx::Document::open_with_limits(bytes, &docx_parse_limits())
         .map_err(|e| format!("parse docx: {e}"))?;
     let model = docx_wire_model(&doc)?;
@@ -232,7 +245,13 @@ fn parse_docx(bytes: &[u8], name: &str, id: &str) -> Result<(String, Vec<Resourc
             continue;
         }
         let mime = mime_for_part(path);
-        resources.push((path.clone(), "blob".to_string(), mime, data.clone(), sha256_hex(data)));
+        resources.push((
+            path.clone(),
+            "blob".to_string(),
+            mime,
+            data.clone(),
+            sha256_hex(data),
+        ));
     }
     let _ = name;
     let _ = id;
@@ -240,7 +259,11 @@ fn parse_docx(bytes: &[u8], name: &str, id: &str) -> Result<(String, Vec<Resourc
 }
 
 /// Parse XLSX (pure).
-fn parse_xlsx(bytes: &[u8], name: &str, id: &str) -> Result<(String, Vec<ResourceRow>, i64), String> {
+fn parse_xlsx(
+    bytes: &[u8],
+    name: &str,
+    id: &str,
+) -> Result<(String, Vec<ResourceRow>, i64), String> {
     let wb = betteroffice_xlsx::Workbook::open(bytes).map_err(|e| format!("parse xlsx: {e}"))?;
     let model = serde_json::to_string(&workbook_to_dto(wb.model())).map_err(|e| e.to_string())?;
     let _ = name;
@@ -249,23 +272,65 @@ fn parse_xlsx(bytes: &[u8], name: &str, id: &str) -> Result<(String, Vec<Resourc
 }
 
 /// Import DOCX: parse → wire model JSON + non-editor parts as BLOBs.
-pub fn import_docx(state: &DbState, bytes: &[u8], name: &str, id: &str) -> Result<DocumentMeta, String> {
+pub fn import_docx(
+    state: &DbState,
+    bytes: &[u8],
+    name: &str,
+    id: &str,
+) -> Result<DocumentMeta, String> {
     let (model, resources, size) = parse_docx(bytes, name, id)?;
     let model_hash = sha256_hex(model.as_bytes());
     state
-        .documents_write(id, name, "docx", size, Some(&sha256_hex(bytes)), 1, None, &model, &model_hash, &resources)
+        .documents_write(
+            id,
+            name,
+            "docx",
+            size,
+            Some(&sha256_hex(bytes)),
+            1,
+            None,
+            &model,
+            &model_hash,
+            &resources,
+        )
         .map_err(|e| format!("persist: {e}"))?;
-    Ok(DocumentMeta { id: id.to_string(), name: name.to_string(), kind: "docx".into(), size })
+    Ok(DocumentMeta {
+        id: id.to_string(),
+        name: name.to_string(),
+        kind: "docx".into(),
+        size,
+    })
 }
 
 /// Import XLSX: parse → workbook model JSON.
-pub fn import_xlsx(state: &DbState, bytes: &[u8], name: &str, id: &str) -> Result<DocumentMeta, String> {
+pub fn import_xlsx(
+    state: &DbState,
+    bytes: &[u8],
+    name: &str,
+    id: &str,
+) -> Result<DocumentMeta, String> {
     let (model, resources, size) = parse_xlsx(bytes, name, id)?;
     let model_hash = sha256_hex(model.as_bytes());
     state
-        .documents_write(id, name, "xlsx", size, Some(&sha256_hex(bytes)), 1, None, &model, &model_hash, &resources)
+        .documents_write(
+            id,
+            name,
+            "xlsx",
+            size,
+            Some(&sha256_hex(bytes)),
+            1,
+            None,
+            &model,
+            &model_hash,
+            &resources,
+        )
         .map_err(|e| format!("persist: {e}"))?;
-    Ok(DocumentMeta { id: id.to_string(), name: name.to_string(), kind: "xlsx".into(), size })
+    Ok(DocumentMeta {
+        id: id.to_string(),
+        name: name.to_string(),
+        kind: "xlsx".into(),
+        size,
+    })
 }
 
 /// Export a document to OOXML bytes from the canonical model.
@@ -291,12 +356,17 @@ pub fn export(state: &DbState, doc_id: &str, version: Option<i64>) -> Result<Vec
 fn export_xlsx(model_json: &str) -> Result<Vec<u8>, String> {
     let dto: XlsxModelDto =
         serde_json::from_str(model_json).map_err(|e| format!("model json: {e}"))?;
-    let wb =
-        betteroffice_xlsx::Workbook::from_model(dto_to_workbook(dto)).map_err(|e| format!("from_model: {e}"))?;
+    let wb = betteroffice_xlsx::Workbook::from_model(dto_to_workbook(dto))
+        .map_err(|e| format!("from_model: {e}"))?;
     wb.save().map_err(|e| format!("save xlsx: {e}"))
 }
 
-fn export_docx(state: &DbState, doc_id: &str, _version: i64, model_json: &str) -> Result<Vec<u8>, String> {
+fn export_docx(
+    state: &DbState,
+    doc_id: &str,
+    _version: i64,
+    model_json: &str,
+) -> Result<Vec<u8>, String> {
     #[derive(serde::Deserialize)]
     struct Wire {
         body: docx_parse::DocumentBody,
@@ -333,8 +403,7 @@ fn export_docx(state: &DbState, doc_id: &str, _version: i64, model_json: &str) -
         },
         selective: None,
     };
-    docx_parse::serializer::write_docx_s13(request, &bottom)
-        .map_err(|e| format!("write docx: {e}"))
+    docx_parse::serializer::write_docx_s13(request, &bottom).map_err(|e| format!("write docx: {e}"))
 }
 
 /// Save an edited document: re-parse the editor bytes into the canonical
@@ -353,12 +422,15 @@ pub fn save_edited(
 
     let (model, resources, size): (String, Vec<ResourceRow>, i64) = match kind.as_str() {
         "xlsx" => {
-            let wb = betteroffice_xlsx::Workbook::open(bytes).map_err(|e| format!("parse xlsx: {e}"))?;
-            let model = serde_json::to_string(&workbook_to_dto(wb.model())).map_err(|e| e.to_string())?;
+            let wb =
+                betteroffice_xlsx::Workbook::open(bytes).map_err(|e| format!("parse xlsx: {e}"))?;
+            let model =
+                serde_json::to_string(&workbook_to_dto(wb.model())).map_err(|e| e.to_string())?;
             (model, Vec::new(), bytes.len() as i64)
         }
         "docx" => {
-            let doc = betteroffice_docx::Document::open(bytes).map_err(|e| format!("parse docx: {e}"))?;
+            let doc =
+                betteroffice_docx::Document::open(bytes).map_err(|e| format!("parse docx: {e}"))?;
             let model = docx_wire_model(&doc)?;
             let parts = ooxml_opc::unzip_parts(bytes).map_err(|e| format!("unzip: {e}"))?;
             let mut resources = Vec::new();
@@ -367,7 +439,13 @@ pub fn save_edited(
                     continue;
                 }
                 let mime = mime_for_part(path);
-                resources.push((path.clone(), "blob".to_string(), mime, data.clone(), sha256_hex(data)));
+                resources.push((
+                    path.clone(),
+                    "blob".to_string(),
+                    mime,
+                    data.clone(),
+                    sha256_hex(data),
+                ));
             }
             (model, resources, bytes.len() as i64)
         }
@@ -383,7 +461,18 @@ pub fn save_edited(
     let next = head + 1;
 
     state
-        .documents_write(doc_id, name, &kind, size, None, next, Some(base_version), &model, &model_hash, &resources)
+        .documents_write(
+            doc_id,
+            name,
+            &kind,
+            size,
+            None,
+            next,
+            Some(base_version),
+            &model,
+            &model_hash,
+            &resources,
+        )
         .map_err(|e| format!("persist: {e}"))?;
     Ok(next)
 }
@@ -442,24 +531,28 @@ pub struct DocumentListEntry {
 }
 
 #[tauri::command]
-pub async fn documents_list(state: State<'_, Arc<DbState>>) -> Result<Vec<DocumentListEntry>, String> {
+pub async fn documents_list(
+    state: State<'_, Arc<DbState>>,
+) -> Result<Vec<DocumentListEntry>, String> {
     let state = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        state
-            .documents_list()
-            .map(|rows| {
-                rows.into_iter()
-                    .map(|(id, name, kind, size, head_version, created_at, updated_at)| DocumentListEntry {
-                        id,
-                        name,
-                        kind,
-                        size,
-                        head_version,
-                        created_at,
-                        updated_at,
-                    })
-                    .collect()
-            })
+        state.documents_list().map(|rows| {
+            rows.into_iter()
+                .map(
+                    |(id, name, kind, size, head_version, created_at, updated_at)| {
+                        DocumentListEntry {
+                            id,
+                            name,
+                            kind,
+                            size,
+                            head_version,
+                            created_at,
+                            updated_at,
+                        }
+                    },
+                )
+                .collect()
+        })
     })
     .await
     .map_err(|e| e.to_string())?
@@ -469,7 +562,12 @@ pub async fn documents_list(state: State<'_, Arc<DbState>>) -> Result<Vec<Docume
 const PARSE_TIMEOUT_SECS: u64 = 20;
 
 #[tauri::command]
-pub async fn documents_import(bytes: Vec<u8>, name: String, id: String, state: State<'_, Arc<DbState>>) -> Result<DocumentMeta, String> {
+pub async fn documents_import(
+    bytes: Vec<u8>,
+    name: String,
+    id: String,
+    state: State<'_, Arc<DbState>>,
+) -> Result<DocumentMeta, String> {
     let kind = detect_ooxml_kind(&bytes, &name)?;
     let source_hash = sha256_hex(&bytes);
     let name_owned = name.clone();
@@ -477,30 +575,48 @@ pub async fn documents_import(bytes: Vec<u8>, name: String, id: String, state: S
     let kind_owned = kind.to_string();
     // Parsing is CPU-heavy and can hang on hostile input — run it on the
     // blocking pool with a hard timeout so the UI never freezes.
-    let parsed = tauri::async_runtime::spawn_blocking(move || {
-        match kind {
-            "docx" => parse_docx(&bytes, &name, &id),
-            "xlsx" => parse_xlsx(&bytes, &name, &id),
-            _ => Err("unsupported file type".to_string()),
-        }
+    let parsed = tauri::async_runtime::spawn_blocking(move || match kind {
+        "docx" => parse_docx(&bytes, &name, &id),
+        "xlsx" => parse_xlsx(&bytes, &name, &id),
+        _ => Err("unsupported file type".to_string()),
     });
-    let (model, resources, size) = tokio::time::timeout(
-        std::time::Duration::from_secs(PARSE_TIMEOUT_SECS),
-        parsed,
-    )
-    .await
-    .map_err(|_| format!("parsing timed out after {PARSE_TIMEOUT_SECS}s — the file may be corrupt"))?
-    .map_err(|e| e.to_string())??;
+    let (model, resources, size) =
+        tokio::time::timeout(std::time::Duration::from_secs(PARSE_TIMEOUT_SECS), parsed)
+            .await
+            .map_err(|_| {
+                format!("parsing timed out after {PARSE_TIMEOUT_SECS}s — the file may be corrupt")
+            })?
+            .map_err(|e| e.to_string())??;
 
     let model_hash = sha256_hex(model.as_bytes());
     state
-        .documents_write(&id_owned, &name_owned, &kind_owned, size, Some(&source_hash), 1, None, &model, &model_hash, &resources)
+        .documents_write(
+            &id_owned,
+            &name_owned,
+            &kind_owned,
+            size,
+            Some(&source_hash),
+            1,
+            None,
+            &model,
+            &model_hash,
+            &resources,
+        )
         .map_err(|e| format!("persist: {e}"))?;
-    Ok(DocumentMeta { id: id_owned, name: name_owned, kind: kind_owned, size })
+    Ok(DocumentMeta {
+        id: id_owned,
+        name: name_owned,
+        kind: kind_owned,
+        size,
+    })
 }
 
 #[tauri::command]
-pub async fn documents_export(doc_id: String, version: Option<i64>, state: State<'_, Arc<DbState>>) -> Result<Vec<u8>, String> {
+pub async fn documents_export(
+    doc_id: String,
+    version: Option<i64>,
+    state: State<'_, Arc<DbState>>,
+) -> Result<Vec<u8>, String> {
     let state = state.inner().clone();
     let doc_id_owned = doc_id.clone();
     // Rebuilding the package from the model (zip + serialization) is CPU-heavy
@@ -511,7 +627,13 @@ pub async fn documents_export(doc_id: String, version: Option<i64>, state: State
 }
 
 #[tauri::command]
-pub async fn documents_save(doc_id: String, base_version: i64, name: String, bytes: Vec<u8>, state: State<'_, Arc<DbState>>) -> Result<i64, String> {
+pub async fn documents_save(
+    doc_id: String,
+    base_version: i64,
+    name: String,
+    bytes: Vec<u8>,
+    state: State<'_, Arc<DbState>>,
+) -> Result<i64, String> {
     let state = state.inner().clone();
     let doc_id_owned = doc_id.clone();
     let name_owned = name.clone();
@@ -522,12 +644,17 @@ pub async fn documents_save(doc_id: String, base_version: i64, name: String, byt
     });
     tokio::time::timeout(std::time::Duration::from_secs(PARSE_TIMEOUT_SECS), task)
         .await
-        .map_err(|_| format!("save timed out after {PARSE_TIMEOUT_SECS}s — the file may be corrupt"))?
+        .map_err(|_| {
+            format!("save timed out after {PARSE_TIMEOUT_SECS}s — the file may be corrupt")
+        })?
         .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-pub async fn documents_versions(doc_id: String, state: State<'_, Arc<DbState>>) -> Result<Vec<(i64, i64)>, String> {
+pub async fn documents_versions(
+    doc_id: String,
+    state: State<'_, Arc<DbState>>,
+) -> Result<Vec<(i64, i64)>, String> {
     let state = state.inner().clone();
     let doc_id_owned = doc_id.clone();
     tauri::async_runtime::spawn_blocking(move || state.documents_versions(&doc_id_owned))
@@ -536,7 +663,10 @@ pub async fn documents_versions(doc_id: String, state: State<'_, Arc<DbState>>) 
 }
 
 #[tauri::command]
-pub async fn documents_delete(doc_id: String, state: State<'_, Arc<DbState>>) -> Result<(), String> {
+pub async fn documents_delete(
+    doc_id: String,
+    state: State<'_, Arc<DbState>>,
+) -> Result<(), String> {
     let state = state.inner().clone();
     let doc_id_owned = doc_id.clone();
     tauri::async_runtime::spawn_blocking(move || state.documents_delete(&doc_id_owned))

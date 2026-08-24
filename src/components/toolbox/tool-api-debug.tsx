@@ -765,11 +765,13 @@ export function ToolApiDebug({ active = true }: ToolApiDebugProps) {
     }
   }, [url, buildRequest, t]);
 
-  const openSaveDialog = useCallback(() => {
-    setSaveName(url.split('/').filter(Boolean).pop() || t('toolbox.apiDebug.untitledRequest'));
-    setSaveGroup('');
+  const openSaveDialog = useCallback((saveAsNew = false) => {
+    const selected = saveAsNew ? null : collection.find((item) => item.id === selectedId);
+    if (saveAsNew) setSelectedId(null);
+    setSaveName(selected?.name ?? (url.split('/').filter(Boolean).pop() || t('toolbox.apiDebug.untitledRequest')));
+    setSaveGroup(selected?.group ?? '');
     setSaveDialogOpen(true);
-  }, [url, t]);
+  }, [collection, selectedId, url, t]);
 
   const handleSaveRequest = useCallback(() => {
     if (!saveName.trim()) {
@@ -956,7 +958,7 @@ export function ToolApiDebug({ active = true }: ToolApiDebugProps) {
             <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
               {t('toolbox.apiDebug.collection')}
             </span>
-            <Button variant="ghost" size="sm" className="h-5 w-5 p-0 text-muted-foreground hover:text-foreground" onClick={openSaveDialog} title={t('toolbox.apiDebug.newRequest')}>
+            <Button variant="ghost" size="sm" className="h-5 w-5 p-0 text-muted-foreground hover:text-foreground" onClick={() => openSaveDialog(true)} title={t('toolbox.apiDebug.newRequest')}>
               <Plus className="h-3.5 w-3.5" />
             </Button>
           </div>
@@ -1044,7 +1046,7 @@ export function ToolApiDebug({ active = true }: ToolApiDebugProps) {
                     {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
                     {t('toolbox.apiDebug.send')}
                   </Button>
-                  <Button size="sm" variant="outline" className="h-9 gap-1 shrink-0" onClick={openSaveDialog} title={t('toolbox.apiDebug.saveRequest')}>
+                  <Button size="sm" variant="outline" className="h-9 gap-1 shrink-0" onClick={() => openSaveDialog()} title={t('toolbox.apiDebug.saveRequest')}>
                     <Save className="h-4 w-4" />
                   </Button>
                   <Button size="sm" variant="outline" className="h-9 gap-1 shrink-0" onClick={() => setDocOpen(true)} title={t('toolbox.apiDebug.doc')}>

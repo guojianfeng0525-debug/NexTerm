@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use tauri::State;
+use tauri::{AppHandle, Emitter, State};
 
 use crate::builder;
 use crate::compile;
@@ -63,11 +63,19 @@ pub struct MemoryIndex {
 impl MemoryIndex {
     /// Find a class entry by its binary name (com.foo.Bar); None when absent.
     fn find_class(&self, dotted: &str) -> Option<(String, &jar::JarEntryInfo)> {
-        if let Some(e) = self.entries.iter().find(|e| e.kind == "class" && e.class_name == dotted) {
+        if let Some(e) = self
+            .entries
+            .iter()
+            .find(|e| e.kind == "class" && e.class_name == dotted)
+        {
             return Some((String::new(), e));
         }
         for (lib_id, n) in &self.nested {
-            if let Some(e) = n.entries.iter().find(|e| e.kind == "class" && e.class_name == dotted) {
+            if let Some(e) = n
+                .entries
+                .iter()
+                .find(|e| e.kind == "class" && e.class_name == dotted)
+            {
                 return Some((lib_id.clone(), e));
             }
         }
@@ -82,13 +90,15 @@ impl MemoryIndex {
         } else {
             let n = self.nested.get(library_id).ok_or("Library not found")?;
             let mut cur = std::io::Cursor::new(&n.bytes);
-            let mut archive = zip::ZipArchive::new(&mut cur).map_err(|e| format!("open nested jar: {e}"))?;
+            let mut archive =
+                zip::ZipArchive::new(&mut cur).map_err(|e| format!("open nested jar: {e}"))?;
             let mut e = archive
                 .by_name(entry_path)
                 .map_err(|e| format!("entry {entry_path} not found: {e}"))?;
             let mut buf = Vec::with_capacity(e.size() as usize);
             use std::io::Read;
-            e.read_to_end(&mut buf).map_err(|e| format!("read entry: {e}"))?;
+            e.read_to_end(&mut buf)
+                .map_err(|e| format!("read entry: {e}"))?;
             Ok(buf)
         }
     }
@@ -105,7 +115,11 @@ impl MemoryIndex {
             Some(i) => &entry_path[..i],
             None => "",
         };
-        let prefix = if dir.is_empty() { String::new() } else { format!("{dir}/") };
+        let prefix = if dir.is_empty() {
+            String::new()
+        } else {
+            format!("{dir}/")
+        };
         use std::io::Write;
         if library_id.is_empty() {
             let file = std::fs::File::open(&self.jar_path).map_err(|e| format!("open jar: {e}"))?;
@@ -166,7 +180,7 @@ pub struct JarState {
     /// feature no longer writes to it).
     pub db_path: std::path::PathBuf,
     /// project_id → cancel flag for the active decompile.
-    pub cancels: Mutex<HashMap<String, Arc<AtomicBool>>>,
+    pub cancels: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
     /// Where decompile scratch dirs live (temporary .class files).
     pub scratch: PathBuf,
     /// Tauri resource dir (bundled jdcore/ lives here). Resolved at startup so
@@ -174,7 +188,7 @@ pub struct JarState {
     /// exe layout.
     pub resource_dir: Option<std::path::PathBuf>,
     /// Open jar projects: project_id → in-memory index (JD-GUI: no DB).
-    pub indexes: Mutex<HashMap<String, MemoryIndex>>,
+    pub indexes: Arc<Mutex<HashMap<String, MemoryIndex>>>,
 }
 
 impl JarState {
@@ -201,7 +215,7 @@ impl JarState {
 
 // ── Response types ────────────────────────────────────────────────────────
 
-#[derive(serde::Serialize)]
+#[derive(Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectSummary {
     pub id: String,
@@ -236,6 +250,39 @@ pub struct ClassView {
     /// jump to a method inside the current editor (JD-GUI: references to the
     /// class itself resolve within the same page, no new tab).
     pub methods: Vec<MethodLine>,
+}
+
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ExportProgress {
+    project_id: String,
+    phase: &'static str,
+    completed: usize,
+    total: usize,
+    class_name: Option<String>,
+    message: Option<String>,
+}
+
+fn emit_export_progress(
+    app: &AppHandle,
+    project_id: &str,
+    phase: &'static str,
+    completed: usize,
+    total: usize,
+    class_name: Option<String>,
+    message: Option<String>,
+) {
+    let _ = app.emit(
+        "jar://export-progress",
+        ExportProgress {
+            project_id: project_id.to_string(),
+            phase,
+            completed,
+            total,
+            class_name,
+            message,
+        },
+    );
 }
 
 /// A method declaration of the currently-open class.
@@ -308,7 +355,9 @@ pub async fn jar_project_open(
             let base = ename.rsplit('/').next().unwrap_or(&ename).to_string();
             let lib_id = format!(
                 "{pid}:nested:{}",
-                crate::jar::sha256_bytes(ename.as_bytes()).get(..12).unwrap_or("n")
+                crate::jar::sha256_bytes(ename.as_bytes())
+                    .get(..12)
+                    .unwrap_or("n")
             );
             out.push(NestedJarData {
                 id: lib_id,
@@ -358,7 +407,11 @@ pub async fn jar_project_open(
         nested: nested.into_iter().map(|n| (n.id.clone(), n)).collect(),
         class_names,
     };
-    state.indexes.lock().expect("indexes poisoned").insert(id.clone(), index);
+    state
+        .indexes
+        .lock()
+        .expect("indexes poisoned")
+        .insert(id.clone(), index);
 
     Ok(ProjectSummary {
         id,
@@ -400,7 +453,11 @@ pub async fn jar_project_delete(
     project_id: String,
     state: State<'_, JarState>,
 ) -> Result<(), String> {
-    state.indexes.lock().expect("indexes poisoned").remove(&project_id);
+    state
+        .indexes
+        .lock()
+        .expect("indexes poisoned")
+        .remove(&project_id);
     state.cancels.lock().expect("poisoned").remove(&project_id);
     Ok(())
 }
@@ -449,7 +506,11 @@ pub async fn jar_class_search(
     let indexes = state.indexes.lock().expect("indexes poisoned");
     let ix = indexes.get(&project_id).ok_or("Project not found")?;
     let mut out: Vec<serde_json::Value> = Vec::new();
-    for e in ix.entries.iter().chain(ix.nested.values().flat_map(|n| n.entries.iter())) {
+    for e in ix
+        .entries
+        .iter()
+        .chain(ix.nested.values().flat_map(|n| n.entries.iter()))
+    {
         let name = e.class_name.to_lowercase();
         let pkg = e.package_name.to_lowercase();
         if name.contains(&q) || pkg.contains(&q) {
@@ -487,7 +548,10 @@ fn open_type_regexp(pattern: &str) -> Result<regex::Regex, String> {
             re.push_str(".*");
         } else if ch == '?' {
             re.push('.');
-        } else if matches!(ch, '.' | '$' | '/' | '\\' | '(' | ')' | '[' | ']' | '{' | '}' | '+' | '-' | '^' | '|') {
+        } else if matches!(
+            ch,
+            '.' | '$' | '/' | '\\' | '(' | ')' | '[' | ']' | '{' | '}' | '+' | '-' | '^' | '|'
+        ) {
             re.push('\\');
             re.push(ch);
         } else {
@@ -527,7 +591,9 @@ pub async fn jar_open_type(
     };
     let mut out = Vec::new();
     for pid in pids {
-        let Some(ix) = indexes.get(&pid) else { continue };
+        let Some(ix) = indexes.get(&pid) else {
+            continue;
+        };
         for e in ix.entries.iter().filter(|e| e.kind == "class") {
             if re.is_match(simple_class_name(&e.class_name)) {
                 out.push(serde_json::json!({
@@ -582,7 +648,11 @@ pub async fn jar_known_class_names(
     let mut names: BTreeSet<String> = BTreeSet::new();
     let mut simple: BTreeSet<String> = BTreeSet::new();
     for ix in indexes.values() {
-        for e in ix.entries.iter().chain(ix.nested.values().flat_map(|n| n.entries.iter())) {
+        for e in ix
+            .entries
+            .iter()
+            .chain(ix.nested.values().flat_map(|n| n.entries.iter()))
+        {
             if e.kind == "class" {
                 names.insert(e.class_name.clone());
                 if let Some(s) = e.class_name.rsplit('.').next() {
@@ -636,27 +706,57 @@ pub async fn jar_method_location(
         if members.methods.iter().any(|m| m == method_name) {
             let scratch_dir = scratch.join(project_id);
             let _ = std::fs::create_dir_all(&scratch_dir);
-            let class_file = scratch_dir.join(format!("loc-{}.class", entry.entry_path.replace('/', "_")));
+            let class_file =
+                scratch_dir.join(format!("loc-{}.class", entry.entry_path.replace('/', "_")));
             if std::fs::write(&class_file, &bytes).is_ok() {
-                let siblings_dir = scratch_dir.join(format!("sib-{}", entry.entry_path.replace('/', "_")));
+                let siblings_dir =
+                    scratch_dir.join(format!("sib-{}", entry.entry_path.replace('/', "_")));
                 let _ = std::fs::remove_dir_all(&siblings_dir);
-                let _ = ix.extract_sibling_classes_to(&library_id, &entry.entry_path, &siblings_dir);
+                let _ =
+                    ix.extract_sibling_classes_to(&library_id, &entry.entry_path, &siblings_dir);
                 let classpath_arg = siblings_dir.display().to_string();
-                let internal_name = entry.entry_path.strip_suffix(".class").unwrap_or(&entry.entry_path);
-                if let Ok(res) = decompile::decompile_class_with_classpath(&class_file, decompiler_jar, &classpath_arg, internal_name, None) {
+                let internal_name = entry
+                    .entry_path
+                    .strip_suffix(".class")
+                    .unwrap_or(&entry.entry_path);
+                if let Ok(res) = decompile::decompile_class_with_classpath(
+                    &class_file,
+                    decompiler_jar,
+                    &classpath_arg,
+                    internal_name,
+                    None,
+                ) {
                     let _ = std::fs::remove_file(&class_file);
                     let hit = jar::extract_methods(&res.source)
                         .into_iter()
                         .find(|m| m.name == method_name);
-                    return Ok(Some((entry.class_name.clone(), entry.entry_path.clone(), library_id, hit.map(|m| m.line as i64).unwrap_or(1))));
+                    return Ok(Some((
+                        entry.class_name.clone(),
+                        entry.entry_path.clone(),
+                        library_id,
+                        hit.map(|m| m.line as i64).unwrap_or(1),
+                    )));
                 }
                 let _ = std::fs::remove_file(&class_file);
             }
-            return Ok(Some((entry.class_name.clone(), entry.entry_path.clone(), library_id, 1)));
+            return Ok(Some((
+                entry.class_name.clone(),
+                entry.entry_path.clone(),
+                library_id,
+                1,
+            )));
         }
         let (sup, ifaces) = jar::class_super(&bytes).unwrap_or((None, Vec::new()));
         for parent in sup.iter().chain(ifaces.iter()) {
-            if let Some(found) = resolve_member(indexes, project_id, parent, method_name, decompiler_jar, scratch, visited)? {
+            if let Some(found) = resolve_member(
+                indexes,
+                project_id,
+                parent,
+                method_name,
+                decompiler_jar,
+                scratch,
+                visited,
+            )? {
                 return Ok(Some(found));
             }
         }
@@ -668,7 +768,15 @@ pub async fn jar_method_location(
     let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
     {
         let indexes = state.indexes.lock().expect("indexes poisoned");
-        match resolve_member(&indexes, &project_id, &class_internal_name, &method_name, &decompiler_jar, &scratch, &mut visited)? {
+        match resolve_member(
+            &indexes,
+            &project_id,
+            &class_internal_name,
+            &method_name,
+            &decompiler_jar,
+            &scratch,
+            &mut visited,
+        )? {
             Some((class_name, entry_path, library_id, line)) => Ok(serde_json::json!({
                 "entryPath": entry_path,
                 "className": class_name,
@@ -692,27 +800,50 @@ pub async fn jar_type_hierarchy(
     let target_lib = library_id.clone().unwrap_or_default();
 
     let target_entry = if target_lib.is_empty() {
-        ix.entries.iter().find(|e| e.kind == "class" && e.entry_path == entry_path)
+        ix.entries
+            .iter()
+            .find(|e| e.kind == "class" && e.entry_path == entry_path)
     } else {
-        ix.nested.get(&target_lib).and_then(|n| n.entries.iter().find(|e| e.kind == "class" && e.entry_path == entry_path))
+        ix.nested.get(&target_lib).and_then(|n| {
+            n.entries
+                .iter()
+                .find(|e| e.kind == "class" && e.entry_path == entry_path)
+        })
     };
-    let target_class_name = target_entry.map(|e| e.class_name.clone()).ok_or("Class not found")?;
+    let target_class_name = target_entry
+        .map(|e| e.class_name.clone())
+        .ok_or("Class not found")?;
 
     // Lazy subtype edges: scan every opened container's classes; each class's
     // super + interfaces become (super → this) edges (JD-GUI subTypeNames).
-    let mut children: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+    let mut children: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
     let mut read_class = |ix: &MemoryIndex, e: &jar::JarEntryInfo| -> Option<Vec<u8>> {
-        let lib = if ix.entries.iter().any(|x| std::ptr::eq(x, e)) { "" } else {
-            ix.nested.values().find(|n| n.entries.iter().any(|x| std::ptr::eq(x, e))).map(|n| n.id.as_str()).unwrap_or("")
+        let lib = if ix.entries.iter().any(|x| std::ptr::eq(x, e)) {
+            ""
+        } else {
+            ix.nested
+                .values()
+                .find(|n| n.entries.iter().any(|x| std::ptr::eq(x, e)))
+                .map(|n| n.id.as_str())
+                .unwrap_or("")
         };
         ix.read_class_bytes(lib, &e.entry_path).ok()
     };
-    for e in ix.entries.iter().chain(ix.nested.values().flat_map(|n| n.entries.iter())) {
+    for e in ix
+        .entries
+        .iter()
+        .chain(ix.nested.values().flat_map(|n| n.entries.iter()))
+    {
         if e.kind != "class" {
             continue;
         }
-        let Some(bytes) = read_class(ix, e) else { continue };
-        let Ok((sup, ifaces)) = jar::class_super(&bytes) else { continue };
+        let Some(bytes) = read_class(ix, e) else {
+            continue;
+        };
+        let Ok((sup, ifaces)) = jar::class_super(&bytes) else {
+            continue;
+        };
         for parent in sup.iter().chain(ifaces.iter()) {
             let pd = parent.replace('/', ".");
             children.entry(pd).or_default().push(e.class_name.clone());
@@ -723,11 +854,19 @@ pub async fn jar_type_hierarchy(
         v.dedup();
     }
 
-    fn ancestors(ix: &MemoryIndex, read: &dyn Fn(&MemoryIndex, &jar::JarEntryInfo) -> Option<Vec<u8>>, name: &str, out: &mut Vec<String>, visited: &mut std::collections::HashSet<String>) {
+    fn ancestors(
+        ix: &MemoryIndex,
+        read: &dyn Fn(&MemoryIndex, &jar::JarEntryInfo) -> Option<Vec<u8>>,
+        name: &str,
+        out: &mut Vec<String>,
+        visited: &mut std::collections::HashSet<String>,
+    ) {
         if !visited.insert(name.to_string()) {
             return;
         }
-        let Some((_, e)) = ix.find_class(name) else { return };
+        let Some((_, e)) = ix.find_class(name) else {
+            return;
+        };
         let Some(bytes) = read(ix, e) else { return };
         if let Ok((sup, _)) = jar::class_super(&bytes) {
             if let Some(p) = sup {
@@ -738,9 +877,20 @@ pub async fn jar_type_hierarchy(
     }
     let mut parent_chain: Vec<String> = Vec::new();
     let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
-    ancestors(ix, &read_class, &target_class_name, &mut parent_chain, &mut visited);
+    ancestors(
+        ix,
+        &read_class,
+        &target_class_name,
+        &mut parent_chain,
+        &mut visited,
+    );
 
-    fn subtree(children: &std::collections::HashMap<String, Vec<String>>, name: &str, depth: usize, seen: &mut std::collections::HashSet<String>) -> Vec<serde_json::Value> {
+    fn subtree(
+        children: &std::collections::HashMap<String, Vec<String>>,
+        name: &str,
+        depth: usize,
+        seen: &mut std::collections::HashSet<String>,
+    ) -> Vec<serde_json::Value> {
         let mut out = Vec::new();
         if depth > 16 || !seen.insert(name.to_string()) {
             return out;
@@ -895,14 +1045,18 @@ pub async fn jar_constant_search(
                             if want_type {
                                 for t in &pool.type_refs {
                                     if re.is_match(simple_internal_name(t)) {
-                                        matches.push(serde_json::json!({ "kind": "type", "value": t }));
+                                        matches.push(
+                                            serde_json::json!({ "kind": "type", "value": t }),
+                                        );
                                     }
                                 }
                             }
                             if want_string && scan_strings {
                                 for s in &pool.strings {
                                     if re.is_match(s) {
-                                        matches.push(serde_json::json!({ "kind": "string", "value": s }));
+                                        matches.push(
+                                            serde_json::json!({ "kind": "string", "value": s }),
+                                        );
                                     }
                                 }
                             }
@@ -911,41 +1065,52 @@ pub async fn jar_constant_search(
                                 if want_method {
                                     for m in &members.methods {
                                         if re.is_match(m) {
-                                            matches.push(serde_json::json!({ "kind": "method", "value": m }));
+                                            matches.push(
+                                                serde_json::json!({ "kind": "method", "value": m }),
+                                            );
                                         }
                                     }
                                 }
                                 if want_field {
                                     for f in &members.fields {
                                         if re.is_match(f) {
-                                            matches.push(serde_json::json!({ "kind": "field", "value": f }));
+                                            matches.push(
+                                                serde_json::json!({ "kind": "field", "value": f }),
+                                            );
                                         }
                                     }
                                 }
                             }
                         }
-                    } else if want_string && scan_strings && name.ends_with(".properties") || want_module && name.ends_with("module-info.class") {
+                    } else if want_string && scan_strings && name.ends_with(".properties")
+                        || want_module && name.ends_with("module-info.class")
+                    {
                         if want_string && scan_strings && name.ends_with(".properties") {
                             if let Ok(text) = String::from_utf8(bytes.clone()) {
                                 if re.is_match(&text) {
-                                    matches.push(serde_json::json!({ "kind": "string", "value": text }));
+                                    matches.push(
+                                        serde_json::json!({ "kind": "string", "value": text }),
+                                    );
                                 }
                             }
                         }
                         if want_module && name.ends_with("module-info.class") {
                             if re.is_match(&name) {
-                                matches.push(serde_json::json!({ "kind": "module", "value": name }));
+                                matches
+                                    .push(serde_json::json!({ "kind": "module", "value": name }));
                             }
                         }
                     }
                     if !matches.is_empty() {
-                        let entry = file_results.entry(name.clone()).or_insert_with(|| serde_json::json!({
-                            "entryPath": name,
-                            "className": name,
-                            "libraryId": lib_id,
-                            "kind": "class",
-                            "matches": Vec::<serde_json::Value>::new(),
-                        }));
+                        let entry = file_results.entry(name.clone()).or_insert_with(|| {
+                            serde_json::json!({
+                                "entryPath": name,
+                                "className": name,
+                                "libraryId": lib_id,
+                                "kind": "class",
+                                "matches": Vec::<serde_json::Value>::new(),
+                            })
+                        });
                         if let Some(arr) = entry.get_mut("matches").and_then(|m| m.as_array_mut()) {
                             arr.extend(matches);
                         }
@@ -955,14 +1120,15 @@ pub async fn jar_constant_search(
                     }
                 }
             }
-            Ok::<_, String>(serde_json::json!({ "results": file_results.into_values().collect::<Vec<_>>() }))
+            Ok::<_, String>(
+                serde_json::json!({ "results": file_results.into_values().collect::<Vec<_>>() }),
+            )
         })
     }
     .await
     .map_err(|e| e.to_string())??;
     Ok(scan)
 }
-
 
 #[tauri::command]
 pub async fn jar_decompile(
@@ -980,7 +1146,9 @@ pub async fn jar_decompile(
         let entry = if lib_id.is_empty() {
             ix.entries.iter().find(|e| e.entry_path == entry_path)
         } else {
-            ix.nested.get(&lib_id).and_then(|n| n.entries.iter().find(|e| e.entry_path == entry_path))
+            ix.nested
+                .get(&lib_id)
+                .and_then(|n| n.entries.iter().find(|e| e.entry_path == entry_path))
         }
         .ok_or_else(|| format!("Class not found in archive: {entry_path}"))?;
         let bytes = ix.read_class_bytes(&lib_id, &entry_path)?;
@@ -1007,7 +1175,8 @@ pub async fn jar_decompile(
     let classpath_arg = {
         let indexes = state.indexes.lock().expect("indexes poisoned");
         let ix = indexes.get(&project_id).ok_or("Project not found")?;
-        ix.extract_sibling_classes_to(&lib_id, &entry_path, &siblings_dir).ok();
+        ix.extract_sibling_classes_to(&lib_id, &entry_path, &siblings_dir)
+            .ok();
         siblings_dir.display().to_string()
     };
 
@@ -1016,7 +1185,10 @@ pub async fn jar_decompile(
         let cf = class_file.clone();
         let cancel = cancel.clone();
         let cp = classpath_arg.clone();
-        let internal_name = entry_path.strip_suffix(".class").unwrap_or(&entry_path).to_string();
+        let internal_name = entry_path
+            .strip_suffix(".class")
+            .unwrap_or(&entry_path)
+            .to_string();
         let mut opts = decompile::DecompileOptions::default();
         if let Some(v) = escape_unicode {
             opts.escape_unicode = v;
@@ -1024,7 +1196,16 @@ pub async fn jar_decompile(
         if let Some(v) = realign {
             opts.realign = v;
         }
-        move || decompile::decompile_class_with_options(&cf, &jd, &cp, &internal_name, opts, Some(cancel))
+        move || {
+            decompile::decompile_class_with_options(
+                &cf,
+                &jd,
+                &cp,
+                &internal_name,
+                opts,
+                Some(cancel),
+            )
+        }
     })
     .await
     .map_err(|e| e.to_string())??;
@@ -1033,7 +1214,10 @@ pub async fn jar_decompile(
     let refs = result.refs;
     let methods: Vec<MethodLine> = jar::extract_methods(&source)
         .into_iter()
-        .map(|m| MethodLine { name: m.name, line: m.line as i64 })
+        .map(|m| MethodLine {
+            name: m.name,
+            line: m.line as i64,
+        })
         .collect();
     Ok(ClassView {
         entry_path: entry_path.clone(),
@@ -1051,9 +1235,11 @@ pub async fn jar_decompile(
     })
 }
 
-
 #[tauri::command]
-pub async fn jar_decompile_cancel(project_id: String, state: State<'_, JarState>) -> Result<(), String> {
+pub async fn jar_decompile_cancel(
+    project_id: String,
+    state: State<'_, JarState>,
+) -> Result<(), String> {
     let flag = state.cancel_flag(&project_id);
     flag.store(true, Ordering::Relaxed);
     Ok(())
@@ -1093,14 +1279,18 @@ pub async fn jar_class_revert(
         let entry = if lib_id.is_empty() {
             ix.entries.iter().find(|e| e.entry_path == entry_path)
         } else {
-            ix.nested.get(&lib_id).and_then(|n| n.entries.iter().find(|e| e.entry_path == entry_path))
+            ix.nested
+                .get(&lib_id)
+                .and_then(|n| n.entries.iter().find(|e| e.entry_path == entry_path))
         }
         .ok_or_else(|| format!("Class not found in archive: {entry_path}"))?;
         let bytes = ix.read_class_bytes(&lib_id, &entry_path)?;
         (entry.is_inner_class, bytes)
     };
     if !class_bytes.starts_with(&[0xca, 0xfe, 0xba, 0xbe]) {
-        return Err(format!("Class {entry_path} is not a valid JVM class (missing CAFEBABE magic)."));
+        return Err(format!(
+            "Class {entry_path} is not a valid JVM class (missing CAFEBABE magic)."
+        ));
     }
     let decompiler_jar = state.decompiler_jar()?;
     let scratch = state.scratch.join(&project_id);
@@ -1113,14 +1303,18 @@ pub async fn jar_class_revert(
     let classpath_arg = {
         let indexes = state.indexes.lock().expect("indexes poisoned");
         let ix = indexes.get(&project_id).ok_or("Project not found")?;
-        ix.extract_sibling_classes_to(&lib_id, &entry_path, &siblings_dir).ok();
+        ix.extract_sibling_classes_to(&lib_id, &entry_path, &siblings_dir)
+            .ok();
         siblings_dir.display().to_string()
     };
     let result = tauri::async_runtime::spawn_blocking({
         let cf = class_file.clone();
         let jd = decompiler_jar.clone();
         let cp = classpath_arg.clone();
-        let internal_name = entry_path.strip_suffix(".class").unwrap_or(&entry_path).to_string();
+        let internal_name = entry_path
+            .strip_suffix(".class")
+            .unwrap_or(&entry_path)
+            .to_string();
         move || decompile::decompile_class_with_classpath(&cf, &jd, &cp, &internal_name, None)
     })
     .await
@@ -1130,7 +1324,10 @@ pub async fn jar_class_revert(
     let refs = result.refs;
     let methods: Vec<MethodLine> = jar::extract_methods(&source)
         .into_iter()
-        .map(|m| MethodLine { name: m.name, line: m.line as i64 })
+        .map(|m| MethodLine {
+            name: m.name,
+            line: m.line as i64,
+        })
         .collect();
     Ok(ClassView {
         entry_path: entry_path.clone(),
@@ -1193,9 +1390,18 @@ pub async fn jar_navigate(
                 }));
             }
             if local.is_empty() {
-                let simple = name_dotted.rsplit('.').next().unwrap_or(name_dotted).to_string();
-                for e in ix.entries.iter().chain(ix.nested.values().flat_map(|n| n.entries.iter())) {
-                    if e.kind == "class" && e.class_name.rsplit('.').next() == Some(simple.as_str()) {
+                let simple = name_dotted
+                    .rsplit('.')
+                    .next()
+                    .unwrap_or(name_dotted)
+                    .to_string();
+                for e in ix
+                    .entries
+                    .iter()
+                    .chain(ix.nested.values().flat_map(|n| n.entries.iter()))
+                {
+                    if e.kind == "class" && e.class_name.rsplit('.').next() == Some(simple.as_str())
+                    {
                         local.push(serde_json::json!({
                             "kind": "class",
                             "className": e.class_name,
@@ -1239,12 +1445,22 @@ pub async fn jar_navigate(
             if pid != &project_id {
                 continue;
             }
-            for e in ix.entries.iter().chain(ix.nested.values().flat_map(|n| n.entries.iter())) {
+            for e in ix
+                .entries
+                .iter()
+                .chain(ix.nested.values().flat_map(|n| n.entries.iter()))
+            {
                 if e.kind != "class" {
                     continue;
                 }
-                let lib = if ix.entries.iter().any(|x| std::ptr::eq(x, e)) { "" } else {
-                    ix.nested.values().find(|n| n.entries.iter().any(|x| std::ptr::eq(x, e))).map(|n| n.id.as_str()).unwrap_or("")
+                let lib = if ix.entries.iter().any(|x| std::ptr::eq(x, e)) {
+                    ""
+                } else {
+                    ix.nested
+                        .values()
+                        .find(|n| n.entries.iter().any(|x| std::ptr::eq(x, e)))
+                        .map(|n| n.id.as_str())
+                        .unwrap_or("")
                 };
                 let bytes = match ix.read_class_bytes(lib, &e.entry_path) {
                     Ok(b) => b,
@@ -1304,148 +1520,297 @@ pub async fn jar_export_all(
     write_line_numbers: Option<bool>,
     escape_unicode: Option<bool>,
     realign: Option<bool>,
+    app: AppHandle,
     state: State<'_, JarState>,
 ) -> Result<serde_json::Value, String> {
-    let (class_files, main_path) = {
+    let (export_items, main_path) = {
         let indexes = state.indexes.lock().expect("indexes poisoned");
         let ix = indexes.get(&project_id).ok_or("Project not found")?;
-        let mut files: Vec<(String, String, String)> = Vec::new();
-        for e in ix.entries.iter().filter(|e| e.kind == "class" && !e.entry_path.contains('$')) {
-            files.push((String::new(), e.entry_path.clone(), e.class_name.clone()));
+        let mut items: Vec<(String, Option<String>)> = Vec::new();
+        for entry in &ix.entries {
+            // Export only the original archive. Nested JARs are dependencies,
+            // not files owned by the archive the user selected.
+            items.push((
+                entry.entry_path.clone(),
+                (entry.kind == "class").then(|| entry.class_name.clone()),
+            ));
         }
-        for (lib_id, n) in &ix.nested {
-            for e in n.entries.iter().filter(|e| e.kind == "class" && !e.entry_path.contains('$')) {
-                files.push((lib_id.clone(), e.entry_path.clone(), e.class_name.clone()));
-            }
-        }
-        (files, ix.jar_path.clone())
+        (items, ix.jar_path.clone())
     };
-    let class_count = class_files.len();
-
-    let out = PathBuf::from(&output_dir);
-    let want_zip = out.extension().map(|e| e.eq_ignore_ascii_case("zip")).unwrap_or(false);
-    let staging = if want_zip {
-        let st = state.scratch.join(format!("{project_id}-export-src"));
-        let _ = std::fs::remove_dir_all(&st);
-        std::fs::create_dir_all(&st).map_err(|e| format!("create staging: {e}"))?;
-        st
-    } else {
-        std::fs::create_dir_all(&out).map_err(|e| format!("create output dir: {e}"))?;
-        out.clone()
-    };
-
+    let item_count = export_items.len();
+    emit_export_progress(
+        &app,
+        &project_id,
+        "preparing",
+        0,
+        item_count,
+        None,
+        None,
+    );
     let decompiler_jar = state.decompiler_jar()?;
     let cancel = state.cancel_flag(&project_id);
     cancel.store(false, Ordering::Relaxed);
-    let scratch = state.scratch.join(&project_id);
-    std::fs::create_dir_all(&scratch).map_err(|e| format!("scratch: {e}"))?;
+    let scratch_root = state.scratch.clone();
+    let indexes = Arc::clone(&state.indexes);
 
-    let mut exported = 0usize;
-    let mut failed: Vec<String> = Vec::new();
-
-    let indexes = state.indexes.lock().expect("indexes poisoned");
-    let ix = indexes.get(&project_id).ok_or("Project not found")?;
-    for (lib_id, entry, class_name) in &class_files {
-        if cancel.load(Ordering::Relaxed) {
-            return Err("Export cancelled".into());
-        }
-        let bytes = match ix.read_class_bytes(lib_id, entry) {
-            Ok(b) => b,
-            Err(_) => {
-                failed.push(class_name.clone());
-                continue;
-            }
+    tauri::async_runtime::spawn_blocking(move || {
+        let out = PathBuf::from(&output_dir);
+        let want_zip = out
+            .extension()
+            .map(|e| e.eq_ignore_ascii_case("zip"))
+            .unwrap_or(false);
+        let staging = if want_zip {
+            let st = scratch_root.join(format!("{project_id}-export-src"));
+            let _ = std::fs::remove_dir_all(&st);
+            std::fs::create_dir_all(&st).map_err(|e| format!("create staging: {e}"))?;
+            st
+        } else {
+            std::fs::create_dir_all(&out).map_err(|e| format!("create output dir: {e}"))?;
+            out.clone()
         };
-        let class_file = scratch.join(format!("{}.class", entry.replace('/', "_")));
-        if std::fs::write(&class_file, &bytes).is_err() {
-            failed.push(class_name.clone());
-            continue;
-        }
-        let siblings_dir = scratch.join("siblings");
-        let _ = std::fs::remove_dir_all(&siblings_dir);
-        ix.extract_sibling_classes_to(lib_id, entry, &siblings_dir).ok();
-        let internal_name = entry.strip_suffix(".class").unwrap_or(entry);
-        let mut saver_opts = decompile::DecompileOptions::saver();
-        if let Some(v) = escape_unicode {
-            saver_opts.escape_unicode = v;
-        }
-        if let Some(v) = realign {
-            saver_opts.realign = v;
-        }
-        if let Some(wl) = write_line_numbers {
-            saver_opts.line_numbers = wl;
-        }
-        let res = decompile::decompile_class_with_options(
-            &class_file,
-            &decompiler_jar,
-            &siblings_dir.display().to_string(),
-            internal_name,
-            saver_opts,
-            Some(cancel.clone()),
-        );
-        match res {
-            Ok(res) => {
-                let mut out_src = res.source;
-                if write_metadata.unwrap_or(true) {
-                    let location = if lib_id.is_empty() { main_path.replace('\\', "/") } else { lib_id.clone() };
-                    let (minor, major, version_label) = jar::class_file_info(&bytes).unwrap_or((0, 0, String::new()));
-                    let mut meta = String::new();
-                    meta.push_str("\\n\\n/* Location:              ");
-                    meta.push_str(&location);
-                    meta.push_str(&format!(":{entry}\\n * Java compiler version: {version_label}"));
-                    meta.push_str(&format!(" ({}", major));
-                    meta.push_str(&format!(".{})\\n * JD-Core Version:       1.1.3\\n */", minor));
-                    out_src.push_str(&meta);
-                }
-                let rel_java = entry.replace(".class", ".java");
-                let dest = staging.join(&rel_java);
+
+        let scratch = scratch_root.join(&project_id);
+        std::fs::create_dir_all(&scratch).map_err(|e| format!("scratch: {e}"))?;
+
+        let mut exported = 0usize;
+        let mut failed: Vec<String> = Vec::new();
+
+        let indexes = indexes.lock().expect("indexes poisoned");
+        let ix = indexes.get(&project_id).ok_or("Project not found")?;
+        for (completed, (entry, class_name)) in export_items.iter().enumerate() {
+            if cancel.load(Ordering::Relaxed) {
+                emit_export_progress(
+                    &app,
+                    &project_id,
+                    "cancelled",
+                    completed,
+                    item_count,
+                    None,
+                    None,
+                );
+                return Err("Export cancelled".into());
+            }
+            emit_export_progress(
+                &app,
+                &project_id,
+                "processing",
+                completed,
+                item_count,
+                Some(class_name.clone().unwrap_or_else(|| entry.clone())),
+                None,
+            );
+            if class_name.is_none() {
+                let bytes = match jar::read_entry_bytes(Path::new(&main_path), entry) {
+                    Ok(bytes) => bytes,
+                    Err(error) => {
+                        failed.push(entry.clone());
+                        emit_export_progress(&app, &project_id, "failed", completed + 1, item_count, Some(entry.clone()), Some(error));
+                        continue;
+                    }
+                };
+                let dest = staging.join(entry);
                 if let Some(parent) = dest.parent() {
                     let _ = std::fs::create_dir_all(parent);
                 }
-                if std::fs::write(&dest, &out_src).is_ok() {
-                    exported += 1;
-                } else {
+                match std::fs::write(&dest, bytes) {
+                    Ok(()) => exported += 1,
+                    Err(error) => {
+                        failed.push(entry.clone());
+                        emit_export_progress(&app, &project_id, "failed", completed + 1, item_count, Some(entry.clone()), Some(format!("copy resource: {error}")));
+                    }
+                }
+                emit_export_progress(&app, &project_id, "decompiling", completed + 1, item_count, Some(entry.clone()), None);
+                continue;
+            }
+
+            let class_name = class_name.as_ref().expect("class item must have a name");
+            let bytes = match ix.read_class_bytes("", entry) {
+                Ok(b) => b,
+                Err(error) => {
                     failed.push(class_name.clone());
+                    emit_export_progress(
+                        &app,
+                        &project_id,
+                        "failed",
+                        completed + 1,
+                        item_count,
+                        Some(class_name.clone()),
+                        Some(error),
+                    );
+                    continue;
+                }
+            };
+            let class_file = scratch.join(format!("{}.class", entry.replace('/', "_")));
+            if let Err(error) = std::fs::write(&class_file, &bytes) {
+                failed.push(class_name.clone());
+                emit_export_progress(
+                    &app,
+                    &project_id,
+                    "failed",
+                    completed + 1,
+                    item_count,
+                    Some(class_name.clone()),
+                    Some(format!("write class: {error}")),
+                );
+                continue;
+            }
+            let siblings_dir = scratch.join("siblings");
+            let _ = std::fs::remove_dir_all(&siblings_dir);
+            ix.extract_sibling_classes_to("", entry, &siblings_dir)
+                .ok();
+            let internal_name = entry.strip_suffix(".class").unwrap_or(entry);
+            let mut saver_opts = decompile::DecompileOptions::saver();
+            if let Some(v) = escape_unicode {
+                saver_opts.escape_unicode = v;
+            }
+            if let Some(v) = realign {
+                saver_opts.realign = v;
+            }
+            if let Some(wl) = write_line_numbers {
+                saver_opts.line_numbers = wl;
+            }
+            let res = decompile::decompile_class_with_options(
+                &class_file,
+                &decompiler_jar,
+                &siblings_dir.display().to_string(),
+                internal_name,
+                saver_opts,
+                Some(cancel.clone()),
+            );
+            match res {
+                Ok(res) => {
+                    let mut out_src = res.source;
+                    if write_metadata.unwrap_or(true) {
+                        let location = main_path.replace('\\', "/");
+                        let (minor, major, version_label) =
+                            jar::class_file_info(&bytes).unwrap_or((0, 0, String::new()));
+                        let mut meta = String::new();
+                        meta.push_str("\\n\\n/* Location:              ");
+                        meta.push_str(&location);
+                        meta.push_str(&format!(
+                            ":{entry}\\n * Java compiler version: {version_label}"
+                        ));
+                        meta.push_str(&format!(" ({}", major));
+                        meta.push_str(&format!(
+                            ".{})\\n * JD-Core Version:       1.1.3\\n */",
+                            minor
+                        ));
+                        out_src.push_str(&meta);
+                    }
+                    let rel_java = entry.replace(".class", ".java");
+                    let dest = staging.join(&rel_java);
+                    if let Some(parent) = dest.parent() {
+                        let _ = std::fs::create_dir_all(parent);
+                    }
+                    match std::fs::write(&dest, &out_src) {
+                        Ok(()) => exported += 1,
+                        Err(error) => {
+                            failed.push(class_name.clone());
+                            emit_export_progress(
+                                &app,
+                                &project_id,
+                                "failed",
+                                completed + 1,
+                                item_count,
+                                Some(class_name.clone()),
+                                Some(format!("write source: {error}")),
+                            );
+                        }
+                    }
+                }
+                Err(error) => {
+                    failed.push(class_name.clone());
+                    emit_export_progress(
+                        &app,
+                        &project_id,
+                        "failed",
+                        completed + 1,
+                        item_count,
+                        Some(class_name.clone()),
+                        Some(error),
+                    );
                 }
             }
-            Err(_) => failed.push(class_name.clone()),
+            let _ = std::fs::remove_file(&class_file);
+            emit_export_progress(
+                &app,
+                &project_id,
+                "decompiling",
+                completed + 1,
+                item_count,
+                Some(class_name.clone()),
+                None,
+            );
         }
-        let _ = std::fs::remove_file(&class_file);
-    }
-    drop(indexes);
+        drop(indexes);
 
-    if want_zip {
-        let file = std::fs::File::create(&out).map_err(|e| format!("create zip: {e}"))?;
-        let mut zip = zip::ZipWriter::new(file);
-        let opts = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
-        pack_dir_into_zip(&staging, "", &mut zip, opts)?;
-        zip.finish().map_err(|e| format!("finish zip: {e}"))?;
-        let _ = std::fs::remove_dir_all(&staging);
-    }
+        if want_zip {
+            emit_export_progress(
+                &app,
+                &project_id,
+                "packing",
+                item_count,
+                item_count,
+                None,
+                None,
+            );
+            let file = std::fs::File::create(&out).map_err(|e| format!("create zip: {e}"))?;
+            let mut zip = zip::ZipWriter::new(file);
+            let opts = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
+            pack_dir_into_zip(&staging, "", &mut zip, opts)?;
+            zip.finish().map_err(|e| format!("finish zip: {e}"))?;
+            let _ = std::fs::remove_dir_all(&staging);
+        }
 
-    Ok(serde_json::json!({
-        "exported": exported,
-        "total": class_count,
-        "failed": failed.len(),
-        "failedClasses": failed,
-        "outputDir": output_dir,
-    }))
+        emit_export_progress(
+            &app,
+            &project_id,
+            "completed",
+            item_count,
+            item_count,
+            None,
+            None,
+        );
+
+        Ok(serde_json::json!({
+            "exported": exported,
+            "total": item_count,
+            "failed": failed.len(),
+            "failedClasses": failed,
+            "outputDir": output_dir,
+        }))
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 /// Recursively pack a directory into a zip (export "Save All Sources" as zip).
-fn pack_dir_into_zip(dir: &std::path::Path, prefix: &str, zip: &mut zip::ZipWriter<std::fs::File>, opts: zip::write::SimpleFileOptions) -> Result<(), String> {
+fn pack_dir_into_zip(
+    dir: &std::path::Path,
+    prefix: &str,
+    zip: &mut zip::ZipWriter<std::fs::File>,
+    opts: zip::write::SimpleFileOptions,
+) -> Result<(), String> {
     for entry in std::fs::read_dir(dir).map_err(|e| format!("read dir: {e}"))? {
         let entry = entry.map_err(|e| format!("entry: {e}"))?;
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().to_string();
-        let rel = if prefix.is_empty() { name.clone() } else { format!("{prefix}/{name}") };
+        let rel = if prefix.is_empty() {
+            name.clone()
+        } else {
+            format!("{prefix}/{name}")
+        };
         if path.is_dir() {
             pack_dir_into_zip(&path, &rel, zip, opts)?;
         } else {
-            let bytes = std::fs::read(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
-            zip.start_file(rel.clone(), opts).map_err(|e| format!("zip start {rel}: {e}"))?;
+            let bytes =
+                std::fs::read(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+            zip.start_file(rel.clone(), opts)
+                .map_err(|e| format!("zip start {rel}: {e}"))?;
             use std::io::Write;
-            zip.write_all(&bytes).map_err(|e| format!("zip write {rel}: {e}"))?;
+            zip.write_all(&bytes)
+                .map_err(|e| format!("zip write {rel}: {e}"))?;
         }
     }
     Ok(())
@@ -1474,7 +1839,12 @@ pub async fn jar_libraries(
             })
         })
         .collect();
-    libs.sort_by(|a, b| a["name"].as_str().unwrap_or("").cmp(b["name"].as_str().unwrap_or("")));
+    libs.sort_by(|a, b| {
+        a["name"]
+            .as_str()
+            .unwrap_or("")
+            .cmp(b["name"].as_str().unwrap_or(""))
+    });
     Ok(libs)
 }
 
@@ -1501,7 +1871,9 @@ pub async fn jar_pom_open(
 
     let pom_dir = pom_path.parent().unwrap_or(Path::new("."));
     let main_jar = {
-        let c1 = pom_dir.join("target").join(format!("{}-{}.jar", pom.artifact_id, pom.version));
+        let c1 = pom_dir
+            .join("target")
+            .join(format!("{}-{}.jar", pom.artifact_id, pom.version));
         let c2 = pom_dir.join(format!("{}-{}.jar", pom.artifact_id, pom.version));
         if c1.is_file() {
             Some(c1)
@@ -1529,18 +1901,31 @@ pub async fn jar_pom_open(
         }
     }
 
-    let mut nested: std::collections::HashMap<String, NestedJarData> = std::collections::HashMap::new();
+    let mut nested: std::collections::HashMap<String, NestedJarData> =
+        std::collections::HashMap::new();
     let mut lib_summaries: Vec<serde_json::Value> = Vec::new();
     for dep in &pom.dependencies {
-        let Some(jar_path) = &dep.jar_path else { continue };
-        let Ok(bytes) = std::fs::read(jar_path) else { continue };
+        let Some(jar_path) = &dep.jar_path else {
+            continue;
+        };
+        let Ok(bytes) = std::fs::read(jar_path) else {
+            continue;
+        };
         let mut cur = std::io::Cursor::new(bytes.clone());
-        let Ok(idx) = jar::index_jar_reader(&mut cur) else { continue };
-        let base = jar_path.rsplit(['/', '\\']).next().unwrap_or(jar_path).to_string();
+        let Ok(idx) = jar::index_jar_reader(&mut cur) else {
+            continue;
+        };
+        let base = jar_path
+            .rsplit(['/', '\\'])
+            .next()
+            .unwrap_or(jar_path)
+            .to_string();
         let lib_id = format!(
             "{}:dep:{}",
             id,
-            crate::jar::sha256_bytes(jar_path.as_bytes()).get(..12).unwrap_or("d")
+            crate::jar::sha256_bytes(jar_path.as_bytes())
+                .get(..12)
+                .unwrap_or("d")
         );
         let name = format!("{}-{}.jar", dep.artifact_id, dep.version);
         nested.insert(
@@ -1581,7 +1966,10 @@ pub async fn jar_pom_open(
     let index = MemoryIndex {
         project_id: id.clone(),
         name: name.clone(),
-        jar_path: main_jar.as_ref().map(|p| p.display().to_string()).unwrap_or_default(),
+        jar_path: main_jar
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default(),
         jar_hash: main_hash,
         size: main_size,
         class_count,
@@ -1591,7 +1979,11 @@ pub async fn jar_pom_open(
         nested,
         class_names,
     };
-    state.indexes.lock().expect("indexes poisoned").insert(id.clone(), index);
+    state
+        .indexes
+        .lock()
+        .expect("indexes poisoned")
+        .insert(id.clone(), index);
 
     Ok(serde_json::json!({
         "projectId": id,
@@ -1652,8 +2044,16 @@ pub async fn jar_maven_sources(
     if let Some(f) = filters {
         let f = f.trim();
         if !f.is_empty() {
-            let allow: Vec<&str> = f.split_whitespace().filter(|x| x.starts_with('+')).map(|x| &x[1..]).collect();
-            let deny: Vec<&str> = f.split_whitespace().filter(|x| x.starts_with('-')).map(|x| &x[1..]).collect();
+            let allow: Vec<&str> = f
+                .split_whitespace()
+                .filter(|x| x.starts_with('+'))
+                .map(|x| &x[1..])
+                .collect();
+            let deny: Vec<&str> = f
+                .split_whitespace()
+                .filter(|x| x.starts_with('-'))
+                .map(|x| &x[1..])
+                .collect();
             let hit = allow.iter().any(|p| group_id.starts_with(p));
             let blocked = deny.iter().any(|p| group_id.starts_with(p));
             let ok = (allow.is_empty() || hit) && !blocked;
@@ -1680,9 +2080,14 @@ pub async fn jar_maven_sources(
         let bytes = tauri::async_runtime::spawn_blocking(move || {
             let resp = reqwest::blocking::get(&url).map_err(|e| format!("download {url}: {e}"))?;
             if !resp.status().is_success() {
-                return Err(format!("Maven sources download failed (HTTP {})", resp.status()));
+                return Err(format!(
+                    "Maven sources download failed (HTTP {})",
+                    resp.status()
+                ));
             }
-            resp.bytes().map(|b| b.to_vec()).map_err(|e| format!("read body: {e}"))
+            resp.bytes()
+                .map(|b| b.to_vec())
+                .map_err(|e| format!("read body: {e}"))
         })
         .await
         .map_err(|e| e.to_string())??;
@@ -1730,7 +2135,10 @@ pub async fn jar_maven_sources(
 /// Read a .java file from an extracted Maven sources root (path stays inside
 /// the root — zip-slip style traversal is rejected).
 #[tauri::command]
-pub async fn jar_read_source_file(root: String, entry_path: String) -> Result<serde_json::Value, String> {
+pub async fn jar_read_source_file(
+    root: String,
+    entry_path: String,
+) -> Result<serde_json::Value, String> {
     let root_path = PathBuf::from(&root);
     let target = root_path.join(&entry_path);
     if !target.starts_with(&root_path) {
@@ -1750,7 +2158,9 @@ mod open_type_tests {
     use super::{open_type_regexp, simple_class_name};
 
     fn matches(pattern: &str, class_name: &str) -> bool {
-        open_type_regexp(pattern).unwrap().is_match(simple_class_name(class_name))
+        open_type_regexp(pattern)
+            .unwrap()
+            .is_match(simple_class_name(class_name))
     }
 
     #[test]
@@ -1801,8 +2211,15 @@ mod memory_index_tests {
         assert!(jdk.found);
         let out = dir.join(format!("o-{}", src.file_name().unwrap().to_string_lossy()));
         std::fs::create_dir_all(&out).unwrap();
-        assert!(std::process::Command::new(jdk.javac_path.as_deref().unwrap())
-            .arg("-d").arg(&out).arg(&src).status().unwrap().success());
+        assert!(
+            std::process::Command::new(jdk.javac_path.as_deref().unwrap())
+                .arg("-d")
+                .arg(&out)
+                .arg(&src)
+                .status()
+                .unwrap()
+                .success()
+        );
         out
     }
     fn copy_tree(src: &Path, base: &Path, dest: &Path) {
@@ -1823,18 +2240,44 @@ mod memory_index_tests {
         let dir = std::env::temp_dir().join(format!("jar-memidx-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
 
-        let dep_out = compile(&dir, "com/dep/Util.java", "com.dep", "public class Util { public int f() { return 1; } }");
+        let dep_out = compile(
+            &dir,
+            "com/dep/Util.java",
+            "com.dep",
+            "public class Util { public int f() { return 1; } }",
+        );
         let dep_jar = dir.join("dep.jar");
-        assert!(std::process::Command::new("jar").arg("cf").arg(&dep_jar).arg("-C").arg(&dep_out).arg(".").status().unwrap().success());
+        assert!(std::process::Command::new("jar")
+            .arg("cf")
+            .arg(&dep_jar)
+            .arg("-C")
+            .arg(&dep_out)
+            .arg(".")
+            .status()
+            .unwrap()
+            .success());
 
-        let main_out = compile(&dir, "com/app/Main.java", "com.app", "public class Main { public int x = 1; }");
+        let main_out = compile(
+            &dir,
+            "com/app/Main.java",
+            "com.app",
+            "public class Main { public int x = 1; }",
+        );
         let staging = dir.join("stg");
         std::fs::create_dir_all(staging.join("BOOT-INF/classes")).unwrap();
         std::fs::create_dir_all(staging.join("BOOT-INF/lib")).unwrap();
         copy_tree(&main_out, &main_out, &staging.join("BOOT-INF/classes"));
         std::fs::copy(&dep_jar, staging.join("BOOT-INF/lib/dep.jar")).unwrap();
         let fat = dir.join("fat.jar");
-        assert!(std::process::Command::new("jar").arg("cf").arg(&fat).arg("-C").arg(&staging).arg(".").status().unwrap().success());
+        assert!(std::process::Command::new("jar")
+            .arg("cf")
+            .arg(&fat)
+            .arg("-C")
+            .arg(&staging)
+            .arg(".")
+            .status()
+            .unwrap()
+            .success());
 
         let idx = jar::index_jar(&fat).unwrap();
         let mut nested_map: std::collections::HashMap<String, NestedJarData> = Default::default();
@@ -1852,23 +2295,51 @@ mod memory_index_tests {
                 let mut cur = std::io::Cursor::new(bytes.clone());
                 let nidx = jar::index_jar_reader(&mut cur).unwrap();
                 assert!(nidx.entries.iter().any(|x| x.class_name == "com.dep.Util"));
-                nested_map.insert("n1".into(), NestedJarData {
-                    id: "n1".into(), entry_path: name, name: "[nested] dep.jar|BOOT-INF/lib/dep.jar".into(),
-                    group_id: String::new(), artifact_id: "dep".into(), version: String::new(),
-                    bytes, entries: nidx.entries.clone(), tree: jar::build_tree(&nidx.entries), class_count: 1,
-                });
+                nested_map.insert(
+                    "n1".into(),
+                    NestedJarData {
+                        id: "n1".into(),
+                        entry_path: name,
+                        name: "[nested] dep.jar|BOOT-INF/lib/dep.jar".into(),
+                        group_id: String::new(),
+                        artifact_id: "dep".into(),
+                        version: String::new(),
+                        bytes,
+                        entries: nidx.entries.clone(),
+                        tree: jar::build_tree(&nidx.entries),
+                        class_count: 1,
+                    },
+                );
             }
         }
         let mut class_names: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-        for e in &idx.entries { if e.kind == "class" { class_names.insert(e.class_name.clone()); } }
-        for n in nested_map.values() { for e in &n.entries { if e.kind == "class" { class_names.insert(e.class_name.clone()); } } }
+        for e in &idx.entries {
+            if e.kind == "class" {
+                class_names.insert(e.class_name.clone());
+            }
+        }
+        for n in nested_map.values() {
+            for e in &n.entries {
+                if e.kind == "class" {
+                    class_names.insert(e.class_name.clone());
+                }
+            }
+        }
         assert!(class_names.contains("com.app.Main"));
         assert!(class_names.contains("com.dep.Util"));
 
         let ix = MemoryIndex {
-            project_id: "p".into(), name: "fat.jar".into(), jar_path: fat.display().to_string(),
-            jar_hash: idx.jar_hash.clone(), size: 0, class_count: idx.class_count, resource_count: idx.resource_count,
-            entries: idx.entries.clone(), main_tree: jar::build_tree(&idx.entries), nested: nested_map, class_names,
+            project_id: "p".into(),
+            name: "fat.jar".into(),
+            jar_path: fat.display().to_string(),
+            jar_hash: idx.jar_hash.clone(),
+            size: 0,
+            class_count: idx.class_count,
+            resource_count: idx.resource_count,
+            entries: idx.entries.clone(),
+            main_tree: jar::build_tree(&idx.entries),
+            nested: nested_map,
+            class_names,
         };
         let (lib, entry) = ix.find_class("com.app.Main").expect("main class");
         assert_eq!(lib, "");
@@ -1878,7 +2349,8 @@ mod memory_index_tests {
         let bytes = ix.read_class_bytes("n1", &entry.entry_path).unwrap();
         assert!(bytes.starts_with(&[0xca, 0xfe, 0xba, 0xbe]));
         let sib = dir.join("sib");
-        ix.extract_sibling_classes_to("", "BOOT-INF/classes/com/app/Main.class", &sib).ok();
+        ix.extract_sibling_classes_to("", "BOOT-INF/classes/com/app/Main.class", &sib)
+            .ok();
         assert!(sib.join("BOOT-INF/classes/com/app/Main.class").is_file());
         println!("MEMORY-INDEX RESOLUTION PASS");
         std::fs::remove_dir_all(&dir).ok();

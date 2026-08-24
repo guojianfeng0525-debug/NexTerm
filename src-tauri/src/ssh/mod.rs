@@ -1,7 +1,7 @@
 use crate::proxy::ProxyConfig;
 use anyhow::Result;
-use russh::*;
 use russh::keys::{self, decode_secret_key};
+use russh::*;
 use russh_sftp::client::SftpSession;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -215,9 +215,7 @@ impl SshClient {
         let ssh_config = client::Config {
             preferred: russh::Preferred {
                 key: std::borrow::Cow::Borrowed(PREFERRED_HOST_KEY_ALGOS),
-                compression: std::borrow::Cow::Borrowed(compression_preferences(
-                    use_compression,
-                )),
+                compression: std::borrow::Cow::Borrowed(compression_preferences(use_compression)),
                 ..russh::Preferred::DEFAULT
             },
             // Send a keepalive on the user-configured interval. After the
@@ -262,7 +260,9 @@ impl SshClient {
                 AuthMethod::Password { password } => jump_session
                     .authenticate_password(&jump.username, password)
                     .await
-                    .map_err(|e| anyhow::anyhow!("Jump host password authentication failed: {}", e))?
+                    .map_err(|e| {
+                        anyhow::anyhow!("Jump host password authentication failed: {}", e)
+                    })?
                     .success(),
                 AuthMethod::PublicKey {
                     key_path,
@@ -278,7 +278,9 @@ impl SshClient {
                             ),
                         )
                         .await
-                        .map_err(|e| anyhow::anyhow!("Jump host public key authentication failed: {}", e))?
+                        .map_err(|e| {
+                            anyhow::anyhow!("Jump host public key authentication failed: {}", e)
+                        })?
                         .success()
                 }
             };
@@ -305,8 +307,21 @@ impl SshClient {
                 ),
             )
             .await
-            .map_err(|_| anyhow::anyhow!("Timed out opening the jump channel to {}:{}", config.host, config.port))?
-            .map_err(|e| anyhow::anyhow!("Failed to open the jump channel to {}:{}: {}", config.host, config.port, e))?;
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "Timed out opening the jump channel to {}:{}",
+                    config.host,
+                    config.port
+                )
+            })?
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to open the jump channel to {}:{}: {}",
+                    config.host,
+                    config.port,
+                    e
+                )
+            })?;
 
             let session = tokio::time::timeout(
                 connection_timeout,
@@ -521,10 +536,9 @@ impl SshClient {
             .and_then(|output| bash_version_from_probe(&output));
 
             // Open a new SSH channel
-            let mut channel = session
-                .channel_open_session()
-                .await
-                .map_err(|e| anyhow::anyhow!("Failed to open PTY channel (session may have dropped): {e}"))?;
+            let mut channel = session.channel_open_session().await.map_err(|e| {
+                anyhow::anyhow!("Failed to open PTY channel (session may have dropped): {e}")
+            })?;
             let bash_terminal_modes = [(Pty::ECHO, 0), (Pty::ECHONL, 0)];
             let terminal_modes = if bash_version.is_some() {
                 bash_terminal_modes.as_slice()
@@ -806,7 +820,10 @@ impl SshClient {
 /// endings so keys created or edited on Windows (which use `\r\n`) are parsed
 /// correctly by russh's PEM / OpenSSH decoder. Used both for the target
 /// host and for the jump host when it authenticates with a public key.
-pub(crate) fn load_private_key(key_path: &str, passphrase: Option<&str>) -> Result<keys::PrivateKey> {
+pub(crate) fn load_private_key(
+    key_path: &str,
+    passphrase: Option<&str>,
+) -> Result<keys::PrivateKey> {
     // Expand tilde in path — use dirs::home_dir() for cross-platform support
     // (HOME is not set on Windows; USERPROFILE is used instead).
     let expanded_path = if key_path.starts_with("~/") || key_path.starts_with("~\\") {
@@ -828,9 +845,8 @@ pub(crate) fn load_private_key(key_path: &str, passphrase: Option<&str>) -> Resu
         ));
     }
 
-    let key_content = std::fs::read_to_string(&expanded_path).map_err(|e| {
-        anyhow::anyhow!("Failed to read SSH key file {}: {}", key_path, e)
-    })?;
+    let key_content = std::fs::read_to_string(&expanded_path)
+        .map_err(|e| anyhow::anyhow!("Failed to read SSH key file {}: {}", key_path, e))?;
     let key_content = key_content.replace("\r\n", "\n");
 
     // decode_secret_key takes the key *content* as a &str.

@@ -7,10 +7,12 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
 import { open, save } from '@tauri-apps/plugin-dialog';
+import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Badge } from '@/components/ui/badge';
+import { Progress } from '@/components/ui/progress';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription } from '@/components/ui/dialog';
 import {
   Archive,
@@ -43,6 +45,15 @@ import { java } from '@codemirror/lang-java';
 import { searchKeymap, highlightSelectionMatches } from '@codemirror/search';
 
 type BottomTab = 'output' | 'search';
+
+interface ExportProgressEvent {
+  projectId: string;
+  phase: 'preparing' | 'processing' | 'decompiling' | 'failed' | 'packing' | 'completed' | 'cancelled';
+  completed: number;
+  total: number;
+  className?: string;
+  message?: string;
+}
 
 /** Hover underline for a known class reference (JD-GUI style). */
 const setHoverEffect = StateEffect.define<{ from: number; to: number } | null>();
@@ -451,6 +462,7 @@ export function ToolJarDecompiler() {
   const [jdk, setJdk] = useState<{ label: string } | null>(null);
   const [busy, setBusy] = useState(false);
   const [busyLabel, setBusyLabel] = useState('');
+  const [exportProgress, setExportProgress] = useState<ExportProgressEvent | null>(null);
   const [bottomTab, setBottomTab] = useState<BottomTab>('output');
   const [diagnostics, setDiagnostics] = useState<CompileDiagnostic[]>([]);
   const [buildLog, setBuildLog] = useState<string[]>([]);
@@ -482,6 +494,31 @@ export function ToolJarDecompiler() {
   });
   /** Drop overlay visible while dragging a file over the panel. */
   const [dropOverlay, setDropOverlay] = useState(false);
+
+  useEffect(() => {
+    const unlisteners: UnlistenFn[] = [];
+    void listen<ExportProgressEvent>('jar://export-progress', (event) => {
+      if (event.payload.projectId !== project?.id) return;
+      setExportProgress(event.payload);
+      setBottomTab('output');
+      if (event.payload.phase === 'failed') {
+        setBuildLog((log) => [...log, t('toolbox.jar.exportItemFailed', { name: event.payload.className, error: event.payload.message })]);
+      } else if (event.payload.phase === 'preparing') {
+        setBuildLog((log) => [...log, t('toolbox.jar.exportPreparing')]);
+      } else if (event.payload.phase === 'packing') {
+        setBuildLog((log) => [...log, t('toolbox.jar.exportPacking')]);
+      } else if (event.payload.phase === 'completed') {
+        setBuildLog((log) => [...log, t('toolbox.jar.exportCompleted', { completed: event.payload.completed, total: event.payload.total })]);
+      } else if (event.payload.phase === 'cancelled') {
+        setBuildLog((log) => [...log, t('toolbox.jar.exportCancelled')]);
+      } else if (event.payload.phase === 'processing' && event.payload.className) {
+        setBuildLog((log) => [...log, t('toolbox.jar.exportProcessing', { completed: event.payload.completed, total: event.payload.total, name: event.payload.className })]);
+      }
+    }).then((unlisten) => unlisteners.push(unlisten));
+    return () => {
+      for (const unlisten of unlisteners) unlisten();
+    };
+  }, [project?.id, t]);
   /** Recent-files dropdown open state. */
   const [recentOpen, setRecentOpen] = useState(false);
   /** Cursor position in the editor (status bar). */
@@ -1557,17 +1594,18 @@ export function ToolJarDecompiler() {
       if (typeof dir !== 'string' || !dir) return;
       setBusy(true);
       setBusyLabel(t('toolbox.jar.exportAll'));
+      setExportProgress({ projectId: project.id, phase: 'preparing', completed: 0, total: 0 });
       setBottomTab('output');
       try {
         const result = await jarApi.exportAll(project.id, dir, { writeMetadata: prefWriteMetadata, writeLineNumbers: prefWriteLineNumbers, escapeUnicode: prefEscapeUnicode || null, realign: prefRealignLineNumbers || null });
         setBuildLog((l) => [
           ...l,
-          `Export: ${result.exported}/${result.total} sources → ${result.outputDir}`,
-          result.failed > 0 ? `  ${result.failed} failed: ${result.failedClasses.slice(0, 5).join(', ')}` : '  all OK',
+          t('toolbox.jar.exportResult', { exported: result.exported, total: result.total, outputDir: result.outputDir }),
+          result.failed > 0 ? t('toolbox.jar.exportPartialFailure', { count: result.failed, classes: result.failedClasses.slice(0, 5).join(', ') }) : t('toolbox.jar.exportAllOk'),
         ]);
-        toast.success(`${result.exported}/${result.total} ${t('toolbox.jar.exportAll')}`);
+        toast.success(t('toolbox.jar.exportSucceeded', { exported: result.exported, total: result.total }));
       } catch (e) {
-        setBuildLog((l) => [...l, `Export FAILED: ${e}`]);
+        setBuildLog((l) => [...l, t('toolbox.jar.exportFailed', { error: String(e) })]);
         toast.error(String(e));
       } finally {
         setBusy(false);
@@ -1576,22 +1614,30 @@ export function ToolJarDecompiler() {
     }
     setBusy(true);
     setBusyLabel(t('toolbox.jar.exportAll'));
+    setExportProgress({ projectId: project.id, phase: 'preparing', completed: 0, total: 0 });
     setBottomTab('output');
     try {
       const result = await jarApi.exportAll(project.id, zipPath, { writeMetadata: prefWriteMetadata, writeLineNumbers: prefWriteLineNumbers, escapeUnicode: prefEscapeUnicode || null, realign: prefRealignLineNumbers || null });
       setBuildLog((l) => [
         ...l,
-        `Export ZIP: ${result.exported}/${result.total} sources → ${result.outputDir}`,
-        result.failed > 0 ? `  ${result.failed} failed: ${result.failedClasses.slice(0, 5).join(', ')}` : '  all OK',
+        t('toolbox.jar.exportResult', { exported: result.exported, total: result.total, outputDir: result.outputDir }),
+        result.failed > 0 ? t('toolbox.jar.exportPartialFailure', { count: result.failed, classes: result.failedClasses.slice(0, 5).join(', ') }) : t('toolbox.jar.exportAllOk'),
       ]);
-      toast.success(`${result.exported}/${result.total} ${t('toolbox.jar.exportAll')}`);
+      toast.success(t('toolbox.jar.exportSucceeded', { exported: result.exported, total: result.total }));
     } catch (e) {
-      setBuildLog((l) => [...l, `Export ZIP FAILED: ${e}`]);
+      setBuildLog((l) => [...l, t('toolbox.jar.exportFailed', { error: String(e) })]);
       toast.error(String(e));
     } finally {
       setBusy(false);
     }
-  }, [project, t]);
+  }, [project, t, prefWriteMetadata, prefWriteLineNumbers, prefEscapeUnicode, prefRealignLineNumbers]);
+
+  const handleCancelExport = useCallback(() => {
+    if (!project || !busy) return;
+    void jarApi.decompileCancel(project.id).catch((error: unknown) => {
+      toast.error(String(error));
+    });
+  }, [project, busy]);
 
   // ── Open a resource (text preview / image / hex) in a new tab. ──
   const handleOpenResource = useCallback(
@@ -2986,12 +3032,18 @@ export function ToolJarDecompiler() {
             </div>
           )}
           {busy && (
-            <Badge variant="outline" className="text-[10px] gap-1">
-              <Loader2 className="h-3 w-3 animate-spin" /> {busyLabel}
-            </Badge>
+            <div className="w-44 flex items-center gap-2">
+              <Progress value={exportProgress?.total ? (exportProgress.completed / exportProgress.total) * 100 : 0} className="h-1.5" />
+              <span className="whitespace-nowrap text-[10px] text-muted-foreground">
+                {exportProgress?.total ? t('toolbox.jar.exportProgress', { completed: exportProgress.completed, total: exportProgress.total }) : busyLabel}
+              </span>
+              <Button size="sm" variant="ghost" className="h-6 px-1 text-[10px]" onClick={handleCancelExport}>
+                {t('common.cancel')}
+              </Button>
+            </div>
           )}
           {project && (
-            <Button size="sm" variant="outline" className="h-7 text-xs gap-1" onClick={() => void handleExportAll()}>
+            <Button size="sm" variant="outline" className="h-7 text-xs gap-1" disabled={busy} onClick={() => void handleExportAll()}>
               <Download className="h-3.5 w-3.5" />
               {t('toolbox.jar.exportAll')}
             </Button>

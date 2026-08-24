@@ -1,12 +1,12 @@
 mod commands;
 mod connection_manager;
-pub mod documents;
 pub mod db;
 mod desktop_protocol;
+pub mod documents;
 mod ftp_client;
+mod jump;
 mod ls_parser;
 mod os_detect;
-mod jump;
 mod proxy;
 mod rdp_client;
 mod sftp_client;
@@ -15,13 +15,13 @@ mod toolbox;
 mod vnc_client;
 mod websocket_server;
 
-pub mod jar;
-pub mod jar_db;
-pub mod decompile;
-pub mod compile;
 pub mod builder;
-pub mod pom;
+pub mod compile;
+pub mod decompile;
+pub mod jar;
 mod jar_commands;
+pub mod jar_db;
+pub mod pom;
 
 use connection_manager::ConnectionManager;
 use std::sync::atomic::AtomicU16;
@@ -170,35 +170,65 @@ fn build_app_menu<F: Fn(&str) -> String>(
         "m_tool_apps",
         &t("toolbox.apps.title"),
         true,
-        &[&MenuItem::with_id(app, "tool_apps", &t("toolbox.apps.open"), true, None::<&str>)?],
+        &[&MenuItem::with_id(
+            app,
+            "tool_apps",
+            &t("toolbox.apps.open"),
+            true,
+            None::<&str>,
+        )?],
     )?;
     let vault_menu = Submenu::with_id_and_items(
         app,
         "m_tool_vault",
         &t("toolbox.vault.title"),
         true,
-        &[&MenuItem::with_id(app, "tool_vault", &t("toolbox.vault.open"), true, None::<&str>)?],
+        &[&MenuItem::with_id(
+            app,
+            "tool_vault",
+            &t("toolbox.vault.open"),
+            true,
+            None::<&str>,
+        )?],
     )?;
     let tunnels_menu = Submenu::with_id_and_items(
         app,
         "m_tool_tunnels",
         &t("toolbox.tunnels.title"),
         true,
-        &[&MenuItem::with_id(app, "tool_tunnels", &t("toolbox.tunnels.open"), true, None::<&str>)?],
+        &[&MenuItem::with_id(
+            app,
+            "tool_tunnels",
+            &t("toolbox.tunnels.open"),
+            true,
+            None::<&str>,
+        )?],
     )?;
     let services_menu = Submenu::with_id_and_items(
         app,
         "m_tool_services",
         &t("toolbox.services.title"),
         true,
-        &[&MenuItem::with_id(app, "tool_services", &t("toolbox.services.open"), true, None::<&str>)?],
+        &[&MenuItem::with_id(
+            app,
+            "tool_services",
+            &t("toolbox.services.open"),
+            true,
+            None::<&str>,
+        )?],
     )?;
     let notes_menu = Submenu::with_id_and_items(
         app,
         "m_tool_notes",
         &t("toolbox.notes.title"),
         true,
-        &[&MenuItem::with_id(app, "tool_notes", &t("toolbox.notes.open"), true, None::<&str>)?],
+        &[&MenuItem::with_id(
+            app,
+            "tool_notes",
+            &t("toolbox.notes.open"),
+            true,
+            None::<&str>,
+        )?],
     )?;
 
     // ── Window menu ───────────────────────────────────────────────────────────
@@ -275,7 +305,6 @@ fn default_menu_text(key: &str) -> String {
     .to_string()
 }
 
-
 /// Portable WebView2 runtime setup (decided at startup, not build time).
 ///
 /// The Windows portable build may ship the Fixed Version WebView2 Runtime in a
@@ -295,7 +324,10 @@ fn setup_portable_webview2() {
     }
 
     let exe_path = std::env::current_exe().unwrap_or_default();
-    let base_dir = exe_path.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+    let base_dir = exe_path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_default();
     let runtime_dir = base_dir.join("WebView2");
     let msedge_exe = runtime_dir.join("msedgewebview2.exe");
     let msedge_dll = runtime_dir.join("msedge.dll");
@@ -308,7 +340,10 @@ fn setup_portable_webview2() {
         ("exe_path", &exe_path.display().to_string()),
         ("base_dir", &base_dir.display().to_string()),
         ("runtime_dir", &runtime_dir.display().to_string()),
-        ("runtime_exists", if runtime_exists { "true" } else { "false" }),
+        (
+            "runtime_exists",
+            if runtime_exists { "true" } else { "false" },
+        ),
         ("msedge_exists", if fixed_ok { "true" } else { "false" }),
         ("architecture", "x64"),
         ("status", if fixed_ok { "valid" } else { "system-fallback" }),
@@ -323,7 +358,6 @@ fn setup_portable_webview2() {
     // Otherwise leave the variable unset: the loader uses the system WebView2
     // (Microsoft Edge / system runtime) when available.
 }
-
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -417,13 +451,23 @@ pub fn run() {
                             // same SQLite file via per-command connections).
                             app.manage(jar_commands::JarState {
                                 db_path: path.clone(),
-                                cancels: std::sync::Mutex::new(Default::default()),
-                                scratch: app.path().app_data_dir().unwrap_or_else(|_| dir.clone()).join("jar-scratch"),
+                                cancels: std::sync::Arc::new(std::sync::Mutex::new(
+                                    Default::default(),
+                                )),
+                                scratch: app
+                                    .path()
+                                    .app_data_dir()
+                                    .unwrap_or_else(|_| dir.clone())
+                                    .join("jar-scratch"),
                                 resource_dir: app.path().resource_dir().ok(),
-                                indexes: std::sync::Mutex::new(Default::default()),
+                                indexes: std::sync::Arc::new(std::sync::Mutex::new(
+                                    Default::default(),
+                                )),
                             });
                         }
-                        Err(e) => tracing::warn!("Failed to open SQLite store at {:?}: {}", path, e),
+                        Err(e) => {
+                            tracing::warn!("Failed to open SQLite store at {:?}: {}", path, e)
+                        }
                     }
                 }
                 if !opened {
@@ -441,10 +485,14 @@ pub fn run() {
                                     );
                                     app.manage(jar_commands::JarState {
                                         db_path: dir.join("nexterm.db"),
-                                        cancels: std::sync::Mutex::new(Default::default()),
+                                        cancels: std::sync::Arc::new(std::sync::Mutex::new(
+                                            Default::default(),
+                                        )),
                                         scratch: dir.join("jar-scratch"),
                                         resource_dir: app.path().resource_dir().ok(),
-                                        indexes: std::sync::Mutex::new(Default::default()),
+                                        indexes: std::sync::Arc::new(std::sync::Mutex::new(
+                                            Default::default(),
+                                        )),
                                     });
                                 }
                                 Err(e) => tracing::warn!("Failed to open SQLite store: {}", e),

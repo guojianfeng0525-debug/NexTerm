@@ -13,8 +13,8 @@
 //! migrate its data into the normalized tables before `drop_legacy_tables`
 //! removes them.
 
-use rusqlite::{params_from_iter, Connection, Row};
 use rusqlite::types::{Value as SqlValue, ValueRef};
+use rusqlite::{params_from_iter, Connection, Row};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 use std::sync::{Arc, Mutex};
 use tauri::State;
@@ -124,7 +124,11 @@ impl DbState {
             ("connections", "jump_port", "jump_port INTEGER"),
             ("connections", "jump_username", "jump_username TEXT"),
             ("connections", "jump_password", "jump_password TEXT"),
-            ("connections", "jump_use_key", "jump_use_key INTEGER NOT NULL DEFAULT 0"),
+            (
+                "connections",
+                "jump_use_key",
+                "jump_use_key INTEGER NOT NULL DEFAULT 0",
+            ),
             ("connections", "default_directory", "default_directory TEXT"),
             ("toolbox_apps", "args", "args TEXT"),
             ("toolbox_apps", "work_dir", "work_dir TEXT"),
@@ -137,21 +141,13 @@ impl DbState {
                 "command_suggestions",
                 "command_suggestions INTEGER NOT NULL DEFAULT 1",
             ),
-            (
-                "documents",
-                "edited_content",
-                "edited_content TEXT",
-            ),
+            ("documents", "edited_content", "edited_content TEXT"),
             (
                 "documents",
                 "head_version",
                 "head_version INTEGER NOT NULL DEFAULT 0",
             ),
-            (
-                "documents",
-                "source_hash",
-                "source_hash TEXT",
-            ),
+            ("documents", "source_hash", "source_hash TEXT"),
             // JAR decompiler module migrations.
             (
                 "jar_classes",
@@ -183,7 +179,10 @@ impl DbState {
         model_hash: &str,
         resources: &[(String, String, String, Vec<u8>, String)],
     ) -> Result<(), String> {
-        let mut conn = self.conn.lock().map_err(|_| "db lock poisoned".to_string())?;
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|_| "db lock poisoned".to_string())?;
         let tx = conn.transaction().map_err(|e| e.to_string())?;
 
         if let Some(expected) = expect_head {
@@ -195,7 +194,9 @@ impl DbState {
                 )
                 .map_err(|e| format!("read head_version: {e}"))?;
             if cur != expected {
-                return Err(format!("version conflict: head is {cur}, expected {expected}"));
+                return Err(format!(
+                    "version conflict: head is {cur}, expected {expected}"
+                ));
             }
         }
 
@@ -241,7 +242,10 @@ impl DbState {
 
     /// Document kind ('docx' | 'xlsx'), if present.
     pub fn documents_kind(&self, doc_id: &str) -> Result<Option<String>, String> {
-        let conn = self.conn.lock().map_err(|_| "db lock poisoned".to_string())?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| "db lock poisoned".to_string())?;
         let mut stmt = conn
             .prepare("SELECT kind FROM documents WHERE id = ?1")
             .map_err(|e| format!("prepare: {e}"))?;
@@ -259,7 +263,10 @@ impl DbState {
         doc_id: &str,
         version: Option<i64>,
     ) -> Result<Option<(i64, String)>, String> {
-        let conn = self.conn.lock().map_err(|_| "db lock poisoned".to_string())?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| "db lock poisoned".to_string())?;
         let (sql, params): (&str, Vec<Box<dyn rusqlite::ToSql>>) = match version {
             Some(v) => (
                 "SELECT version, model FROM document_versions WHERE document_id = ?1 AND version = ?2",
@@ -289,12 +296,17 @@ impl DbState {
         &self,
         doc_id: &str,
     ) -> Result<Vec<(String, String, String, Vec<u8>)>, String> {
-        let conn = self.conn.lock().map_err(|_| "db lock poisoned".to_string())?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| "db lock poisoned".to_string())?;
         let mut stmt = conn
             .prepare("SELECT resource_id, kind, mime, data FROM document_resources WHERE document_id = ?1")
             .map_err(|e| format!("prepare: {e}"))?;
         let rows = stmt
-            .query_map([doc_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .query_map([doc_id], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            })
             .map_err(|e| format!("query: {e}"))?
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| e.to_string())?;
@@ -303,7 +315,10 @@ impl DbState {
 
     /// Version list: (version, created_at) newest first.
     pub fn documents_versions(&self, doc_id: &str) -> Result<Vec<(i64, i64)>, String> {
-        let conn = self.conn.lock().map_err(|_| "db lock poisoned".to_string())?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| "db lock poisoned".to_string())?;
         let mut stmt = conn
             .prepare("SELECT version, created_at FROM document_versions WHERE document_id = ?1 ORDER BY version DESC")
             .map_err(|e| format!("prepare: {e}"))?;
@@ -317,11 +332,20 @@ impl DbState {
 
     /// Delete a document and all its versions/resources.
     pub fn documents_delete(&self, doc_id: &str) -> Result<(), String> {
-        let conn = self.conn.lock().map_err(|_| "db lock poisoned".to_string())?;
-        conn.execute("DELETE FROM document_versions WHERE document_id = ?1", [doc_id])
-            .map_err(|e| e.to_string())?;
-        conn.execute("DELETE FROM document_resources WHERE document_id = ?1", [doc_id])
-            .map_err(|e| e.to_string())?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| "db lock poisoned".to_string())?;
+        conn.execute(
+            "DELETE FROM document_versions WHERE document_id = ?1",
+            [doc_id],
+        )
+        .map_err(|e| e.to_string())?;
+        conn.execute(
+            "DELETE FROM document_resources WHERE document_id = ?1",
+            [doc_id],
+        )
+        .map_err(|e| e.to_string())?;
         conn.execute("DELETE FROM documents WHERE id = ?1", [doc_id])
             .map_err(|e| e.to_string())?;
         Ok(())
@@ -331,13 +355,24 @@ impl DbState {
     pub fn documents_list(
         &self,
     ) -> Result<Vec<(String, String, String, i64, i64, i64, i64)>, String> {
-        let conn = self.conn.lock().map_err(|_| "db lock poisoned".to_string())?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| "db lock poisoned".to_string())?;
         let mut stmt = conn
             .prepare("SELECT id, name, kind, size, head_version, created_at, updated_at FROM documents ORDER BY created_at DESC")
             .map_err(|e| format!("prepare: {e}"))?;
         let rows = stmt
             .query_map([], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?))
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                ))
             })
             .map_err(|e| format!("query: {e}"))?
             .collect::<Result<Vec<_>, _>>()
@@ -453,11 +488,8 @@ fn table_columns(conn: &Connection, table: &str) -> Result<Vec<String>, String> 
 fn ensure_column(conn: &Connection, table: &str, column: &str, ddl: &str) -> Result<(), String> {
     let columns = table_columns(conn, table)?;
     if !columns.iter().any(|c| c == column) {
-        conn.execute_batch(&format!(
-            "ALTER TABLE \"{}\" ADD COLUMN {};",
-            table, ddl
-        ))
-        .map_err(|e| format!("Failed to add column {} to {}: {}", column, table, e))?;
+        conn.execute_batch(&format!("ALTER TABLE \"{}\" ADD COLUMN {};", table, ddl))
+            .map_err(|e| format!("Failed to add column {} to {}: {}", column, table, e))?;
     }
     Ok(())
 }
@@ -509,7 +541,10 @@ pub fn row_upsert(
 ) -> Result<(), String> {
     validate_table(&table)?;
     let pk = pk_column(&table)?.to_string();
-    let conn = state.conn.lock().map_err(|_| "db lock poisoned".to_string())?;
+    let conn = state
+        .conn
+        .lock()
+        .map_err(|_| "db lock poisoned".to_string())?;
     let columns = table_columns(&conn, &table)?;
 
     let mut names: Vec<String> = Vec::new();
@@ -521,8 +556,7 @@ pub fn row_upsert(
                 has_pk = true;
                 // Primary keys may be numeric (e.g. `id: 1` for single-row
                 // tables) or strings. Only null / empty strings are invalid.
-                let pk_invalid =
-                    v.is_null() || v.as_str().map_or(false, |s| s.is_empty());
+                let pk_invalid = v.is_null() || v.as_str().map_or(false, |s| s.is_empty());
                 if pk_invalid {
                     return Err(format!("primary key '{}' must be non-empty", pk));
                 }
@@ -582,7 +616,10 @@ pub fn row_get(
 ) -> Result<Option<JsonMap<String, JsonValue>>, String> {
     validate_table(&table)?;
     let pk = pk_column(&table)?.to_string();
-    let conn = state.conn.lock().map_err(|_| "db lock poisoned".to_string())?;
+    let conn = state
+        .conn
+        .lock()
+        .map_err(|_| "db lock poisoned".to_string())?;
     let sql = format!("SELECT * FROM \"{}\" WHERE \"{}\" = ?1", table, pk);
     let mut stmt = conn.prepare(&sql).map_err(|e| format!("prepare: {}", e))?;
     let names: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
@@ -602,7 +639,10 @@ pub fn row_list(
     state: State<'_, Arc<DbState>>,
 ) -> Result<Vec<JsonMap<String, JsonValue>>, String> {
     validate_table(&table)?;
-    let conn = state.conn.lock().map_err(|_| "db lock poisoned".to_string())?;
+    let conn = state
+        .conn
+        .lock()
+        .map_err(|_| "db lock poisoned".to_string())?;
     let sql = format!("SELECT * FROM \"{}\"", table);
     let mut stmt = conn.prepare(&sql).map_err(|e| format!("prepare: {}", e))?;
     let names: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
@@ -623,9 +663,13 @@ pub fn row_delete(
 ) -> Result<(), String> {
     validate_table(&table)?;
     let pk = pk_column(&table)?.to_string();
-    let conn = state.conn.lock().map_err(|_| "db lock poisoned".to_string())?;
+    let conn = state
+        .conn
+        .lock()
+        .map_err(|_| "db lock poisoned".to_string())?;
     let sql = format!("DELETE FROM \"{}\" WHERE \"{}\" = ?1", table, pk);
-    conn.execute(&sql, [&key]).map_err(|e| format!("delete: {}", e))?;
+    conn.execute(&sql, [&key])
+        .map_err(|e| format!("delete: {}", e))?;
     Ok(())
 }
 
@@ -633,9 +677,13 @@ pub fn row_delete(
 #[tauri::command]
 pub fn row_clear(table: String, state: State<'_, Arc<DbState>>) -> Result<(), String> {
     validate_table(&table)?;
-    let conn = state.conn.lock().map_err(|_| "db lock poisoned".to_string())?;
+    let conn = state
+        .conn
+        .lock()
+        .map_err(|_| "db lock poisoned".to_string())?;
     let sql = format!("DELETE FROM \"{}\"", table);
-    conn.execute_batch(&sql).map_err(|e| format!("clear: {}", e))?;
+    conn.execute_batch(&sql)
+        .map_err(|e| format!("clear: {}", e))?;
     Ok(())
 }
 
@@ -649,7 +697,10 @@ pub fn legacy_db_get(
     if !LEGACY_TABLES.contains(&table.as_str()) {
         return Err(format!("not a legacy table: {}", table));
     }
-    let conn = state.conn.lock().map_err(|_| "db lock poisoned".to_string())?;
+    let conn = state
+        .conn
+        .lock()
+        .map_err(|_| "db lock poisoned".to_string())?;
     let sql = format!("SELECT value FROM \"{}\" WHERE key = ?1", table);
     let mut stmt = conn.prepare(&sql).map_err(|e| format!("prepare: {}", e))?;
     let mut rows = stmt
@@ -665,7 +716,10 @@ pub fn legacy_db_get(
 /// into the normalized tables.
 #[tauri::command]
 pub fn drop_legacy_tables(state: State<'_, Arc<DbState>>) -> Result<(), String> {
-    let conn = state.conn.lock().map_err(|_| "db lock poisoned".to_string())?;
+    let conn = state
+        .conn
+        .lock()
+        .map_err(|_| "db lock poisoned".to_string())?;
     conn.execute_batch(
         "DROP TABLE IF EXISTS connections_legacy; \
          DROP TABLE IF EXISTS profiles_legacy; \
@@ -1092,7 +1146,11 @@ mod upsert_tests {
         state
     }
 
-    fn upsert_raw(state: &DbState, table: &str, row: JsonMap<String, JsonValue>) -> Result<(), String> {
+    fn upsert_raw(
+        state: &DbState,
+        table: &str,
+        row: JsonMap<String, JsonValue>,
+    ) -> Result<(), String> {
         let pk = pk_column(table)?.to_string();
         let conn = state.conn.lock().map_err(|_| "lock".to_string())?;
         let columns = table_columns(&conn, table)?;
@@ -1150,7 +1208,11 @@ mod upsert_tests {
 
         let conn = state.conn.lock().unwrap();
         let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM connections WHERE id='conn-1'", [], |r| r.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM connections WHERE id='conn-1'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(count, 1, "connection row must be persisted");
     }
@@ -1203,7 +1265,11 @@ mod upsert_tests {
 
         let conn = state.conn.lock().unwrap();
         let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM connections WHERE id='conn-full'", [], |r| r.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM connections WHERE id='conn-full'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(count, 1);
     }
@@ -1249,15 +1315,20 @@ mod upsert_tests {
         let state = DbState::open(&path).expect("open migrates");
         let conn = state.conn.lock().unwrap();
         let cols = table_columns(&conn, "jar_classes").unwrap();
-        assert!(cols.iter().any(|c| c == "library_id"), "library_id column missing: {cols:?}");
+        assert!(
+            cols.iter().any(|c| c == "library_id"),
+            "library_id column missing: {cols:?}"
+        );
         // Existing row is readable with library_id default ''.
         let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM jar_classes WHERE library_id = ''", [], |r| r.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM jar_classes WHERE library_id = ''",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(count, 1);
         drop(conn);
         let _ = std::fs::remove_file(&path);
     }
-
-
 }
