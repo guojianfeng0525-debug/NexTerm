@@ -103,6 +103,23 @@ impl MemoryIndex {
         }
     }
 
+    /// Stage the main archive's classes by JVM internal name, not their
+    /// physical container path. This is essential for Spring Boot JARs where
+    /// `BOOT-INF/classes/com/example/Foo.class` is requested by JD-Core as
+    /// `com/example/Foo`.
+    fn extract_main_classes_to(&self, dest_root: &Path) -> Result<(), String> {
+        for entry in self.entries.iter().filter(|entry| entry.kind == "class") {
+            let bytes = self.read_class_bytes("", &entry.entry_path)?;
+            let internal_name = entry.class_name.replace('.', "/");
+            let destination = dest_root.join(format!("{internal_name}.class"));
+            if let Some(parent) = destination.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| format!("create classpath directory: {e}"))?;
+            }
+            std::fs::write(destination, bytes).map_err(|e| format!("write classpath entry: {e}"))?;
+        }
+        Ok(())
+    }
+
     /// Extract same-directory classes of `entry_path` (JD-GUI ContainerLoader)
     /// from MEMORY into `dest_root` (package structure preserved).
     pub fn extract_sibling_classes_to(
@@ -261,6 +278,80 @@ struct ExportProgress {
     total: usize,
     class_name: Option<String>,
     message: Option<String>,
+}
+
+enum ExportItem {
+    Source {
+        entry_path: String,
+        class_name: String,
+        fallback_entries: Vec<String>,
+    },
+    Resource {
+        entry_path: String,
+    },
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ExportFailure {
+    entry_path: String,
+    reason: String,
+    fallback_entries: Vec<String>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ExportManifest {
+    source_units: usize,
+    grouped_inner_classes: usize,
+    grouped_inner_class_entries: Vec<String>,
+    resources: usize,
+    failures: Vec<ExportFailure>,
+}
+
+fn source_unit_fallback_entries(index: &MemoryIndex, entry_path: &str) -> Vec<String> {
+    let mut entries = vec![entry_path.to_string()];
+    let Ok(bytes) = index.read_class_bytes("", entry_path) else {
+        return entries;
+    };
+    for internal_name in jar::inner_classes_of(&bytes) {
+        if index
+            .entries
+            .iter()
+            .find(|entry| entry.kind == "class" && entry.class_name.replace('.', "/") == internal_name && entry.is_inner_class)
+            .is_some()
+        {
+            if let Some(entry) = index.entries.iter().find(|entry| entry.kind == "class" && entry.class_name.replace('.', "/") == internal_name) {
+                entries.push(entry.entry_path.clone());
+            }
+        }
+    }
+    entries.sort();
+    entries.dedup();
+    entries
+}
+
+fn write_fallback_classes(
+    index: &MemoryIndex,
+    entries: &[String],
+    fallback_root: &Path,
+) -> Vec<String> {
+    let mut written = Vec::new();
+    for entry_path in entries {
+        let Ok(bytes) = index.read_class_bytes("", entry_path) else {
+            continue;
+        };
+        let destination = fallback_root.join(entry_path);
+        if let Some(parent) = destination.parent() {
+            if std::fs::create_dir_all(parent).is_err() {
+                continue;
+            }
+        }
+        if std::fs::write(&destination, bytes).is_ok() {
+            written.push(format!("fallback/{entry_path}"));
+        }
+    }
+    written
 }
 
 fn emit_export_progress(
@@ -453,12 +544,27 @@ pub async fn jar_project_delete(
     project_id: String,
     state: State<'_, JarState>,
 ) -> Result<(), String> {
+    // Request cancellation before taking the index lock. Exports hold that
+    // lock while decompiling, so this lets the current JD-Core child exit
+    // before its index and scratch directory are released.
+    let cancel = state.cancel_flag(&project_id);
+    cancel.store(true, Ordering::Relaxed);
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
     state
         .indexes
         .lock()
         .expect("indexes poisoned")
         .remove(&project_id);
     state.cancels.lock().expect("poisoned").remove(&project_id);
+    let scratch = state.scratch.join(&project_id);
+    tauri::async_runtime::spawn_blocking(move || match std::fs::remove_dir_all(scratch) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    })
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| format!("remove project scratch: {e}"))?;
     Ok(())
 }
 
@@ -1523,19 +1629,29 @@ pub async fn jar_export_all(
     app: AppHandle,
     state: State<'_, JarState>,
 ) -> Result<serde_json::Value, String> {
-    let (export_items, main_path) = {
+    let (export_items, main_path, grouped_inner_class_entries) = {
         let indexes = state.indexes.lock().expect("indexes poisoned");
         let ix = indexes.get(&project_id).ok_or("Project not found")?;
-        let mut items: Vec<(String, Option<String>)> = Vec::new();
+        let mut items = Vec::new();
+        let mut grouped_inner_class_entries = Vec::new();
         for entry in &ix.entries {
-            // Export only the original archive. Nested JARs are dependencies,
-            // not files owned by the archive the user selected.
-            items.push((
-                entry.entry_path.clone(),
-                (entry.kind == "class").then(|| entry.class_name.clone()),
-            ));
+            if entry.kind == "class" {
+                if entry.is_inner_class {
+                    grouped_inner_class_entries.push(entry.entry_path.clone());
+                    continue;
+                }
+                items.push(ExportItem::Source {
+                    entry_path: entry.entry_path.clone(),
+                    class_name: entry.class_name.clone(),
+                    fallback_entries: source_unit_fallback_entries(ix, &entry.entry_path),
+                });
+            } else {
+                items.push(ExportItem::Resource {
+                    entry_path: entry.entry_path.clone(),
+                });
+            }
         }
-        (items, ix.jar_path.clone())
+        (items, ix.jar_path.clone(), grouped_inner_class_entries)
     };
     let item_count = export_items.len();
     emit_export_progress(
@@ -1572,12 +1688,27 @@ pub async fn jar_export_all(
         let scratch = scratch_root.join(&project_id);
         std::fs::create_dir_all(&scratch).map_err(|e| format!("scratch: {e}"))?;
 
+        let classpath = scratch.join("classpath");
+        let fallback_root = staging.join("fallback");
+
         let mut exported = 0usize;
         let mut failed: Vec<String> = Vec::new();
+        let mut source_units = 0usize;
+        let mut resources = 0usize;
+        let mut failures = Vec::new();
 
         let indexes = indexes.lock().expect("indexes poisoned");
         let ix = indexes.get(&project_id).ok_or("Project not found")?;
-        for (completed, (entry, class_name)) in export_items.iter().enumerate() {
+        ix.extract_main_classes_to(&classpath)?;
+        for (completed, item) in export_items.iter().enumerate() {
+            let (entry, class_name, _fallback_entries) = match item {
+                ExportItem::Source {
+                    entry_path,
+                    class_name,
+                    fallback_entries,
+                } => (entry_path, Some(class_name.clone()), Some(fallback_entries)),
+                ExportItem::Resource { entry_path } => (entry_path, None, None),
+            };
             if cancel.load(Ordering::Relaxed) {
                 emit_export_progress(
                     &app,
@@ -1613,7 +1744,10 @@ pub async fn jar_export_all(
                     let _ = std::fs::create_dir_all(parent);
                 }
                 match std::fs::write(&dest, bytes) {
-                    Ok(()) => exported += 1,
+                    Ok(()) => {
+                        exported += 1;
+                        resources += 1;
+                    }
                     Err(error) => {
                         failed.push(entry.clone());
                         emit_export_progress(&app, &project_id, "failed", completed + 1, item_count, Some(entry.clone()), Some(format!("copy resource: {error}")));
@@ -1654,11 +1788,7 @@ pub async fn jar_export_all(
                 );
                 continue;
             }
-            let siblings_dir = scratch.join("siblings");
-            let _ = std::fs::remove_dir_all(&siblings_dir);
-            ix.extract_sibling_classes_to("", entry, &siblings_dir)
-                .ok();
-            let internal_name = entry.strip_suffix(".class").unwrap_or(entry);
+            let internal_name = class_name.replace('.', "/");
             let mut saver_opts = decompile::DecompileOptions::saver();
             if let Some(v) = escape_unicode {
                 saver_opts.escape_unicode = v;
@@ -1672,8 +1802,8 @@ pub async fn jar_export_all(
             let res = decompile::decompile_class_with_options(
                 &class_file,
                 &decompiler_jar,
-                &siblings_dir.display().to_string(),
-                internal_name,
+                &classpath.display().to_string(),
+                &internal_name,
                 saver_opts,
                 Some(cancel.clone()),
             );
@@ -1685,14 +1815,14 @@ pub async fn jar_export_all(
                         let (minor, major, version_label) =
                             jar::class_file_info(&bytes).unwrap_or((0, 0, String::new()));
                         let mut meta = String::new();
-                        meta.push_str("\\n\\n/* Location:              ");
+                        meta.push_str("\n\n/* Location:              ");
                         meta.push_str(&location);
                         meta.push_str(&format!(
-                            ":{entry}\\n * Java compiler version: {version_label}"
+                            ":{entry}\n * Java compiler version: {version_label}"
                         ));
                         meta.push_str(&format!(" ({}", major));
                         meta.push_str(&format!(
-                            ".{})\\n * JD-Core Version:       1.1.3\\n */",
+                            ".{})\n * JD-Core Version:       1.1.3\n */",
                             minor
                         ));
                         out_src.push_str(&meta);
@@ -1703,7 +1833,10 @@ pub async fn jar_export_all(
                         let _ = std::fs::create_dir_all(parent);
                     }
                     match std::fs::write(&dest, &out_src) {
-                        Ok(()) => exported += 1,
+                        Ok(()) => {
+                            exported += 1;
+                            source_units += 1;
+                        }
                         Err(error) => {
                             failed.push(class_name.clone());
                             emit_export_progress(
@@ -1742,6 +1875,42 @@ pub async fn jar_export_all(
                 None,
             );
         }
+        for item in &export_items {
+            match item {
+                ExportItem::Source {
+                    entry_path,
+                    class_name,
+                    fallback_entries,
+                } if failed.contains(class_name) => {
+                    let fallback_entries = write_fallback_classes(ix, fallback_entries, &fallback_root);
+                    failures.push(ExportFailure {
+                        entry_path: entry_path.clone(),
+                        reason: "Source decompilation or write failed; original bytecode preserved".into(),
+                        fallback_entries,
+                    });
+                }
+                ExportItem::Resource { entry_path } if failed.contains(entry_path) => {
+                    failures.push(ExportFailure {
+                        entry_path: entry_path.clone(),
+                        reason: "Resource copy failed".into(),
+                        fallback_entries: Vec::new(),
+                    });
+                }
+                _ => {}
+            }
+        }
+        let manifest = ExportManifest {
+            source_units,
+            grouped_inner_classes: grouped_inner_class_entries.len(),
+            grouped_inner_class_entries,
+            resources,
+            failures,
+        };
+        let manifest_path = staging.join("export-manifest.json");
+        let manifest_json = serde_json::to_vec_pretty(&manifest)
+            .map_err(|e| format!("serialize export manifest: {e}"))?;
+        std::fs::write(&manifest_path, manifest_json)
+            .map_err(|e| format!("write export manifest: {e}"))?;
         drop(indexes);
 
         if want_zip {

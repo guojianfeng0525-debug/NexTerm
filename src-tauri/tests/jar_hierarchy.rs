@@ -256,15 +256,14 @@ fn method_location_resolution() {
 /// WITH the inner class body when the sibling-classes dir is supplied (the
 /// revert / method-location paths extract siblings like jar_decompile).
 #[test]
-#[ignore]
-fn inner_class_resolves_from_siblings() {
+fn inner_class_resolves_from_full_container() {
     let dir = std::env::temp_dir().join(format!("jar-innersib-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let src_dir = dir.join("demo");
     std::fs::create_dir_all(&src_dir).unwrap();
     std::fs::write(
         src_dir.join("Outer.java"),
-        "package demo;\npublic class Outer {\n  public class Inner { public int x = 1; }\n  public int use() { return new Inner().x; }\n}\n",
+        "package demo;\npublic class Outer {\n  public class Inner { public int x = 1; }\n  public int use() { return new Inner().x; }\n  public Runnable callback() { return new Runnable() { public void run() { System.out.println(\"ok\"); } }; }\n}\n",
     )
     .unwrap();
     let jdk = compile::detect_jdk();
@@ -274,7 +273,7 @@ fn inner_class_resolves_from_siblings() {
     assert!(std::process::Command::new(jdk.javac_path.as_deref().unwrap())
         .arg("-d").arg(&out).arg(src_dir.join("Outer.java"))
         .status().unwrap().success());
-    // demo/Outer.class and demo/Outer$Inner.class both exist.
+    // demo/Outer.class, demo/Outer$Inner.class and demo/Outer$1.class all exist.
     let bytes = std::fs::read(out.join("demo/Outer.class")).unwrap();
 
     let jd = nexterm_lib::decompile::find_decompiler_jar().unwrap();
@@ -284,12 +283,51 @@ fn inner_class_resolves_from_siblings() {
     // (a) WITHOUT the siblings classpath → inner class body is a placeholder.
     let alone = nexterm_lib::decompile::decompile_class(&cf, &jd, "demo/Outer", None).unwrap();
     let alone_has_inner = alone.contains("x = 1") || alone.contains("public class Inner");
-    // (b) WITH siblings (extract_sibling_classes, as revert/method-loc do) →
-    //     the inner class body must resolve.
+    // (b) WITH the full container classpath used by Save All Sources → the
+    //     inner class body must resolve in the root source unit.
     let jar_path = dir.join("outer.jar");
     assert!(std::process::Command::new("jar").arg("cf").arg(&jar_path).arg("-C").arg(&out).arg(".").status().unwrap().success());
-    let siblings = dir.join("siblings");
-    jar::extract_sibling_classes(&jar_path, "demo/Outer.class", &siblings).unwrap();
+    let index = jar::index_jar(&jar_path).unwrap();
+    assert!(index.entries.iter().any(|entry| entry.entry_path == "demo/Outer$Inner.class" && entry.is_inner_class));
+    assert!(index.entries.iter().any(|entry| entry.entry_path == "demo/Outer$1.class" && entry.is_inner_class));
+    // JD-GUI's second pass also reads an unclassified $ entry itself. This
+    // fixture excludes Outer.class, so only that pass can classify Outer$1.
+    let isolated = dir.join("anonymous-only.jar");
+    assert!(std::process::Command::new("jar")
+        .arg("cf")
+        .arg(&isolated)
+        .arg("-C")
+        .arg(&out)
+        .arg("demo/Outer$1.class")
+        .status()
+        .unwrap()
+        .success());
+    let isolated_index = jar::index_jar(&isolated).unwrap();
+    assert!(isolated_index.entries.iter().any(|entry| entry.entry_path == "demo/Outer$1.class" && entry.is_inner_class));
+
+    // Spring Boot stores application classes under BOOT-INF/classes while the
+    // InnerClasses attribute keeps the JVM name (demo/Outer$1). The physical
+    // archive prefix must be restored before comparing the two.
+    let boot_root = dir.join("boot");
+    let boot_classes = boot_root.join("BOOT-INF/classes/demo");
+    std::fs::create_dir_all(&boot_classes).unwrap();
+    for name in ["Outer.class", "Outer$Inner.class", "Outer$1.class"] {
+        std::fs::copy(out.join("demo").join(name), boot_classes.join(name)).unwrap();
+    }
+    let boot_jar = dir.join("boot.jar");
+    assert!(std::process::Command::new("jar")
+        .arg("cf")
+        .arg(&boot_jar)
+        .arg("-C")
+        .arg(&boot_root)
+        .arg(".")
+        .status()
+        .unwrap()
+        .success());
+    let boot_index = jar::index_jar(&boot_jar).unwrap();
+    assert!(boot_index.entries.iter().any(|entry| entry.entry_path == "BOOT-INF/classes/demo/Outer$1.class" && entry.is_inner_class));
+    let siblings = dir.join("container");
+    jar::extract_all_classes(&jar_path, &siblings).unwrap();
     let with_sib = nexterm_lib::decompile::decompile_class_with_classpath(
         &cf, &jd, &siblings.display().to_string(), "demo/Outer", None,
     )

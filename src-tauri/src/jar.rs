@@ -466,8 +466,11 @@ pub fn inner_classes_of(bytes: &[u8]) -> Vec<String> {
                         class_name[i] = Some(idx);
                     }
                 }
-                9 | 10 | 11 | 12 | 3 | 4 | 16 | 17 | 18 | 19 | 20 => {
+                3 | 4 | 9 | 10 | 11 | 12 | 17 | 18 => {
                     skip(&mut off, 4)?;
+                }
+                8 | 16 | 19 | 20 => {
+                    skip(&mut off, 2)?;
                 }
                 15 => {
                     skip(&mut off, 3)?;
@@ -969,6 +972,16 @@ fn class_name_from_path(path: &str) -> String {
     stripped.replace('/', ".").replace('\\', ".")
 }
 
+/// Resolve a JVM internal name to the physical entry path in the same archive
+/// source root as `declaring_path`. A Spring Boot class lives at
+/// `BOOT-INF/classes/com/example/Foo.class`, while its InnerClasses metadata
+/// refers to it only as `com/example/Foo`.
+fn entry_path_for_internal_name(declaring_path: &str, declaring_internal_name: &str, internal_name: &str) -> Option<String> {
+    let suffix = format!("{declaring_internal_name}.class");
+    let prefix = declaring_path.strip_suffix(&suffix)?;
+    Some(format!("{prefix}{internal_name}.class"))
+}
+
 /// List nested archive entries (jar/war/ear/zip) inside a zip — e.g. Spring
 /// Boot "BOOT-INF/lib/spring-core.jar" or "WEB-INF/lib/xxx.jar". Mirrors
 /// JD-GUI's recursive container model.
@@ -1217,8 +1230,40 @@ pub fn index_jar_reader<R: std::io::Read + std::io::Seek>(
             }
             buf
         };
+        let outer_internal_name = class_name_from_path(outer).replace('.', "/");
         for inner in inner_classes_of(&bytes) {
-            inner_type_paths.insert(format!("{inner}.class"));
+            if let Some(path) = entry_path_for_internal_name(outer, &outer_internal_name, &inner) {
+                inner_type_paths.insert(path);
+            }
+        }
+    }
+
+    // JD-GUI's JarContainerEntryUtil has a second pass for entries that were
+    // not declared by their inferred outer. Anonymous and local classes can
+    // still describe themselves through their own InnerClasses attribute.
+    // Do not use '$' as proof by itself: only hide an entry after bytecode
+    // metadata confirms it is an inner type.
+    for (name, _, _) in &raw {
+        if !name.ends_with(".class") || !name.contains('$') || inner_type_paths.contains(name) {
+            continue;
+        }
+        let bytes = {
+            let mut entry = match archive.by_name(name) {
+                Ok(entry) => entry,
+                Err(_) => continue,
+            };
+            let mut buffer = Vec::with_capacity(entry.size() as usize);
+            use std::io::Read;
+            if entry.read_to_end(&mut buffer).is_err() {
+                continue;
+            }
+            buffer
+        };
+        let entry_internal_name = class_name_from_path(name).replace('.', "/");
+        for inner in inner_classes_of(&bytes) {
+            if let Some(path) = entry_path_for_internal_name(name, &entry_internal_name, &inner) {
+                inner_type_paths.insert(path);
+            }
         }
     }
 

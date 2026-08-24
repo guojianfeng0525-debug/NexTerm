@@ -1941,11 +1941,13 @@ function AppContent() {
           <div className={cn('absolute inset-0 bg-background', section === 'api' ? '' : 'hidden')}>
             <ToolApiDebug active={section === 'api'} />
           </div>
-          <div className={cn('absolute inset-0 bg-background', section === 'jar' ? '' : 'hidden')}>
-            <Suspense fallback={<div className="h-full flex items-center justify-center text-xs text-muted-foreground">{'...'}</div>}>
-              <ToolJarDecompiler />
-            </Suspense>
-          </div>
+          {section === 'jar' && (
+            <div className="absolute inset-0 bg-background">
+              <Suspense fallback={<div className="h-full flex items-center justify-center text-xs text-muted-foreground">{'...'}</div>}>
+                <ToolJarDecompiler />
+              </Suspense>
+            </div>
+          )}
         </div>
       </div>
 

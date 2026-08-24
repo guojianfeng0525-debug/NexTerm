@@ -641,6 +641,10 @@ export function ToolJarDecompiler() {
   const editorRef = useRef<HTMLDivElement>(null);
   const editorViewRef = useRef<EditorView | null>(null);
   const rootRef = useRef<HTMLDivElement>(null);
+  const projectRef = useRef<ProjectSummary | null>(null);
+  const lifecycleRef = useRef(0);
+  const openTypeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const constTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   /** Latest selected entry, for async race guards (e.g. source swap). */
   const selectedEntryRef = useRef<string | null>(null);
   /** True while a programmatic doc replacement is in flight (don't mark dirty). */
@@ -667,6 +671,18 @@ export function ToolJarDecompiler() {
   const knownNamesRef = useRef<{ dotted: Set<string>; simple: Set<string>; slash: Set<string> }>({ dotted: new Set(), simple: new Set(), slash: new Set() });
   /** Count of indexed types (status bar) — state so it re-renders. */
   const [knownNamesCount, setKnownNamesCount] = useState(0);
+
+  useEffect(() => {
+    projectRef.current = project;
+  }, [project]);
+
+  useEffect(() => () => {
+    lifecycleRef.current += 1;
+    if (openTypeTimerRef.current) clearTimeout(openTypeTimerRef.current);
+    if (constTimerRef.current) clearTimeout(constTimerRef.current);
+    const currentProject = projectRef.current;
+    if (currentProject) void jarApi.deleteProject(currentProject.id);
+  }, []);
 
 
 
@@ -846,10 +862,16 @@ export function ToolJarDecompiler() {
   // ── Open a JAR by path (shared by dialog + drag&drop + recent history). ──
   const openProjectByPath = useCallback(
     async (path: string) => {
+      const lifecycle = lifecycleRef.current;
       setBusy(true);
       setBusyLabel(t('toolbox.jar.opening'));
       try {
         const p = await jarApi.openProject(path);
+        if (lifecycle !== lifecycleRef.current) {
+          void jarApi.deleteProject(p.id);
+          return;
+        }
+        projectRef.current = p;
         setProject(p);
         const idx = await jarApi.classIndex(p.id);
         setTree(idx);
@@ -941,6 +963,7 @@ export function ToolJarDecompiler() {
 
   // ── Open a Maven pom.xml: main jar + dependency libraries. ──
   const handleOpenPom = useCallback(async () => {
+    const lifecycle = lifecycleRef.current;
     const path = await open({
       multiple: false,
       directory: false,
@@ -951,6 +974,10 @@ export function ToolJarDecompiler() {
     setBusyLabel(t('toolbox.jar.opening'));
     try {
       const r = await jarApi.pomOpen(path);
+      if (lifecycle !== lifecycleRef.current) {
+        void jarApi.deleteProject(r.projectId);
+        return;
+      }
       const p: ProjectSummary = {
         id: r.projectId,
         name: r.name,
@@ -963,6 +990,7 @@ export function ToolJarDecompiler() {
         createdAt: 0,
         updatedAt: 0,
       };
+      projectRef.current = p;
       setProject(p);
       setTree(r.classTree);
       setLibraries(r.libraries);
@@ -1698,7 +1726,6 @@ export function ToolJarDecompiler() {
   }, [project, query]);
 
   // ── Open Type (Ctrl+T): JD-GUI global type search dialog. ──
-  const openTypeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const handleOpenTypeOpen = useCallback(() => {
     setOpenTypePattern('');
     setOpenTypeResults([]);
@@ -2015,7 +2042,6 @@ export function ToolJarDecompiler() {
   }, [project, selectedEntry, handleGotoLine]);
 
   // ── Search in constant pools (Ctrl+Shift+S): JD-GUI. ──
-  const constTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // JD-GUI SearchInConstantPools flag bits (exact values from source):
   // TYPE=1 CTOR=2 METHOD=4 FIELD=8 STRING=16 MODULE=32 DECL=64 REF=128.
