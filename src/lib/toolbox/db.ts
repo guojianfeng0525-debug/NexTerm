@@ -30,6 +30,7 @@ export type DbTable =
   | 'notes'
   | 'api_collections'
   | 'api_environments'
+  | 'api_request_history'
   | 'app_settings'
   | 'layout_config'
   | 'terminal_appearance'

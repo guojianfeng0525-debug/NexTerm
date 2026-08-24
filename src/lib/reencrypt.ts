@@ -22,6 +22,7 @@ const ENCRYPTED_FIELDS: Record<string, string[]> = {
   tunnels: ['jump_password'],
   api_collections: ['request'],
   api_environments: ['variables'],
+  api_request_history: ['details'],
 };
 
 /** Tables whose primary key is itself encrypted — rebuilt wholesale. */

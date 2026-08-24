@@ -14,6 +14,8 @@ const DB: Record<string, Record<string, unknown>[]> = {
   services: [],
   tunnels: [],
   api_collections: [],
+  api_request_history: [],
+  app_lock: [],
 };
 const invokeMock = vi.fn();
 
@@ -24,7 +26,7 @@ vi.mock('@tauri-apps/api/core', () => ({
 beforeEach(async () => {
   for (const k of Object.keys(DB)) DB[k] = [];
   invokeMock.mockImplementation(
-    (cmd: string, args?: { table?: string; row?: Record<string, unknown>; id?: string }) => {
+    (cmd: string, args?: { table?: string; row?: Record<string, unknown>; key?: string }) => {
       if (cmd === 'row_list' && args?.table) return Promise.resolve(DB[args.table] ?? []);
       if (cmd === 'row_upsert' && args?.table && args?.row) {
         const rows = DB[args.table as string];
@@ -34,8 +36,12 @@ beforeEach(async () => {
         else rows[idx] = args.row;
         return Promise.resolve();
       }
-      if (cmd === 'row_delete' && args?.table && args?.id) {
-        DB[args.table as string] = DB[args.table as string].filter(r => r.id !== args.id);
+      if (cmd === 'row_delete' && args?.table && args?.key) {
+        DB[args.table as string] = DB[args.table as string].filter(r => r.id !== args.key);
+        return Promise.resolve();
+      }
+      if (cmd === 'row_clear' && args?.table) {
+        DB[args.table] = [];
         return Promise.resolve();
       }
       return Promise.reject(new Error(`unexpected invoke: ${cmd}`));
@@ -148,8 +154,9 @@ describe('toolbox persistence', () => {
       bodyType: 'none' as const,
       bodyText: '',
       auth: { type: 'none' as const, username: '', password: '', token: '', apiKeyName: '', apiKeyValue: '', apiKeyIn: 'header' as const },
-      timeoutMs: 30000,
-      updatedAt: Date.now(),
+       timeoutMs: 30000,
+       assertions: [],
+       updatedAt: Date.now(),
     });
     setCollection([request('api-a', 'A'), request('api-b', 'B')]);
     await flush();
@@ -157,5 +164,32 @@ describe('toolbox persistence', () => {
 
     await hydrateApiDebugStorage();
     expect(getCollection().map((item) => item.id).sort()).toEqual(['api-a', 'api-b']);
+  });
+
+  it('keeps the latest 100 encrypted API request history entries across reloads', async () => {
+    const { addApiRequestHistory, clearApiRequestHistory, getApiRequestHistory, hydrateApiDebugStorage } = await import('../toolbox/api-debug-storage');
+    clearApiRequestHistory();
+    const config = {
+      id: 'request', name: '', group: '', method: 'GET', url: 'https://example.test/private?token=secret',
+      params: [], headers: [], bodyType: 'none' as const, bodyText: '',
+      auth: { type: 'bearer' as const, username: '', password: '', token: 'secret-token', apiKeyName: '', apiKeyValue: '', apiKeyIn: 'header' as const },
+       timeoutMs: 30000, updatedAt: Date.now(),
+       assertions: [],
+    };
+    for (let i = 0; i < 101; i++) {
+      addApiRequestHistory({
+        method: 'GET', url: config.url, status: 200, statusText: 'OK', durationMs: i,
+        config, responsePreview: `response-${i}`, responseBodyIsBase64: false,
+      });
+    }
+    await new Promise(resolve => setTimeout(resolve, 250));
+
+    expect(getApiRequestHistory()).toHaveLength(100);
+    expect(DB.api_request_history).toHaveLength(100);
+    expect(String(DB.api_request_history[0].details)).not.toContain('secret-token');
+
+    await hydrateApiDebugStorage();
+    expect(getApiRequestHistory()).toHaveLength(100);
+    expect(getApiRequestHistory()[0].config.auth.token).toBe('secret-token');
   });
 });

@@ -7,14 +7,14 @@
  * the active environment id lives in the `preferences` table. A synchronous
  * cache is hydrated by `hydrateApiDebugStorage()` after unlock.
  */
-import { rowList, rowUpsert, rowDelete, encField, decField } from './db';
+import { rowList, rowUpsert, rowDelete, rowClear, encField, decField } from './db';
 import { getApiActiveEnv, setApiActiveEnv as persistActiveEnv } from '../preferences';
 /** Coerce an unknown DB value to string ('' when absent). */
 function str(v: unknown): string {
   return typeof v === 'string' ? v : '';
 }
 
-export type BodyType = 'none' | 'json' | 'text' | 'form';
+export type BodyType = 'none' | 'json' | 'text' | 'form' | 'multipart';
 
 export interface AuthConfig {
   type: 'none' | 'basic' | 'bearer' | 'apikey';
@@ -26,6 +26,13 @@ export interface AuthConfig {
   apiKeyIn: 'header' | 'query';
 }
 
+/** Declarative response check. Values are data only; no scripts are executed. */
+export type ApiAssertion =
+  | { target: 'status'; operator: 'equals'; value: string }
+  | { target: 'header'; name: string; operator: 'equals' | 'contains'; value: string }
+  | { target: 'body'; path: string; operator: 'equals' | 'contains'; value: string }
+  | { target: 'responseTime'; operator: 'lessThanOrEqual'; value: string };
+
 export interface RequestConfig {
   id: string;
   name: string;
@@ -36,8 +43,11 @@ export interface RequestConfig {
   headers: [string, string][];
   bodyType: BodyType;
   bodyText: string;
+  /** Structured URL-encoded or multipart text fields. File contents are never persisted. */
+  formFields?: [string, string][];
   auth: AuthConfig;
   timeoutMs: number;
+  assertions: ApiAssertion[];
   updatedAt: number;
 }
 
@@ -47,9 +57,27 @@ export interface ApiEnvironment {
   variables: [string, string][];
 }
 
+export interface ApiRequestHistory {
+  id: string;
+  method: string;
+  url: string;
+  status: number;
+  statusText: string;
+  durationMs: number;
+  timestamp: number;
+  config: RequestConfig;
+  responsePreview: string;
+  responseBodyIsBase64: boolean;
+}
+
+export const API_REQUEST_HISTORY_LIMIT = 100;
+export const API_REQUEST_HISTORY_PREVIEW_CHARS = 8_000;
+
 let collection: RequestConfig[] = [];
 let environments: ApiEnvironment[] = [];
 let activeEnvId = '';
+let history: ApiRequestHistory[] = [];
+let historyPersistence: Promise<void> = Promise.resolve();
 let hydrated = false;
 
 export function isApiDebugStorageHydrated(): boolean {
@@ -66,6 +94,10 @@ export function getEnvironments(): ApiEnvironment[] {
 
 export function getActiveEnvId(): string {
   return activeEnvId;
+}
+
+export function getApiRequestHistory(): ApiRequestHistory[] {
+  return history;
 }
 
 async function rowToRequest(row: Record<string, unknown>): Promise<RequestConfig | null> {
@@ -91,10 +123,33 @@ async function rowToEnvironment(row: Record<string, unknown>): Promise<ApiEnviro
   return { id: str(row.id), name: str(row.name), variables };
 }
 
+async function rowToHistory(row: Record<string, unknown>): Promise<ApiRequestHistory | null> {
+  const raw = await decField(row.details as string);
+  if (!raw) return null;
+  try {
+    const details = JSON.parse(raw) as Omit<ApiRequestHistory, 'id' | 'method' | 'status' | 'durationMs' | 'timestamp'>;
+    if (!details.url || !details.config) return null;
+    return {
+      id: str(row.id),
+      method: str(row.method),
+      status: Number(row.status) || 0,
+      durationMs: Number(row.duration_ms) || 0,
+      timestamp: Number(row.timestamp) || 0,
+      ...details,
+    };
+  } catch {
+    return null;
+  }
+}
+
 /** Load requests, environments and the active env id from SQLite. */
 export async function hydrateApiDebugStorage(): Promise<void> {
   try {
-    const [cRows, eRows] = await Promise.all([rowList('api_collections'), rowList('api_environments')]);
+    const [cRows, eRows, hRows] = await Promise.all([
+      rowList('api_collections'),
+      rowList('api_environments'),
+      rowList('api_request_history'),
+    ]);
     const requests: RequestConfig[] = [];
     for (const row of cRows) {
       const r = await rowToRequest(row);
@@ -108,10 +163,19 @@ export async function hydrateApiDebugStorage(): Promise<void> {
     }
     // Active env id (app_settings column).
     activeEnvId = getApiActiveEnv();
+    const loadedHistory: ApiRequestHistory[] = [];
+    for (const row of hRows) {
+      const item = await rowToHistory(row);
+      if (item) loadedHistory.push(item);
+    }
+    loadedHistory.sort((a, b) => b.timestamp - a.timestamp);
+    history = loadedHistory.slice(0, API_REQUEST_HISTORY_LIMIT);
+    for (const item of loadedHistory.slice(API_REQUEST_HISTORY_LIMIT)) void rowDelete('api_request_history', item.id);
   } catch {
     collection = [];
     environments = [];
     activeEnvId = '';
+    history = [];
   }
   hydrated = true;
 }
@@ -161,4 +225,62 @@ export function setEnvironments(items: ApiEnvironment[]): void {
 export function setActiveEnvId(id: string): void {
   activeEnvId = id;
   persistActiveEnv(id);
+}
+
+/** Store an encrypted request snapshot and a bounded response preview. */
+export function addApiRequestHistory(item: Omit<ApiRequestHistory, 'id' | 'timestamp' | 'responsePreview'> & { responsePreview?: string }): void {
+  const entry: ApiRequestHistory = {
+    ...item,
+    id: `api-history-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+    timestamp: Date.now(),
+    responsePreview: (item.responsePreview ?? '').slice(0, API_REQUEST_HISTORY_PREVIEW_CHARS),
+  };
+  const removed = history.slice(API_REQUEST_HISTORY_LIMIT - 1).map((old) => old.id);
+  history = [entry, ...history].slice(0, API_REQUEST_HISTORY_LIMIT);
+  historyPersistence = historyPersistence.then(async () => {
+    const details = await encField(JSON.stringify({
+      url: entry.url,
+      statusText: entry.statusText,
+      config: entry.config,
+      responsePreview: entry.responsePreview,
+      responseBodyIsBase64: entry.responseBodyIsBase64,
+    }));
+    if (!details) return;
+    await rowUpsert('api_request_history', {
+      id: entry.id,
+      method: entry.method,
+      status: entry.status,
+      duration_ms: entry.durationMs,
+      timestamp: entry.timestamp,
+      details,
+    });
+    for (const id of removed) await rowDelete('api_request_history', id);
+  }, async () => {
+    // A prior failed write must not block subsequent history records.
+    const details = await encField(JSON.stringify({
+      url: entry.url,
+      statusText: entry.statusText,
+      config: entry.config,
+      responsePreview: entry.responsePreview,
+      responseBodyIsBase64: entry.responseBodyIsBase64,
+    }));
+    if (!details) return;
+    await rowUpsert('api_request_history', {
+      id: entry.id,
+      method: entry.method,
+      status: entry.status,
+      duration_ms: entry.durationMs,
+      timestamp: entry.timestamp,
+      details,
+    });
+    for (const id of removed) await rowDelete('api_request_history', id);
+  });
+}
+
+export function clearApiRequestHistory(): void {
+  history = [];
+  historyPersistence = historyPersistence.then(
+    () => rowClear('api_request_history'),
+    () => rowClear('api_request_history'),
+  );
 }

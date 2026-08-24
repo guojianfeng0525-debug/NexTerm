@@ -551,6 +551,7 @@ pub fn run() {
             config_archive::read_config_archive,
             // API debugger commands
             toolbox::api_request,
+            toolbox::api_request_cancel,
             toolbox::api_ws_connect,
             toolbox::api_ws_send,
             toolbox::api_ws_close,

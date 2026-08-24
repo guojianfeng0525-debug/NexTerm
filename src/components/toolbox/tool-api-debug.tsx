@@ -2,6 +2,8 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { open as openDialog } from '@tauri-apps/plugin-dialog';
+import { readFile } from '@tauri-apps/plugin-fs';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -10,6 +12,7 @@ import { Badge } from '@/components/ui/badge';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Separator } from '@/components/ui/separator';
+import { Switch } from '@/components/ui/switch';
 import {
   Select,
   SelectContent,
@@ -56,19 +59,27 @@ import {
   History,
   FileCode2,
   AlignLeft,
+  CheckCircle2,
+  XCircle,
+  Paperclip,
 } from 'lucide-react';
 import { inferFields, flattenFields, type ApiField } from '@/lib/toolbox/api-doc';
 import {
   getCollection,
   getEnvironments,
   getActiveEnvId,
+  getApiRequestHistory,
+  addApiRequestHistory,
+  clearApiRequestHistory,
   setCollection as persistCollection,
   setEnvironments as persistEnvironments,
   setActiveEnvId as persistActiveEnv,
   type RequestConfig,
   type ApiEnvironment,
+  type ApiRequestHistory,
   type BodyType,
   type AuthConfig,
+  type ApiAssertion,
 } from '@/lib/toolbox/api-debug-storage';
 import { cn } from '@/lib/utils';
 
@@ -76,6 +87,13 @@ import { cn } from '@/lib/utils';
 
 const METHODS = ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEAD', 'OPTIONS'] as const;
 const WS_ID = 'api-debug-ws';
+const MAX_MULTIPART_FILE_BYTES = 25 * 1024 * 1024;
+
+interface MultipartFile {
+  fieldName: string;
+  fileName: string;
+  dataBase64: string;
+}
 
 const EMPTY_AUTH: AuthConfig = {
   type: 'none',
@@ -87,19 +105,23 @@ const EMPTY_AUTH: AuthConfig = {
   apiKeyIn: 'header',
 };
 
-interface RestResponse {
+export interface RestResponse {
   status: number;
   statusText: string;
   headers: [string, string][];
   body: string;
   bodyIsBase64: boolean;
   durationMs: number;
+  bodySizeBytes?: number;
+  contentLength?: number;
+  truncated?: boolean;
 }
 
 interface WsMessageItem {
   dir: 'in' | 'out';
   data: string;
   time: number;
+  truncated?: boolean;
 }
 
 function newId(prefix: string): string {
@@ -108,6 +130,27 @@ function newId(prefix: string): string {
 
 function newParam(): [string, string] {
   return ['', ''];
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = '';
+  for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
+  }
+  return btoa(binary);
+}
+
+function newAssertion(): ApiAssertion {
+  return { target: 'status', operator: 'equals', value: '200' };
+}
+
+function assertionForTarget(target: ApiAssertion['target']): ApiAssertion {
+  switch (target) {
+    case 'header': return { target, name: '', operator: 'equals', value: '' };
+    case 'body': return { target, path: '$', operator: 'equals', value: '' };
+    case 'responseTime': return { target, operator: 'lessThanOrEqual', value: '1000' };
+    default: return { target, operator: 'equals', value: '200' };
+  }
 }
 
 function statusColor(status: number): string {
@@ -140,13 +183,239 @@ function authToHeaders(auth: AuthConfig): [string, string][] {
       if (auth.token) return [['Authorization', `Bearer ${auth.token.trim()}`]];
       return [];
     case 'apikey':
-      if (auth.apiKeyName.trim()) {
+      if (auth.apiKeyIn === 'header' && auth.apiKeyName.trim()) {
         return [[auth.apiKeyName.trim(), auth.apiKeyValue]];
       }
       return [];
     default:
       return [];
   }
+}
+
+export function parseUrlParams(value: string): [string, string][] | null {
+  try {
+    return Array.from(new URL(value).searchParams.entries());
+  } catch {
+    return null;
+  }
+}
+
+interface ApiRequestInput {
+  method: string;
+  url: string;
+  params: [string, string][];
+  headers: [string, string][];
+  bodyType: BodyType;
+  bodyText: string;
+  formFields?: [string, string][];
+  multipartFiles?: MultipartFile[];
+  auth: AuthConfig;
+  timeoutMs: string;
+  variables: [string, string][];
+}
+
+/** Resolve the editor state into the request sent to the backend. */
+export function buildApiRequest({
+  method,
+  url,
+  params,
+  headers,
+  bodyType,
+  bodyText,
+  formFields,
+  multipartFiles,
+  auth,
+  timeoutMs,
+  variables,
+}: ApiRequestInput) {
+  const finalUrl = new URL(resolveTemplate(url.trim(), variables));
+  const activeParams = params
+    .filter(([key]) => key.trim())
+    .map(([key, value]) => [resolveTemplate(key.trim(), variables), resolveTemplate(value, variables)] as [string, string]);
+
+  // Params edited in the table are authoritative over matching URL query keys.
+  // URLSearchParams also keeps the query before any #fragment automatically.
+  for (const [key] of activeParams) finalUrl.searchParams.delete(key);
+  for (const [key, value] of activeParams) finalUrl.searchParams.append(key, value);
+
+  const headerMap = new Map<string, [string, string]>();
+  const setHeader = (key: string, value: string) => {
+    const name = key.trim();
+    if (name) headerMap.set(name.toLowerCase(), [name, value]);
+  };
+  for (const [key, value] of headers) setHeader(key, resolveTemplate(value, variables));
+
+  const resolvedAuth: AuthConfig = {
+    ...auth,
+    username: resolveTemplate(auth.username, variables),
+    password: resolveTemplate(auth.password, variables),
+    token: resolveTemplate(auth.token, variables),
+    apiKeyName: resolveTemplate(auth.apiKeyName, variables),
+    apiKeyValue: resolveTemplate(auth.apiKeyValue, variables),
+  };
+  for (const [key, value] of authToHeaders(resolvedAuth)) setHeader(key, value);
+  if (resolvedAuth.type === 'apikey' && resolvedAuth.apiKeyIn === 'query' && resolvedAuth.apiKeyName.trim()) {
+    finalUrl.searchParams.set(resolvedAuth.apiKeyName.trim(), resolvedAuth.apiKeyValue);
+  }
+
+  const finalBody = bodyType === 'none' ? null : resolveTemplate(bodyText, variables);
+  const resolvedFormFields = formFields
+    ?.filter(([key]) => key.trim())
+    .map(([key, value]) => [resolveTemplate(key.trim(), variables), resolveTemplate(value, variables)] as [string, string]);
+  if (bodyType === 'json' && !headerMap.has('content-type')) {
+    setHeader('Content-Type', 'application/json');
+  } else if (bodyType === 'form' && !headerMap.has('content-type')) {
+    setHeader('Content-Type', 'application/x-www-form-urlencoded');
+  }
+
+  return {
+    method,
+    url: finalUrl.toString(),
+    headers: Array.from(headerMap.values()),
+    body: finalBody,
+    formFields: bodyType === 'form' && resolvedFormFields?.length ? resolvedFormFields : undefined,
+    multipart: bodyType === 'multipart' ? { fields: resolvedFormFields ?? [], files: multipartFiles ?? [] } : undefined,
+    timeoutMs: Number(timeoutMs) || 30000,
+  };
+}
+
+/** Build a persisted request without restoring transient multipart files. */
+export function buildApiRequestFromConfig(config: RequestConfig, variables: [string, string][]) {
+  return buildApiRequest({
+    method: config.method,
+    url: config.url,
+    params: config.params,
+    headers: config.headers,
+    bodyType: config.bodyType,
+    bodyText: config.bodyText,
+    formFields: config.formFields,
+    auth: config.auth,
+    timeoutMs: String(config.timeoutMs),
+    variables,
+  });
+}
+
+export function parseJsonResponse(text: string): { valid: true; value: unknown } | { valid: false } {
+  try {
+    return { valid: true, value: JSON.parse(text) as unknown };
+  } catch {
+    return { valid: false };
+  }
+}
+
+export interface ApiAssertionResult {
+  assertion: ApiAssertion;
+  passed: boolean;
+  actual: string;
+}
+
+/** Parse only $.property and [index] JSON paths, never expressions or filters. */
+function readJsonPath(value: unknown, path: string): unknown {
+  if (!path.startsWith('$')) return undefined;
+  const tokens = path.slice(1).match(/(?:\.([A-Za-z_$][\w$]*))|(?:\[(\d+)\])/g) ?? [];
+  if (tokens.join('') !== path.slice(1)) return undefined;
+  let current: unknown = value;
+  for (const token of tokens) {
+    const property = /^\.([A-Za-z_$][\w$]*)$/.exec(token)?.[1];
+    const index = /^\[(\d+)\]$/.exec(token)?.[1];
+    if (property !== undefined && current !== null && typeof current === 'object' && !Array.isArray(current)) {
+      current = (current as Record<string, unknown>)[property];
+    } else if (index !== undefined && Array.isArray(current)) {
+      current = current[Number(index)];
+    } else {
+      return undefined;
+    }
+  }
+  return current;
+}
+
+function displayAssertionValue(value: unknown): string {
+  return typeof value === 'string' ? value : JSON.stringify(value);
+}
+
+function equalityExpected(value: string): unknown {
+  const parsed = parseJsonResponse(value);
+  return parsed.valid ? parsed.value : value;
+}
+
+/** Evaluates fixed assertion types against a completed response, without eval. */
+export function evaluateApiAssertions(response: RestResponse, assertions: ApiAssertion[]): ApiAssertionResult[] {
+  const json = response.bodyIsBase64 ? { valid: false as const } : parseJsonResponse(response.body);
+  return assertions.map((assertion) => {
+    let actual: unknown;
+    if (assertion.target === 'status') actual = response.status;
+    if (assertion.target === 'responseTime') actual = response.durationMs;
+    if (assertion.target === 'header') {
+      actual = response.headers.find(([name]) => name.toLowerCase() === assertion.name.trim().toLowerCase())?.[1];
+    }
+    if (assertion.target === 'body') actual = json.valid ? readJsonPath(json.value, assertion.path.trim()) : undefined;
+    const actualText = actual === undefined ? '' : displayAssertionValue(actual);
+    let passed: boolean;
+    if (assertion.operator === 'equals') {
+      passed = actual !== undefined && JSON.stringify(actual) === JSON.stringify(equalityExpected(assertion.value));
+    } else if (assertion.operator === 'contains') {
+      const expected = equalityExpected(assertion.value);
+      passed = typeof actual === 'string'
+        ? actual.includes(String(expected))
+        : Array.isArray(actual) && actual.some((item) => JSON.stringify(item) === JSON.stringify(expected));
+    } else {
+      passed = typeof actual === 'number' && Number.isFinite(Number(assertion.value)) && actual <= Number(assertion.value);
+    }
+    return { assertion, passed, actual: actual === undefined ? '(missing)' : actualText };
+  });
+}
+
+export interface CollectionRunResult {
+  config: RequestConfig;
+  response?: RestResponse;
+  assertionResults: ApiAssertionResult[];
+  error?: string;
+  durationMs: number;
+}
+
+export function didCollectionRunPass(result: CollectionRunResult): boolean {
+  return !result.error
+    && !!result.response
+    && result.response.status >= 200
+    && result.response.status < 400
+    && result.assertionResults.every((assertion) => assertion.passed);
+}
+
+/** Run saved requests in order using only their declarative request/assertion data. */
+export async function runApiCollection(
+  configs: RequestConfig[],
+  variables: [string, string][],
+  execute: (request: ReturnType<typeof buildApiRequest>) => Promise<RestResponse>,
+  shouldStop: () => boolean = () => false,
+  stopOnFailure = false,
+  onResult?: (result: CollectionRunResult) => void,
+): Promise<CollectionRunResult[]> {
+  const results: CollectionRunResult[] = [];
+  for (const config of configs) {
+    if (shouldStop()) break;
+    const startedAt = performance.now();
+    let result: CollectionRunResult;
+    try {
+      const response = await execute(buildApiRequestFromConfig(config, variables));
+      result = {
+        config,
+        response,
+        assertionResults: evaluateApiAssertions(response, config.assertions ?? []),
+        durationMs: response.durationMs,
+      };
+    } catch (error) {
+      result = {
+        config,
+        assertionResults: [],
+        error: error instanceof Error ? error.message : String(error),
+        durationMs: Math.round(performance.now() - startedAt),
+      };
+    }
+    results.push(result);
+    onResult?.(result);
+    if (stopOnFailure && !didCollectionRunPass(result)) break;
+  }
+  return results;
 }
 
 
@@ -197,12 +466,9 @@ function buildJsonLines(text: string): JsonBlockLine[] {
   for (let i = 0; i < lines.length; i++) {
     const indent = /^\s*/.exec(lines[i])?.[0].length ?? 0;
     const trimmed = lines[i].trim();
-    // A line OPENS a block when it contains an UNCLOSED '{' / '[' — covers
-    // `"nested": {` and inline `"obj": { "a": 1` (net-positive braces).
-    // Fully-closed lines (`"k": {}`) and standalone closers are not open.
-    const braces = (trimmed.match(/\{/g) ?? []).length - (trimmed.match(/\}/g) ?? []).length;
-    const brackets = (trimmed.match(/\[/g) ?? []).length - (trimmed.match(/\]/g) ?? []).length;
-    const open = braces > 0 || brackets > 0;
+    // JSON.stringify emits structural openers at the end of their line. Using
+    // that shape avoids confusing braces inside string values with blocks.
+    const open = trimmed.endsWith('{') || trimmed.endsWith('[');
     const isClose = trimmed.startsWith('}') || trimmed.startsWith(']');
     if (isClose && stack.length > 0) {
       depth = Math.max(0, depth - 1);
@@ -267,7 +533,7 @@ const CollapsibleJson = React.memo(function CollapsibleJson({ text }: { text: st
             type="button"
             className="w-4 h-4 shrink-0 flex items-center justify-center text-muted-foreground hover:text-primary"
             onClick={() => toggle(i)}
-            aria-label={isCollapsed ? 'expand' : 'collapse'}
+            aria-label={isCollapsed ? t('toolbox.apiDebug.expand') : t('toolbox.apiDebug.collapse')}
           >
             {isCollapsed ? <ChevronRight className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
           </button>
@@ -275,7 +541,7 @@ const CollapsibleJson = React.memo(function CollapsibleJson({ text }: { text: st
             {isCollapsed ? (
               <>
                 <span className="text-muted-foreground/60">{line.text} …</span>
-                <span className="text-muted-foreground/60">{lines[line.closeIndex].text}</span>
+                {line.closeIndex >= 0 && <span className="text-muted-foreground/60">{lines[line.closeIndex]?.text}</span>}
               </>
             ) : (
               line.text
@@ -459,6 +725,7 @@ interface WsPanelProps {
   onInputChange: (v: string) => void;
   onConnect: () => void;
   onSend: () => void;
+  onClear: () => void;
 }
 
 const WsPanel = React.memo(function WsPanel({
@@ -471,6 +738,7 @@ const WsPanel = React.memo(function WsPanel({
   onInputChange,
   onConnect,
   onSend,
+  onClear,
 }: WsPanelProps) {
   const { t } = useTranslation();
   const wsIsLive = wsStatus === 'connected' || wsStatus === 'connecting';
@@ -517,8 +785,14 @@ const WsPanel = React.memo(function WsPanel({
         </div>
       </div>
 
-      <div className="flex-1 min-h-0 p-3 flex flex-col">
-        <div className="flex-1 min-h-0 rounded-lg border border-border overflow-hidden flex flex-col">
+        <div className="flex-1 min-h-0 p-3 flex flex-col">
+          <div className="flex justify-end pb-2 shrink-0">
+            <Button variant="ghost" size="sm" className="h-7 gap-1 text-xs" disabled={wsMessages.length === 0} onClick={onClear}>
+              <Trash2 className="h-3.5 w-3.5" />
+              {t('toolbox.apiDebug.wsClearMessages')}
+            </Button>
+          </div>
+          <div className="flex-1 min-h-0 rounded-lg border border-border overflow-hidden flex flex-col">
           <ScrollArea className="flex-1">
             <div className="p-3 space-y-2">
               {wsMessages.length === 0 ? (
@@ -536,7 +810,7 @@ const WsPanel = React.memo(function WsPanel({
                         {msg.dir === 'out' ? <ArrowUpRight className="h-3 w-3" /> : <ArrowDownLeft className="h-3 w-3" />}
                         {new Date(msg.time).toLocaleTimeString()}
                       </div>
-                      {msg.data}
+                      {msg.data}{msg.truncated ? `\n${t('toolbox.apiDebug.wsMessageTruncated')}` : ''}
                     </div>
                   </div>
                 ))
@@ -585,6 +859,10 @@ export function ToolApiDebug({ active = true }: ToolApiDebugProps) {
   const [saveName, setSaveName] = useState('');
   const [saveGroup, setSaveGroup] = useState('');
   const [deleteTarget, setDeleteTarget] = useState<RequestConfig | null>(null);
+  const [history, setHistory] = useState<ApiRequestHistory[]>(() => getApiRequestHistory());
+  const [stopOnFailure, setStopOnFailure] = useState(true);
+  const [collectionRun, setCollectionRun] = useState<{ group: string; results: CollectionRunResult[]; running: boolean; stopped: boolean } | null>(null);
+  const stopCollectionRunRef = useRef(false);
 
   /* request editor state */
   const [method, setMethod] = useState<string>('GET');
@@ -593,11 +871,15 @@ export function ToolApiDebug({ active = true }: ToolApiDebugProps) {
   const [headers, setHeaders] = useState<[string, string][]>([newParam()]);
   const [bodyType, setBodyType] = useState<BodyType>('none');
   const [bodyText, setBodyText] = useState('');
+  const [formFields, setFormFields] = useState<[string, string][]>([newParam()]);
+  const [multipartFiles, setMultipartFiles] = useState<MultipartFile[]>([]);
   const [auth, setAuth] = useState<AuthConfig>({ ...EMPTY_AUTH });
   const [timeoutMs, setTimeoutMs] = useState('30000');
+  const [assertions, setAssertions] = useState<ApiAssertion[]>([]);
   const [configTab, setConfigTab] = useState('params');
 
   const [loading, setLoading] = useState(false);
+  const activeRequestId = useRef<string | null>(null);
   const [response, setResponse] = useState<RestResponse | null>(null);
   const [showRespHeaders, setShowRespHeaders] = useState(false);
   // Raw view renders the body in chunks so a multi-MB response never becomes
@@ -612,7 +894,6 @@ export function ToolApiDebug({ active = true }: ToolApiDebugProps) {
   const [wsStatus, setWsStatus] = useState<'idle' | 'connecting' | 'connected' | 'closed'>('idle');
   const [wsMessages, setWsMessages] = useState<WsMessageItem[]>([]);
   const [wsInput, setWsInput] = useState('');
-  const wsConnectingRef = useRef(false);
 
   useEffect(() => {
     persistCollection(collection);
@@ -644,11 +925,13 @@ export function ToolApiDebug({ active = true }: ToolApiDebugProps) {
   /* ── websocket events ─────────────────────────────────────────────────── */
   useEffect(() => {
     const unlisteners: UnlistenFn[] = [];
-    void listen<{ id: string; data: string; timestamp: number }>('api://ws-message', (event) => {
+    void listen<{ id: string; data: string; timestamp: number; truncated?: boolean }>('api://ws-message', (event) => {
       if (event.payload.id !== WS_ID) return;
-      setWsMessages((prev) => [...prev.slice(-499), { dir: 'in', data: event.payload.data, time: Date.now() }]);
+      setWsMessages((prev) => [...prev.slice(-499), {
+        dir: 'in', data: event.payload.data, time: event.payload.timestamp, truncated: event.payload.truncated,
+      }]);
     }).then((fn) => unlisteners.push(fn));
-    void listen<{ id: string; status: string; error?: string }>('api://ws-status', (event) => {
+    void listen<{ id: string; status: string; error?: string; reason?: string }>('api://ws-status', (event) => {
       if (event.payload.id !== WS_ID) return;
       setWsStatus(event.payload.status === 'connected' ? 'connected' : 'closed');
       if (event.payload.error) {
@@ -662,86 +945,65 @@ export function ToolApiDebug({ active = true }: ToolApiDebugProps) {
 
   /* ── helpers ──────────────────────────────────────────────────────────── */
 
-  const applyConfig = useCallback((cfg: RequestConfig) => {
+  const applyConfig = useCallback((cfg: RequestConfig, selectRequest = true) => {
     setMethod(cfg.method);
     setUrl(cfg.url);
     setParams(cfg.params.length > 0 ? cfg.params.map((p) => [...p] as [string, string]) : [newParam()]);
     setHeaders(cfg.headers.length > 0 ? cfg.headers.map((h) => [...h] as [string, string]) : [newParam()]);
     setBodyType(cfg.bodyType);
     setBodyText(cfg.bodyText);
+    setFormFields(cfg.formFields?.length ? cfg.formFields.map((field) => [...field] as [string, string]) : [newParam()]);
+    // Files are intentionally not persisted with request configurations.
+    setMultipartFiles([]);
     setAuth({ ...EMPTY_AUTH, ...cfg.auth });
     setTimeoutMs(String(cfg.timeoutMs || 30000));
+    setAssertions(cfg.assertions ?? []);
     setResponse(null);
-    setSelectedId(cfg.id);
+    if (selectRequest) setSelectedId(cfg.id);
   }, []);
 
   /** Parse a pasted URL's query string into the params table so they can be
    *  inspected/edited (like Postman/Insomnia). Runs on every URL edit. */
   const handleUrlChange = useCallback((value: string) => {
     setUrl(value);
-    const qIndex = value.indexOf('?');
-    if (qIndex === -1) return;
-    const qs = value.slice(qIndex + 1).split('#')[0];
-    if (!qs) return;
-    const safeDecode = (raw: string) => {
-      try {
-        return decodeURIComponent(raw.replace(/\+/g, ' '));
-      } catch {
-        return raw;
-      }
-    };
-    const parsed: [string, string][] = qs
-      .split('&')
-      .map((pair) => {
-        const eq = pair.indexOf('=');
-        if (eq === -1) return [safeDecode(pair), ''] as [string, string];
-        return [safeDecode(pair.slice(0, eq)), safeDecode(pair.slice(eq + 1))] as [string, string];
-      })
-      .filter(([k]) => k.trim().length > 0);
-    if (parsed.length === 0) return;
-    setParams((prev) => {
-      // Keep any hand-typed rows; drop the trailing blank row before merging.
-      const kept = prev.filter(([k]) => k.trim().length > 0);
-      return [...parsed, ...kept];
-    });
+    const parsed = parseUrlParams(value);
+    if (parsed === null) return;
+    setParams(parsed.length > 0 ? parsed : [newParam()]);
   }, []);
 
   const buildRequest = useCallback(() => {
-    const vars = activeEnv?.variables ?? [];
-    let finalUrl = resolveTemplate(url.trim(), vars);
-    const activeParams = params.filter(([k]) => k.trim());
-    if (activeParams.length > 0) {
-      const qs = activeParams
-        .map(([k, v]) => `${encodeURIComponent(k.trim())}=${encodeURIComponent(resolveTemplate(v, vars))}`)
-        .join('&');
-      finalUrl = finalUrl.includes('?') ? `${finalUrl}&${qs}` : `${finalUrl}?${qs}`;
-    }
-
-    const headerMap = new Map<string, string>();
-    for (const [k, v] of headers) {
-      if (k.trim()) headerMap.set(k.trim(), resolveTemplate(v, vars));
-    }
-    for (const [k, v] of authToHeaders(auth)) {
-      headerMap.set(k, v);
-    }
-    if (auth.type === 'apikey' && auth.apiKeyIn === 'query' && auth.apiKeyName.trim()) {
-      const sep = finalUrl.includes('?') ? '&' : '?';
-      finalUrl = `${finalUrl}${sep}${encodeURIComponent(auth.apiKeyName.trim())}=${encodeURIComponent(auth.apiKeyValue)}`;
-    }
-
-    const finalBody = bodyType === 'none' ? null : resolveTemplate(bodyText, vars);
-    if (bodyType === 'form' && finalBody) {
-      headerMap.set('Content-Type', 'application/x-www-form-urlencoded');
-    }
-
-    return {
+    return buildApiRequest({
       method,
-      url: finalUrl,
-      headers: Array.from(headerMap.entries()),
-      body: finalBody,
-      timeoutMs: Number(timeoutMs) || 30000,
-    };
-  }, [url, params, headers, bodyType, bodyText, auth, timeoutMs, activeEnv, method]);
+      url,
+      params,
+      headers,
+      bodyType,
+      bodyText,
+      formFields,
+      multipartFiles,
+      auth,
+      timeoutMs,
+      variables: activeEnv?.variables ?? [],
+    });
+  }, [url, params, headers, bodyType, bodyText, formFields, multipartFiles, auth, timeoutMs, activeEnv, method]);
+
+  const addMultipartFile = useCallback(async () => {
+    const path = await openDialog({ multiple: false });
+    if (typeof path !== 'string') return;
+    try {
+      const bytes = await readFile(path);
+      if (bytes.byteLength > MAX_MULTIPART_FILE_BYTES) {
+        toast.error(t('toolbox.apiDebug.fileTooLarge', { size: MAX_MULTIPART_FILE_BYTES / (1024 * 1024) }));
+        return;
+      }
+      const fileName = path.split(/[\\/]/).pop() || path;
+      setMultipartFiles((files) => [...files, { fieldName: 'file', fileName, dataBase64: bytesToBase64(bytes) }]);
+    } catch (error) {
+      toast.error(t('toolbox.apiDebug.fileReadFailed'), {
+        description: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }, [t]);
 
   const handleSend = useCallback(async () => {
     if (!url.trim()) {
@@ -751,19 +1013,59 @@ export function ToolApiDebug({ active = true }: ToolApiDebugProps) {
     setLoading(true);
     setResponse(null);
     try {
-      const req = buildRequest();
+      const requestId = crypto.randomUUID();
+      activeRequestId.current = requestId;
+      const req = { ...buildRequest(), requestId };
       const resp = await invoke<RestResponse>('api_request', { request: req });
       setResponse(resp);
-      // Huge bodies can't be parsed into a tree — land on the raw view.
-      setRespView(resp.body.length > MAX_PARSE_BODY_CHARS ? 'raw' : 'tree');
+      const config: RequestConfig = {
+        id: selectedId ?? newId('api-history-request'),
+        name: '',
+        group: '',
+        method,
+        url: url.trim(),
+        params: params.filter(([key]) => key.trim()).map((param) => [...param] as [string, string]),
+        headers: headers.filter(([key]) => key.trim()).map((header) => [...header] as [string, string]),
+        bodyType,
+        bodyText,
+        formFields: formFields.filter(([key]) => key.trim()).map((field) => [...field] as [string, string]),
+        auth: { ...auth },
+        timeoutMs: Number(timeoutMs) || 30000,
+        assertions,
+        updatedAt: Date.now(),
+      };
+      addApiRequestHistory({
+        method: req.method,
+        url: req.url,
+        status: resp.status,
+        statusText: resp.statusText,
+        durationMs: resp.durationMs,
+        config,
+        responsePreview: resp.body,
+        responseBodyIsBase64: resp.bodyIsBase64,
+      });
+      setHistory(getApiRequestHistory());
+      // Non-JSON and oversized responses cannot use the formatted JSON view.
+      // Send them straight to raw output instead of incorrectly calling them
+      // "too large" (for example a 586 B HTML response).
+      const isSmallJson = !resp.bodyIsBase64
+        && resp.body.length <= MAX_PARSE_BODY_CHARS
+        && parseJsonResponse(resp.body).valid;
+      setRespView(isSmallJson ? 'tree' : 'raw');
     } catch (error) {
       toast.error(t('toolbox.apiDebug.requestFailed'), {
         description: error instanceof Error ? error.message : String(error),
       });
     } finally {
+      activeRequestId.current = null;
       setLoading(false);
     }
-  }, [url, buildRequest, t]);
+  }, [url, buildRequest, t, selectedId, method, params, headers, bodyType, bodyText, formFields, auth, timeoutMs, assertions]);
+
+  const handleCancelRequest = useCallback(() => {
+    const requestId = activeRequestId.current;
+    if (requestId) void invoke('api_request_cancel', { requestId });
+  }, []);
 
   const openSaveDialog = useCallback((saveAsNew = false) => {
     const selected = saveAsNew ? null : collection.find((item) => item.id === selectedId);
@@ -788,8 +1090,10 @@ export function ToolApiDebug({ active = true }: ToolApiDebugProps) {
       headers: headers.filter(([k]) => k.trim()).map((h) => [...h] as [string, string]),
       bodyType,
       bodyText,
+      formFields: formFields.filter(([key]) => key.trim()).map((field) => [...field] as [string, string]),
       auth: { ...auth },
       timeoutMs: Number(timeoutMs) || 30000,
+      assertions,
       updatedAt: Date.now(),
     };
     setCollection((prev) => {
@@ -800,7 +1104,7 @@ export function ToolApiDebug({ active = true }: ToolApiDebugProps) {
     setSelectedId(cfg.id);
     setSaveDialogOpen(false);
     toast.success(t('toolbox.apiDebug.saved'));
-  }, [saveName, saveGroup, selectedId, method, url, params, headers, bodyType, bodyText, auth, timeoutMs, t]);
+  }, [saveName, saveGroup, selectedId, method, url, params, headers, bodyType, bodyText, formFields, auth, timeoutMs, assertions, t]);
 
   const handleDeleteRequest = useCallback(() => {
     if (!deleteTarget) return;
@@ -819,6 +1123,41 @@ export function ToolApiDebug({ active = true }: ToolApiDebugProps) {
     }
     return Array.from(map.entries());
   }, [collection]);
+
+  const handleRunGroup = useCallback(async (group: string, configs: RequestConfig[]) => {
+    if (configs.length === 0) return;
+    stopCollectionRunRef.current = false;
+    setCollectionRun({ group, results: [], running: true, stopped: false });
+    const variables = activeEnv?.variables ?? [];
+    await runApiCollection(
+      configs,
+      variables,
+      (request) => invoke<RestResponse>('api_request', { request }),
+      () => stopCollectionRunRef.current,
+      stopOnFailure,
+      (result) => {
+        if (result.response) {
+          addApiRequestHistory({
+            method: result.config.method,
+            url: buildApiRequestFromConfig(result.config, variables).url,
+            status: result.response.status,
+            statusText: result.response.statusText,
+            durationMs: result.response.durationMs,
+            config: result.config,
+            responsePreview: result.response.body,
+            responseBodyIsBase64: result.response.bodyIsBase64,
+          });
+          setHistory(getApiRequestHistory());
+        }
+        setCollectionRun((previous) => previous ? { ...previous, results: [...previous.results, result] } : previous);
+      },
+    );
+    setCollectionRun((previous) => previous ? { ...previous, running: false, stopped: stopCollectionRunRef.current } : previous);
+  }, [activeEnv, stopOnFailure]);
+
+  const handleStopCollectionRun = useCallback(() => {
+    stopCollectionRunRef.current = true;
+  }, []);
 
   /* ── environment dialog ───────────────────────────────────────────────── */
 
@@ -855,15 +1194,12 @@ export function ToolApiDebug({ active = true }: ToolApiDebugProps) {
       setWsStatus('closed');
       return;
     }
+    setWsMessages([]);
     setWsStatus('connecting');
-    wsConnectingRef.current = true;
     try {
       await invoke('api_ws_connect', { id: WS_ID, url: wsUrl.trim() });
-      setWsMessages([]);
-      setWsStatus('connected');
     } catch (error) {
       setWsStatus('closed');
-      wsConnectingRef.current = false;
       toast.error(t('toolbox.apiDebug.wsConnectFailed'), {
         description: error instanceof Error ? error.message : String(error),
       });
@@ -884,6 +1220,10 @@ export function ToolApiDebug({ active = true }: ToolApiDebugProps) {
     }
   }, [wsInput, wsStatus, t]);
 
+  const handleWsClear = useCallback(() => {
+    setWsMessages([]);
+  }, []);
+
   /* ── KV row editor (shared for params/headers) ────────────────────────── */
 
 
@@ -898,33 +1238,35 @@ export function ToolApiDebug({ active = true }: ToolApiDebugProps) {
     }
   }, [bodyType, bodyText]);
 
-  const parsedBody = useMemo(() => {
-    if (!response || response.bodyIsBase64) return null;
+  const parsedResponse = useMemo(() => {
+    if (!response || response.bodyIsBase64) return { valid: false } as const;
     // Huge bodies are never JSON.parse'd — the formatted view is skipped and
     // only raw (chunked) text is shown.
-    if (response.body.length > MAX_PARSE_BODY_CHARS) return null;
-    try {
-      return JSON.parse(response.body) as unknown;
-    } catch {
-      return null;
-    }
+    if (response.body.length > MAX_PARSE_BODY_CHARS) return { valid: false } as const;
+    return parseJsonResponse(response.body);
   }, [response]);
+  const parsedBody = parsedResponse.valid ? parsedResponse.value : undefined;
 
   // Pretty-printed JSON text for the formatted (collapsible) view.
   const prettyBody = useMemo(() => {
-    if (parsedBody === null) return '';
+    if (!parsedResponse.valid) return '';
     try {
       return JSON.stringify(parsedBody, null, 2);
     } catch {
       return '';
     }
-  }, [parsedBody]);
+  }, [parsedBody, parsedResponse.valid]);
 
   const responseFields = useMemo(() => {
-    if (!parsedBody || response?.bodyIsBase64) return null;
+    if (!parsedResponse.valid || response?.bodyIsBase64) return null;
     if ((response?.body.length ?? 0) > MAX_FIELD_INFER_CHARS) return null;
     return inferFields(parsedBody);
-  }, [parsedBody, response]);
+  }, [parsedBody, parsedResponse.valid, response]);
+
+  const assertionResults = useMemo(
+    () => response ? evaluateApiAssertions(response, assertions) : [],
+    [response, assertions],
+  );
 
   return (
     <div className="h-full flex flex-col overflow-hidden bg-background">
@@ -954,26 +1296,64 @@ export function ToolApiDebug({ active = true }: ToolApiDebugProps) {
       <div className="flex flex-1 min-h-0 overflow-hidden">
         {/* ── collection sidebar ── */}
         <div className="w-56 shrink-0 border-r border-border flex flex-col bg-muted/20">
-          <div className="px-2 pt-2 pb-1 flex items-center justify-between">
-            <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-              {t('toolbox.apiDebug.collection')}
+           <div className="px-2 pt-2 pb-1 flex items-center justify-between">
+             <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+               {t('toolbox.apiDebug.collection')}
             </span>
             <Button variant="ghost" size="sm" className="h-5 w-5 p-0 text-muted-foreground hover:text-foreground" onClick={() => openSaveDialog(true)} title={t('toolbox.apiDebug.newRequest')}>
-              <Plus className="h-3.5 w-3.5" />
-            </Button>
+               <Plus className="h-3.5 w-3.5" />
+             </Button>
+           </div>
+          <div className="px-2 pb-2 flex items-center gap-1.5 text-[10px] text-muted-foreground">
+            <Switch checked={stopOnFailure} onCheckedChange={setStopOnFailure} className="scale-75 origin-left" />
+            <span>{t('toolbox.apiDebug.stopOnFailure')}</span>
           </div>
-          <ScrollArea className="flex-1">
+          {collectionRun && (
+            <div className="mx-2 mb-2 rounded-md border border-border bg-background/60 px-2 py-1.5 text-[10px]">
+              <div className="flex items-center gap-1">
+                <span className="min-w-0 flex-1 truncate font-medium">{t('toolbox.apiDebug.runReport', { group: collectionRun.group || t('toolbox.apiDebug.ungrouped') })}</span>
+                {collectionRun.running && <Loader2 className="h-3 w-3 animate-spin" />}
+                {collectionRun.running && <Button variant="ghost" size="sm" className="h-5 px-1 text-[10px]" onClick={handleStopCollectionRun}>{t('toolbox.apiDebug.stop')}</Button>}
+              </div>
+              <div className="mt-1 text-muted-foreground">
+                {t('toolbox.apiDebug.runSummary', {
+                  passed: collectionRun.results.filter(didCollectionRunPass).length,
+                  failed: collectionRun.results.filter((result) => !didCollectionRunPass(result)).length,
+                  total: collectionRun.results.length,
+                  duration: collectionRun.results.reduce((total, result) => total + result.durationMs, 0),
+                })}{collectionRun.stopped ? ` · ${t('toolbox.apiDebug.runStopped')}` : ''}
+              </div>
+              {collectionRun.results.slice(-3).map((result) => (
+                <div key={result.config.id} className={cn('mt-1 flex items-center gap-1 truncate', didCollectionRunPass(result) ? 'text-success' : 'text-destructive')}>
+                  {didCollectionRunPass(result) ? <CheckCircle2 className="h-3 w-3 shrink-0" /> : <XCircle className="h-3 w-3 shrink-0" />}
+                  <span className="min-w-0 flex-1 truncate">{result.config.name}</span>
+                  <span className="font-mono">{result.response?.status ?? t('toolbox.apiDebug.runError')}</span>
+                  <span className="text-muted-foreground">{result.durationMs} ms</span>
+                </div>
+              ))}
+            </div>
+          )}
+          <ScrollArea className="flex-1 min-h-0">
             <div className="px-1 pb-2 space-y-0.5">
               {collection.length === 0 ? (
                 <p className="px-2 py-1 text-xs text-muted-foreground">{t('toolbox.apiDebug.noCollection')}</p>
               ) : (
                 groups.map(([group, items]) => (
                   <div key={group || '__root__'} className="space-y-0.5">
-                    {group && (
-                      <p className="px-2 py-1 text-[11px] font-medium text-muted-foreground flex items-center gap-1">
-                        <FolderOpen className="h-3 w-3" /> {group}
-                      </p>
-                    )}
+                    <div className="px-2 py-1 text-[11px] font-medium text-muted-foreground flex items-center gap-1">
+                      <FolderOpen className="h-3 w-3" /> <span className="min-w-0 flex-1 truncate">{group || t('toolbox.apiDebug.ungrouped')}</span>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-5 px-1 text-[10px]"
+                        disabled={collectionRun?.running === true}
+                        onClick={() => void handleRunGroup(group, items)}
+                        title={t('toolbox.apiDebug.runGroup', { group: group || t('toolbox.apiDebug.ungrouped') })}
+                        aria-label={t('toolbox.apiDebug.runGroup', { group: group || t('toolbox.apiDebug.ungrouped') })}
+                      >
+                        <Play className="h-3 w-3" />
+                      </Button>
+                    </div>
                     {items.map((item) => (
                       <div
                         key={item.id}
@@ -1003,6 +1383,53 @@ export function ToolApiDebug({ active = true }: ToolApiDebugProps) {
               )}
             </div>
           </ScrollArea>
+          <div className="border-t border-border shrink-0">
+            <div className="px-2 pt-2 pb-1 flex items-center justify-between">
+              <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                {t('toolbox.apiDebug.history')}
+              </span>
+              {history.length > 0 && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-5 w-5 p-0 text-muted-foreground hover:text-destructive"
+                  onClick={() => {
+                    clearApiRequestHistory();
+                    setHistory([]);
+                  }}
+                  title={t('toolbox.apiDebug.clearHistory')}
+                  aria-label={t('toolbox.apiDebug.clearHistory')}
+                >
+                  <Trash2 className="h-3 w-3" />
+                </Button>
+              )}
+            </div>
+            <ScrollArea className="h-36">
+              <div className="px-1 pb-2 space-y-0.5">
+                {history.length === 0 ? (
+                  <p className="px-2 py-1 text-xs text-muted-foreground">{t('toolbox.apiDebug.noHistory')}</p>
+                ) : history.map((item) => (
+                  <button
+                    key={item.id}
+                    type="button"
+                    className="w-full rounded-md px-2 py-1.5 text-left hover:bg-accent/60"
+                    onClick={() => applyConfig(item.config, false)}
+                    title={item.responsePreview}
+                    aria-label={t('toolbox.apiDebug.restoreHistory')}
+                  >
+                    <div className="flex items-center gap-1.5">
+                      <Badge variant="outline" className="text-[9px] font-mono shrink-0 px-1">{item.method}</Badge>
+                      <Badge variant="outline" className={cn('text-[9px] font-mono shrink-0 px-1', statusColor(item.status))}>{item.status}</Badge>
+                      <span className="min-w-0 flex-1 truncate font-mono text-[10px]">{item.url}</span>
+                    </div>
+                    <div className="mt-0.5 truncate text-[10px] text-muted-foreground">
+                      {item.durationMs} ms · {new Date(item.timestamp).toLocaleString()}
+                    </div>
+                  </button>
+                ))}
+              </div>
+            </ScrollArea>
+          </div>
         </div>
 
         {/* ── main area ── */}
@@ -1042,9 +1469,9 @@ export function ToolApiDebug({ active = true }: ToolApiDebugProps) {
                       if (e.key === 'Enter') void handleSend();
                     }}
                   />
-                  <Button size="sm" className="h-9 gap-1.5 shrink-0" disabled={loading} onClick={() => void handleSend()}>
-                    {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
-                    {t('toolbox.apiDebug.send')}
+                  <Button size="sm" className="h-9 gap-1.5 shrink-0" onClick={loading ? handleCancelRequest : () => void handleSend()}>
+                    {loading ? <Square className="h-4 w-4" /> : <Send className="h-4 w-4" />}
+                    {loading ? t('common.cancel') : t('toolbox.apiDebug.send')}
                   </Button>
                   <Button size="sm" variant="outline" className="h-9 gap-1 shrink-0" onClick={() => openSaveDialog()} title={t('toolbox.apiDebug.saveRequest')}>
                     <Save className="h-4 w-4" />
@@ -1063,6 +1490,7 @@ export function ToolApiDebug({ active = true }: ToolApiDebugProps) {
                     <TabsTrigger value="auth" className="text-[11px] px-2.5 h-7 gap-1">
                       <KeyRound className="h-3 w-3" /> {t('toolbox.apiDebug.auth')}
                     </TabsTrigger>
+                    <TabsTrigger value="assertions" className="text-[11px] px-2.5 h-7">{t('toolbox.apiDebug.assertions')}</TabsTrigger>
                   </TabsList>
 
                   <div className="rounded-lg border border-border p-2">
@@ -1082,6 +1510,7 @@ export function ToolApiDebug({ active = true }: ToolApiDebugProps) {
                           <SelectItem value="json" className="text-xs">JSON</SelectItem>
                           <SelectItem value="text" className="text-xs">{t('toolbox.apiDebug.bodyText')}</SelectItem>
                           <SelectItem value="form" className="text-xs">x-www-form-urlencoded</SelectItem>
+                          <SelectItem value="multipart" className="text-xs">multipart/form-data</SelectItem>
                         </SelectContent>
                       </Select>
                       {bodyType === 'json' && (
@@ -1100,7 +1529,31 @@ export function ToolApiDebug({ active = true }: ToolApiDebugProps) {
                           </span>
                         </div>
                       )}
-                      {bodyType !== 'none' && (
+                      {(bodyType === 'form' || bodyType === 'multipart') && (
+                        <div className="space-y-2">
+                          <KeyValueEditor rows={formFields} onRowsChange={setFormFields} keyPlaceholder={t('toolbox.apiDebug.key')} valuePlaceholder={t('toolbox.apiDebug.value')} />
+                          {bodyType === 'multipart' && (
+                            <div className="space-y-1.5 border-t border-border pt-2">
+                              {multipartFiles.map((file, index) => (
+                                <div key={`${file.fileName}-${index}`} className="flex items-center gap-1.5">
+                                  <Input
+                                    value={file.fieldName}
+                                    onChange={(event) => setMultipartFiles((files) => files.map((item, itemIndex) => itemIndex === index ? { ...item, fieldName: event.target.value } : item))}
+                                    placeholder={t('toolbox.apiDebug.fileField')}
+                                    className="h-7 w-32 font-mono text-xs"
+                                  />
+                                  <span className="min-w-0 flex-1 truncate font-mono text-xs text-muted-foreground">{file.fileName}</span>
+                                  <Button variant="ghost" size="sm" className="h-7 w-7 p-0 text-muted-foreground hover:text-destructive" onClick={() => setMultipartFiles((files) => files.filter((_, itemIndex) => itemIndex !== index))} aria-label={t('common.delete')}><Trash2 className="h-3.5 w-3.5" /></Button>
+                                </div>
+                              ))}
+                              <Button variant="outline" size="sm" className="h-7 gap-1 text-xs" onClick={() => void addMultipartFile()}>
+                                <Paperclip className="h-3.5 w-3.5" />{t('toolbox.apiDebug.chooseFile')}
+                              </Button>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                      {bodyType !== 'none' && bodyType !== 'form' && bodyType !== 'multipart' && (
                         <Textarea
                           value={bodyText}
                           onChange={(e) => setBodyText(e.target.value)}
@@ -1148,6 +1601,35 @@ export function ToolApiDebug({ active = true }: ToolApiDebugProps) {
                         </div>
                       )}
                     </TabsContent>
+                    <TabsContent value="assertions" className="mt-0 space-y-2">
+                      <p className="text-[10px] text-muted-foreground">{t('toolbox.apiDebug.assertionsDesc')}</p>
+                      {assertions.map((assertion, index) => (
+                        <div key={index} className="flex items-center gap-1.5">
+                          <Select value={assertion.target} onValueChange={(target) => setAssertions((items) => items.map((item, itemIndex) => itemIndex === index ? assertionForTarget(target as ApiAssertion['target']) : item))}>
+                            <SelectTrigger className="h-7 w-28 text-xs"><SelectValue /></SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="status" className="text-xs">{t('toolbox.apiDebug.assertStatus')}</SelectItem>
+                              <SelectItem value="header" className="text-xs">{t('toolbox.apiDebug.assertHeader')}</SelectItem>
+                              <SelectItem value="body" className="text-xs">{t('toolbox.apiDebug.assertBody')}</SelectItem>
+                              <SelectItem value="responseTime" className="text-xs">{t('toolbox.apiDebug.assertResponseTime')}</SelectItem>
+                            </SelectContent>
+                          </Select>
+                          {assertion.target === 'header' && <Input value={assertion.name} onChange={(e) => setAssertions((items) => items.map((item, itemIndex) => itemIndex === index ? { ...item, name: e.target.value } as ApiAssertion : item))} placeholder={t('toolbox.apiDebug.assertHeaderName')} className="h-7 w-32 font-mono text-xs" />}
+                          {assertion.target === 'body' && <Input value={assertion.path} onChange={(e) => setAssertions((items) => items.map((item, itemIndex) => itemIndex === index ? { ...item, path: e.target.value } as ApiAssertion : item))} placeholder="$.data.items[0].id" className="h-7 w-40 font-mono text-xs" />}
+                          <Select value={assertion.operator} onValueChange={(operator) => setAssertions((items) => items.map((item, itemIndex) => itemIndex === index ? { ...item, operator } as ApiAssertion : item))}>
+                            <SelectTrigger className="h-7 w-24 text-xs"><SelectValue /></SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="equals" className="text-xs" disabled={assertion.target === 'responseTime'}>{t('toolbox.apiDebug.assertEquals')}</SelectItem>
+                              <SelectItem value="contains" className="text-xs" disabled={assertion.target === 'status' || assertion.target === 'responseTime'}>{t('toolbox.apiDebug.assertContains')}</SelectItem>
+                              <SelectItem value="lessThanOrEqual" className="text-xs" disabled={assertion.target !== 'responseTime'}>{t('toolbox.apiDebug.assertMaxTime')}</SelectItem>
+                            </SelectContent>
+                          </Select>
+                          <Input value={assertion.value} onChange={(e) => setAssertions((items) => items.map((item, itemIndex) => itemIndex === index ? { ...item, value: e.target.value } : item))} placeholder={assertion.target === 'responseTime' ? '1000' : t('toolbox.apiDebug.assertValue')} className="h-7 flex-1 min-w-20 font-mono text-xs" />
+                          <Button variant="ghost" size="sm" className="h-7 w-7 p-0 text-muted-foreground hover:text-destructive" onClick={() => setAssertions((items) => items.filter((_, itemIndex) => itemIndex !== index))} aria-label={t('common.delete')}><Trash2 className="h-3.5 w-3.5" /></Button>
+                        </div>
+                      ))}
+                      <Button variant="outline" size="sm" className="h-7 text-xs" onClick={() => setAssertions((items) => [...items, newAssertion()])}><Plus className="h-3.5 w-3.5" />{t('toolbox.apiDebug.addAssertion')}</Button>
+                    </TabsContent>
                   </div>
                 </Tabs>
               </div>
@@ -1164,10 +1646,19 @@ export function ToolApiDebug({ active = true }: ToolApiDebugProps) {
                         <Clock className="h-3 w-3" /> {response.durationMs} ms
                       </span>
                       <span className="text-[11px] text-muted-foreground">
-                        {t('toolbox.apiDebug.size')}: {response.bodyIsBase64 ? `[binary] ${response.body.length}` : `${response.body.length} B`}
+                        {t('toolbox.apiDebug.size')}: {response.bodySizeBytes ?? (response.bodyIsBase64 ? response.body.length : response.body.length)} B
                       </span>
+                      {response.truncated && (
+                        <span className="text-[11px] text-warning">{t('toolbox.apiDebug.truncated')}</span>
+                      )}
+                      {assertionResults.length > 0 && (
+                        <span className={cn('text-[11px] flex items-center gap-1', assertionResults.every((result) => result.passed) ? 'text-success' : 'text-destructive')}>
+                          {assertionResults.every((result) => result.passed) ? <CheckCircle2 className="h-3.5 w-3.5" /> : <XCircle className="h-3.5 w-3.5" />}
+                          {t('toolbox.apiDebug.assertionSummary', { passed: assertionResults.filter((result) => result.passed).length, total: assertionResults.length })}
+                        </span>
+                      )}
                       <div className="ml-auto flex items-center gap-1">
-                        {parsedBody !== null && (
+                        {parsedResponse.valid && (
                           <Tabs value={respView} onValueChange={(v) => setRespView(v as 'tree' | 'raw' | 'fields')} className="h-6">
                             <TabsList className="h-6 w-auto">
                               <TabsTrigger value="tree" className="h-5 px-2 text-[10px]">{t('toolbox.apiDebug.viewTree')}</TabsTrigger>
@@ -1190,6 +1681,17 @@ export function ToolApiDebug({ active = true }: ToolApiDebugProps) {
                         ))}
                       </div>
                     )}
+                    {assertionResults.length > 0 && (
+                      <div className="border-b border-border bg-muted/10 px-3 py-2 space-y-1 shrink-0">
+                        {assertionResults.map((result, index) => (
+                          <div key={index} className={cn('flex items-center gap-1.5 text-[11px]', result.passed ? 'text-success' : 'text-destructive')}>
+                            {result.passed ? <CheckCircle2 className="h-3.5 w-3.5 shrink-0" /> : <XCircle className="h-3.5 w-3.5 shrink-0" />}
+                            <span className="font-mono">{result.assertion.target === 'body' ? result.assertion.path : result.assertion.target === 'header' ? result.assertion.name : result.assertion.target}</span>
+                            <span className="text-muted-foreground">{result.assertion.operator} {result.assertion.value} ({result.actual})</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
                     <ScrollArea className="flex-1 min-h-0">
                       {/* Views stay mounted and toggle via hidden — switching
                           tree/raw/fields never rebuilds a large JSON tree. */}
@@ -1198,12 +1700,12 @@ export function ToolApiDebug({ active = true }: ToolApiDebugProps) {
                           <FieldTable root={responseFields} />
                         </div>
                       )}
-                      {!!parsedBody && (
+                       {parsedResponse.valid && (
                         <div className={cn('p-3', respView !== 'tree' && 'hidden')}>
                           <CollapsibleJson text={prettyBody} />
                         </div>
                       )}
-                      {!parsedBody && respView === 'tree' && (
+                       {!parsedResponse.valid && respView === 'tree' && (
                         <div className="p-6 text-center text-xs text-muted-foreground">
                           {t('toolbox.apiDebug.bodyTooLarge')}
                         </div>
@@ -1247,6 +1749,7 @@ export function ToolApiDebug({ active = true }: ToolApiDebugProps) {
                         onInputChange={setWsInput}
                         onConnect={() => void handleWsConnect()}
                         onSend={() => void handleWsSend()}
+                        onClear={handleWsClear}
                       />
           </Tabs>
         </div>

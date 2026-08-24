@@ -17,7 +17,11 @@ use base64::Engine as _;
 use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, Mutex};
+use std::fmt::Display;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc, Mutex,
+};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, State};
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -30,6 +34,17 @@ use tokio_util::sync::CancellationToken;
 const MAX_SERVICE_LOG_LINES: usize = 1000;
 /// Maximum number of output lines returned by `service_logs`.
 const SERVICE_LOG_READ_LINES: usize = 500;
+/// Default maximum response preview returned over IPC (1 MiB).
+const API_RESPONSE_PREVIEW_BYTES: usize = 1024 * 1024;
+/// An API request must never retain more than this many response bytes in memory.
+const API_RESPONSE_HARD_LIMIT_BYTES: usize = 100 * 1024 * 1024;
+/// File uploads are buffered for Tauri IPC and reqwest multipart construction.
+const API_MULTIPART_FILE_LIMIT_BYTES: usize = 25 * 1024 * 1024;
+const API_MULTIPART_FILE_MAX_BASE64_CHARS: usize = 4 * API_MULTIPART_FILE_LIMIT_BYTES.div_ceil(3);
+/// Maximum inbound WebSocket frame preview sent to the API debugger UI.
+const API_WS_MESSAGE_PREVIEW_BYTES: usize = 1024 * 1024;
+static NEXT_WS_INSTANCE_ID: AtomicU64 = AtomicU64::new(1);
+static NEXT_API_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Shared state
@@ -52,16 +67,23 @@ pub struct ServiceHandle {
 }
 
 pub struct WsHandle {
-    tx: mpsc::Sender<String>,
+    tx: mpsc::Sender<WsCommand>,
     token: CancellationToken,
     task: tauri::async_runtime::JoinHandle<()>,
+    instance_id: u64,
+}
+
+enum WsCommand {
+    Text(String),
+    Close,
 }
 
 #[derive(Default)]
 pub struct ToolboxState {
     tunnels: Mutex<HashMap<String, TunnelHandle>>,
     services: Mutex<HashMap<String, ServiceHandle>>,
-    ws: Mutex<HashMap<String, WsHandle>>,
+    ws: Arc<Mutex<HashMap<String, WsHandle>>>,
+    api_requests: Mutex<HashMap<String, CancellationToken>>,
 }
 
 impl ToolboxState {
@@ -955,11 +977,39 @@ pub async fn service_logs(
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ApiRequest {
+    pub request_id: Option<String>,
     pub method: String,
     pub url: String,
     pub headers: Option<Vec<(String, String)>>,
     pub body: Option<String>,
+    /// Structured application/x-www-form-urlencoded fields. Kept separate from
+    /// `body` so existing raw-body callers remain compatible.
+    pub form_fields: Option<Vec<(String, String)>>,
+    /// Structured multipart form fields and base64-encoded file contents.
+    pub multipart: Option<ApiMultipartBody>,
     pub timeout_ms: Option<u64>,
+    /// Maximum response bytes returned to the UI. Defaults to 1 MiB and is
+    /// capped at 100 MiB to keep a debugger request from exhausting memory.
+    pub response_size_limit_bytes: Option<usize>,
+    /// Certificate validation is enabled by default. This opt-out exists only
+    /// for explicitly debugging development servers with self-signed certs.
+    pub insecure_skip_tls_verify: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApiMultipartBody {
+    pub fields: Option<Vec<(String, String)>>,
+    pub files: Option<Vec<ApiMultipartFile>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApiMultipartFile {
+    pub field_name: String,
+    pub file_name: String,
+    pub data_base64: String,
+    pub content_type: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -971,13 +1021,95 @@ pub struct ApiResponse {
     pub body: String,
     pub body_is_base64: bool,
     pub duration_ms: u64,
+    /// Number of response bytes included in `body`, before base64 encoding.
+    pub body_size_bytes: usize,
+    /// Server-provided Content-Length, when available.
+    pub content_length: Option<u64>,
+    /// True when the response exceeded the configured preview limit.
+    pub truncated: bool,
+    /// Reserved for a future explicit download-to-file mode. No files are
+    /// written implicitly by the API debugger.
+    pub download_file_path: Option<String>,
+}
+
+fn response_size_limit(requested: Option<usize>) -> Result<usize, String> {
+    let limit = requested.unwrap_or(API_RESPONSE_PREVIEW_BYTES);
+    if limit == 0 {
+        return Err("Response size limit must be greater than zero".to_string());
+    }
+    Ok(limit.min(API_RESPONSE_HARD_LIMIT_BYTES))
+}
+
+/// Collect no more than `limit` bytes from a response stream. Reading stops as
+/// soon as a surplus byte is observed, rather than buffering the whole body.
+async fn read_response_preview<S, B, E>(
+    mut stream: S,
+    limit: usize,
+    cancellation: &CancellationToken,
+) -> Result<(Vec<u8>, bool), String>
+where
+    S: futures::Stream<Item = Result<B, E>> + Unpin,
+    B: AsRef<[u8]>,
+    E: Display,
+{
+    let mut bytes = Vec::with_capacity(limit.min(API_RESPONSE_PREVIEW_BYTES));
+
+    loop {
+        let chunk = tokio::select! {
+            _ = cancellation.cancelled() => return Err("Request cancelled".to_string()),
+            chunk = stream.next() => chunk,
+        };
+        let Some(chunk) = chunk else { break; };
+        let chunk = chunk.map_err(|error| format!("Failed to read response body: {error}"))?;
+        let chunk = chunk.as_ref();
+        let remaining = limit.saturating_sub(bytes.len());
+        if chunk.len() > remaining {
+            bytes.extend_from_slice(&chunk[..remaining]);
+            return Ok((bytes, true));
+        }
+        bytes.extend_from_slice(chunk);
+        if bytes.len() == limit {
+            // A further poll distinguishes an exactly-limit response from a
+            // truncated one when Content-Length is unavailable.
+            return match tokio::select! {
+                _ = cancellation.cancelled() => return Err("Request cancelled".to_string()),
+                chunk = stream.next() => chunk,
+            } {
+                Some(Ok(_)) => Ok((bytes, true)),
+                Some(Err(error)) => Err(format!("Failed to read response body: {error}")),
+                None => Ok((bytes, false)),
+            };
+        }
+    }
+
+    Ok((bytes, false))
 }
 
 /// Send an HTTP request from the API debugger.
 #[tauri::command]
-pub async fn api_request(request: ApiRequest) -> Result<ApiResponse, String> {
+pub async fn api_request(request: ApiRequest, state: State<'_, ToolboxState>) -> Result<ApiResponse, String> {
+    let request_id = request.request_id.clone().unwrap_or_else(|| {
+        format!("api-{}", NEXT_API_REQUEST_ID.fetch_add(1, Ordering::Relaxed))
+    });
+    let cancellation = CancellationToken::new();
+    state.api_requests.lock().map_err(|_| "api request state poisoned".to_string())?.insert(request_id.clone(), cancellation.clone());
+    let result = api_request_inner(request, cancellation.clone()).await;
+    state.api_requests.lock().map_err(|_| "api request state poisoned".to_string())?.remove(&request_id);
+    result
+}
+
+#[tauri::command]
+pub fn api_request_cancel(request_id: String, state: State<'_, ToolboxState>) -> Result<(), String> {
+    if let Some(token) = state.api_requests.lock().map_err(|_| "api request state poisoned".to_string())?.get(&request_id) {
+        token.cancel();
+    }
+    Ok(())
+}
+
+async fn api_request_inner(request: ApiRequest, cancellation: CancellationToken) -> Result<ApiResponse, String> {
+    let response_limit = response_size_limit(request.response_size_limit_bytes)?;
     let client = reqwest::Client::builder()
-        .danger_accept_invalid_certs(true)
+        .danger_accept_invalid_certs(request.insecure_skip_tls_verify.unwrap_or(false))
         .build()
         .map_err(|e| format!("Failed to build HTTP client: {}", e))?;
 
@@ -992,40 +1124,87 @@ pub async fn api_request(request: ApiRequest) -> Result<ApiResponse, String> {
             }
         }
     }
-    if let Some(body) = &request.body {
+    if let Some(multipart) = request.multipart {
+        let mut form = reqwest::multipart::Form::new();
+        for (name, value) in multipart.fields.unwrap_or_default() {
+            if !name.trim().is_empty() {
+                form = form.text(name, value);
+            }
+        }
+        for file in multipart.files.unwrap_or_default() {
+            if file.field_name.trim().is_empty() {
+                return Err("Multipart file field name is required".to_string());
+            }
+            if file.file_name.trim().is_empty() {
+                return Err("Multipart file name is required".to_string());
+            }
+            if file.data_base64.len() > API_MULTIPART_FILE_MAX_BASE64_CHARS {
+                return Err(format!(
+                    "Multipart file '{}' exceeds the {} MiB limit",
+                    file.file_name,
+                    API_MULTIPART_FILE_LIMIT_BYTES / (1024 * 1024)
+                ));
+            }
+            let data = base64::engine::general_purpose::STANDARD
+                .decode(file.data_base64)
+                .map_err(|_| {
+                    format!(
+                        "Multipart file '{}' has invalid base64 data",
+                        file.file_name
+                    )
+                })?;
+            if data.len() > API_MULTIPART_FILE_LIMIT_BYTES {
+                return Err(format!(
+                    "Multipart file '{}' exceeds the {} MiB limit",
+                    file.file_name,
+                    API_MULTIPART_FILE_LIMIT_BYTES / (1024 * 1024)
+                ));
+            }
+            let mut part = reqwest::multipart::Part::bytes(data).file_name(file.file_name);
+            if let Some(content_type) = file.content_type.filter(|value| !value.trim().is_empty()) {
+                part = part.mime_str(&content_type).map_err(|_| {
+                    format!("Multipart file has invalid content type: {content_type}")
+                })?;
+            }
+            form = form.part(file.field_name, part);
+        }
+        req = req.multipart(form);
+    } else if let Some(fields) = request.form_fields {
+        req = req.form(&fields);
+    } else if let Some(body) = &request.body {
         if !body.trim().is_empty() {
             req = req.body(body.clone());
         }
     }
-    let timeout = Duration::from_millis(request.timeout_ms.unwrap_or(30_000));
+    let timeout_ms = request.timeout_ms.unwrap_or(30_000);
+    if timeout_ms == 0 {
+        return Err("Request timeout must be greater than zero".to_string());
+    }
+    let timeout = Duration::from_millis(timeout_ms);
     req = req.timeout(timeout);
 
     let start = Instant::now();
-    let resp = req
-        .send()
-        .await
-        .map_err(|e| format!("Request failed: {}", e))?;
+    let resp = tokio::select! {
+        _ = cancellation.cancelled() => return Err("Request cancelled".to_string()),
+        response = req.send() => response.map_err(|e| format!("Request failed: {}", e))?,
+    };
     let status = resp.status();
+    let content_length = resp.content_length();
     let headers: Vec<(String, String)> = resp
         .headers()
         .iter()
         .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
         .collect();
 
-    // Read the full body — the response is not truncated so the debugger can
-    // show complete data. Memory is bounded by the frontend: huge bodies are
-    // never JSON.parse'd into a second tree, the raw view renders in chunks,
-    // and switching away from the API module clears the stored response.
-    let bytes = resp
-        .bytes()
-        .await
-        .map_err(|e| format!("Failed to read response body: {}", e))?;
+    let (bytes, mut truncated) = read_response_preview(resp.bytes_stream(), response_limit, &cancellation).await?;
+    truncated |= content_length.is_some_and(|length| length > response_limit as u64);
     let duration_ms = start.elapsed().as_millis() as u64;
+    let body_size_bytes = bytes.len();
 
-    let (body, body_is_base64) = match String::from_utf8(bytes.to_vec()) {
+    let (body, body_is_base64) = match String::from_utf8(bytes) {
         Ok(text) => (text, false),
-        Err(_) => (
-            base64::engine::general_purpose::STANDARD.encode(&bytes),
+        Err(error) => (
+            base64::engine::general_purpose::STANDARD.encode(error.into_bytes()),
             true,
         ),
     };
@@ -1037,7 +1216,70 @@ pub async fn api_request(request: ApiRequest) -> Result<ApiResponse, String> {
         body,
         body_is_base64,
         duration_ms,
+        body_size_bytes,
+        content_length,
+        truncated,
+        download_file_path: None,
     })
+}
+
+#[cfg(test)]
+mod api_request_tests {
+    use super::*;
+
+    #[test]
+    fn response_size_limit_defaults_and_caps() {
+        assert_eq!(
+            response_size_limit(None).unwrap(),
+            API_RESPONSE_PREVIEW_BYTES
+        );
+        assert_eq!(
+            response_size_limit(Some(usize::MAX)).unwrap(),
+            API_RESPONSE_HARD_LIMIT_BYTES
+        );
+        assert!(response_size_limit(Some(0)).is_err());
+    }
+
+    #[tokio::test]
+    async fn response_preview_stops_at_limit() {
+        let stream = futures::stream::iter(vec![
+            Ok::<_, &'static str>(b"abc".to_vec()),
+            Ok(b"def".to_vec()),
+        ]);
+        let (body, truncated) = read_response_preview(stream, 4, &CancellationToken::new()).await.unwrap();
+        assert_eq!(body, b"abcd");
+        assert!(truncated);
+    }
+
+    #[tokio::test]
+    async fn response_preview_marks_exact_complete_body() {
+        let stream = futures::stream::iter(vec![Ok::<_, &'static str>(b"abcd".to_vec())]);
+        let (body, truncated) = read_response_preview(stream, 4, &CancellationToken::new()).await.unwrap();
+        assert_eq!(body, b"abcd");
+        assert!(!truncated);
+    }
+
+    #[tokio::test]
+    async fn response_preview_stops_when_cancelled() {
+        let token = CancellationToken::new();
+        token.cancel();
+        let stream = futures::stream::pending::<Result<Vec<u8>, &'static str>>();
+        let error = read_response_preview(stream, 4, &token).await.unwrap_err();
+        assert_eq!(error, "Request cancelled");
+    }
+
+    #[test]
+    fn websocket_text_preview_respects_byte_limit_without_splitting_utf8() {
+        let text = format!("{}x", "a".repeat(API_WS_MESSAGE_PREVIEW_BYTES));
+        let (preview, truncated) = truncate_ws_text(&text);
+        assert_eq!(preview.len(), API_WS_MESSAGE_PREVIEW_BYTES);
+        assert!(truncated);
+
+        let text = format!("{}é", "a".repeat(API_WS_MESSAGE_PREVIEW_BYTES - 1));
+        let (preview, truncated) = truncate_ws_text(&text);
+        assert_eq!(preview.len(), API_WS_MESSAGE_PREVIEW_BYTES - 1);
+        assert!(truncated);
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1046,6 +1288,7 @@ pub struct WsMessagePayload {
     pub id: String,
     pub data: String,
     pub timestamp: u64,
+    pub truncated: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1054,6 +1297,32 @@ pub struct WsStatusPayload {
     pub id: String,
     pub status: String,
     pub error: Option<String>,
+    pub reason: Option<String>,
+}
+
+fn truncate_ws_text(text: &str) -> (String, bool) {
+    if text.len() <= API_WS_MESSAGE_PREVIEW_BYTES {
+        return (text.to_string(), false);
+    }
+
+    let mut end = API_WS_MESSAGE_PREVIEW_BYTES;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    (text[..end].to_string(), true)
+}
+
+fn close_reason(frame: Option<tokio_tungstenite::tungstenite::protocol::CloseFrame>) -> String {
+    match frame {
+        Some(frame) if frame.reason.is_empty() => {
+            format!("Peer closed the connection ({})", frame.code)
+        }
+        Some(frame) => format!(
+            "Peer closed the connection ({}: {})",
+            frame.code, frame.reason
+        ),
+        None => "Peer closed the connection".to_string(),
+    }
 }
 
 /// Open a WebSocket client connection. Inbound messages are pushed to the
@@ -1069,21 +1338,29 @@ pub async fn api_ws_connect(
     {
         let mut ws = state.ws.lock().expect("ws state poisoned");
         if let Some(old) = ws.remove(&id) {
-            old.token.cancel();
-            old.task.abort();
+            if old.tx.try_send(WsCommand::Close).is_err() {
+                old.token.cancel();
+            }
         }
     }
 
-    let (ws_stream, _) = tokio_tungstenite::connect_async(&url)
+    // Enforce the same limit at the protocol layer so an oversized peer frame
+    // is rejected before it can become an unbounded application message.
+    let ws_config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
+        .max_message_size(Some(API_WS_MESSAGE_PREVIEW_BYTES))
+        .max_frame_size(Some(API_WS_MESSAGE_PREVIEW_BYTES));
+    let (ws_stream, _) = tokio_tungstenite::connect_async_with_config(&url, Some(ws_config), false)
         .await
         .map_err(|e| format!("WebSocket connect failed: {}", e))?;
     let (mut write, mut read) = ws_stream.split();
-    let (tx, mut rx) = mpsc::channel::<String>(64);
+    let (tx, mut rx) = mpsc::channel::<WsCommand>(64);
     let token = CancellationToken::new();
     let task_token = token.clone();
+    let ws_state = Arc::clone(&state.ws);
     let emit_app = app.clone();
     let emit_app2 = app.clone();
     let task_id = id.clone();
+    let instance_id = NEXT_WS_INSTANCE_ID.fetch_add(1, Ordering::Relaxed);
 
     let task = tauri::async_runtime::spawn(async move {
         let _ = emit_app.emit(
@@ -1092,53 +1369,109 @@ pub async fn api_ws_connect(
                 id: task_id.clone(),
                 status: "connected".into(),
                 error: None,
+                reason: None,
             },
         );
-        loop {
+        let closed_reason = loop {
             tokio::select! {
-                _ = task_token.cancelled() => break,
-                Some(message) = rx.recv() => {
-                    if write.send(tokio_tungstenite::tungstenite::Message::Text(message.into())).await.is_err() {
-                        break;
+                _ = task_token.cancelled() => {
+                    let _ = write.send(tokio_tungstenite::tungstenite::Message::Close(None)).await;
+                    break "Closed locally".to_string();
+                }
+                command = rx.recv() => {
+                    match command {
+                        Some(WsCommand::Text(message)) => {
+                            if let Err(error) = write.send(tokio_tungstenite::tungstenite::Message::Text(message.into())).await {
+                                let message = format!("WebSocket write failed: {error}");
+                                let _ = emit_app.emit("api://ws-status", WsStatusPayload {
+                                    id: task_id.clone(), status: "error".into(), error: Some(message.clone()), reason: None,
+                                });
+                                break message;
+                            }
+                        }
+                        Some(WsCommand::Close) => {
+                            let _ = write.send(tokio_tungstenite::tungstenite::Message::Close(None)).await;
+                            break "Closed locally".to_string();
+                        }
+                        None => {
+                            break "WebSocket command channel closed".to_string();
+                        }
                     }
                 }
                 incoming = read.next() => {
                     match incoming {
                         Some(Ok(tokio_tungstenite::tungstenite::Message::Text(text))) => {
+                            let (data, truncated) = truncate_ws_text(&text);
                             let _ = emit_app.emit(
                                 "api://ws-message",
-                                WsMessagePayload { id: task_id.clone(), data: text.to_string(), timestamp: now_ms() },
+                                WsMessagePayload { id: task_id.clone(), data, timestamp: now_ms(), truncated },
                             );
                         }
                         Some(Ok(tokio_tungstenite::tungstenite::Message::Binary(bin))) => {
+                            let truncated = bin.len() > API_WS_MESSAGE_PREVIEW_BYTES;
+                            let data = base64::engine::general_purpose::STANDARD.encode(&bin[..bin.len().min(API_WS_MESSAGE_PREVIEW_BYTES)]);
                             let _ = emit_app.emit(
                                 "api://ws-message",
-                                WsMessagePayload { id: task_id.clone(), data: base64::engine::general_purpose::STANDARD.encode(&bin), timestamp: now_ms() },
+                                WsMessagePayload { id: task_id.clone(), data, timestamp: now_ms(), truncated },
                             );
                         }
-                        Some(Ok(tokio_tungstenite::tungstenite::Message::Close(_))) => break,
-                        Some(Err(_)) => break,
-                        None => break,
+                        Some(Ok(tokio_tungstenite::tungstenite::Message::Ping(payload))) => {
+                            if let Err(error) = write.send(tokio_tungstenite::tungstenite::Message::Pong(payload)).await {
+                                let message = format!("WebSocket pong failed: {error}");
+                                let _ = emit_app.emit("api://ws-status", WsStatusPayload {
+                                    id: task_id.clone(), status: "error".into(), error: Some(message.clone()), reason: None,
+                                });
+                                break message;
+                            }
+                        }
+                        Some(Ok(tokio_tungstenite::tungstenite::Message::Close(frame))) => {
+                            break close_reason(frame);
+                        }
+                        Some(Err(error)) => {
+                            let message = format!("WebSocket read failed: {error}");
+                            let _ = emit_app.emit("api://ws-status", WsStatusPayload {
+                                id: task_id.clone(), status: "error".into(), error: Some(message.clone()), reason: None,
+                            });
+                            break message;
+                        }
+                        None => {
+                            break "WebSocket connection ended unexpectedly".to_string();
+                        }
                         _ => {}
                     }
                 }
             }
+        };
+        // A reader can exit independently of the explicit close command. Only
+        // remove this task's entry so a newer connection with the same ID wins.
+        let mut connections = ws_state.lock().expect("ws state poisoned");
+        if connections
+            .get(&task_id)
+            .is_some_and(|handle| handle.instance_id == instance_id)
+        {
+            connections.remove(&task_id);
         }
+        drop(connections);
         let _ = emit_app2.emit(
             "api://ws-status",
             WsStatusPayload {
                 id: task_id.clone(),
                 status: "closed".into(),
                 error: None,
+                reason: Some(closed_reason),
             },
         );
     });
 
-    state
-        .ws
-        .lock()
-        .expect("ws state poisoned")
-        .insert(id, WsHandle { tx, token, task });
+    state.ws.lock().expect("ws state poisoned").insert(
+        id,
+        WsHandle {
+            tx,
+            token,
+            task,
+            instance_id,
+        },
+    );
     Ok(())
 }
 
@@ -1157,7 +1490,7 @@ pub async fn api_ws_send(
             None => return Err("WebSocket connection not found".into()),
         }
     };
-    tx.send(message)
+    tx.send(WsCommand::Text(message))
         .await
         .map_err(|_| "WebSocket is closed".into())
 }
@@ -1167,8 +1500,9 @@ pub async fn api_ws_send(
 pub async fn api_ws_close(id: String, state: State<'_, ToolboxState>) -> Result<(), String> {
     let removed = state.ws.lock().expect("ws state poisoned").remove(&id);
     if let Some(handle) = removed {
-        handle.token.cancel();
-        handle.task.abort();
+        if handle.tx.try_send(WsCommand::Close).is_err() {
+            handle.token.cancel();
+        }
     }
     Ok(())
 }
