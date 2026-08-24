@@ -38,7 +38,10 @@ export type DbTable =
   | 'workspace_groups'
   | 'workspace_tabs'
   | 'workspace_grid_nodes'
-  | 'documents';
+  | 'documents'
+  | 'jar_preferences'
+  | 'jar_recent_files'
+  | 'jar_find_history';
 
 export type Row = Record<string, unknown>;
 
@@ -93,6 +96,15 @@ export async function rowClear(table: DbTable): Promise<void> {
     await invoke('row_clear', { table });
   } catch {
     /* ignore */
+  }
+}
+
+/** Retain the newest learned command-stat rows. */
+export async function pruneCommandStats(limit: number): Promise<void> {
+  try {
+    await invoke('prune_command_stats', { limit });
+  } catch {
+    /* non-critical cache maintenance */
   }
 }
 

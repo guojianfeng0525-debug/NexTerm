@@ -50,10 +50,59 @@ pub struct MemoryStats {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DiskStats {
+    pub is_available: bool,
     pub total: String,
     pub used: String,
     pub available: String,
     pub use_percent: f64,
+}
+
+fn unavailable_disk_stats() -> DiskStats {
+    DiskStats {
+        is_available: false,
+        total: String::new(),
+        used: String::new(),
+        available: String::new(),
+        use_percent: 0.0,
+    }
+}
+
+fn format_kib(kib: u64) -> String {
+    const UNITS: [&str; 4] = ["K", "M", "G", "T"];
+    let mut value = kib as f64;
+    let mut unit = 0usize;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 { format!("{kib}K") } else { format!("{value:.1}{}", UNITS[unit]) }
+}
+
+/// Parse one POSIX `df -kP` row. The command is locale-neutral and avoids
+/// shell-side column parsing so minimal servers do not require awk/sed/grep.
+fn parse_disk_stats(output: &str) -> Option<DiskStats> {
+    for line in output.lines().skip(1) {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        if fields.len() < 6 {
+            continue;
+        }
+        let capacity_index = fields.iter().position(|field| field.ends_with('%'))?;
+        if capacity_index < 4 {
+            continue;
+        }
+        let total = fields.get(capacity_index - 3)?.parse::<u64>().ok()?;
+        let used = fields.get(capacity_index - 2)?.parse::<u64>().ok()?;
+        let free = fields.get(capacity_index - 1)?.parse::<u64>().ok()?;
+        let use_percent = fields[capacity_index].trim_end_matches('%').parse::<f64>().ok()?;
+        return Some(DiskStats {
+            is_available: true,
+            total: format_kib(total),
+            used: format_kib(used),
+            available: format_kib(free),
+            use_percent,
+        });
+    }
+    None
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -218,16 +267,7 @@ async fn collect_system_stats_fast(
         free: swap_parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0),
         available: 0,
     };
-    let disk_parts: Vec<&str> = disk.trim().split_whitespace().collect();
-    let disk_stats = DiskStats {
-        total: disk_parts.get(0).unwrap_or(&"0").to_string(),
-        used: disk_parts.get(1).unwrap_or(&"0").to_string(),
-        available: disk_parts.get(2).unwrap_or(&"0").to_string(),
-        use_percent: disk_parts
-            .get(3)
-            .and_then(|s| s.trim_end_matches('%').parse().ok())
-            .unwrap_or(0.0),
-    };
+    let disk_stats = parse_disk_stats(&disk)?;
 
     Some(SystemStats {
         cpu_percent,
@@ -289,16 +329,7 @@ async fn collect_system_stats_legacy(
         .execute_command(os_info.disk_cmd())
         .await
         .unwrap_or_default();
-    let disk_parts: Vec<&str> = disk_output.trim().split_whitespace().collect();
-    let disk = DiskStats {
-        total: disk_parts.get(0).unwrap_or(&"0").to_string(),
-        used: disk_parts.get(1).unwrap_or(&"0").to_string(),
-        available: disk_parts.get(2).unwrap_or(&"0").to_string(),
-        use_percent: disk_parts
-            .get(3)
-            .and_then(|s| s.trim_end_matches('%').parse().ok())
-            .unwrap_or(0.0),
-    };
+    let disk = parse_disk_stats(&disk_output).unwrap_or_else(unavailable_disk_stats);
 
     // Uptime
     let uptime = client

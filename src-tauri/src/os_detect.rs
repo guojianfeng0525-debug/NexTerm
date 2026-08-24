@@ -274,13 +274,10 @@ impl OsInfo {
         }
     }
 
-    /// Disk stats for root filesystem — `df -h /` is universal on POSIX, but
-    /// some minimal systems lack `awk`. We add a `sed`-based fallback that
-    /// works with plain `df -hP /` (POSIX-safe, no column wrapping).
+    /// Root disk in POSIX's stable one-line KiB layout. Parsing happens in Rust
+    /// so remote hosts do not need awk, sed, grep, or GNU df extensions.
     pub fn disk_cmd(&self) -> &'static str {
-        // Primary: awk on `df -h /` (Size Used Avail Use%). Fallback: df -hP
-        // with sed when awk is missing; last resort: df without -h (bytes).
-        "df -h / | awk 'NR==2{printf \"%s %s %s %s\", $2,$3,$4,$5}' || df -hP / 2>/dev/null | sed -n '2{s/  */ /g;p;}' | awk '{printf \"%s %s %s %s\", $2,$3,$4,$5}' || df -P / 2>/dev/null | sed -n '2{s/  */ /g;p;}' | awk '{printf \"%s %s %s %s\", $2,$3,$4,$5}'"
+        "LC_ALL=C df -kP / 2>/dev/null"
     }
 
     /// Uptime command.

@@ -36,6 +36,7 @@ import {
   FileSearch,
 } from 'lucide-react';
 import { jarApi, type ClassView, type PackageNode, type ProjectSummary, type CompileDiagnostic, type ClassRef } from '@/lib/toolbox/jar-api';
+import { getJarFindHistory, getJarPreferences, getJarRecentFiles, saveJarFindHistory, saveJarRecentFiles, setJarPreferences } from '@/lib/toolbox/jar-storage';
 import { useWebviewFileDrop } from '@/lib/use-webview-file-drop';
 import { EditorView, keymap, lineNumbers, highlightActiveLine, drawSelection, rectangularSelection, crosshairCursor, highlightSpecialChars, Decoration, type DecorationSet, type ViewUpdate } from '@codemirror/view';
 import { EditorState, StateField, StateEffect, type Extension } from '@codemirror/state';
@@ -484,14 +485,7 @@ export function ToolJarDecompiler() {
   const [expandedLibs, setExpandedLibs] = useState<Set<string>>(() => new Set(['']));
   /** Pom metadata when opened via pom.xml. */
   const [pomInfo, setPomInfo] = useState<{ groupId: string; artifactId: string; version: string; resolvedCount: number } | null>(null);
-  /** Recent files (JD-GUI "File → Recent"). Persisted to localStorage. */
-  const [recent, setRecent] = useState<{ path: string; name: string; at: number }[]>(() => {
-    try {
-      const raw = localStorage.getItem('nexterm.jar.recent');
-      if (raw) return JSON.parse(raw) as { path: string; name: string; at: number }[];
-    } catch { /* ignore */ }
-    return [];
-  });
+  const [recent, setRecent] = useState(() => getJarRecentFiles());
   /** Drop overlay visible while dragging a file over the panel. */
   const [dropOverlay, setDropOverlay] = useState(false);
 
@@ -527,13 +521,7 @@ export function ToolJarDecompiler() {
   const [findOpen, setFindOpen] = useState(false);
   const [findQuery, setFindQuery] = useState('');
   const [findCaseSensitive, setFindCaseSensitive] = useState(false);
-  const [findHistory, setFindHistory] = useState<string[]>(() => {
-    try {
-      const raw = localStorage.getItem('nexterm.jar.findHistory');
-      if (raw) return JSON.parse(raw) as string[];
-    } catch { /* ignore */ }
-    return [];
-  });
+  const [findHistory, setFindHistory] = useState(() => getJarFindHistory());
   /** Current match index (1-based) for the status display; -1 = no match. */
   const [findMatchIndex, setFindMatchIndex] = useState(-1);
   /** Total match count for the status display. */
@@ -604,33 +592,14 @@ export function ToolJarDecompiler() {
   const [aboutOpen, setAboutOpen] = useState(false);
   /** Pasted log text (JD-GUI Paste Log: clipboard → viewer tab). */
   const [logText, setLogText] = useState<string | null>(null);
-  const [prefsFontSize, setPrefsFontSize] = useState(() => {
-    try {
-      return parseInt(localStorage.getItem('nexterm.jar.fontSize') ?? '', 10) || 12;
-    } catch { return 12; }
-  });
-  const [prefsSingleLineTabs, setPrefsSingleLineTabs] = useState(() => {
-    try {
-      return localStorage.getItem('nexterm.jar.singleLineTabs') === 'true';
-    } catch { return false; }
-  });
-  // JD-GUI preferences (ClassFileDecompilerPreferencesProvider +
-  // ClassFileSaverPreferencesProvider). Persisted to localStorage.
-  const loadPref = (key: string, def: boolean) => {
-    try { return localStorage.getItem(key) === 'true'; } catch { return def; }
-  };
-  const savePref = (key: string, v: boolean) => {
-    try { localStorage.setItem(key, v ? 'true' : 'false'); } catch { /* ignore */ }
-  };
-  const [prefEscapeUnicode, setPrefEscapeUnicode] = useState(() => loadPref('nexterm.jar.escapeUnicode', false));
-  const [prefRealignLineNumbers, setPrefRealignLineNumbers] = useState(() => loadPref('nexterm.jar.realignLineNumbers', false));
-  const [prefWriteLineNumbers, setPrefWriteLineNumbers] = useState(() => loadPref('nexterm.jar.writeLineNumbers', true));
-  const [prefWriteMetadata, setPrefWriteMetadata] = useState(() => loadPref('nexterm.jar.writeMetadata', true));
-  // JD-GUI MavenOrgSourceLoaderPreferencesProvider: toggle + group filter.
-  const [prefMavenEnabled, setPrefMavenEnabled] = useState(() => loadPref('nexterm.jar.mavenEnabled', true));
-  const [prefMavenFilters, setPrefMavenFilters] = useState(() => {
-    try { return localStorage.getItem('nexterm.jar.mavenFilters') ?? '+org.springframework +org.apache +org.hibernate'; } catch { return '+org.springframework +org.apache +org.hibernate'; }
-  });
+  const [prefsFontSize, setPrefsFontSize] = useState(() => getJarPreferences().fontSize);
+  const [prefsSingleLineTabs, setPrefsSingleLineTabs] = useState(() => getJarPreferences().singleLineTabs);
+  const [prefEscapeUnicode, setPrefEscapeUnicode] = useState(() => getJarPreferences().escapeUnicode);
+  const [prefRealignLineNumbers, setPrefRealignLineNumbers] = useState(() => getJarPreferences().realignLineNumbers);
+  const [prefWriteLineNumbers, setPrefWriteLineNumbers] = useState(() => getJarPreferences().writeLineNumbers);
+  const [prefWriteMetadata, setPrefWriteMetadata] = useState(() => getJarPreferences().writeMetadata);
+  const [prefMavenEnabled, setPrefMavenEnabled] = useState(() => getJarPreferences().mavenEnabled);
+  const [prefMavenFilters, setPrefMavenFilters] = useState(() => getJarPreferences().mavenFilters);
   /** Navigation history (Alt+← / Alt+→, JD-GUI Back/Forward). JD-GUI records
    *  the caret position too, so Back restores it. */
   const [navHistory, setNavHistory] = useState<{ entryPath: string; libraryId: string; position?: number }[]>([]);
@@ -785,7 +754,7 @@ export function ToolJarDecompiler() {
           view.dispatch({ effects: setDblClickWordEffect.of(ranges) });
         },
         wheel: (event, view) => {
-          // JD-GUI: Ctrl+wheel zooms the font (persisted to localStorage).
+          // JD-GUI: Ctrl+wheel zooms the font (persisted in SQLite).
           if (!(event.ctrlKey || event.metaKey)) return false;
           event.preventDefault();
           const delta = event.deltaY < 0 ? 1 : -1;
@@ -793,9 +762,7 @@ export function ToolJarDecompiler() {
           const next = Math.min(40, Math.max(2, cur + delta)); // JD-GUI 2..40
           view.dom.style.fontSize = `${next}px`;
           view.requestMeasure();
-          try {
-            localStorage.setItem('nexterm.jar.fontSize', String(next));
-          } catch { /* ignore */ }
+          setJarPreferences({ fontSize: next });
           return true;
         },
       }),
@@ -814,11 +781,7 @@ export function ToolJarDecompiler() {
     ];
     const state = EditorState.create({ doc: editorText, extensions: exts });
     const view2 = new EditorView({ state, parent: editorRef.current });
-    // Restore persisted font size (Ctrl+wheel zoom).
-    try {
-      const saved = localStorage.getItem('nexterm.jar.fontSize');
-      if (saved) view2.dom.style.fontSize = `${parseFloat(saved)}px`;
-    } catch { /* ignore */ }
+    view2.dom.style.fontSize = `${prefsFontSize}px`;
     editorViewRef.current = view2;
     return () => {
       view2.destroy();
@@ -917,9 +880,7 @@ export function ToolJarDecompiler() {
         // Record in recent history (most-recent first, dedupe).
         setRecent((prev) => {
           const next = [{ path, name: p.name, at: Date.now() }, ...prev.filter((r) => r.path !== path)].slice(0, 10); // JD-GUI RECENT_FILES_MAX=10
-          try {
-            localStorage.setItem('nexterm.jar.recent', JSON.stringify(next));
-          } catch { /* storage unavailable */ }
+          saveJarRecentFiles(next);
           return next;
         });
       } catch (e) {
@@ -2218,9 +2179,7 @@ export function ToolJarDecompiler() {
 
   const applyFontSize = useCallback((size: number) => {
     setPrefsFontSize(size);
-    try {
-      localStorage.setItem('nexterm.jar.fontSize', String(size));
-    } catch { /* ignore */ }
+    setJarPreferences({ fontSize: size });
     if (editorViewRef.current) {
       editorViewRef.current.dom.style.fontSize = `${size}px`;
       editorViewRef.current.requestMeasure();
@@ -2229,9 +2188,7 @@ export function ToolJarDecompiler() {
 
   const applyTabLayout = useCallback((single: boolean) => {
     setPrefsSingleLineTabs(single);
-    try {
-      localStorage.setItem('nexterm.jar.singleLineTabs', single ? 'true' : 'false');
-    } catch { /* ignore */ }
+    setJarPreferences({ singleLineTabs: single });
   }, []);
 
   // ── JD-GUI Find panel (Ctrl+F): live highlight + Next/Prev + case. ──
@@ -2325,9 +2282,7 @@ export function ToolJarDecompiler() {
     if (!q) return;
     setFindHistory((prev) => {
       const next = [q, ...prev.filter((x) => x !== q)].slice(0, 10);
-      try {
-        localStorage.setItem('nexterm.jar.findHistory', JSON.stringify(next));
-      } catch { /* ignore */ }
+      saveJarFindHistory(next);
       return next;
     });
   }, []);
@@ -2906,22 +2861,22 @@ export function ToolJarDecompiler() {
             <div className="space-y-2 border-t border-border pt-3">
               <div className="text-xs font-medium mb-1.5">{t('toolbox.jar.prefDecompiler')}</div>
               <label className="flex items-center gap-2 text-xs cursor-pointer select-none">
-                <input type="checkbox" className="accent-primary" checked={prefEscapeUnicode} onChange={(e) => { setPrefEscapeUnicode(e.target.checked); savePref('nexterm.jar.escapeUnicode', e.target.checked); }} />
+                <input type="checkbox" className="accent-primary" checked={prefEscapeUnicode} onChange={(e) => { setPrefEscapeUnicode(e.target.checked); setJarPreferences({ escapeUnicode: e.target.checked }); }} />
                 {t('toolbox.jar.prefEscapeUnicode')}
               </label>
               <label className="flex items-center gap-2 text-xs cursor-pointer select-none">
-                <input type="checkbox" className="accent-primary" checked={prefRealignLineNumbers} onChange={(e) => { setPrefRealignLineNumbers(e.target.checked); savePref('nexterm.jar.realignLineNumbers', e.target.checked); }} />
+                <input type="checkbox" className="accent-primary" checked={prefRealignLineNumbers} onChange={(e) => { setPrefRealignLineNumbers(e.target.checked); setJarPreferences({ realignLineNumbers: e.target.checked }); }} />
                 {t('toolbox.jar.prefRealignLines')}
               </label>
             </div>
             <div className="space-y-2 border-t border-border pt-3">
               <div className="text-xs font-medium mb-1.5">{t('toolbox.jar.prefSaver')}</div>
               <label className="flex items-center gap-2 text-xs cursor-pointer select-none">
-                <input type="checkbox" className="accent-primary" checked={prefWriteLineNumbers} onChange={(e) => { setPrefWriteLineNumbers(e.target.checked); savePref('nexterm.jar.writeLineNumbers', e.target.checked); }} />
+                <input type="checkbox" className="accent-primary" checked={prefWriteLineNumbers} onChange={(e) => { setPrefWriteLineNumbers(e.target.checked); setJarPreferences({ writeLineNumbers: e.target.checked }); }} />
                 {t('toolbox.jar.prefWriteLineNumbers')}
               </label>
               <label className="flex items-center gap-2 text-xs cursor-pointer select-none">
-                <input type="checkbox" className="accent-primary" checked={prefWriteMetadata} onChange={(e) => { setPrefWriteMetadata(e.target.checked); savePref('nexterm.jar.writeMetadata', e.target.checked); }} />
+                <input type="checkbox" className="accent-primary" checked={prefWriteMetadata} onChange={(e) => { setPrefWriteMetadata(e.target.checked); setJarPreferences({ writeMetadata: e.target.checked }); }} />
                 {t('toolbox.jar.prefWriteMetadata')}
               </label>
             </div>
@@ -2929,14 +2884,14 @@ export function ToolJarDecompiler() {
             <div className="space-y-2 border-t border-border pt-3">
               <div className="text-xs font-medium mb-1.5">{t('toolbox.jar.prefMaven')}</div>
               <label className="flex items-center gap-2 text-xs cursor-pointer select-none">
-                <input type="checkbox" className="accent-primary" checked={prefMavenEnabled} onChange={(e) => { setPrefMavenEnabled(e.target.checked); savePref('nexterm.jar.mavenEnabled', e.target.checked); }} />
+                <input type="checkbox" className="accent-primary" checked={prefMavenEnabled} onChange={(e) => { setPrefMavenEnabled(e.target.checked); setJarPreferences({ mavenEnabled: e.target.checked }); }} />
                 {t('toolbox.jar.prefMavenEnabled')}
               </label>
               <label className="flex items-center gap-2 text-xs">
                 <span className="shrink-0">{t('toolbox.jar.prefMavenFilters')}</span>
                 <Input
                   value={prefMavenFilters}
-                  onChange={(e) => { setPrefMavenFilters(e.target.value); try { localStorage.setItem('nexterm.jar.mavenFilters', e.target.value); } catch { /* ignore */ } }}
+                  onChange={(e) => { setPrefMavenFilters(e.target.value); setJarPreferences({ mavenFilters: e.target.value }); }}
                   className="h-7 text-[11px] font-mono"
                   placeholder="+org.springframework +org.apache"
                 />

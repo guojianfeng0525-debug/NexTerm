@@ -21,7 +21,7 @@ use tauri::State;
 
 /// Allow-listed normalized tables. Table names are validated against this
 /// list before being interpolated into SQL, so no injection is possible.
-pub const TABLES: [&str; 33] = [
+pub const TABLES: [&str; 36] = [
     "connections",
     "folders",
     "active_connections",
@@ -59,6 +59,9 @@ pub const TABLES: [&str; 33] = [
     "jar_libraries",
     "jar_symbols",
     "jar_subtypes",
+    "jar_preferences",
+    "jar_recent_files",
+    "jar_find_history",
 ];
 
 /// Tables whose legacy key-value layout collides with a new normalized table
@@ -141,7 +144,6 @@ impl DbState {
                 "command_suggestions",
                 "command_suggestions INTEGER NOT NULL DEFAULT 1",
             ),
-            ("documents", "edited_content", "edited_content TEXT"),
             (
                 "documents",
                 "head_version",
@@ -217,6 +219,14 @@ impl DbState {
             rusqlite::params![format!("{id}-v{version}"), id, version, model, model_hash, now_ms()],
         )
         .map_err(|e| format!("insert document_versions: {e}"))?;
+
+        // Canonical document models can be several MiB. Keep a bounded,
+        // useful undo history instead of retaining every snapshot forever.
+        tx.execute(
+            "DELETE FROM document_versions WHERE document_id = ?1 AND version <= ?2",
+            rusqlite::params![id, version.saturating_sub(10)],
+        )
+        .map_err(|e| format!("prune document_versions: {e}"))?;
 
         for (resource_id, kind_res, mime, data, sha) in resources {
             tx.execute(
@@ -469,6 +479,9 @@ fn pk_column(table: &str) -> Result<&'static str, String> {
         "documents" => "id",
         "document_versions" => "id",
         "document_resources" => "id",
+        "jar_preferences" => "id",
+        "jar_recent_files" => "id",
+        "jar_find_history" => "id",
         _ => return Err(format!("unknown table: {}", table)),
     })
 }
@@ -735,6 +748,38 @@ pub fn drop_legacy_tables(state: State<'_, Arc<DbState>>) -> Result<(), String> 
     Ok(())
 }
 
+/// Rebuild SQLite after a bulk retention purge. This intentionally requires an
+/// explicit caller instead of running during startup, because VACUUM needs an
+/// exclusive lock and temporarily as much free disk space as the database.
+#[tauri::command]
+pub fn database_vacuum(state: State<'_, Arc<DbState>>) -> Result<(), String> {
+    let conn = state
+        .conn
+        .lock()
+        .map_err(|_| "db lock poisoned".to_string())?;
+    conn.execute_batch("VACUUM").map_err(|e| format!("vacuum: {e}"))
+}
+
+/// Retain only the most recently used learned command rows. This avoids
+/// unbounded growth without rebuilding the database file on every eviction.
+#[tauri::command]
+pub fn prune_command_stats(limit: u32, state: State<'_, Arc<DbState>>) -> Result<(), String> {
+    let conn = state
+        .conn
+        .lock()
+        .map_err(|_| "db lock poisoned".to_string())?;
+    conn.execute(
+        "DELETE FROM command_stats WHERE rowid IN (
+            SELECT rowid FROM command_stats
+            ORDER BY last_used DESC
+            LIMIT -1 OFFSET ?1
+        )",
+        [limit],
+    )
+    .map_err(|e| format!("prune command stats: {e}"))?;
+    Ok(())
+}
+
 const CREATE_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS "connections" (
   id TEXT PRIMARY KEY,
@@ -911,6 +956,29 @@ CREATE TABLE IF NOT EXISTS "api_environments" (
   variables TEXT NOT NULL DEFAULT '[]',
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS "jar_preferences" (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  font_size REAL NOT NULL DEFAULT 12,
+  single_line_tabs INTEGER NOT NULL DEFAULT 0,
+  escape_unicode INTEGER NOT NULL DEFAULT 0,
+  realign_line_numbers INTEGER NOT NULL DEFAULT 0,
+  write_line_numbers INTEGER NOT NULL DEFAULT 1,
+  write_metadata INTEGER NOT NULL DEFAULT 1,
+  maven_enabled INTEGER NOT NULL DEFAULT 1,
+  maven_filters TEXT NOT NULL DEFAULT '',
+  updated_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS "jar_recent_files" (
+  id TEXT PRIMARY KEY,
+  path TEXT NOT NULL,
+  name TEXT NOT NULL,
+  opened_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS "jar_find_history" (
+  id TEXT PRIMARY KEY,
+  query TEXT NOT NULL,
+  used_at INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS "app_settings" (
   id INTEGER PRIMARY KEY CHECK (id = 1),

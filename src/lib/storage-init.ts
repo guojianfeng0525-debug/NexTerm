@@ -18,6 +18,7 @@ import { hydrateApiDebugStorage } from './toolbox/api-debug-storage';
 import { initializeDocumentsStore } from './toolbox/documents-storage';
 import { hydrateWorkspace } from './terminal-group-serializer';
 import { migrateLegacyStorage } from './migration';
+import { hydrateJarStorage } from './toolbox/jar-storage';
 
 /**
  * Hydrate every SQLite-backed store. Never throws — each store degrades to
@@ -43,6 +44,7 @@ export async function initializeAllStorage(): Promise<void> {
     hydrateApiDebugStorage(),
     hydrateWorkspace(),
     initializeDocumentsStore(),
+    hydrateJarStorage(),
   ]);
   // Suggestion store migrates the (now hydrated) legacy usage/history as its
   // initial global frequency data — must run after hydrateCommandHistory.

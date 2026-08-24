@@ -12,11 +12,13 @@
  */
 
 import React, {
+  createContext,
   useState,
   useEffect,
   useRef,
   useMemo,
   useCallback,
+  useContext,
 } from "react";
 import { useTranslation } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";
@@ -73,15 +75,83 @@ interface LogMonitorProps {
   externalLogPath?: string;
   /** Increment to re-trigger loading the same externalLogPath */
   externalLogPathKey?: number;
+  /** Only the visible instance fetches or refreshes logs. */
+  isActive?: boolean;
 }
 
-interface LogSource {
+export interface LogSource {
   id: string;
   name: string;
   source_type: "file" | "journal" | "docker";
   path: string;
   category: string;
   size_human?: string;
+}
+
+interface LogMonitorState {
+  sources: LogSource[];
+  selectedSourceId: string;
+  customPath: string;
+  showCustomInput: boolean;
+  rawLines: string[];
+  searchTerm: string;
+  isRegex: boolean;
+  activeFilters: Set<LogLevel>;
+  lineCount: number;
+  autoRefresh: boolean;
+  refreshInterval: number;
+  scrollLocked: boolean;
+}
+
+type LogMonitorStateContext = LogMonitorState & {
+  setSources: React.Dispatch<React.SetStateAction<LogSource[]>>;
+  setSelectedSourceId: React.Dispatch<React.SetStateAction<string>>;
+  setCustomPath: React.Dispatch<React.SetStateAction<string>>;
+  setShowCustomInput: React.Dispatch<React.SetStateAction<boolean>>;
+  setRawLines: React.Dispatch<React.SetStateAction<string[]>>;
+  setSearchTerm: React.Dispatch<React.SetStateAction<string>>;
+  setIsRegex: React.Dispatch<React.SetStateAction<boolean>>;
+  setActiveFilters: React.Dispatch<React.SetStateAction<Set<LogLevel>>>;
+  setLineCount: React.Dispatch<React.SetStateAction<number>>;
+  setAutoRefresh: React.Dispatch<React.SetStateAction<boolean>>;
+  setRefreshInterval: React.Dispatch<React.SetStateAction<number>>;
+  setScrollLocked: React.Dispatch<React.SetStateAction<boolean>>;
+};
+
+const LogMonitorContext = createContext<LogMonitorStateContext | null>(null);
+
+export function LogMonitorStateProvider({ children }: { children: React.ReactNode }) {
+  const [sources, setSources] = useState<LogSource[]>([]);
+  const [selectedSourceId, setSelectedSourceId] = useState("");
+  const [customPath, setCustomPath] = useState("");
+  const [showCustomInput, setShowCustomInput] = useState(false);
+  const [rawLines, setRawLines] = useState<string[]>([]);
+  const [searchTerm, setSearchTerm] = useState("");
+  const [isRegex, setIsRegex] = useState(false);
+  const [activeFilters, setActiveFilters] = useState<Set<LogLevel>>(new Set());
+  const [lineCount, setLineCount] = useState(200);
+  const [autoRefresh, setAutoRefresh] = useState(false);
+  const [refreshInterval, setRefreshInterval] = useState(3);
+  const [scrollLocked, setScrollLocked] = useState(true);
+
+  return (
+    <LogMonitorContext.Provider value={{
+      sources, setSources, selectedSourceId, setSelectedSourceId,
+      customPath, setCustomPath, showCustomInput, setShowCustomInput,
+      rawLines, setRawLines, searchTerm, setSearchTerm, isRegex, setIsRegex,
+      activeFilters, setActiveFilters, lineCount, setLineCount,
+      autoRefresh, setAutoRefresh, refreshInterval, setRefreshInterval,
+      scrollLocked, setScrollLocked,
+    }}>
+      {children}
+    </LogMonitorContext.Provider>
+  );
+}
+
+function useLogMonitorState(): LogMonitorStateContext {
+  const state = useContext(LogMonitorContext);
+  if (!state) throw new Error("LogMonitor must be rendered inside LogMonitorStateProvider");
+  return state;
 }
 
 interface LogSourcesResponse {
@@ -242,31 +312,19 @@ const SOURCE_TYPE_LABELS: Record<string, { icon: React.ReactNode; label: string 
 
 // ── Component ──
 
-export function LogMonitor({ connectionId, externalLogPath, externalLogPathKey }: LogMonitorProps) {
+export function LogMonitor({ connectionId, externalLogPath, externalLogPathKey, isActive = true }: LogMonitorProps) {
   const { t } = useTranslation();
-  // Source state
-  const [sources, setSources] = useState<LogSource[]>([]);
-  const [selectedSourceId, setSelectedSourceId] = useState("");
-  const [customPath, setCustomPath] = useState("");
-  const [showCustomInput, setShowCustomInput] = useState(false);
+  const {
+    sources, setSources, selectedSourceId, setSelectedSourceId,
+    customPath, setCustomPath, showCustomInput, setShowCustomInput,
+    rawLines, setRawLines, searchTerm, setSearchTerm, isRegex, setIsRegex,
+    activeFilters, setActiveFilters, lineCount, setLineCount,
+    autoRefresh, setAutoRefresh, refreshInterval, setRefreshInterval,
+    scrollLocked, setScrollLocked,
+  } = useLogMonitorState();
   const [isDiscovering, setIsDiscovering] = useState(false);
 
-  // Log data state
-  const [rawLines, setRawLines] = useState<string[]>([]);
   const [isLoading, setIsLoading] = useState(false);
-
-  // Filter state
-  const [searchTerm, setSearchTerm] = useState("");
-  const [isRegex, setIsRegex] = useState(false);
-  const [activeFilters, setActiveFilters] = useState<Set<LogLevel>>(new Set());
-  const [lineCount, setLineCount] = useState(200);
-
-  // Auto-refresh state
-  const [autoRefresh, setAutoRefresh] = useState(false);
-  const [refreshInterval, setRefreshInterval] = useState(3);
-
-  // Scroll state
-  const [scrollLocked, setScrollLocked] = useState(true);
   const scrollRef = useRef<HTMLDivElement>(null);
   const lastScrollTop = useRef(0);
 
@@ -308,14 +366,14 @@ export function LogMonitor({ connectionId, externalLogPath, externalLogPathKey }
     } finally {
       setIsDiscovering(false);
     }
-  }, [connectionId]);
+  }, [connectionId, setSources, t]);
 
   // Auto-discover on mount
   useEffect(() => {
-    if (connectionId) {
-      discoverSources();
+    if (connectionId && isActive) {
+      void discoverSources();
     }
-  }, [connectionId, discoverSources]);
+  }, [connectionId, discoverSources, isActive]);
 
   // ── Find selected source ──
   const selectedSource = useMemo(
@@ -389,30 +447,29 @@ export function LogMonitor({ connectionId, externalLogPath, externalLogPathKey }
         if (!isAutoRefresh) setIsLoading(false);
       }
     },
-    [connectionId, selectedSourceId, selectedSource, lineCount, scrollLocked]
+    [connectionId, selectedSourceId, selectedSource, lineCount, scrollLocked, setRawLines, t]
   );
 
   // Load when source changes
   useEffect(() => {
-    if (selectedSourceId) {
-      setRawLines([]);
-      loadLog();
+    if (isActive && selectedSourceId) {
+      void loadLog();
     }
-  }, [selectedSourceId]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [isActive, selectedSourceId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Auto-refresh timer
   useEffect(() => {
-    if (!autoRefresh || !selectedSourceId) return;
+    if (!isActive || !autoRefresh || !selectedSourceId) return;
     const interval = setInterval(
       () => { void loadLog(true); },
       refreshInterval * 1000
     );
     return () => clearInterval(interval);
-  }, [autoRefresh, selectedSourceId, refreshInterval, loadLog]);
+  }, [isActive, autoRefresh, selectedSourceId, refreshInterval, loadLog]);
 
   // Handle external log path (sent from file browser)
   useEffect(() => {
-    if (!externalLogPath) return;
+    if (!isActive || !externalLogPath) return;
     const path = externalLogPath.trim();
     if (!path) return;
 
@@ -437,7 +494,7 @@ export function LogMonitor({ connectionId, externalLogPath, externalLogPathKey }
 
     // Select and load it
     setSelectedSourceId(id);
-  }, [externalLogPath, externalLogPathKey]);
+  }, [isActive, externalLogPath, externalLogPathKey, setSelectedSourceId, setSources]);
 
   // ── Parse and filter lines ──
 
@@ -493,7 +550,7 @@ export function LogMonitor({ connectionId, externalLogPath, externalLogPathKey }
   const handleSourceChange = useCallback((value: string) => {
     setSelectedSourceId(value);
     setAutoRefresh(false);
-  }, []);
+  }, [setAutoRefresh, setSelectedSourceId]);
 
   const handleAddCustomPath = useCallback(() => {
     const path = customPath.trim();
@@ -521,7 +578,7 @@ export function LogMonitor({ connectionId, externalLogPath, externalLogPathKey }
     setSelectedSourceId(id);
     setCustomPath("");
     setShowCustomInput(false);
-  }, [customPath]);
+  }, [customPath, setCustomPath, setSelectedSourceId, setShowCustomInput, setSources]);
 
   const toggleLevel = useCallback((level: LogLevel) => {
     setActiveFilters((prev) => {
@@ -533,7 +590,7 @@ export function LogMonitor({ connectionId, externalLogPath, externalLogPathKey }
       }
       return next;
     });
-  }, []);
+  }, [setActiveFilters]);
 
   const handleScroll = useCallback(() => {
     const el = scrollRef.current;
@@ -553,7 +610,7 @@ export function LogMonitor({ connectionId, externalLogPath, externalLogPathKey }
     }
 
     lastScrollTop.current = el.scrollTop;
-  }, [scrollLocked]);
+  }, [scrollLocked, setScrollLocked]);
 
   const handleDownload = useCallback(() => {
     const text = rawLines.join("\n");

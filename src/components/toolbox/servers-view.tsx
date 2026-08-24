@@ -105,7 +105,7 @@ interface ServerStats {
   cpu_percent: number;
   cores: number;
   memory: { total: number; used: number; free: number; available: number };
-  disk: { total: string; used: string; available: string; use_percent: number };
+  disk: { is_available: boolean; total: string; used: string; available: string; use_percent: number };
   uptime: string;
   bandwidth?: { rx_bytes_per_sec: number; tx_bytes_per_sec: number };
 }
@@ -1152,10 +1152,10 @@ export function ServersView({
                               <span className="flex items-center gap-1 min-w-0">
                                 <HardDrive className="h-3 w-3 shrink-0" />
                                 <span className="truncate">
-                                  {resources[server.id] ? `${resources[server.id].disk.total} ${resources[server.id].disk.use_percent.toFixed(0)}%` : '—'}
+                                  {resources[server.id]?.disk.is_available ? `${resources[server.id].disk.total} ${resources[server.id].disk.use_percent.toFixed(0)}%` : '—'}
                                 </span>
                               </span>
-                              <GradientBar value={resources[server.id]?.disk.use_percent ?? 0} />
+                              <GradientBar value={resources[server.id]?.disk.is_available ? resources[server.id].disk.use_percent : 0} />
                             </span>
                             <span className="flex flex-col gap-0.5 min-w-0">
                               <span className="flex items-center gap-1 min-w-0">

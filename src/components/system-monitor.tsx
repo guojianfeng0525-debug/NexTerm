@@ -187,7 +187,7 @@ export function SystemMonitor({ connectionId }: SystemMonitorProps) {
       cpu_percent: number;
       memory: { total: number; used: number; free: number; available: number };
       swap: { total: number; used: number; free: number; available: number };
-      disk: { total: string; used: string; available: string; use_percent: number };
+        disk: { is_available: boolean; total: string; used: string; available: string; use_percent: number };
       uptime: string;
       load_average?: string;
     }>('get_system_stats', { connectionId });

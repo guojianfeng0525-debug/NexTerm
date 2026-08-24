@@ -8,7 +8,7 @@
  * writes are asynchronous and fire-and-forget — a failing SQLite write only
  * logs and degrades, it never affects the terminal.
  */
-import { rowList, rowUpsert, encField, decField } from '../toolbox/db';
+import { rowList, rowUpsert, encField, decField, pruneCommandStats } from '../toolbox/db';
 import { isSensitiveCommand } from './sensitive';
 import { SCOPE_GLOBAL, STORE_CAP, type CommandStat } from './types';
 
@@ -35,6 +35,9 @@ export function cwdScope(fullPath: string | undefined): string | null {
 
 // ── in-memory cache: scope -> (command -> stat) ─────────────────────────────
 let cache = new Map<string, Map<string, CommandStat>>();
+// AES-GCM ciphertext has a random IV. Re-encrypting a command on every use
+// changes the composite primary key and turns an upsert into an insert.
+let ciphertextByCommand = new Map<string, string>();
 let hydrated = false;
 
 export function isSuggestionStoreHydrated(): boolean {
@@ -95,7 +98,10 @@ export function recordUse(command: string, connScope: string, cwdScopeKey: strin
     }
   }
   // Prune rarely to keep memory bounded.
-  if (cache.size > STORE_CAP) pruneCache();
+  if (statCount() > STORE_CAP) {
+    pruneCache();
+    void pruneCommandStats(STORE_CAP);
+  }
   void persistScopes(scopes, trimmed);
 }
 
@@ -136,8 +142,9 @@ async function persistScopes(scopes: string[], command: string): Promise<void> {
   for (const scope of scopes) {
     const stat = cache.get(scope)?.get(command);
     if (!stat) continue;
-    const cipher = await encField(command);
+    const cipher = ciphertextByCommand.get(command) ?? await encField(command);
     if (!cipher) continue;
+    ciphertextByCommand.set(command, cipher);
     try {
       await rowUpsert('command_stats', {
         command: cipher,
@@ -164,11 +171,13 @@ export async function hydrateSuggestionStore(
   try {
     const rows = await rowList('command_stats');
     cache = new Map();
+    ciphertextByCommand = new Map();
     if (rows.length > 0) {
       for (const row of rows) {
         const scope = typeof row.scope === 'string' ? row.scope : '';
         const cmd = await decField(row.command as string);
         if (cmd === undefined || !scope) continue;
+        ciphertextByCommand.set(cmd, row.command as string);
         const bucket = getBucket(scope);
         bucket.set(cmd, {
           command: cmd,
@@ -221,6 +230,7 @@ export async function hydrateSuggestionStore(
       for (const stat of globalBucket.values()) {
         const cipher = await encField(stat.command);
         if (!cipher) continue;
+        ciphertextByCommand.set(stat.command, cipher);
         try {
           await rowUpsert('command_stats', {
             command: cipher,
@@ -256,6 +266,12 @@ function pruneCache(): void {
   for (const item of all.slice(0, excess)) {
     cache.get(item.scope)?.delete(item.command);
   }
+}
+
+function statCount(): number {
+  let total = 0;
+  for (const bucket of cache.values()) total += bucket.size;
+  return total;
 }
 
 /** Reset for tests. */

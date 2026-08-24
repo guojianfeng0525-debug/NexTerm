@@ -601,6 +601,8 @@ pub fn run() {
             db::row_list,
             db::row_delete,
             db::row_clear,
+            db::database_vacuum,
+            db::prune_command_stats,
             db::legacy_db_get,
             db::drop_legacy_tables,
             // Toolbox commands (apps, tunnels, services)
