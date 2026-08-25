@@ -90,6 +90,7 @@ describe('SyncDialog remote downloads', () => {
         destinationRoot: 'C:/Downloads/release',
         remoteRelativePath: 'nested/report.txt',
         destinationRelativePath: 'nested/report.txt',
+        transferId: expect.stringMatching(/^sync-/),
       });
     });
     expect(mocks.invoke.mock.calls.some(([command]) => command === 'download_remote_file')).toBe(false);

@@ -27,6 +27,7 @@ fn jump_config() -> JumpConfig {
         auth_method: AuthMethod::Password {
             password: JUMP_PASS.to_string(),
         },
+        host_key_fingerprint: None,
     }
 }
 
@@ -45,6 +46,8 @@ async fn connect_through_jump_and_open_pty() {
         keepalive_max: Some(3),
         proxy: None,
         jump: Some(jump_config()),
+        host_key_fingerprint: None,
+        host_key_verification: false,
     };
 
     let mut client = SshClient::new();

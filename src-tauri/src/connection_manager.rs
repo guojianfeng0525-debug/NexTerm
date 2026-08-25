@@ -8,7 +8,7 @@ use crate::vnc_client::VncClient;
 use anyhow::Result;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Mutex};
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
@@ -19,6 +19,7 @@ pub struct ConnectionManager {
     /// Used to prevent a stale Close from killing a newly created session.
     pty_generations: Arc<RwLock<HashMap<String, u64>>>,
     pending_connections: Arc<RwLock<HashMap<String, CancellationToken>>>,
+    active_transfers: Arc<Mutex<HashMap<(String, String), CancellationToken>>>,
     /// Standalone SFTP connections (no PTY)
     sftp_connections: Arc<RwLock<HashMap<String, StandaloneSftpClient>>>,
     /// FTP/FTPS connections
@@ -38,11 +39,38 @@ impl ConnectionManager {
             pty_sessions: Arc::new(RwLock::new(HashMap::new())),
             pty_generations: Arc::new(RwLock::new(HashMap::new())),
             pending_connections: Arc::new(RwLock::new(HashMap::new())),
+            active_transfers: Arc::new(Mutex::new(HashMap::new())),
             sftp_connections: Arc::new(RwLock::new(HashMap::new())),
             ftp_connections: Arc::new(RwLock::new(HashMap::new())),
             desktop_connections: Arc::new(RwLock::new(HashMap::new())),
             connection_types: Arc::new(RwLock::new(HashMap::new())),
             os_info_cache: OsInfoCache::new(),
+        }
+    }
+
+    pub async fn register_transfer(&self, connection_id: &str, transfer_id: &str) -> Result<CancellationToken> {
+        let mut transfers = self.active_transfers.lock().await;
+        let key = (connection_id.to_string(), transfer_id.to_string());
+        if transfers.contains_key(&key) {
+            return Err(anyhow::anyhow!("Transfer is already active"));
+        }
+        let token = CancellationToken::new();
+        transfers.insert(key, token.clone());
+        Ok(token)
+    }
+
+    pub async fn finish_transfer(&self, connection_id: &str, transfer_id: &str) {
+        self.active_transfers.lock().await.remove(&(connection_id.to_string(), transfer_id.to_string()));
+    }
+
+    pub async fn cancel_transfer(&self, connection_id: &str, transfer_id: &str) -> bool {
+        let token = self.active_transfers.lock().await
+            .get(&(connection_id.to_string(), transfer_id.to_string())).cloned();
+        if let Some(token) = token {
+            token.cancel();
+            true
+        } else {
+            false
         }
     }
 

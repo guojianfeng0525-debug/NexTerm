@@ -106,6 +106,7 @@ describe('DirectoryTransferDialog download', () => {
       remoteRelativePath: '子目录/report 1.txt',
       destinationRelativePath: 'release files/子目录/report 1.txt',
       onProgress: expect.any(Object),
+      transferId: expect.stringMatching(/^directory-/),
     });
     expect(mocks.invoke).toHaveBeenCalledWith('download_remote_file_confined', {
       connectionId: 'conn-1',
@@ -114,6 +115,7 @@ describe('DirectoryTransferDialog download', () => {
       remoteRelativePath: 'README.md',
       destinationRelativePath: 'release files/README.md',
       onProgress: expect.any(Object),
+      transferId: expect.stringMatching(/^directory-/),
     });
     expect(mocks.success).toHaveBeenCalledOnce();
   });
@@ -156,6 +158,7 @@ describe('DirectoryTransferDialog download', () => {
       remoteRelativePath: 'nested\\..\\outside.txt',
       destinationRelativePath: 'release/nested\\..\\outside.txt',
       onProgress: expect.any(Object),
+      transferId: expect.stringMatching(/^directory-/),
     });
     expect(mocks.invoke.mock.calls.some(([command]) => command === 'download_remote_file')).toBe(false);
     expect(mocks.success).not.toHaveBeenCalled();

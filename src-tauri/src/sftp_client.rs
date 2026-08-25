@@ -19,7 +19,12 @@ pub struct SftpConfig {
     /// Optional SSH jump host the SFTP connection is tunnelled through.
     pub jump: Option<JumpConfig>,
     pub host_key_fingerprint: Option<String>,
+    #[serde(default = "default_host_key_verification")]
     pub host_key_verification: bool,
+}
+
+fn default_host_key_verification() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -140,6 +145,7 @@ impl StandaloneSftpClient {
                 connection_timeout,
                 None, // SFTP sessions rely on the target SSH session's keepalive
                 3,
+                config.host_key_verification,
             )
             .await?;
             jump_handle = Some(tunnel.session);
@@ -345,22 +351,29 @@ impl StandaloneSftpClient {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("SFTP session not connected"))?;
 
-        let data = tokio::fs::read(local_path)
+        let mut local_file = tokio::fs::File::open(local_path)
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to read local file '{}': {}", local_path, e))?;
-        let total_bytes = data.len() as u64;
+            .map_err(|e| anyhow::anyhow!("Failed to open local file '{}': {}", local_path, e))?;
+        let total_bytes = local_file
+            .metadata()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to stat local file '{}': {}", local_path, e))?
+            .len();
 
         let mut remote_file = sftp.create(remote_path).await.map_err(|e| {
             anyhow::anyhow!("Failed to create remote file '{}': {}", remote_path, e)
         })?;
 
-        let chunk_size = 32768;
-        let mut offset = 0;
-        while offset < data.len() {
-            let end = std::cmp::min(offset + chunk_size, data.len());
-            remote_file.write_all(&data[offset..end]).await?;
-            offset = end;
-            on_progress(total_bytes, offset as u64);
+        let mut buffer = vec![0u8; 32768];
+        let mut transferred = 0u64;
+        loop {
+            let read = local_file.read(&mut buffer).await?;
+            if read == 0 {
+                break;
+            }
+            remote_file.write_all(&buffer[..read]).await?;
+            transferred += read as u64;
+            on_progress(total_bytes, transferred);
         }
         remote_file.flush().await?;
 

@@ -42,6 +42,7 @@ interface TransferQueueProps {
   dispatch: React.Dispatch<TransferAction>;
   expanded: boolean;
   onToggleExpanded: () => void;
+  onCancel?: (item: TransferItem) => void;
 }
 
 // ---------- Helpers ----------
@@ -87,6 +88,7 @@ export function TransferQueue({
   dispatch,
   expanded,
   onToggleExpanded,
+  onCancel,
 }: TransferQueueProps) {
   const { t } = useTranslation();
   const activeCount = getActiveTransferCount(transfers);
@@ -278,9 +280,10 @@ export function TransferQueue({
                       size="icon"
                       className="h-5 w-5 shrink-0"
                       title={t('transferQueue.cancel')}
-                      onClick={() =>
-                        dispatch({ type: "CANCEL", id: item.id })
-                      }
+                      onClick={() => {
+                        onCancel?.(item);
+                        dispatch({ type: "CANCEL", id: item.id });
+                      }}
                     >
                       <X className="h-3 w-3" />
                     </Button>

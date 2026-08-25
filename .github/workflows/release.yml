@@ -5,6 +5,16 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing version tag to publish (for example, v2.7.1)
+        required: true
+        type: string
+      prerelease:
+        description: Mark the GitHub release as a prerelease
+        required: false
+        default: false
+        type: boolean
 
 jobs:
   release:
@@ -31,6 +41,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -79,11 +91,11 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: 'nexterm ${{ github.ref_name }}'
+          tagName: "${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}"
+          releaseName: "nexterm ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}"
           releaseBody: 'See the assets to download this version and install.'
           releaseDraft: false
-          prerelease: false
+          prerelease: "${{ github.event_name == 'workflow_dispatch' && inputs.prerelease || false }}"
           includeUpdaterJson: true
           args: ${{ matrix.args }}
 

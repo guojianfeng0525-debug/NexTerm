@@ -78,6 +78,8 @@ export interface ConnectionConfig {
 
   // SSH specific
   defaultDirectory?: string; // initial working directory on connect
+  terminalEncoding?: 'utf-8' | 'gbk' | 'gb18030';
+  terminalStartupMode?: 'safe' | 'disabled';
   compression?: boolean;
   keepAlive?: boolean;
   keepAliveInterval?: number;
@@ -138,6 +140,8 @@ export function ConnectionDialog({
     jumpPassword: '',
     jumpUseKey: false,
     defaultDirectory: '',
+    terminalEncoding: 'utf-8',
+    terminalStartupMode: 'safe',
     compression: true,
     keepAlive: true,
     keepAliveInterval: 60,
@@ -362,6 +366,22 @@ export function ConnectionDialog({
         return;
       }
     }
+    if ((config.protocol === 'SSH' || config.protocol === 'SFTP') && config.jumpHost?.trim() && !connectionConfig.jumpHostKeyFingerprint) {
+      try {
+        const { fingerprint } = await invoke<{ fingerprint: string }>('ssh_host_key_fingerprint', {
+          request: { host: config.jumpHost, port: config.jumpPort || 22 },
+        });
+        if (!window.confirm(t('connectionDialog.hostKey.confirmJump', { host: config.jumpHost, port: config.jumpPort || 22, fingerprint }))) {
+          resetConnectionState();
+          return;
+        }
+        connectionConfig = { ...connectionConfig, jumpHostKeyFingerprint: fingerprint };
+      } catch (error) {
+        toast.error(t('connectionDialog.hostKey.probeFailed'), { description: String(error) });
+        resetConnectionState();
+        return;
+      }
+    }
 
 
     // For SFTP/FTP/RDP/VNC protocols, delegate connection to App.tsx (via onConnect)
@@ -396,6 +416,8 @@ export function ConnectionDialog({
             jumpPassword: jumpEnabled ? config.jumpPassword : undefined,
             jumpUseKey: jumpEnabled ? config.jumpUseKey : undefined,
             defaultDirectory: config.defaultDirectory,
+            terminalEncoding: config.terminalEncoding,
+            terminalStartupMode: config.terminalStartupMode,
             compression: config.compression,
             keepAlive: config.keepAlive,
             keepAliveInterval: config.keepAliveInterval,
@@ -429,7 +451,9 @@ export function ConnectionDialog({
             jumpUsername: jumpEnabled ? config.jumpUsername : undefined,
             jumpPassword: jumpEnabled ? config.jumpPassword : undefined,
             jumpUseKey: jumpEnabled ? config.jumpUseKey : undefined,
-        defaultDirectory: config.defaultDirectory,
+            defaultDirectory: config.defaultDirectory,
+            terminalEncoding: config.terminalEncoding,
+            terminalStartupMode: config.terminalStartupMode,
             compression: config.compression,
             keepAlive: config.keepAlive,
             keepAliveInterval: config.keepAliveInterval,
@@ -441,7 +465,10 @@ export function ConnectionDialog({
         }
 
         if (connectionConfig.hostKeyFingerprint) {
-          ConnectionStorageManager.updateConnection(connectionId, { hostKeyFingerprint: connectionConfig.hostKeyFingerprint });
+          ConnectionStorageManager.updateConnection(connectionId, {
+            hostKeyFingerprint: connectionConfig.hostKeyFingerprint,
+            jumpHostKeyFingerprint: connectionConfig.jumpHostKeyFingerprint,
+          });
         }
 
         // Delegate actual connection to App.tsx handler
@@ -483,6 +510,8 @@ export function ConnectionDialog({
         jumpPassword: jumpEnabled ? config.jumpPassword : undefined,
         jumpUseKey: jumpEnabled ? config.jumpUseKey : undefined,
         defaultDirectory: config.defaultDirectory,
+        terminalEncoding: config.terminalEncoding,
+        terminalStartupMode: config.terminalStartupMode,
         compression: config.compression,
         keepAlive: config.keepAlive,
         keepAliveInterval: config.keepAliveInterval,
@@ -513,10 +542,22 @@ export function ConnectionDialog({
         jumpPassword: jumpEnabled ? config.jumpPassword : undefined,
         jumpUseKey: jumpEnabled ? config.jumpUseKey : undefined,
         defaultDirectory: config.defaultDirectory,
+        terminalEncoding: config.terminalEncoding,
+        terminalStartupMode: config.terminalStartupMode,
         compression: config.compression,
         keepAlive: config.keepAlive,
         keepAliveInterval: config.keepAliveInterval,
         serverAliveCountMax: config.serverAliveCountMax,
+      });
+    }
+
+    // Persist the accepted TOFU fingerprints before attempting authentication.
+    // A bad password or temporary network failure must not discard a host key
+    // the user has explicitly approved.
+    if (connectionConfig.hostKeyFingerprint) {
+      ConnectionStorageManager.updateConnection(connectionId, {
+        hostKeyFingerprint: connectionConfig.hostKeyFingerprint,
+        jumpHostKeyFingerprint: connectionConfig.jumpHostKeyFingerprint,
       });
     }
 
@@ -533,7 +574,10 @@ export function ConnectionDialog({
           ...connectionConfig,
           id: connectionId
         });
-        ConnectionStorageManager.updateConnection(connectionId, { hostKeyFingerprint: connectionConfig.hostKeyFingerprint });
+        ConnectionStorageManager.updateConnection(connectionId, {
+          hostKeyFingerprint: connectionConfig.hostKeyFingerprint,
+          jumpHostKeyFingerprint: connectionConfig.jumpHostKeyFingerprint,
+        });
         if (!editingConnection) {
           setConfig(defaultConfig);
         }
@@ -641,6 +685,8 @@ const handleCancelConnectionAttempt = async () => {
       rdpResolution: config.rdpResolution,
       vncColorDepth: config.vncColorDepth,
       defaultDirectory: config.defaultDirectory,
+      terminalEncoding: config.terminalEncoding,
+      terminalStartupMode: config.terminalStartupMode,
     });
 
     // Notify parent to update tab display info (e.g. tab title)
@@ -825,7 +871,7 @@ const handleCancelConnectionAttempt = async () => {
                       id="host"
                       placeholder={t('connectionDialog.placeholder.host')}
                       value={config.host}
-                      onChange={(e) => updateConfig({ host: e.target.value })}
+                      onChange={(e) => updateConfig({ host: e.target.value, hostKeyFingerprint: undefined })}
                     />
                   </div>
                   <div className="space-y-2">
@@ -834,7 +880,7 @@ const handleCancelConnectionAttempt = async () => {
                       id="port"
                       type="number"
                       value={displayValues.port}
-                      onChange={(e) => handleNumberInput('port', e.target.value, (n) => updateConfig({ port: n }))}
+                      onChange={(e) => handleNumberInput('port', e.target.value, (n) => updateConfig({ port: n, hostKeyFingerprint: undefined }))}
                     />
                   </div>
                 </div>
@@ -864,6 +910,7 @@ const handleCancelConnectionAttempt = async () => {
 
                 {/* Default directory — SSH/SFTP open here on connect */}
                 {(config.protocol === 'SSH' || config.protocol === 'SFTP') && (
+                  <div className="grid grid-cols-3 gap-4">
                   <div className="space-y-2">
                     <Label htmlFor="default-directory">{t('connectionDialog.label.defaultDirectory')}</Label>
                     <Input
@@ -873,6 +920,28 @@ const handleCancelConnectionAttempt = async () => {
                       onChange={(e) => updateConfig({ defaultDirectory: e.target.value })}
                       className="font-mono text-xs"
                     />
+                  </div>
+                   <div className="space-y-2">
+                     <Label>{t('connectionDialog.label.terminalEncoding')}</Label>
+                    <Select value={config.terminalEncoding ?? 'utf-8'} onValueChange={(terminalEncoding) => updateConfig({ terminalEncoding: terminalEncoding as ConnectionConfig['terminalEncoding'] })}>
+                      <SelectTrigger><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="utf-8">UTF-8</SelectItem>
+                        <SelectItem value="gbk">GBK</SelectItem>
+                        <SelectItem value="gb18030">GB18030</SelectItem>
+                      </SelectContent>
+                     </Select>
+                   </div>
+                   <div className="space-y-2">
+                     <Label>{t('connectionDialog.label.terminalStartupMode')}</Label>
+                     <Select value={config.terminalStartupMode ?? 'safe'} onValueChange={(terminalStartupMode) => updateConfig({ terminalStartupMode: terminalStartupMode as ConnectionConfig['terminalStartupMode'] })}>
+                       <SelectTrigger><SelectValue /></SelectTrigger>
+                       <SelectContent>
+                         <SelectItem value="safe">{t('connectionDialog.label.terminalStartupSafe')}</SelectItem>
+                         <SelectItem value="disabled">{t('connectionDialog.label.terminalStartupDisabled')}</SelectItem>
+                       </SelectContent>
+                     </Select>
+                   </div>
                   </div>
                 )}
 
@@ -1187,7 +1256,7 @@ const handleCancelConnectionAttempt = async () => {
                             placeholder={t('connectionDialog.placeholder.jumpHost')}
                             value={config.jumpHost}
                             disabled={!!jumpServerId}
-                            onChange={(e) => updateConfig({ jumpHost: e.target.value })}
+                            onChange={(e) => updateConfig({ jumpHost: e.target.value, jumpHostKeyFingerprint: undefined })}
                           />
                         </div>
                         <div className="space-y-2">
@@ -1197,7 +1266,7 @@ const handleCancelConnectionAttempt = async () => {
                             type="number"
                             value={displayValues.jumpPort}
                             disabled={!!jumpServerId}
-                            onChange={(e) => handleNumberInput('jumpPort', e.target.value, (n) => updateConfig({ jumpPort: n }))}
+                            onChange={(e) => handleNumberInput('jumpPort', e.target.value, (n) => updateConfig({ jumpPort: n, jumpHostKeyFingerprint: undefined }))}
                           />
                         </div>
                       </div>

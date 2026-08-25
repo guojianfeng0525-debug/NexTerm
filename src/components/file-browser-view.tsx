@@ -194,6 +194,7 @@ export function FileBrowserView({
               localPath: nextItem.sourcePath,
               remotePath: nextItem.destinationPath,
               onProgress,
+              transferId: nextItem.id,
             },
           );
           if (result.success) {
@@ -214,6 +215,7 @@ export function FileBrowserView({
               remotePath: nextItem.sourcePath,
               localPath: nextItem.destinationPath,
               onProgress,
+              transferId: nextItem.id,
             },
           );
           if (result.success) {
@@ -660,6 +662,7 @@ export function FileBrowserView({
           dispatch={dispatchTransfer}
           expanded={queueExpanded}
           onToggleExpanded={() => setQueueExpanded((p) => !p)}
+          onCancel={(item) => { void invoke('cancel_file_transfer', { connectionId, transferId: item.id }); }}
         />
       </div>
 

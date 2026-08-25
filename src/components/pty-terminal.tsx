@@ -39,6 +39,7 @@ interface PtyTerminalProps {
   connectionId: string;
   connectionName: string;
   defaultDirectory?: string;
+  terminalEncoding?: 'utf-8' | 'gbk' | 'gb18030';
   host?: string;
   username?: string;
   appearanceKey?: number;
@@ -276,6 +277,7 @@ export function PtyTerminal({
   connectionId,
   connectionName,
   defaultDirectory,
+  terminalEncoding = 'utf-8',
   host = 'localhost', 
   username = 'user',
   appearanceKey = 0,
@@ -1108,7 +1110,7 @@ export function PtyTerminal({
       ws.binaryType = 'arraybuffer';
       // One streaming TextDecoder per WebSocket connection: preserves UTF-8
       // multi-byte sequences that may be split across successive output frames.
-      const outputDecoder = new TextDecoder('utf-8');
+      const outputDecoder = new TextDecoder(terminalEncoding);
       wsRef.current = ws;
 
       ws.onopen = () => {

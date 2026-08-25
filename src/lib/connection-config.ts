@@ -44,6 +44,8 @@ export function toConnectionConfig(data: ConnectionData): ConnectionConfig {
     hostKeyFingerprint: data.hostKeyFingerprint,
     jumpHostKeyFingerprint: data.jumpHostKeyFingerprint,
     defaultDirectory: data.defaultDirectory,
+    terminalEncoding: data.terminalEncoding,
+    terminalStartupMode: data.terminalStartupMode,
     compression: data.compression,
     keepAlive: data.keepAlive,
     keepAliveInterval: data.keepAliveInterval,

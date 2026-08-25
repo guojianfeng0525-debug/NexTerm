@@ -90,6 +90,7 @@
     "description": "配置连接设置和身份验证选项",
     "hostKey": {
       "confirm": "验证 SSH 服务器身份\n\n{{host}}:{{port}}\n{{fingerprint}}\n\n是否信任此主机密钥并连接？",
+      "confirmJump": "验证 SSH 跳板机身份\n\n{{host}}:{{port}}\n{{fingerprint}}\n\n是否信任此主机密钥并连接？",
       "probeFailed": "无法获取 SSH 主机密钥"
     },
     "tab": {
@@ -128,6 +129,10 @@
       "proxyPort": "代理端口",
       "proxyUsername": "代理用户名",
       "defaultDirectory": "默认目录",
+      "terminalEncoding": "终端编码",
+      "terminalStartupMode": "默认目录",
+      "terminalStartupSafe": "支持时安全进入",
+      "terminalStartupDisabled": "使用服务器默认目录",
       "proxyPassword": "代理密码",
       "jumpHost": "跳板机主机",
       "jumpPort": "跳板机端口",

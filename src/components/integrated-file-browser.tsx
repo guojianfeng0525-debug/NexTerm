@@ -444,6 +444,7 @@ export function IntegratedFileBrowser({ connectionId, host: _host, isConnected, 
               localPath: nextItem.sourcePath,
               remotePath: nextItem.destinationPath,
               onProgress: channel,
+              transferId: nextItem.id,
             },
           );
           if (result.success) {
@@ -468,6 +469,7 @@ export function IntegratedFileBrowser({ connectionId, host: _host, isConnected, 
               remotePath: nextItem.sourcePath,
               localPath: nextItem.destinationPath,
               onProgress: channel,
+              transferId: nextItem.id,
             },
           );
           if (result.success) {
@@ -1989,6 +1991,9 @@ export function IntegratedFileBrowser({ connectionId, host: _host, isConnected, 
         dispatch={dispatchTransfer}
         expanded={queueExpanded}
         onToggleExpanded={() => setQueueExpanded(p => !p)}
+        onCancel={(item) => {
+          void invoke('cancel_file_transfer', { connectionId, transferId: item.id });
+        }}
       />
 
       {directoryTransfer && (

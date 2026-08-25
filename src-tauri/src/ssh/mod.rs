@@ -604,13 +604,6 @@ impl SshClient {
             let mut channel = session.channel_open_session().await.map_err(|e| {
                 anyhow::anyhow!("Failed to open PTY channel (session may have dropped): {e}")
             })?;
-            let bash_terminal_modes = [(Pty::ECHO, 0), (Pty::ECHONL, 0)];
-            let terminal_modes = if bash_version.is_some() {
-                bash_terminal_modes.as_slice()
-            } else {
-                &[]
-            };
-
             // Request PTY with terminal type and dimensions
             // Similar to ttyd's approach: xterm-256color terminal
             channel
@@ -621,7 +614,7 @@ impl SshClient {
                     rows,             // rows
                     0,                // pixel_width (not used)
                     0,                // pixel_height (not used)
-                    terminal_modes,
+                    &[],
                 )
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to request PTY on the session: {e}"))?;
@@ -658,26 +651,12 @@ impl SshClient {
 
             let channel_id = channel.id();
 
-            // Clone channel for input task
+            // Clone channel for input task.
+            // Do not inject shell integration or a fallback `cd` through this
+            // writer: both are interactive input and can pollute remote shell
+            // history. The safe exec startup above is the only automatic
+            // default-directory mechanism.
             let mut input_channel = channel.make_writer();
-            if let Some(version) = bash_version {
-                let integration_command = bash_shell_integration_command(version);
-                input_channel.write_all(&integration_command).await?;
-                input_channel.flush().await?;
-            }
-            // Non-Bash shells cannot be launched portably through an SSH exec
-            // request. Keep the existing compatible fallback for them.
-            if bash_version.is_none() {
-                if let Some(dir) = default_directory {
-                    // Single-quote the path and escape embedded quotes so paths
-                    // with spaces/special characters are handled safely.
-                    let escaped = dir.replace('\'', "'\\''");
-                    input_channel
-                        .write_all(format!("cd '{}'\r", escaped).as_bytes())
-                        .await?;
-                    input_channel.flush().await?;
-                }
-            }
 
             // Create a channel for resize requests
             let (resize_tx, mut resize_rx) = mpsc::channel::<(u32, u32)>(16);
@@ -774,6 +753,15 @@ impl SshClient {
     }
 
     pub async fn download_file(&self, remote_path: &str, local_path: &str) -> Result<u64> {
+        self.download_file_with_progress(remote_path, local_path, |_, _| {}).await
+    }
+
+    pub async fn download_file_with_progress(
+        &self,
+        remote_path: &str,
+        local_path: &str,
+        mut on_progress: impl FnMut(u64, u64) + Send,
+    ) -> Result<u64> {
         if let Some(session) = &self.session {
             // Open SFTP subsystem
             let channel = session.channel_open_session().await?;
@@ -783,24 +771,24 @@ impl SshClient {
             // Open remote file for reading
             let mut remote_file = sftp.open(remote_path).await?;
 
-            // Read file content
-            let mut buffer = Vec::new();
-            let mut temp_buf = vec![0u8; 8192];
-            let mut total_bytes = 0u64;
+            let total_bytes = remote_file.metadata().await
+                .map(|metadata| metadata.size.unwrap_or(0))
+                .unwrap_or(0);
+            let mut local_file = tokio::fs::File::create(local_path).await?;
+            let mut temp_buf = vec![0u8; 32768];
+            let mut transferred = 0u64;
 
             loop {
                 let n = remote_file.read(&mut temp_buf).await?;
                 if n == 0 {
                     break;
                 }
-                buffer.extend_from_slice(&temp_buf[..n]);
-                total_bytes += n as u64;
+                local_file.write_all(&temp_buf[..n]).await?;
+                transferred += n as u64;
+                on_progress(total_bytes, transferred);
             }
-
-            // Write to local file
-            tokio::fs::write(local_path, buffer).await?;
-
-            Ok(total_bytes)
+            local_file.flush().await?;
+            Ok(transferred)
         } else {
             Err(anyhow::anyhow!("Not connected"))
         }
@@ -835,10 +823,18 @@ impl SshClient {
     }
 
     pub async fn upload_file(&self, local_path: &str, remote_path: &str) -> Result<u64> {
+        self.upload_file_with_progress(local_path, remote_path, |_, _| {}).await
+    }
+
+    pub async fn upload_file_with_progress(
+        &self,
+        local_path: &str,
+        remote_path: &str,
+        mut on_progress: impl FnMut(u64, u64) + Send,
+    ) -> Result<u64> {
         if let Some(session) = &self.session {
-            // Read local file
-            let data = tokio::fs::read(local_path).await?;
-            let total_bytes = data.len() as u64;
+            let mut local_file = tokio::fs::File::open(local_path).await?;
+            let total_bytes = local_file.metadata().await?.len();
 
             // Open SFTP subsystem
             let channel = session.channel_open_session().await?;
@@ -848,19 +844,21 @@ impl SshClient {
             // Create remote file for writing
             let mut remote_file = sftp.create(remote_path).await?;
 
-            // Write data in chunks
-            let mut offset = 0;
-            let chunk_size = 8192;
-
-            while offset < data.len() {
-                let end = std::cmp::min(offset + chunk_size, data.len());
-                remote_file.write_all(&data[offset..end]).await?;
-                offset = end;
+            let mut buffer = vec![0u8; 32768];
+            let mut transferred = 0u64;
+            loop {
+                let read = local_file.read(&mut buffer).await?;
+                if read == 0 {
+                    break;
+                }
+                remote_file.write_all(&buffer[..read]).await?;
+                transferred += read as u64;
+                on_progress(total_bytes, transferred);
             }
 
             remote_file.flush().await?;
 
-            Ok(total_bytes)
+            Ok(transferred)
         } else {
             Err(anyhow::anyhow!("Not connected"))
         }
@@ -894,6 +892,18 @@ impl SshClient {
         } else {
             Err(anyhow::anyhow!("Not connected"))
         }
+    }
+
+    pub async fn rename_remote_file(&self, old_path: &str, new_path: &str) -> Result<()> {
+        let sftp = self.open_sftp_session().await?;
+        sftp.rename(old_path, new_path).await?;
+        Ok(())
+    }
+
+    pub async fn remove_remote_file(&self, path: &str) -> Result<()> {
+        let sftp = self.open_sftp_session().await?;
+        sftp.remove_file(path).await?;
+        Ok(())
     }
 }
 

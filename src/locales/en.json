@@ -90,6 +90,7 @@
     "description": "Configure connection settings and authentication options",
     "hostKey": {
       "confirm": "Verify SSH server identity\n\n{{host}}:{{port}}\n{{fingerprint}}\n\nTrust this host key and connect?",
+      "confirmJump": "Verify SSH jump host identity\n\n{{host}}:{{port}}\n{{fingerprint}}\n\nTrust this host key and connect?",
       "probeFailed": "Could not retrieve the SSH host key"
     },
     "tab": {
@@ -128,6 +129,10 @@
       "proxyPort": "Proxy Port",
       "proxyUsername": "Proxy Username",
       "defaultDirectory": "Default Directory",
+      "terminalEncoding": "Terminal Encoding",
+      "terminalStartupMode": "Default Directory",
+      "terminalStartupSafe": "Open safely when supported",
+      "terminalStartupDisabled": "Use server default",
       "proxyPassword": "Proxy Password",
       "jumpHost": "Jump Host",
       "jumpPort": "Jump Port",

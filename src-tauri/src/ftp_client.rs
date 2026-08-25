@@ -40,11 +40,12 @@ macro_rules! ftp_stream {
 /// FTP/FTPS client using `suppaftp` with async support.
 pub struct FtpClient {
     stream: Option<FtpStreamKind>,
+    config: Option<FtpConfig>,
 }
 
 impl FtpClient {
     pub fn new() -> Self {
-        Self { stream: None }
+        Self { stream: None, config: None }
     }
 
     /// Connect to an FTP server, authenticate, and switch to binary transfer mode.
@@ -141,11 +142,20 @@ impl FtpClient {
 
         Ok(Self {
             stream: Some(stream_kind),
+            config: Some(config.clone()),
         })
     }
 
     pub fn is_connected(&self) -> bool {
         self.stream.is_some()
+    }
+
+    /// Return the connection settings for a short-lived transfer client.
+    /// Transfers must not hold the shared browser connection lock.
+    pub fn transfer_config(&self) -> Result<FtpConfig> {
+        self.config
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("FTP session not connected"))
     }
 
     pub async fn disconnect(&mut self) -> Result<()> {

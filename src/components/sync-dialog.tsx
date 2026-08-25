@@ -145,6 +145,7 @@ export function SyncDialog({
     ...INITIAL_SYNC_PROGRESS,
   });
   const cancelRef = useRef(false);
+  const activeTransferIdRef = useRef<string | null>(null);
 
   // Filter for result table
   const [showSkipped, setShowSkipped] = useState(false);
@@ -301,6 +302,10 @@ export function SyncDialog({
       }));
 
       try {
+        const transferId = `sync-${Date.now()}-${processedItems}`;
+        if (entry.action === "upload" || entry.action === "download") {
+          activeTransferIdRef.current = transferId;
+        }
         switch (entry.action) {
           case "create-dir": {
             const remoteDir = pathJoin(remotePath, entry.relativePath);
@@ -317,6 +322,7 @@ export function SyncDialog({
               connectionId,
               localPath: srcPath,
               remotePath: destPath,
+              transferId,
             });
             if (!result.success) {
               throw new Error(result.error ?? "Upload failed");
@@ -339,6 +345,7 @@ export function SyncDialog({
               destinationRoot: localPath,
               remoteRelativePath: entry.relativePath,
               destinationRelativePath: entry.relativePath,
+              transferId,
             });
             if (!result.success) {
               throw new Error(result.error ?? "Download failed");
@@ -353,6 +360,7 @@ export function SyncDialog({
           description: err instanceof Error ? err.message : String(err),
         });
       }
+      activeTransferIdRef.current = null;
 
       processedItems++;
     }
@@ -784,6 +792,10 @@ export function SyncDialog({
               size="sm"
               onClick={() => {
                 cancelRef.current = true;
+                const transferId = activeTransferIdRef.current;
+                if (transferId) {
+                  void invoke("cancel_file_transfer", { connectionId, transferId });
+                }
               }}
             >
               <X className="h-4 w-4 mr-1" />

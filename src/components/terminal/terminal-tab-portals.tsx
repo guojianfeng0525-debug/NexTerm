@@ -23,7 +23,13 @@ import { FileEditorView } from '../file-editor-view';
  *  the tab id itself, which is the original connection id for normal tabs). */
 function defaultDirectoryForTab(tab: TerminalTab): string | undefined {
   const sourceId = tab.originalConnectionId || tab.id;
-  return ConnectionStorageManager.getConnection(sourceId)?.defaultDirectory;
+  const connection = ConnectionStorageManager.getConnection(sourceId);
+  return connection?.terminalStartupMode === 'disabled' ? undefined : connection?.defaultDirectory;
+}
+
+function terminalEncodingForTab(tab: TerminalTab): 'utf-8' | 'gbk' | 'gb18030' {
+  const sourceId = tab.originalConnectionId || tab.id;
+  return ConnectionStorageManager.getConnection(sourceId)?.terminalEncoding ?? 'utf-8';
 }
 
 interface TerminalTabPortalContextValue {
@@ -136,6 +142,7 @@ function TerminalTabContent({ tab, themeKey }: { tab: TerminalTab; themeKey: num
         connectionId={tab.id}
         connectionName={tab.name}
         defaultDirectory={defaultDirectoryForTab(tab)}
+        terminalEncoding={terminalEncodingForTab(tab)}
         host={tab.host}
         username={tab.username}
         themeKey={themeKey}

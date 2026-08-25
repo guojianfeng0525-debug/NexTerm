@@ -39,6 +39,7 @@ pub async fn connect_via_jump(
     connection_timeout: Duration,
     keepalive: Option<Duration>,
     keepalive_max: usize,
+    host_key_verification: bool,
 ) -> Result<JumpTunnel> {
     let ssh_config = client::Config {
         preferred: russh::Preferred {
@@ -60,7 +61,7 @@ pub async fn connect_via_jump(
         client::connect(
             Arc::new(ssh_config),
             (&jump.host[..], jump.port),
-            Client::new(jump.host_key_fingerprint.clone(), false),
+            Client::new(jump.host_key_fingerprint.clone(), host_key_verification),
         ),
     )
     .await

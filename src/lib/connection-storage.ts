@@ -57,6 +57,8 @@ export interface ConnectionData {
   jumpHostKeyFingerprint?: string;
   // SSH-specific advanced
   defaultDirectory?: string; // initial working directory on connect
+  terminalEncoding?: 'utf-8' | 'gbk' | 'gb18030';
+  terminalStartupMode?: 'safe' | 'disabled';
   compression?: boolean;
   keepAlive?: boolean;
   keepAliveInterval?: number;
@@ -129,6 +131,8 @@ function connToRow(c: ConnectionData): Record<string, unknown> {
     host_key_fingerprint: c.hostKeyFingerprint ?? null,
     jump_host_key_fingerprint: c.jumpHostKeyFingerprint ?? null,
     default_directory: c.defaultDirectory ?? null,
+    terminal_encoding: c.terminalEncoding ?? 'utf-8',
+    terminal_startup_mode: c.terminalStartupMode ?? 'safe',
     compression: c.compression ? 1 : 0,
     keep_alive: c.keepAlive ? 1 : 0,
     keep_alive_interval: c.keepAliveInterval ?? null,
@@ -169,6 +173,8 @@ function rowToConn(row: Record<string, unknown>): ConnectionData {
     jumpHostKeyFingerprint: (row.jump_host_key_fingerprint as string) ?? undefined,
     jumpUseKey: !!row.jump_use_key,
     defaultDirectory: (row.default_directory as string) ?? undefined,
+    terminalEncoding: (row.terminal_encoding as ConnectionData['terminalEncoding']) ?? 'utf-8',
+    terminalStartupMode: (row.terminal_startup_mode as ConnectionData['terminalStartupMode']) ?? 'safe',
     compression: !!row.compression,
     keepAlive: !!row.keep_alive,
     keepAliveInterval: (row.keep_alive_interval as number) ?? undefined,
@@ -197,7 +203,9 @@ async function persistConnection(c: ConnectionData): Promise<void> {
   // NOT NULL column — never write null (0 = disabled), or the whole row upsert fails.
   row.jump_use_key = c.jumpUseKey ? 1 : 0;
   row.vnc_password = await encField(c.vncPassword);
-  await rowUpsert('connections', row);
+  if (!await rowUpsert('connections', row)) {
+    throw new Error(`Failed to persist connection ${c.id}`);
+  }
 }
 
 async function rowToConnDecrypted(row: Record<string, unknown>): Promise<ConnectionData> {
@@ -233,7 +241,9 @@ function rowToFolder(row: Record<string, unknown>): ConnectionFolder {
 }
 
 async function persistFolder(f: ConnectionFolder): Promise<void> {
-  await rowUpsert('folders', folderToRow(f));
+  if (!await rowUpsert('folders', folderToRow(f))) {
+    throw new Error(`Failed to persist folder ${f.id}`);
+  }
 }
 
 /**
@@ -307,6 +317,24 @@ async function persistAll(): Promise<void> {
   ]);
 }
 
+// Cache mutations are synchronous for responsive UI, but database writes must
+// retain their order. A single queue prevents a slow encrypted write from
+// overwriting a newer edit and surfaces failures to the application shell.
+let persistQueue: Promise<void> = Promise.resolve();
+
+function queuePersist(): void {
+  persistQueue = persistQueue
+    .then(() => persistAll())
+    .catch((error: unknown) => {
+      console.error('[connections] persistence failed:', error);
+      try {
+        window.dispatchEvent(new CustomEvent('nexterm:connection-storage-error', { detail: error }));
+      } catch {
+        /* non-browser runtime */
+      }
+    });
+}
+
 /**
  * Notify UI listeners (ServersView, ConnectionManager) that the connection /
  * folder data changed, so they can reload without waiting for a
@@ -326,7 +354,7 @@ function persistConnections(connections: ConnectionData[]): void {
   if (!sqlCache) sqlCache = { connections: [], folders: [], active: [] };
   sqlCache.connections = connections;
   notifyConnectionsChanged();
-  void persistAll();
+  queuePersist();
 }
 
 /** Persist the given folders list: update the cache, then flush to SQLite. */
@@ -334,7 +362,7 @@ function persistFolders(folders: ConnectionFolder[]): void {
   if (!sqlCache) sqlCache = { connections: [], folders: [], active: [] };
   sqlCache.folders = folders;
   notifyConnectionsChanged();
-  void persistAll();
+  queuePersist();
 }
 
 function persistBoth(connections: ConnectionData[], folders: ConnectionFolder[]): void {
@@ -342,7 +370,7 @@ function persistBoth(connections: ConnectionData[], folders: ConnectionFolder[])
   sqlCache.connections = connections;
   sqlCache.folders = folders;
   notifyConnectionsChanged();
-  void persistAll();
+  queuePersist();
 }
 
 export class ConnectionStorageManager {

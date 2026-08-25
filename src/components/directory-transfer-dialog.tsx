@@ -102,6 +102,7 @@ export function DirectoryTransferDialog({
     ...initialProgress,
   });
   const cancelRef = useRef(false);
+  const activeTransferIdRef = useRef<string | null>(null);
   const startedRef = useRef(false);
 
   // Auto-start transfer when dialog opens
@@ -276,6 +277,8 @@ export function DirectoryTransferDialog({
           sourcePath === "/"
             ? `/${file.relative_path}`
             : `${sourcePath}/${file.relative_path}`;
+        const transferId = `directory-${Date.now()}-${processedFiles}`;
+        activeTransferIdRef.current = transferId;
 
         setProgress((p) => ({
           ...p,
@@ -304,6 +307,7 @@ export function DirectoryTransferDialog({
               localPath: fileSrcPath,
               remotePath: fileDestPath,
               onProgress: channel,
+              transferId,
             });
             if (!result.success) {
               throw new Error(result.error ?? "Upload failed");
@@ -319,6 +323,7 @@ export function DirectoryTransferDialog({
               remoteRelativePath: file.relative_path,
               destinationRelativePath: destinationRelativePath(file.relative_path),
               onProgress: channel,
+              transferId,
             });
             if (!result.success) {
               throw new Error(result.error ?? "Download failed");
@@ -336,6 +341,7 @@ export function DirectoryTransferDialog({
             ],
           }));
         }
+        activeTransferIdRef.current = null;
 
         processedFiles++;
       }
@@ -547,6 +553,10 @@ export function DirectoryTransferDialog({
               size="sm"
               onClick={() => {
                 cancelRef.current = true;
+                const transferId = activeTransferIdRef.current;
+                if (transferId) {
+                  void invoke("cancel_file_transfer", { connectionId, transferId });
+                }
               }}
             >
               <X className="h-4 w-4 mr-1" />

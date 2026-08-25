@@ -5,6 +5,11 @@ on:
     branches: [main]
     tags: ['v*']
   workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing version tag to publish (for example, v2.7.1)
+        required: false
+        type: string
 
 permissions:
   contents: write
@@ -15,6 +20,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
 
       - name: Setup pnpm (version from packageManager field)
         uses: pnpm/action-setup@v4
@@ -123,9 +130,10 @@ jobs:
 
       # Publish a GitHub Release when a version tag (v*) is pushed.
       - name: Publish Release
-        if: startsWith(github.ref, 'refs/tags/')
+        if: startsWith(github.ref, 'refs/tags/') || inputs.tag != ''
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
           files: |
             dist/NexTerm-portable.zip
           generate_release_notes: true
