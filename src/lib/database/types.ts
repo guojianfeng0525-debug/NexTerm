@@ -17,6 +17,51 @@ export type DatabaseObjectNodeKind =
 
 export type DatabaseObjectRole = "relation";
 
+export type DatabaseObjectIconRole =
+  | "connection"
+  | "catalog"
+  | "schema"
+  | "group"
+  | "relation";
+
+export type DatabaseObjectNodeId = string & {
+  readonly __databaseObjectNodeId: unique symbol;
+};
+
+export interface DatabaseObjectIdentitySegment {
+  readonly kind: DatabaseObjectNodeKind;
+  readonly value: string;
+}
+
+export interface DatabaseObjectIdentity {
+  readonly providerId: DatabaseProviderId;
+  readonly connectionId: string;
+  readonly path: readonly DatabaseObjectIdentitySegment[];
+}
+
+/**
+ * The shared Navigator treats this path as opaque. Providers construct and
+ * decode it at their boundary, keeping provider metadata out of the renderer.
+ */
+export interface DatabaseObjectReference {
+  readonly providerId: DatabaseProviderId;
+  readonly path: readonly string[];
+}
+
+export interface DatabaseObjectNode {
+  readonly id: DatabaseObjectNodeId;
+  readonly parentId?: DatabaseObjectNodeId;
+  readonly providerId: DatabaseProviderId;
+  readonly kind: DatabaseObjectNodeKind;
+  readonly objectRole?: DatabaseObjectRole;
+  readonly label: string;
+  readonly iconRole: DatabaseObjectIconRole;
+  readonly expandable: boolean;
+  readonly selectable: boolean;
+  readonly openable: boolean;
+  readonly reference: DatabaseObjectReference;
+}
+
 export type DatabaseExplainCapability = "none" | "text" | "visual";
 
 /**

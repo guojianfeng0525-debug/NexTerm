@@ -143,12 +143,12 @@ interpret a PostgreSQL schema/table hierarchy to load children.
 
 ### Migration Status
 
-- Navigator / Object Model Provider Migration: NOT STARTED.
-- Shared Database Object metadata foundation: PARTIAL / FOUNDATION ONLY.
-- Live Navigator consumes Shared Object Nodes: NO.
-- Provider Object Adapter: NOT IMPLEMENTED.
-- Generic child loading: NOT IMPLEMENTED.
-- Navigator rendering abstraction: NOT IMPLEMENTED.
+- Navigator / Object Model Provider Migration: COMPLETE for the current PostgreSQL hierarchy.
+- `DatabaseObjectNode` is the live Navigator contract: stable ID, parent ID, provider ID, shared kind/role, presentation metadata, action flags, and an opaque provider reference.
+- `createDatabaseObjectNodeId` scopes every node by provider, connection, and typed hierarchy path.
+- `postgresql-object-loader.ts` is the active PostgreSQL adapter. It owns `postgres_catalog_*` mapping and reference decoding for existing table browse requests.
+- `DatabaseNavigator` is provider-neutral and renders shared nodes only; it does not inspect PostgreSQL fields or branch by provider.
+- Child loading remains lazy. Refresh reloads expanded nodes through the active loader.
 
 ## Command Architecture
 

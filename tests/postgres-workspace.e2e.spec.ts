@@ -1,5 +1,12 @@
 import { expect, test } from '@playwright/test';
 
+declare global {
+  interface Window {
+    __postgresSchemaRequestCount?: number;
+    __postgresRelationRequestCount?: number;
+  }
+}
+
 test.describe('PostgreSQL workspace', () => {
   test('opens the Navicat-style workspace and connection settings', async ({ page }) => {
     await page.addInitScript(() => {
@@ -10,10 +17,15 @@ test.describe('PostgreSQL workspace', () => {
               return Promise.resolve({ serverVersion: '16.0' });
             }
             if (command === 'postgres_catalog_schemas') {
+              window.__postgresSchemaRequestCount = (window.__postgresSchemaRequestCount ?? 0) + 1;
               return Promise.resolve(['public']);
             }
             if (command === 'postgres_catalog_search') {
-              return Promise.resolve([]);
+              window.__postgresRelationRequestCount = (window.__postgresRelationRequestCount ?? 0) + 1;
+              return Promise.resolve([{ kind: 'relation', schema: 'public', name: 'users' }]);
+            }
+            if (command === 'postgres_table_data') {
+              return Promise.resolve({ columns: ['id'], rows: [['1']], truncated: false });
             }
             return Promise.resolve(undefined);
           },
@@ -56,6 +68,26 @@ test.describe('PostgreSQL workspace', () => {
     await dialog.getByRole('button', { name: 'Connect', exact: true }).click();
     await expect(page.getByTestId('postgres-disconnect')).toBeEnabled();
     await expect(page.getByTestId('postgres-new-query')).toBeEnabled();
+    const navigator = page.getByTestId('postgres-workspace').locator('aside').first();
+    const users = navigator.getByRole('button', { name: 'users', exact: true });
+    await expect(users).toBeVisible();
+    await users.click();
+    await expect(users).toHaveClass(/bg-primary\/10/);
+    await expect(
+      page.getByTestId('postgres-workspace').getByRole('main').getByRole('button', { name: 'users', exact: true }),
+    ).toBeVisible();
+
+    const tables = navigator.getByRole('button', { name: 'Tables', exact: true });
+    await tables.click();
+    await expect(users).toBeHidden();
+    await tables.click();
+    await expect(users).toBeVisible();
+
+    const beforeRefresh = await page.evaluate(() => window.__postgresSchemaRequestCount);
+    await page.getByTestId('postgres-refresh').click();
+    await expect
+      .poll(() => page.evaluate(() => window.__postgresSchemaRequestCount))
+      .toBeGreaterThan(beforeRefresh ?? 0);
     await page.getByTestId('postgres-disconnect').click();
     await expect(page.getByTestId('postgres-disconnect')).toHaveCount(0);
     await expect(page.getByTestId('postgres-connect')).toBeEnabled();

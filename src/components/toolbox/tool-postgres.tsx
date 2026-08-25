@@ -1,15 +1,12 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type Dispatch, type SetStateAction } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 import {
-  ChevronDown,
-  ChevronRight,
   Database,
   FileCode2,
   FolderTree,
   KeyRound,
-  ListTree,
   Loader2,
   Play,
   Plus,
@@ -48,6 +45,17 @@ import type {
 import type { PostgresCatalogLookup } from "@/lib/postgres-completion";
 import { resolveDatabaseCommand } from "@/lib/database/command-registry";
 import { postgresqlProvider } from "@/lib/database/provider-registry";
+import { DatabaseNavigator } from "@/components/toolbox/database-navigator";
+import {
+  createPostgresNavigatorConnectionNode,
+  getPostgresRelationReference,
+  loadPostgresNavigatorChildren,
+  type PostgresRelationReference,
+} from "@/lib/database/postgresql-object-loader";
+import type {
+  DatabaseObjectNode,
+  DatabaseObjectNodeId,
+} from "@/lib/database/types";
 
 type Result = {
   columns: string[];
@@ -56,17 +64,12 @@ type Result = {
   primaryKeyColumns?: string[];
   truncated: boolean;
 };
-type CatalogItem = {
-  kind: string;
-  schema?: string;
-  name: string;
-  dataType?: string;
-};
+type TableObject = { schema: string; name: string };
 type WorkspaceTab = {
   id: string;
   type: "query" | "table";
   title: string;
-  object?: CatalogItem;
+  object?: TableObject;
   sql: string;
   result: Result | null;
   dirty?: boolean;
@@ -74,6 +77,25 @@ type WorkspaceTab = {
 type DialogPage = "general" | "ssh" | "tls";
 
 const pageSize = 100;
+
+type NavigatorChildren = Partial<
+  Record<DatabaseObjectNodeId, readonly DatabaseObjectNode[]>
+>;
+
+async function loadNavigatorChildren(
+  node: DatabaseObjectNode,
+  tablesLabel: string,
+  setNavigatorChildren: Dispatch<SetStateAction<NavigatorChildren>>,
+) {
+  try {
+    const children = await loadPostgresNavigatorChildren(node, tablesLabel);
+    setNavigatorChildren((current) => ({ ...current, [node.id]: children }));
+    return children;
+  } catch {
+    setNavigatorChildren((current) => ({ ...current, [node.id]: [] }));
+    return [];
+  }
+}
 
 function newConnection(): PostgresConnection {
   const now = Date.now();
@@ -112,23 +134,22 @@ export function ToolPostgres() {
   const [draft, setDraft] = useState<PostgresConnection>(
     () => PostgresConnectionsStorage.load()[0] ?? newConnection(),
   );
-  const [selectedId, setSelectedId] = useState<string | null>(
+  const [, setSelectedId] = useState<string | null>(
     () => PostgresConnectionsStorage.load()[0]?.id ?? null,
   );
   const [connected, setConnected] = useState(false);
   const [connecting, setConnecting] = useState(false);
   const [navigatorWidth, setNavigatorWidth] = useState(276);
   const [dragging, setDragging] = useState(false);
-  const [schemas, setSchemas] = useState<string[]>([]);
   const [schema, setSchema] = useState<string | null>(null);
-  const [objects, setObjects] = useState<CatalogItem[]>([]);
   const [filter, setFilter] = useState("");
-  const [expanded, setExpanded] = useState<Record<string, boolean>>({
-    connection: true,
-    database: true,
-    schema: true,
-    tables: true,
-  });
+  const [expanded, setExpanded] = useState<
+    Partial<Record<DatabaseObjectNodeId, boolean>>
+  >({});
+  const [navigatorChildren, setNavigatorChildren] =
+    useState<NavigatorChildren>({});
+  const [selectedNavigatorNodeId, setSelectedNavigatorNodeId] =
+    useState<DatabaseObjectNodeId | null>(null);
   const [tabs, setTabs] = useState<WorkspaceTab[]>([newQuery()]);
   const [activeTab, setActiveTab] = useState<string>(() => tabs[0]?.id ?? "");
   const [resultHeight, setResultHeight] = useState(260);
@@ -171,6 +192,18 @@ export function ToolPostgres() {
           request: { connectionId: draft.id, ...request },
         })
     : undefined;
+  const navigatorConnections = connections.length
+    ? connections
+    : connected
+      ? [draft]
+      : connections;
+  const navigatorRoots = navigatorConnections.map((connection) =>
+    createPostgresNavigatorConnectionNode(connection),
+  );
+  const navigatorNodes = [
+    ...navigatorRoots,
+    ...Object.values(navigatorChildren).flatMap((children) => children ?? []),
+  ];
   const update = <K extends keyof PostgresConnection>(
     key: K,
     value: PostgresConnection[K],
@@ -184,33 +217,49 @@ export function ToolPostgres() {
       window.removeEventListener("nexterm:toolbox-changed", updateConnections);
   }, []);
   useEffect(() => {
-    if (!connected) {
-      setSchemas([]);
-      setObjects([]);
-      return;
-    }
-    void invoke<string[]>("postgres_catalog_schemas", {
-      connectionId: draft.id,
-    })
-      .then((items) => {
-        setSchemas(items);
-        setSchema(items[0] ?? null);
-        if (items[0])
-          setExpanded((current) => ({
-            ...current,
-            [`schema:${items[0]}`]: true,
-          }));
-      })
-      .catch(() => setSchemas([]));
-  }, [connected, draft.id]);
-  useEffect(() => {
-    if (!connected || !schema) return;
-    void invoke<CatalogItem[]>("postgres_catalog_search", {
-      request: { connectionId: draft.id, kind: "relation", schema },
-    })
-      .then(setObjects)
-      .catch(() => setObjects([]));
-  }, [connected, draft.id, schema]);
+    if (!connected) return;
+
+    const loadInitialNavigatorPath = async () => {
+      const connection = createPostgresNavigatorConnectionNode(draft);
+      const catalog = await loadNavigatorChildren(
+        connection,
+        t("toolbox.postgres.tables"),
+        setNavigatorChildren,
+      );
+      const firstCatalog = catalog[0];
+      if (!firstCatalog) return;
+      const schemas = await loadNavigatorChildren(
+        firstCatalog,
+        t("toolbox.postgres.tables"),
+        setNavigatorChildren,
+      );
+      const firstSchema = schemas[0];
+      if (!firstSchema) return;
+      const groups = await loadNavigatorChildren(
+        firstSchema,
+        t("toolbox.postgres.tables"),
+        setNavigatorChildren,
+      );
+      const firstGroup = groups[0];
+      if (firstGroup)
+        await loadNavigatorChildren(
+          firstGroup,
+          t("toolbox.postgres.tables"),
+          setNavigatorChildren,
+        );
+
+      setSchema(firstSchema.label);
+      setSelectedNavigatorNodeId(connection.id);
+      setExpanded({
+        [connection.id]: true,
+        [firstCatalog.id]: true,
+        [firstSchema.id]: true,
+        ...(firstGroup ? { [firstGroup.id]: true } : {}),
+      });
+    };
+
+    void loadInitialNavigatorPath();
+  }, [connected, draft, t]);
   useEffect(() => {
     const move = (event: PointerEvent) => {
       if (dragging)
@@ -354,8 +403,15 @@ export function ToolPostgres() {
       setRunning(false);
     }
   };
-  const browse = async (object: CatalogItem, offset = 0) => {
-    if (!connected || !object.schema) return;
+  const browse = async (
+    reference: PostgresRelationReference,
+    offset = 0,
+  ) => {
+    if (!connected) return;
+    const object: TableObject = {
+      schema: reference.schema,
+      name: reference.relation,
+    };
     const id = `table:${object.schema}.${object.name}`;
     openTab({
       id,
@@ -371,7 +427,7 @@ export function ToolPostgres() {
       patchTab(id, {
         result: await invoke<Result>("postgres_table_data", {
           request: {
-            connectionId: draft.id,
+            connectionId: reference.connectionId,
             schema: object.schema,
             table: object.name,
             limit: pageSize,
@@ -387,43 +443,33 @@ export function ToolPostgres() {
       setRunning(false);
     }
   };
-  const visibleObjects = objects.filter((item) =>
-    item.name.toLowerCase().includes(filter.toLowerCase()),
-  );
-  const navigatorConnections = connections.length
-    ? connections
-    : connected
-      ? [draft]
-      : connections;
-  const treeToggle = (key: string) =>
-    setExpanded((current) => ({ ...current, [key]: !current[key] }));
-  const treeRow = (
-    key: string,
-    icon: React.ReactNode,
-    label: string,
-    depth: number,
-    hasChildren = false,
-    onClick?: () => void,
-  ) => (
-    <button
-      type="button"
-      onClick={onClick ?? (() => treeToggle(key))}
-      className="flex h-6 w-full items-center gap-1 px-1 text-left text-[12px] hover:bg-accent/70"
-    >
-      <span style={{ width: depth * 14 }} />
-      {hasChildren ? (
-        expanded[key] ? (
-          <ChevronDown className="h-3.5 w-3.5" />
-        ) : (
-          <ChevronRight className="h-3.5 w-3.5" />
-        )
-      ) : (
-        <span className="w-3.5" />
-      )}
-      {icon}
-      <span className="truncate">{label}</span>
-    </button>
-  );
+  const treeToggle = (node: DatabaseObjectNode) => {
+    const willExpand = !(expanded[node.id] ?? false);
+    setExpanded((current) => ({ ...current, [node.id]: !current[node.id] }));
+    if (willExpand && !navigatorChildren[node.id]) {
+      void loadNavigatorChildren(
+        node,
+        t("toolbox.postgres.tables"),
+        setNavigatorChildren,
+      );
+    }
+  };
+  const refreshNavigator = async () => {
+    const expandedNodes = navigatorNodes.filter(
+      (node) => node.expandable && expanded[node.id],
+    );
+    const refreshed = await Promise.all(
+      expandedNodes.map(async (node) => [
+        node.id,
+        await loadNavigatorChildren(
+          node,
+          t("toolbox.postgres.tables"),
+          setNavigatorChildren,
+        ),
+      ] as const),
+    );
+    setNavigatorChildren((current) => ({ ...current, ...Object.fromEntries(refreshed) }));
+  };
 
   return (
     <div
@@ -456,19 +502,25 @@ export function ToolPostgres() {
           data-testid="postgres-new-query"
         />
         <Separator />
-        <ToolButton
-          icon={<Table2 />}
-          label={t("toolbox.postgres.tables")}
-          disabled={!connected}
-          onClick={() => treeToggle("tables")}
+          <ToolButton
+            icon={<Table2 />}
+            label={t("toolbox.postgres.tables")}
+            disabled={!connected}
+            onClick={() => {
+              const group = navigatorNodes.find(
+                (node) =>
+                  node.kind === "group" &&
+                  node.parentId === selectedNavigatorNodeId,
+              );
+              if (group) treeToggle(group);
+            }}
         />
         <ToolButton
-          icon={<RefreshCw />}
-          label={t("toolbox.postgres.refresh")}
-          disabled={!connected}
-          onClick={() => {
-            setSchema(schema);
-          }}
+            icon={<RefreshCw />}
+            label={t("toolbox.postgres.refresh")}
+            disabled={!connected}
+            onClick={() => void refreshNavigator()}
+            data-testid="postgres-refresh"
         />
         <div className="flex-1" />
         <span className="mr-2 text-[11px] text-muted-foreground">
@@ -521,73 +573,34 @@ export function ToolPostgres() {
             </div>
           </div>
           <div className="overflow-auto py-1">
-            {navigatorConnections.map((connection) => (
-              <div key={connection.id}>
-                {treeRow(
-                  `connection:${connection.id}`,
-                  <Database className="h-3.5 w-3.5 text-primary" />,
-                  connection.name,
-                  0,
-                  true,
-                  () => {
+            <DatabaseNavigator
+              roots={navigatorRoots}
+              childrenByParent={navigatorChildren}
+              expanded={expanded}
+              selectedNodeId={selectedNavigatorNodeId}
+              filter={filter}
+              onToggle={treeToggle}
+              onSelect={(node) => {
+                setSelectedNavigatorNodeId(node.id);
+                if (node.kind === "connection") {
+                  const connection = navigatorConnections.find(
+                    (item) => item.id === node.reference.path[0],
+                  );
+                  if (connection) {
                     setDraft(connection);
                     setSelectedId(connection.id);
                     setConnected(false);
-                    treeToggle(`connection:${connection.id}`);
-                  },
-                )}
-                {selectedId === connection.id &&
-                  expanded[`connection:${connection.id}`] && (
-                    <>
-                      {treeRow(
-                        "database",
-                        <Database className="h-3.5 w-3.5" />,
-                        connection.database,
-                        1,
-                        true,
-                      )}
-                      {expanded.database &&
-                        schemas.map((item) => (
-                          <div key={item}>
-                            {treeRow(
-                              `schema:${item}`,
-                              <ListTree className="h-3.5 w-3.5" />,
-                              item,
-                              2,
-                              true,
-                              () => {
-                                setSchema(item);
-                                treeToggle(`schema:${item}`);
-                              },
-                            )}
-                            {schema === item && expanded[`schema:${item}`] && (
-                              <>
-                                {treeRow(
-                                  "tables",
-                                  <Table2 className="h-3.5 w-3.5 text-sky-500" />,
-                                  t("toolbox.postgres.tables"),
-                                  3,
-                                  true,
-                                )}
-                                {expanded.tables &&
-                                  visibleObjects.map((object) =>
-                                    treeRow(
-                                      `object:${object.name}`,
-                                      <Table2 className="h-3.5 w-3.5 text-muted-foreground" />,
-                                      object.name,
-                                      4,
-                                      false,
-                                      () => void browse(object),
-                                    ),
-                                  )}
-                              </>
-                            )}
-                          </div>
-                        ))}
-                    </>
-                  )}
-              </div>
-            ))}
+                  }
+                }
+                if (node.kind === "schema") setSchema(node.label);
+                const relation = getPostgresRelationReference(node);
+                if (relation) setSchema(relation.schema);
+              }}
+              onOpen={(node) => {
+                const relation = getPostgresRelationReference(node);
+                if (relation) void browse(relation);
+              }}
+            />
             {!connections.length && (
               <p className="px-3 py-4 text-center text-[11px] text-muted-foreground">
                 {t("toolbox.postgres.noConnections")}
@@ -675,10 +688,27 @@ export function ToolPostgres() {
                 offset={tableOffset}
                 onPrevious={() =>
                   tab.object &&
-                  void browse(tab.object, Math.max(0, tableOffset - pageSize))
+                  void browse(
+                    {
+                      connectionId: draft.id,
+                      database: draft.database,
+                      schema: tab.object.schema,
+                      relation: tab.object.name,
+                    },
+                    Math.max(0, tableOffset - pageSize),
+                  )
                 }
                 onNext={() =>
-                  tab.object && void browse(tab.object, tableOffset + pageSize)
+                  tab.object &&
+                  void browse(
+                    {
+                      connectionId: draft.id,
+                      database: draft.database,
+                      schema: tab.object.schema,
+                      relation: tab.object.name,
+                    },
+                    tableOffset + pageSize,
+                  )
                 }
                 t={t}
               />

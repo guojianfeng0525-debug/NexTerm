@@ -57,33 +57,14 @@ Infrastructure established; migration pending. `src/lib/database/` now contains 
 
 ## Navigator / Object Model Coupling
 
-Navigator / Object Model Provider Migration is NOT STARTED. The current
-Navigator runtime is still a PostgreSQL-specific implementation in
-`ToolPostgres`, not a consumer of live shared object nodes.
+Feature Batch 6 moves the live PostgreSQL Navigator to a shared object model.
 
-- The tree is built directly in JSX through `treeRow(...)`, rather than from a
-  shared node contract or provider child loader.
-- Metadata loads directly through `postgres_catalog_schemas` and
-  `postgres_catalog_search`.
-- Table open/browse depends on the PostgreSQL-only local `CatalogItem`, its
-  `schema`, and `postgres_table_data`.
-- Tree identity is insufficiently scoped: the connection uses
-  `connection:${connection.id}`, while database is `database`, schemas use
-  `schema:${name}`, the tables group is `tables`, and relations use
-  `object:${object.name}`. These keys do not consistently include connection,
-  database, schema, and object hierarchy, creating cross-connection or
-  cross-schema collision risk.
-- Selection is split between `selectedId` and `schema`; no shared selected
-  Navigator-node model exists.
-- Expand/collapse state is a local `Record<string, boolean>` whose keys are
-  not consistently full object identities.
-- Toolbar refresh calls `setSchema(schema)`. When the value is unchanged this
-  does not guarantee a metadata reload, so it is not a reliable provider
-  metadata refresh path.
-- There is no explicit `onDoubleClick` or double-click command. The current
-  native E2E's apparent double-click table-open success can result from the
-  same click handler running twice; double-click interaction parity is not
-  implemented.
+- `DatabaseNavigator` renders `DatabaseObjectNode` values and contains no PostgreSQL branch or field parsing.
+- `postgresql-object-loader.ts` maps the existing `postgres_catalog_schemas` and `postgres_catalog_search` IPC responses into the current hierarchy and decodes a relation reference only for the preserved table browse handler.
+- Node identity is deterministic and scopes provider, connection, catalog, schema, group, and relation. Expand and visual selection use those node IDs.
+- Refresh reloads expanded nodes through the loader, issuing fresh metadata requests rather than reassigning unchanged schema state.
+- Remaining PostgreSQL coupling is intentional: the adapter's catalog request/mapping, PostgreSQL connection runtime, and `postgres_table_data` table browse request.
+- Single-click relation open is preserved. Explicit double-click semantics remain deferred.
 
 ## Risks To Preserve During Migration
 
