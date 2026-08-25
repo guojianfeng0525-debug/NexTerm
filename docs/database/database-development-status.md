@@ -9,7 +9,7 @@ PostgreSQL is the first current provider. The long-term target is a Shared Datab
 ## Current Architecture
 
 - Shared frontend/domain adoption: VALIDATED with PostgreSQL and experimental SQLite P0. The shared provider core, command resolver, profile envelope, provider-selection connection dialog, object model/Navigator, query-editor context/CodeEditor, result contracts, and result pane have two real providers.
-- Shared Workspace Shell: NOT IMPLEMENTED. `ToolPostgres` and `ToolSqlite` still own workspace UI composition.
+- Shared Workspace Shell: IMPLEMENTED for toolbar host, Navigator placement, query-tab host, workspace region, and optional status region. `ToolPostgres` and `ToolSqlite` retain provider runtime orchestration and provider-specific workspace slots.
 - Provider runtime and IPC: PROVIDER-SPECIFIC. PostgreSQL retains `postgres_*` IPC and `PostgresState`; SQLite retains `sqlite_*` IPC and independent `rusqlite` runtime state.
 - Generic runtime, generic `database_*` IPC, and generic `DatabaseState`: NOT IMPLEMENTED / DEFERRED.
 
@@ -152,10 +152,11 @@ Not migrated:
 - The experimental SQLite toolbox entry includes a file-picker flow. SQLite profiles persist in the isolated `database_sqlite_connections` table because SQLite reserves the `sqlite_` table-name prefix.
 - The shared provider-selection connection dialog and SQLite profile create/edit/delete UI are implemented. Focused frontend tests, both renderer E2E suites, SQLite Rust tests, i18n, debug Tauri build, and native desktop E2E for both providers pass.
 
-### Feature Batch 11 - Shared Database Workspace Shell - NOT STARTED
+### Feature Batch 11 - Shared Database Workspace Shell - COMPLETE
 
-- Goal: extract only proven duplicated workspace UI composition from `ToolPostgres` and `ToolSqlite`.
-- Runtime, IPC, Rust, and profile persistence changes are out of scope. Generic runtime and generic IPC are not proposed.
+- Added production `DatabaseWorkspaceShell`, used by both `ToolPostgres` and `ToolSqlite`. It owns only the shared toolbar host, Navigator placement, query-tab host, workspace region, and optional status region.
+- Provider hosts keep all runtime calls, metadata loading, query context construction, result adaptation, connection/profile dialogs, and provider-specific UI. `postgres_*`, `sqlite_*`, Rust, and persistence are unchanged.
+- Focused shell/SQLite tests, PostgreSQL and SQLite renderer tests, debug Tauri build, and sequential PostgreSQL live-fixture plus SQLite real-file native tests pass.
 
 ## Last Known Verification
 
@@ -226,7 +227,7 @@ Detailed analysis remains in `postgresql-coupling-report.md`.
 | Area | Status |
 | --- | --- |
 | Shared Frontend / Domain | VALIDATED for PostgreSQL + experimental SQLite P0 |
-| Shared Workspace Shell | NOT IMPLEMENTED; Feature Batch 11 next target |
+| Shared Workspace Shell | COMPLETE: UI-only shell used by PostgreSQL + SQLite |
 | Provider Runtime / IPC | PROVIDER-SPECIFIC: `postgres_*` / `PostgresState` and `sqlite_*` / SQLite runtime |
 | Generic Runtime / IPC | NOT IMPLEMENTED / DEFERRED |
 | Generic Connection Profile | COMPLETE for PostgreSQL + SQLite saved-profile envelope adoption |
@@ -244,7 +245,7 @@ Detailed analysis remains in `postgresql-coupling-report.md`.
 
 ## Next Target
 
-Feature Batch 11 evaluates and extracts only demonstrated shared Database Workspace UI composition. It must preserve provider-owned runtime orchestration and existing IPC.
+Runtime remains provider-specific after the workspace extraction. Any runtime-boundary work requires a new evidence-based design batch; generic runtime and IPC remain deferred.
 
 ## Permanent Architecture Constraints
 
@@ -260,9 +261,9 @@ Feature Batch 11 evaluates and extracts only demonstrated shared Database Worksp
 
 ## Session Handoff
 
-- What changed: Feature Batch 10 added and validated an experimental SQLite P0 implementation using the existing shared profile, navigator, editor, result, and command contracts. Its profile table is `database_sqlite_connections`, avoiding SQLite's reserved `sqlite_` prefix.
-- What did not change: PostgreSQL execution, IPC, `PostgresState`, storage format, crypto, frontend mutation UI, CSV export, context menus, shortcuts, and generic runtime/IPC design.
-- Tests: 34 focused tests, both renderer suites, SQLite Rust focused tests, frontend build, debug Tauri build, i18n parity, touched-file lint, and both native desktop suites pass.
+- What changed: Feature Batch 11 added `DatabaseWorkspaceShell` as the UI-only composition boundary used by both provider hosts. Its shared tab host preserves host-owned tab state and its slots preserve existing Navigator, editor, result, toolbar, and status behavior.
+- What did not change: PostgreSQL/SQLite execution, IPC, `PostgresState`, SQLite runtime state, storage format, crypto, frontend mutation UI, CSV export, context menus, shortcuts, and generic runtime/IPC design.
+- Tests: focused shell/SQLite tests, both renderer suites, debug Tauri build, touched-file lint, `git diff --check`, and both native desktop suites pass. PostgreSQL native uses a live Docker fixture; SQLite native uses a temporary real file.
 - Real Tauri status: both PostgreSQL (live Docker fixture) and SQLite (temporary real file) native suites pass.
 - Known warnings: historical Rust warnings may remain; they were not Slice 2 build failures.
 - Generic command execution remains explicitly out of scope.

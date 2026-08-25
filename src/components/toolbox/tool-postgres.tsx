@@ -14,7 +14,6 @@ import {
   Search,
   Table2,
   Unplug,
-  X,
 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -48,6 +47,7 @@ import { resolveDatabaseCommand } from "@/lib/database/command-registry";
 import { postgresqlProvider } from "@/lib/database/provider-registry";
 import { DatabaseNavigator } from "@/components/toolbox/database-navigator";
 import { DatabaseResultPane } from "@/components/toolbox/database-result-pane";
+import { DatabaseWorkspaceShell } from "@/components/toolbox/database-workspace-shell";
 import { DatabaseProviderSelect } from "@/components/toolbox/database-provider-select";
 import {
   createPostgresNavigatorConnectionNode,
@@ -501,14 +501,10 @@ export function ToolPostgres() {
   };
 
   return (
-    <div
-      className="h-full min-h-0 flex flex-col bg-background text-foreground"
-      data-testid="postgres-workspace"
-    >
-      <header
-        className="flex h-10 shrink-0 items-center gap-1 border-b bg-muted/25 px-2"
-        data-testid="postgres-toolbar"
-      >
+    <DatabaseWorkspaceShell
+      testId="postgres-workspace"
+      toolbarTestId="postgres-toolbar"
+      toolbar={<>
         <ToolButton
           icon={<Plus />}
           label={t("toolbox.postgres.newConnection")}
@@ -577,9 +573,8 @@ export function ToolPostgres() {
             data-testid="postgres-connect"
           />
         )}
-      </header>
-      <div className="flex min-h-0 flex-1">
-        <aside
+      </>}
+      navigator={<aside
           className="relative shrink-0 border-r bg-muted/10"
           style={{ width: navigatorWidth }}
         >
@@ -640,32 +635,13 @@ export function ToolPostgres() {
             className="absolute inset-y-0 -right-1 z-10 w-2 cursor-col-resize"
             onPointerDown={() => setDragging(true)}
           />
-        </aside>
-        <main className="flex min-w-0 flex-1 flex-col">
-          <nav className="flex h-8 shrink-0 items-end overflow-x-auto border-b bg-muted/15">
-            {tabs.map((item) => (
-              <button
-                key={item.id}
-                type="button"
-                onClick={() => setActiveTab(item.id)}
-                className={`group flex h-8 min-w-28 items-center gap-1 border-r px-2 text-[12px] ${item.id === activeTab ? "bg-background font-medium" : "text-muted-foreground hover:bg-muted/50"}`}
-              >
-                <FileCode2 className="h-3.5 w-3.5" />
-                <span className="max-w-32 truncate">{item.title}</span>
-                {item.dirty && (
-                  <i className="h-1.5 w-1.5 rounded-full bg-primary" />
-                )}
-                <X
-                  className="ml-auto h-3 w-3 opacity-0 group-hover:opacity-100"
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    closeTab(item.id);
-                  }}
-                />
-              </button>
-            ))}
-          </nav>
-          {tab && (
+        </aside>}
+      tabs={tabs.map((item) => ({ id: item.id, title: item.title, dirty: item.dirty }))}
+      activeTabId={activeTab}
+      onActivateTab={setActiveTab}
+      onCloseTab={closeTab}
+      tabClassName={(_, active) => `group flex h-8 min-w-28 items-center gap-1 border-r px-2 text-[12px] ${active ? "bg-background font-medium" : "text-muted-foreground hover:bg-muted/50"}`}
+      workspace={tab && (
             <section className="flex min-h-0 flex-1 flex-col">
               <div className="flex h-8 shrink-0 items-center gap-1 border-b bg-muted/10 px-2">
                 <ToolButton
@@ -760,9 +736,7 @@ export function ToolPostgres() {
               />
             </section>
           )}
-        </main>
-      </div>
-      <footer className="flex h-6 shrink-0 items-center border-t bg-muted/25 px-2 text-[11px] text-muted-foreground">
+      status={<footer className="flex h-6 shrink-0 items-center border-t bg-muted/25 px-2 text-[11px] text-muted-foreground">
         <span>
           {connected
             ? `PostgreSQL · ${draft.environment}`
@@ -775,7 +749,8 @@ export function ToolPostgres() {
             ? t("toolbox.postgres.executing")
             : t("toolbox.postgres.ready")}
         </span>
-      </footer>
+      </footer>}
+    >
       <ConnectionDialog
         open={configOpen}
         onOpenChange={setConfigOpen}
@@ -789,7 +764,7 @@ export function ToolPostgres() {
         connecting={connecting}
         t={t}
       />
-    </div>
+    </DatabaseWorkspaceShell>
   );
 }
 

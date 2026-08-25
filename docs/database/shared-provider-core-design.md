@@ -33,7 +33,7 @@ authoritative progress log.
 
 The shared profile envelope, command resolver, object model/Navigator, query-editor context/CodeEditor, and result contract/pane are implemented and validated by both providers. Workspace composition remains owned by the two provider hosts. Runtime and IPC remain provider-specific.
 
-## Batch 11 Target: Shared Workspace Composition
+## Shared Workspace Composition
 
 ```text
                  DatabaseWorkspaceShell
@@ -47,7 +47,7 @@ The shared profile envelope, command resolver, object model/Navigator, query-edi
     PostgreSQL runtime             SQLite runtime
 ```
 
-If implemented, `DatabaseWorkspaceShell` owns only shared toolbar, Navigator placement, query-tab host, editor/result layout, status region, and connected/disconnected presentation. It does not call provider IPC, own a runtime handle, or interpret provider payloads.
+`DatabaseWorkspaceShell` owns only the shared toolbar host, Navigator placement, query-tab host, workspace region, and optional status region. Provider hosts supply all slot content and callbacks, so the shell does not call provider IPC, own a runtime handle, or interpret provider payloads. Provider-specific editor/result composition remains host-owned where table paging and local-file behavior differ.
 
 ## Deferred Runtime Boundary
 
