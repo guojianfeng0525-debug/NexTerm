@@ -23,7 +23,7 @@ describe("shared database result contracts", () => {
     ]);
     expect(result.columns.map((column) => column.label)).toEqual(["id", "id", "amount"]);
     expect(result.rows[0]).toEqual([null, "", "9223372036854775807.123456789"]);
-    expect(result.editability).toEqual({ editable: false, primaryKeyColumnKeys: [] });
+    expect(result.editability).toEqual({ editable: false, primaryKeyColumnKeys: [], nullableColumnKeys: [] });
   });
 
   it("supports semantic and provider-native type identity without requiring it from PostgreSQL IPC", () => {
@@ -56,6 +56,7 @@ describe("shared database result contracts", () => {
         columns: ["id", "name"],
         rows: [["8", "Ada"]],
         primaryKeyColumns: ["id"],
+        nullableColumns: ["name"],
         truncated: true,
       },
       { offset: 100, limit: 100 },
@@ -64,7 +65,8 @@ describe("shared database result contracts", () => {
     expect(result.pagination).toEqual({ offset: 100, limit: 100, hasMore: true });
     expect(result.editability).toEqual({
       editable: true,
-      primaryKeyColumnKeys: ["column:0"],
+        primaryKeyColumnKeys: ["column:0"],
+        nullableColumnKeys: ["column:1"],
     });
   });
 

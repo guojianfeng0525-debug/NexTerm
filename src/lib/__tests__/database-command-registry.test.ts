@@ -165,4 +165,31 @@ describe("database command resolver", () => {
     expect(resolveDatabaseCommand("database.workspace.newQuery", { ...connectedSqlite, scope: "DATABASE" })).toMatchObject({ state: "enabled" });
     expect(resolveDatabaseCommand("database.connection.disconnect", { ...connectedSqlite, scope: "DATABASE" })).toMatchObject({ state: "enabled" });
   });
+
+  it("exposes PostgreSQL data operations only when their capabilities permit them", () => {
+    expect(resolveDatabaseCommand("database.data.saveChanges", {
+      ...connectedNavigatorContext,
+      scope: "DATA_GRID",
+    })).toMatchObject({ state: "enabled" });
+    expect(resolveDatabaseCommand("database.data.nextPage", {
+      ...connectedNavigatorContext,
+      scope: "DATA_GRID",
+    })).toMatchObject({ state: "enabled" });
+    expect(resolveDatabaseCommand("database.data.saveChanges", {
+      scope: "DATA_GRID",
+      provider: sqliteProvider,
+      connectionState: "connected",
+    })).toMatchObject({ state: "disabled", reason: "missing-capability" });
+  });
+
+  it("allows tab and result commands without changing provider runtime boundaries", () => {
+    expect(resolveDatabaseCommand("database.tab.close", {
+      ...connectedNavigatorContext,
+      scope: "WORKSPACE",
+    })).toMatchObject({ state: "enabled" });
+    expect(resolveDatabaseCommand("database.result.copyCell", {
+      ...connectedNavigatorContext,
+      scope: "DATA_GRID",
+    })).toMatchObject({ state: "enabled" });
+  });
 });

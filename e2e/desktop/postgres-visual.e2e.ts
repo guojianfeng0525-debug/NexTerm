@@ -1,5 +1,9 @@
 import { expect } from '@wdio/globals';
 
+async function rightClick(element: WebdriverIO.Element) {
+  await element.click({ button: 'right' });
+}
+
 async function configureTheme(label: '深色' | '浅色') {
   await $('button:has(svg.lucide-settings)').click();
   const settingsDialog = await $('[role="dialog"]');
@@ -54,7 +58,7 @@ describe('PostgreSQL visual workspace', () => {
     await inputs[5].setValue('nexterm_e2e');
     await lightDialog.$('button=连接').click();
 
-    await browser.pause(2_000);
+    await $('[data-testid="postgres-run"]').waitForEnabled();
     await browser.saveScreenshot('./test-results/postgres/debug-after-connect.png');
     if (!(await $('[data-testid="postgres-run"]').isEnabled())) {
       const errors = await $$('[data-sonner-toast][data-type="error"]');
@@ -88,6 +92,10 @@ describe('PostgreSQL visual workspace', () => {
     await workspace.$('table').waitForDisplayed();
     expect((await workspace.$$('tbody tr')).length).toBeGreaterThan(0);
     await browser.saveScreenshot('./test-results/postgres/05-query-result.png');
+    await rightClick(await workspace.$('td:nth-child(2)'));
+    await $('[data-testid="database-result-context-menu"]').waitForDisplayed();
+    await browser.saveScreenshot('./test-results/postgres/05a-result-context-menu.png');
+    await browser.keys('Escape');
     await configureTheme('深色');
     await browser.saveScreenshot('./test-results/database-visual/postgres-workspace-after.png');
     await configureTheme('浅色');
@@ -101,10 +109,20 @@ describe('PostgreSQL visual workspace', () => {
     await expect($('button=users')).not.toBeExisting();
     await tablesGroup.click();
     await expect($('button=users')).toBeDisplayed();
+    await rightClick(await $('button=users'));
+    await $('[data-testid="database-navigator-context-menu"]').waitForDisplayed();
+    await browser.saveScreenshot('./test-results/postgres/06a-navigator-context-menu.png');
+    await browser.keys('Escape');
+
+    const connectionNode = await $('[data-node-id*="connection:"]');
+    await rightClick(connectionNode);
+    await $('[data-testid="database-navigator-context-menu"]').waitForDisplayed();
+    await browser.saveScreenshot('./test-results/postgres/06b-connection-context-menu.png');
+    await browser.keys('Escape');
+
     await $('[data-testid="postgres-refresh"]').click();
-    await browser.pause(500);
     await $('button=users').click();
-    await browser.pause(500);
+    await workspace.$('tbody tr').waitForDisplayed();
     await browser.saveScreenshot('./test-results/postgres/06-table-data.png');
     await expect($('button=users')).toBeDisplayed();
 

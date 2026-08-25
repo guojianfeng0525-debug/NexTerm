@@ -10,6 +10,11 @@ import type {
   DatabaseObjectNode,
   DatabaseObjectNodeId,
 } from "@/lib/database/types";
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuTrigger,
+} from "@/components/ui/context-menu";
 
 function nodeIcon(node: DatabaseObjectNode): ReactNode {
   switch (node.iconRole) {
@@ -37,6 +42,7 @@ interface DatabaseNavigatorProps {
   readonly onToggle: (node: DatabaseObjectNode) => void;
   readonly onSelect: (node: DatabaseObjectNode) => void;
   readonly onOpen: (node: DatabaseObjectNode) => void;
+  readonly renderContextMenu?: (node: DatabaseObjectNode) => ReactNode;
 }
 
 export function DatabaseNavigator({
@@ -48,6 +54,7 @@ export function DatabaseNavigator({
   onToggle,
   onSelect,
   onOpen,
+  renderContextMenu,
 }: DatabaseNavigatorProps) {
   const normalizedFilter = filter.trim().toLowerCase();
   const renderNodes = (nodes: readonly DatabaseObjectNode[], depth: number) =>
@@ -64,6 +71,10 @@ export function DatabaseNavigator({
       const selected = selectedNodeId === node.id;
       return (
         <div key={node.id}>
+          <ContextMenu onOpenChange={(open) => {
+            if (open && node.selectable) onSelect(node);
+          }}>
+            <ContextMenuTrigger asChild>
           <button
             type="button"
             onClick={() => {
@@ -88,6 +99,13 @@ export function DatabaseNavigator({
             {nodeIcon(node)}
             <span className="truncate">{node.label}</span>
           </button>
+            </ContextMenuTrigger>
+            {renderContextMenu && (
+              <ContextMenuContent data-testid="database-navigator-context-menu">
+                {renderContextMenu(node)}
+              </ContextMenuContent>
+            )}
+          </ContextMenu>
           {node.expandable && isExpanded && renderNodes(children, depth + 1)}
         </div>
       );

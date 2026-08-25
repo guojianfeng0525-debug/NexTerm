@@ -14,6 +14,7 @@ export interface PostgresQueryRuntimeResult {
 
 export interface PostgresTableRuntimeResult extends PostgresQueryRuntimeResult {
   readonly primaryKeyColumns?: readonly string[];
+  readonly nullableColumns?: readonly string[];
 }
 
 function columnsFor(names: readonly string[]): readonly DatabaseResultColumn[] {
@@ -44,7 +45,7 @@ export function adaptPostgresQueryResult(
     rows: result.rows,
     commandTags,
     truncated: result.truncated,
-    editability: { editable: false, primaryKeyColumnKeys: [] },
+    editability: { editable: false, primaryKeyColumnKeys: [], nullableColumnKeys: [] },
   };
 }
 
@@ -54,6 +55,7 @@ export function adaptPostgresTableResult(
 ): DatabaseTabularResult {
   const columns = columnsFor(result.columns);
   const primaryKeyNames = new Set(result.primaryKeyColumns ?? []);
+  const nullableColumnNames = new Set(result.nullableColumns ?? []);
   return {
     kind: "tabular",
     columns,
@@ -68,6 +70,9 @@ export function adaptPostgresTableResult(
       editable: primaryKeyNames.size > 0,
       primaryKeyColumnKeys: columns
         .filter((column) => primaryKeyNames.has(column.label))
+        .map((column) => column.key),
+      nullableColumnKeys: columns
+        .filter((column) => nullableColumnNames.has(column.label))
         .map((column) => column.key),
     },
   };

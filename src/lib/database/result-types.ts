@@ -32,6 +32,7 @@ export interface DatabaseResultPagination {
 export interface DatabaseResultEditability {
   readonly editable: boolean;
   readonly primaryKeyColumnKeys: readonly string[];
+  readonly nullableColumnKeys?: readonly string[];
 }
 
 export interface DatabaseTabularResult {

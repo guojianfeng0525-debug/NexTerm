@@ -13,10 +13,36 @@ function ContextMenu({
 }
 
 function ContextMenuTrigger({
+  onMouseDown,
   ...props
 }: React.ComponentProps<typeof ContextMenuPrimitive.Trigger>) {
   return (
-    <ContextMenuPrimitive.Trigger data-slot="context-menu-trigger" {...props} />
+    <ContextMenuPrimitive.Trigger
+      data-slot="context-menu-trigger"
+      {...props}
+      onMouseDown={(event) => {
+        onMouseDown?.(event);
+        if (event.defaultPrevented || event.button !== 2) return;
+
+        // Some WebKit input providers emit a secondary mousedown/up pair but
+        // omit contextmenu. Normalize that legitimate mouse input through the
+        // same Radix trigger path used by physical right-clicks.
+        event.currentTarget.dispatchEvent(new MouseEvent("contextmenu", {
+          bubbles: true,
+          cancelable: true,
+          button: event.button,
+          buttons: event.buttons,
+          clientX: event.clientX,
+          clientY: event.clientY,
+          screenX: event.screenX,
+          screenY: event.screenY,
+          ctrlKey: event.ctrlKey,
+          altKey: event.altKey,
+          shiftKey: event.shiftKey,
+          metaKey: event.metaKey,
+        }));
+      }}
+    />
   );
 }
 

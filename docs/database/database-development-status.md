@@ -182,9 +182,16 @@ Not migrated:
 - Focused tests: PASS. PostgreSQL, SQLite, and MySQL renderer suites: PASS. Debug Tauri build: PASS. PostgreSQL, SQLite, and MySQL native suites: PASS sequentially. No product changes were made during final visual closure.
 - Runtime, IPC, Rust, persistence, profile contracts, query runtime, and provider capability claims are unchanged. Screenshot captures remain ignored runtime evidence under `test-results/database-visual/`.
 
+### Feature Batch 15 - PostgreSQL Native Stability - COMPLETE
+
+- Fixed an incorrect frontend disconnect transition: selecting the current PostgreSQL connection node previously set local `connected` state to `false`, despite retaining the backend session. Browse then short-circuited on local disconnected state and could render no rows.
+- Connection-node selection now preserves the active connection state. Table paging is scoped to each active result tab rather than shared across table identities.
+- PostgreSQL nullable-column metadata now comes from `pg_attribute`; editable nullable cells can explicitly stage SQL `NULL`, independently from empty strings.
+- Native acceptance uses semantic enabled/row waits rather than fixed connection or browse delays. PostgreSQL completed three consecutive live-fixture passes, followed sequentially by SQLite and MySQL passes on the same debug binary.
+
 ## Last Known Verification
 
-These are the latest known results from Feature Batch 13 verification.
+These are the latest known results from Feature Batch 15 verification.
 
 | Check | Result |
 | --- | --- |
@@ -231,6 +238,10 @@ These are the latest known results from Feature Batch 13 verification.
 | Feature Batch 14 native desktop E2E | PASS sequentially: PostgreSQL live Docker, SQLite real file, MySQL live Docker |
 | Feature Batch 14 real Tauri visual review | PASS: PostgreSQL, SQLite, and MySQL dialogs in dark, light, and 960x700 small-window views; cross-provider consistency PASS; prior P1 resolved |
 | Repository-wide Rust formatter check | PRE-EXISTING REPOSITORY DIFFERENCES |
+| Feature Batch 15 `pnpm tauri build --debug --no-bundle` | PASS |
+| Feature Batch 15 PostgreSQL native desktop E2E | PASS x3 consecutively: live fixture, connection/context menus, query result, refresh/table browse, explicit disconnect |
+| Feature Batch 15 SQLite native desktop E2E | PASS: sequentially after PostgreSQL on same debug binary |
+| Feature Batch 15 MySQL native desktop E2E | PASS: sequentially after SQLite on same debug binary |
 
 ## Native Tauri Desktop E2E
 

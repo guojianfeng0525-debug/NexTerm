@@ -95,6 +95,7 @@ pub struct PostgresTableDataResult {
     pub columns: Vec<String>,
     pub rows: Vec<Vec<Option<String>>>,
     pub primary_key_columns: Vec<String>,
+    pub nullable_columns: Vec<String>,
     pub truncated: bool,
 }
 
@@ -508,6 +509,11 @@ pub async fn postgres_table_data(
         &[&request.schema, &request.table],
     ).await.map_err(|error| format!("Failed to load table primary key: {error}"))?;
     let primary_key_columns: Vec<String> = key_rows.into_iter().filter_map(|row| row.try_get::<_, String>(0).ok()).collect();
+    let nullable_rows = client.query(
+        "SELECT a.attname FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = $1 AND c.relname = $2 AND a.attnum > 0 AND NOT a.attisdropped AND NOT a.attnotnull ORDER BY a.attnum",
+        &[&request.schema, &request.table],
+    ).await.map_err(|error| format!("Failed to load table nullability: {error}"))?;
+    let nullable_columns: Vec<String> = nullable_rows.into_iter().filter_map(|row| row.try_get::<_, String>(0).ok()).collect();
     // A stable order is required for reliable paging. Tables without a primary
     // key remain browseable but cannot promise stable page boundaries.
     let order = if primary_key_columns.is_empty() {
@@ -527,7 +533,7 @@ pub async fn postgres_table_data(
             rows.push((0..row.len()).map(|index| row.get(index).map(str::to_owned)).collect());
         }
     }
-    Ok(PostgresTableDataResult { columns, truncated: rows.len() == limit, rows, primary_key_columns })
+    Ok(PostgresTableDataResult { columns, truncated: rows.len() == limit, rows, primary_key_columns, nullable_columns })
 }
 
 #[tauri::command]

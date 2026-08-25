@@ -1,5 +1,8 @@
-import { useEffect, useState, type Dispatch, type SetStateAction } from "react";
+import { useEffect, useEffectEvent, useState, type Dispatch, type SetStateAction } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { writeText as writeClipboardText } from "@tauri-apps/plugin-clipboard-manager";
+import { save as saveFile } from "@tauri-apps/plugin-dialog";
+import { writeTextFile } from "@tauri-apps/plugin-fs";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 import {
@@ -17,6 +20,10 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
+import {
+  ContextMenuItem,
+  ContextMenuSeparator,
+} from "@/components/ui/context-menu";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -61,7 +68,7 @@ import {
   type PostgresQueryRuntimeResult,
   type PostgresTableRuntimeResult,
 } from "@/lib/database/postgresql-result-adapter";
-import type { DatabaseResult } from "@/lib/database/result-types";
+import type { DatabaseResult, DatabaseTabularResult } from "@/lib/database/result-types";
 import type {
   DatabaseObjectNode,
   DatabaseObjectNodeId,
@@ -75,6 +82,7 @@ type WorkspaceTab = {
   object?: TableObject;
   sql: string;
   result: DatabaseResult | null;
+  baseline?: DatabaseTabularResult;
   dirty?: boolean;
 };
 type DialogPage = "general" | "ssh" | "tls";
@@ -171,9 +179,11 @@ export function ToolPostgres() {
   const [running, setRunning] = useState(false);
   const [configOpen, setConfigOpen] = useState(false);
   const [dialogPage, setDialogPage] = useState<DialogPage>("general");
-  const [tableOffset, setTableOffset] = useState(0);
+  const [transactionActive, setTransactionActive] = useState(false);
 
   const tab = tabs.find((item) => item.id === activeTab) ?? tabs[0];
+  const tableOffset =
+    tab?.result?.kind === "tabular" ? tab.result.pagination?.offset ?? 0 : 0;
   const postgresConfig = draft.providerConfig;
   const executeCommand = resolveDatabaseCommand("database.query.execute", {
     scope: "QUERY_EDITOR",
@@ -447,11 +457,9 @@ export function ToolPostgres() {
       sql: "",
       result: null,
     });
-    setTableOffset(offset);
     setRunning(true);
     try {
-      patchTab(id, {
-        result: adaptPostgresTableResult(
+      const result = adaptPostgresTableResult(
           await invoke<PostgresTableRuntimeResult>("postgres_table_data", {
             request: {
               connectionId: reference.connectionId,
@@ -462,8 +470,8 @@ export function ToolPostgres() {
             },
           }),
           { offset, limit: pageSize },
-        ),
-      });
+        );
+      patchTab(id, { result, baseline: result, dirty: false });
     } catch (error) {
       toast.error(t("toolbox.postgres.queryFailed"), {
         description: String(error),
@@ -499,6 +507,123 @@ export function ToolPostgres() {
     );
     setNavigatorChildren((current) => ({ ...current, ...Object.fromEntries(refreshed) }));
   };
+  const disconnect = async () => {
+    await invoke("postgres_disconnect", { connectionId: draft.id });
+    setConnected(false);
+    setTransactionActive(false);
+  };
+  const createQuery = () => openTab(newQuery());
+  const copyText = async (value: string) => {
+    try {
+      await writeClipboardText(value);
+    } catch (error) {
+      toast.error(t("toolbox.postgres.copyFailed"), { description: String(error) });
+    }
+  };
+  const exportCsv = async () => {
+    if (tab?.result?.kind !== "tabular") return;
+    const quote = (value: string | null) =>
+      value === null ? "NULL" : `"${value.replace(/"/g, '""')}"`;
+    const csv = [
+      tab.result.columns.map((column) => quote(column.label)).join(","),
+      ...tab.result.rows.map((row) => row.map(quote).join(",")),
+    ].join("\n");
+    try {
+      const path = await saveFile({
+        defaultPath: `${tab.title || "postgres-result"}.csv`,
+        filters: [{ name: "CSV", extensions: ["csv"] }],
+      });
+      if (!path) return;
+      await writeTextFile(path, csv);
+      toast.success(t("toolbox.postgres.exported"));
+    } catch (error) {
+      toast.error(t("toolbox.postgres.exportFailed"), { description: String(error) });
+    }
+  };
+  const transaction = async (action: "begin" | "commit" | "rollback") => {
+    try {
+      await invoke("postgres_transaction", { request: { connectionId: draft.id, action } });
+      setTransactionActive(action === "begin");
+    } catch (error) {
+      toast.error(t("toolbox.postgres.transaction.failed"), { description: String(error) });
+    }
+  };
+  const stageTableEdit = (rowIndex: number, columnIndex: number, value: string | null) => {
+    if (!tab || tab.type !== "table" || tab.result?.kind !== "tabular") return;
+    const rows = tab.result.rows.map((row, index) =>
+      index === rowIndex ? row.map((cell, cellIndex) => cellIndex === columnIndex ? value : cell) : row,
+    );
+    patchTab(tab.id, { result: { ...tab.result, rows }, dirty: true });
+  };
+  const isTableCellModified = (rowIndex: number, columnIndex: number) =>
+    tab?.type === "table" &&
+    tab.result?.kind === "tabular" &&
+    tab.baseline?.rows[rowIndex]?.[columnIndex] !== tab.result.rows[rowIndex]?.[columnIndex];
+  const saveTableChanges = async () => {
+    if (!tab?.object || tab.result?.kind !== "tabular" || !tab.baseline || !tab.dirty) return;
+    try {
+      const columns = tab.result.columns;
+      const keyNames = new Set(tab.result.editability.primaryKeyColumnKeys);
+      for (let rowIndex = 0; rowIndex < tab.result.rows.length; rowIndex += 1) {
+        const row = tab.result.rows[rowIndex];
+        const original = tab.baseline.rows[rowIndex];
+        if (!original || row.every((value, index) => value === original[index])) continue;
+        const changes = Object.fromEntries(columns.flatMap((column, index) =>
+          !keyNames.has(column.key) && row[index] !== original[index]
+            ? [[column.label, row[index]]]
+            : [],
+        ));
+        if (!Object.keys(changes).length) continue;
+        const keyValues = Object.fromEntries(columns.flatMap((column, index) =>
+          keyNames.has(column.key) && original[index] !== null
+            ? [[column.label, original[index]]]
+            : [],
+        ));
+        await invoke("postgres_table_update", {
+          request: { connectionId: draft.id, schema: tab.object.schema, table: tab.object.name, keyValues, changes },
+        });
+      }
+      patchTab(tab.id, { baseline: tab.result, dirty: false });
+      toast.success(t("toolbox.postgres.changesSaved"));
+    } catch (error) {
+      toast.error(t("toolbox.postgres.saveChangesFailed"), { description: String(error) });
+    }
+  };
+  const revertTableChanges = () => {
+    if (tab?.baseline) patchTab(tab.id, { result: tab.baseline, dirty: false });
+  };
+  const onDatabaseKeyDown = useEffectEvent((event: KeyboardEvent) => {
+      if (!(event.metaKey || event.ctrlKey) || event.altKey) return;
+      if (event.key.toLowerCase() === "n" && connected) {
+        event.preventDefault();
+        createQuery();
+      }
+      if (event.key === "Enter" && tab?.type === "query" && !running) {
+        event.preventDefault();
+        void execute();
+      }
+      if (event.key.toLowerCase() === "e" && event.shiftKey && tab?.type === "query" && !running) {
+        event.preventDefault();
+        void execute(true);
+      }
+      if (event.key.toLowerCase() === "w") {
+        event.preventDefault();
+        closeTab(activeTab);
+      }
+      if (event.key.toLowerCase() === "r" && connected) {
+        event.preventDefault();
+        if (tab?.type === "table" && tab.object) {
+          void browse({ connectionId: draft.id, database: postgresConfig.database, schema: tab.object.schema, relation: tab.object.name }, tableOffset);
+        } else {
+          void refreshNavigator();
+        }
+      }
+    });
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => onDatabaseKeyDown(event);
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
 
   return (
     <DatabaseWorkspaceShell
@@ -520,9 +645,8 @@ export function ToolPostgres() {
           icon={<FileCode2 />}
           label={t("toolbox.postgres.newQuery")}
           disabled={newQueryCommand.state !== "enabled"}
-          onClick={() => {
-            const query = newQuery();
-            openTab(query);
+           onClick={() => {
+             createQuery();
           }}
           data-testid="postgres-new-query"
         />
@@ -559,9 +683,7 @@ export function ToolPostgres() {
             label={t("toolbox.postgres.disconnect")}
             disabled={disconnectCommand.state !== "enabled"}
             onClick={() =>
-              void invoke("postgres_disconnect", {
-                connectionId: draft.id,
-              }).then(() => setConnected(false))
+              void disconnect()
             }
             data-testid="postgres-disconnect"
           />
@@ -611,9 +733,10 @@ export function ToolPostgres() {
                     (item) => item.id === node.reference.path[0],
                   );
                   if (connection) {
+                    const switchingConnection = connection.id !== draft.id;
                     setDraft(connection);
                     setSelectedId(connection.id);
-                    setConnected(false);
+                    if (switchingConnection) setConnected(false);
                   }
                 }
                 if (node.kind === "schema") setSchema(node.label);
@@ -623,6 +746,43 @@ export function ToolPostgres() {
               onOpen={(node) => {
                 const relation = getPostgresRelationReference(node);
                 if (relation) void browse(relation);
+              }}
+              renderContextMenu={(node) => {
+                const relation = getPostgresRelationReference(node);
+                const nodeContext = {
+                  scope: "NAVIGATOR" as const,
+                  provider: postgresqlProvider,
+                  connectionState: connected ? "connected" as const : "disconnected" as const,
+                };
+                const enabled = (id: Parameters<typeof resolveDatabaseCommand>[0]) =>
+                  resolveDatabaseCommand(id, nodeContext).state === "enabled";
+                if (node.kind === "connection") {
+                  const connectionId = node.reference.path[0];
+                  return <>
+                    {connected ? <ContextMenuItem disabled={!enabled("database.connection.disconnect")} onSelect={() => void disconnect()}>{t("toolbox.postgres.disconnect")}</ContextMenuItem> : <ContextMenuItem onSelect={() => setConfigOpen(true)}>{t("toolbox.postgres.connect")}</ContextMenuItem>}
+                    <ContextMenuItem disabled={!connected} onSelect={createQuery}>{t("toolbox.postgres.newQuery")}</ContextMenuItem>
+                    <ContextMenuItem disabled={!connected} onSelect={() => void refreshNavigator()}>{t("toolbox.postgres.refresh")}</ContextMenuItem>
+                    <ContextMenuSeparator />
+                    <ContextMenuItem onSelect={() => {
+                      const connection = connections.find((item) => item.id === connectionId);
+                      if (connection) setDraft(connection);
+                      setConfigOpen(true);
+                    }}>{t("common.edit")}</ContextMenuItem>
+                    <ContextMenuItem onSelect={() => {
+                      if (window.confirm(t("toolbox.postgres.deleteConfirm", { name: node.label }))) {
+                        void PostgresConnectionsStorage.remove(connectionId);
+                        setConnections((current) => current.filter((connection) => connection.id !== connectionId));
+                        if (connectionId === draft.id) setConnected(false);
+                      }
+                    }}>{t("common.delete")}</ContextMenuItem>
+                  </>;
+                }
+                return <>
+                  {relation && <ContextMenuItem disabled={!enabled("database.object.open")} onSelect={() => void browse(relation)}>{t("toolbox.postgres.openDataAction")}</ContextMenuItem>}
+                  <ContextMenuItem disabled={!connected} onSelect={() => void refreshNavigator()}>{t("toolbox.postgres.refresh")}</ContextMenuItem>
+                  <ContextMenuItem disabled={!connected} onSelect={() => void copyText(node.label)}>{t("toolbox.postgres.copyName")}</ContextMenuItem>
+                  {!relation && <ContextMenuItem disabled={!connected} onSelect={createQuery}>{t("toolbox.postgres.newQuery")}</ContextMenuItem>}
+                </>;
               }}
             />
             {!connections.length && (
@@ -636,10 +796,17 @@ export function ToolPostgres() {
             onPointerDown={() => setDragging(true)}
           />
         </aside>}
-      tabs={tabs.map((item) => ({ id: item.id, title: item.title, dirty: item.dirty }))}
+       tabs={tabs}
       activeTabId={activeTab}
       onActivateTab={setActiveTab}
-      onCloseTab={closeTab}
+       onCloseTab={closeTab}
+       renderTabContextMenu={(item) => <>
+         <ContextMenuItem onSelect={() => closeTab(item.id)}>{t("common.close")}</ContextMenuItem>
+         <ContextMenuItem disabled={tabs.length < 2} onSelect={() => {
+            setTabs((current) => current.filter((tab) => tab.id === item.id));
+           setActiveTab(item.id);
+         }}>{t("toolbox.postgres.closeOtherTabs")}</ContextMenuItem>
+       </>}
       tabClassName={(_, active) => `group flex h-8 min-w-28 items-center gap-1 border-r px-2 text-[12px] outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring ${active ? "bg-background font-medium text-foreground" : "text-muted-foreground hover:bg-muted/50"}`}
       workspace={tab && (
             <section className="flex min-h-0 flex-1 flex-col">
@@ -651,7 +818,7 @@ export function ToolPostgres() {
                   onClick={() => void execute()}
                   data-testid="postgres-run"
                 />
-                {tab.type === "query" && (
+                 {tab.type === "query" && (
                   <ToolButton
                     icon={<KeyRound />}
                     label={t("toolbox.postgres.explain")}
@@ -659,11 +826,21 @@ export function ToolPostgres() {
                     onClick={() => void execute(true)}
                     data-testid="postgres-explain"
                   />
-                )}
-                {tab.type === "table" && (
-                  <span className="ml-1 text-[11px] text-muted-foreground">
-                    {tab.object?.schema}.{tab.object?.name}
-                  </span>
+                 )}
+                 {tab.type === "query" && (
+                   <>
+                     <ToolButton icon={<Play />} label={t("toolbox.postgres.transaction.begin")} disabled={!connected || transactionActive} onClick={() => void transaction("begin")} />
+                     <ToolButton icon={<Play />} label={t("toolbox.postgres.transaction.commit")} disabled={!transactionActive} onClick={() => void transaction("commit")} />
+                     <ToolButton icon={<Play />} label={t("toolbox.postgres.transaction.rollback")} disabled={!transactionActive} onClick={() => void transaction("rollback")} />
+                   </>
+                 )}
+                 {tab.type === "table" && (
+                   <>
+                     <span className="ml-1 text-[11px] text-muted-foreground">{tab.object?.schema}.{tab.object?.name}</span>
+                     <ToolButton icon={<RefreshCw />} label={t("toolbox.postgres.refresh")} disabled={running} onClick={() => tab.object && void browse({ connectionId: draft.id, database: postgresConfig.database, schema: tab.object.schema, relation: tab.object.name }, tableOffset)} />
+                     <ToolButton icon={<Database />} label={t("toolbox.postgres.saveChanges")} disabled={!tab.dirty || running || postgresConfig.readOnly} onClick={() => void saveTableChanges()} />
+                     <ToolButton icon={<RefreshCw />} label={t("toolbox.postgres.revertChanges")} disabled={!tab.dirty || running} onClick={revertTableChanges} />
+                   </>
                 )}
                 <div className="flex-1" />
                 {running && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
@@ -723,16 +900,29 @@ export function ToolPostgres() {
                     tableOffset + pageSize,
                   )
                 }
-                labels={{
+                 labels={{
                   result: t("toolbox.postgres.result"),
                   message: t("toolbox.postgres.message"),
                   ready: t("toolbox.postgres.ready"),
                   null: t("toolbox.postgres.null"),
                   previous: t("toolbox.postgres.previous"),
                   next: t("toolbox.postgres.next"),
-                  rowsRange: (from, to) =>
+                   rowsRange: (from, to) =>
                     t("toolbox.postgres.rowsRange", { from, to }),
-                }}
+                 }}
+                  renderContextMenu={(cell, row, columnName, rowIndex, columnIndex) => <>
+                    <ContextMenuItem onSelect={() => void copyText(cell ?? "NULL")}>{t("toolbox.postgres.copyCell")}</ContextMenuItem>
+                    <ContextMenuItem onSelect={() => void copyText(row.map((value) => value ?? "NULL").join("\t"))}>{t("toolbox.postgres.copyRow")}</ContextMenuItem>
+                    <ContextMenuItem onSelect={() => void copyText(columnName)}>{t("toolbox.postgres.copyColumnName")}</ContextMenuItem>
+                    <ContextMenuSeparator />
+                    {tab.type === "table" && <ContextMenuItem
+                      disabled={postgresConfig.readOnly || tab.result?.kind !== "tabular" || !tab.result.editability.editable || !tab.result.editability.nullableColumnKeys?.includes(tab.result.columns[columnIndex]?.key ?? "")}
+                      onSelect={() => stageTableEdit(rowIndex, columnIndex, null)}
+                    >{t("toolbox.postgres.setNull")}</ContextMenuItem>}
+                    <ContextMenuItem onSelect={() => void exportCsv()}>{t("toolbox.postgres.exportCsv")}</ContextMenuItem>
+                  </>}
+                  onEditCell={tab.type === "table" && !postgresConfig.readOnly ? stageTableEdit : undefined}
+                  isCellModified={isTableCellModified}
               />
             </section>
           )}

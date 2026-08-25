@@ -1,4 +1,11 @@
 import { Button } from "@/components/ui/button";
+import type { ReactNode } from "react";
+import { useState } from "react";
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuTrigger,
+} from "@/components/ui/context-menu";
 import type { DatabaseResult } from "@/lib/database/result-types";
 
 interface DatabaseResultPaneLabels {
@@ -18,6 +25,15 @@ interface DatabaseResultPaneProps {
   readonly onPrevious: () => void;
   readonly onNext: () => void;
   readonly labels: DatabaseResultPaneLabels;
+  readonly renderContextMenu?: (
+    cell: string | null,
+    row: readonly (string | null)[],
+    columnName: string,
+    rowIndex: number,
+    columnIndex: number,
+  ) => ReactNode;
+  readonly onEditCell?: (rowIndex: number, columnIndex: number, value: string) => void;
+  readonly isCellModified?: (rowIndex: number, columnIndex: number) => boolean;
 }
 
 export function DatabaseResultPane({
@@ -27,7 +43,11 @@ export function DatabaseResultPane({
   onPrevious,
   onNext,
   labels,
+  renderContextMenu,
+  onEditCell,
+  isCellModified,
 }: DatabaseResultPaneProps) {
+  const [editing, setEditing] = useState<{ row: number; column: number } | null>(null);
   const tabularResult = result?.kind === "tabular" ? result : null;
   const commandTags = result?.kind === "empty" ? [] : result?.commandTags ?? [];
   const pagination = tabularResult?.pagination;
@@ -69,9 +89,43 @@ export function DatabaseResultPane({
                   {row.map((cell, cellIndex) => (
                     <td
                       key={`${index}:${cellIndex}`}
-                      className="whitespace-nowrap border-b border-r px-2 py-1 select-text"
+                      className={`whitespace-nowrap border-b border-r px-2 py-1 select-text ${isCellModified?.(index, cellIndex) ? "bg-amber-500/10" : ""}`}
                     >
-                      {cell ?? <span className="text-muted-foreground">{labels.null}</span>}
+                    <ContextMenu>
+                      <ContextMenuTrigger asChild>
+                        <div className="min-w-24">
+                      {editing?.row === index && editing.column === cellIndex ? (
+                        <input
+                          autoFocus
+                          className="w-full min-w-24 bg-transparent outline-none"
+                          defaultValue={cell ?? ""}
+                          onBlur={(event) => {
+                            onEditCell?.(index, cellIndex, event.target.value);
+                            setEditing(null);
+                          }}
+                          onKeyDown={(event) => {
+                            if (event.key === "Enter") event.currentTarget.blur();
+                            if (event.key === "Escape") setEditing(null);
+                          }}
+                        />
+                      ) : (
+                        <button
+                          type="button"
+                          className="w-full text-left"
+                          disabled={!onEditCell || !tabularResult.editability.editable || tabularResult.editability.primaryKeyColumnKeys.includes(tabularResult.columns[cellIndex]?.key ?? "")}
+                          onDoubleClick={() => setEditing({ row: index, column: cellIndex })}
+                        >
+                          {cell ?? <span className="text-muted-foreground">{labels.null}</span>}
+                        </button>
+                      )}
+                        </div>
+                      </ContextMenuTrigger>
+                      {renderContextMenu && (
+                        <ContextMenuContent data-testid="database-result-context-menu">
+                           {renderContextMenu(cell, row, tabularResult.columns[cellIndex]?.label ?? "", index, cellIndex)}
+                        </ContextMenuContent>
+                      )}
+                    </ContextMenu>
                     </td>
                   ))}
                 </tr>

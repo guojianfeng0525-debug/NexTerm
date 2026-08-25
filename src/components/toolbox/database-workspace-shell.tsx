@@ -1,5 +1,10 @@
 import type { ReactNode } from "react";
 import { FileCode2, X } from "lucide-react";
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuTrigger,
+} from "@/components/ui/context-menu";
 
 export interface DatabaseWorkspaceTab {
   readonly id: string;
@@ -16,6 +21,7 @@ interface DatabaseWorkspaceShellProps {
   readonly activeTabId: string;
   readonly onActivateTab: (id: string) => void;
   readonly onCloseTab: (id: string) => void;
+  readonly renderTabContextMenu?: (tab: DatabaseWorkspaceTab) => ReactNode;
   readonly tabClassName: (tab: DatabaseWorkspaceTab, active: boolean) => string;
   readonly tabStripClassName?: string;
   readonly workspace: ReactNode;
@@ -33,6 +39,7 @@ export function DatabaseWorkspaceShell({
   activeTabId,
   onActivateTab,
   onCloseTab,
+  renderTabContextMenu,
   tabClassName,
   tabStripClassName = "flex h-8 shrink-0 items-end overflow-x-auto border-b bg-muted/15",
   workspace,
@@ -49,8 +56,11 @@ export function DatabaseWorkspaceShell({
         <main className="flex min-w-0 flex-1 flex-col">
           <nav className={tabStripClassName}>
             {tabs.map((tab) => (
+              <ContextMenu key={tab.id} onOpenChange={(open) => {
+                if (open) onActivateTab(tab.id);
+              }}>
+                <ContextMenuTrigger asChild>
               <button
-                key={tab.id}
                 type="button"
                 onClick={() => onActivateTab(tab.id)}
                 className={tabClassName(tab, tab.id === activeTabId)}
@@ -67,6 +77,13 @@ export function DatabaseWorkspaceShell({
                   }}
                 />
               </button>
+                </ContextMenuTrigger>
+                {renderTabContextMenu && (
+                  <ContextMenuContent data-testid="database-tab-context-menu">
+                    {renderTabContextMenu(tab)}
+                  </ContextMenuContent>
+                )}
+              </ContextMenu>
             ))}
           </nav>
           {workspace}
