@@ -87,7 +87,29 @@ It returns the shared contracts above. The PostgreSQL adapter retains all `pg_ca
 
 ## Provider-Aware Object Model
 
-The shared navigator renders provider-returned nodes. It does not synthesize schema/table levels.
+### Current Implementation
+
+The Navigator runtime remains PostgreSQL-specific and lives inside
+`src/components/toolbox/tool-postgres.tsx`. It directly calls
+`postgres_catalog_schemas` and `postgres_catalog_search`, then constructs tree
+rows through local JSX and `treeRow(...)`.
+
+Its current fixed hierarchy is:
+
+```text
+connection -> database -> schema -> tables group -> relation
+```
+
+Table opening remains coupled to the local PostgreSQL `CatalogItem` shape,
+its `schema`, and `postgres_table_data`. The `connection`, `catalog`,
+`schema`, `group`, `object`, and `relation` types currently present in
+`src/lib/database/types.ts` are declarative provider-descriptor metadata;
+they are not the live Navigator node contract.
+
+### Target Architecture
+
+The planned shared Navigator renders provider-returned nodes. It does not
+synthesize PostgreSQL schema/table levels.
 
 ```text
 DatabaseObjectNode
@@ -101,7 +123,32 @@ DatabaseObjectNode
   capabilities: action IDs
 ```
 
-PostgreSQL initially contributes `connection -> catalog(database) -> schema -> group(relations) -> relation`. The common model supports a flat SQLite file, MongoDB collection tree, or Redis key hierarchy later without encoding them now. Object roles are display/action hints, not a PostgreSQL enum used by the shell.
+PostgreSQL will initially contribute `connection -> catalog(database) -> schema
+-> group(relations) -> relation`. The common model supports a flat SQLite file,
+MongoDB collection tree, or Redis key hierarchy later without encoding them
+now. Object roles are display/action hints, not a PostgreSQL enum used by the
+shell.
+
+The intended dependency direction is:
+
+```text
+Shared Navigator Renderer
+  -> Shared Provider-aware Object Node Contract
+  -> Provider Object Adapter / Child Loader
+  -> PostgreSQL Metadata Runtime
+```
+
+The shared renderer must not branch on `if (provider === "postgresql")` or
+interpret a PostgreSQL schema/table hierarchy to load children.
+
+### Migration Status
+
+- Navigator / Object Model Provider Migration: NOT STARTED.
+- Shared Database Object metadata foundation: PARTIAL / FOUNDATION ONLY.
+- Live Navigator consumes Shared Object Nodes: NO.
+- Provider Object Adapter: NOT IMPLEMENTED.
+- Generic child loading: NOT IMPLEMENTED.
+- Navigator rendering abstraction: NOT IMPLEMENTED.
 
 ## Command Architecture
 
@@ -173,7 +220,7 @@ Only one slice is implemented and verified at a time.
 - Atomic Slice 2: COMPLETE. `database.query.explain` toolbar availability in `ToolPostgres` consumes the PostgreSQL descriptor through the Shared Command Resolver.
 - Atomic Slice 3: COMPLETE. `database.query.execute` toolbar availability in `ToolPostgres` consumes the PostgreSQL descriptor through the Shared Command Resolver.
 - Atomic Slice 4: COMPLETE. `database.connection.disconnect` toolbar availability in `ToolPostgres` consumes the PostgreSQL descriptor through the Shared Command Resolver.
-- Shared Runtime Adoption: PARTIAL. The live PostgreSQL UI uses the Shared Command Resolver for `database.query.explain`, `database.query.execute`, and `database.connection.disconnect` availability only. Command execution is not migrated: Explain still calls `execute(true)` then `postgres_explain`, Execute still calls `execute()` then `postgres_execute`, and Disconnect still calls `postgres_disconnect`; all continue through the existing PostgreSQL IPC and Rust paths. PostgreSQL execution, IPC, storage, navigator, editor, and session/runtime contracts are not migrated to a provider core.
+- Shared Runtime Adoption: PARTIAL. The live PostgreSQL UI uses the Shared Command Resolver for `database.query.explain`, `database.query.execute`, and `database.connection.disconnect` availability only. Command execution is not migrated: Explain still calls `execute(true)` then `postgres_explain`, Execute still calls `execute()` then `postgres_execute`, and Disconnect still calls `postgres_disconnect`; all continue through the existing PostgreSQL IPC and Rust paths. PostgreSQL execution, IPC, storage, navigator, editor, and session/runtime contracts are not migrated to a provider core. Navigator/Object Model Provider Migration remains NOT STARTED; the Provider-Aware Object Model section above is target architecture, not a live runtime implementation.
 
 ### Planned broader migration stages
 

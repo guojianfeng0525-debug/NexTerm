@@ -17,7 +17,7 @@ Product baseline: `navicat-premium-audit.md`, Feature Matrix, interaction, conte
 | Completion | `src/lib/postgres-completion.ts` | PostgreSQL keywords, types, functions and catalog requests are embedded in generic editor use. | Host protocol only. | Parser and PostgreSQL completion source. | Register it as the PostgreSQL dialect service. |
 | Tauri IPC/state | `src-tauri/src/postgres.rs`, `src-tauri/src/lib.rs` | `PostgresState`, raw `postgres_*` commands and `tokio_postgres::Client` map are the public frontend contract. | Yes: session registry, provider dispatch, generic request/result contracts. | Driver client, catalog SQL, SQL parser details, identifier quoting. | Add `DatabaseState` and a PostgreSQL adapter behind one generic command surface before retiring raw commands. |
 | Connection security | `src-tauri/src/postgres.rs` | SSH host-key pinning, SSH auth, TLS roots/mTLS and timeouts are PostgreSQL request details. | Shared SSH/TLS descriptors and validation helpers. | PostgreSQL `allow`/`prefer`/`verify-*` semantics and driver connector mapping. | Preserve strict validation; providers translate common transport descriptors into driver options. |
-| Object tree | `src/components/toolbox/tool-postgres.tsx`, `src-tauri/src/postgres.rs` | Tree assumes connection -> database -> schema -> tables and calls all relations `relation`. | Yes: object IDs, node roles, hierarchy, actions and capabilities. | PostgreSQL schema and catalog query implementation; relation subtype mapping. | Provider returns a hierarchy of generic nodes, rather than the shared tree creating schema/table levels. |
+| Object tree | `src/components/toolbox/tool-postgres.tsx`, `src-tauri/src/postgres.rs` | JSX and local `treeRow(...)` hard-code connection -> database -> schema -> tables group -> relation. It directly calls `postgres_catalog_schemas` and `postgres_catalog_search`; table opening requires local `CatalogItem`, `schema`, and `postgres_table_data`. | Yes: object IDs, node roles, hierarchy, selection, lazy child loading, actions and capabilities. | PostgreSQL schema/catalog query implementation, `CatalogItem` mapping, relation subtype mapping, and table-data request translation. | Introduce a live provider-aware object-node contract and PostgreSQL adapter, rather than having the Navigator synthesize schema/table levels. |
 | Results and data | `src/components/toolbox/tool-postgres.tsx`, `src-tauri/src/postgres.rs` | Result values are `string | null`; table paging and update safety depend on PostgreSQL primary-key lookup. | Yes: page/result/cell/row identity contracts and grid host. | PostgreSQL casts, PK discovery and update SQL. | Keep provider responsible for typed values and mutation validation. Do not expose editing until generic grid state exists. |
 | Query operations | `src-tauri/src/postgres.rs`, `ToolPostgres` | Backend supports transaction, Explain, update and fingerprint operations; UI only exposes execute/text Explain. | Yes: operation lifecycle, command enablement and capability gating. | Transaction syntax and Explain representation. | Model operation state centrally; surface only services that both adapter and UI support. |
 | i18n | `src/locales/en.json`, `src/locales/zh-CN.json` | Database vocabulary is under `toolbox.postgres`. | Yes: `database.*` actions/state labels. | PostgreSQL display/default text. | Split common strings from provider contributions while preserving translations. |
@@ -54,6 +54,36 @@ Infrastructure established; migration pending. `src/lib/database/` now contains 
 ## Feature Batch 5 Status
 
 `ToolPostgres` now consumes the shared resolver for the existing `database.workspace.newQuery` toolbar entry. The PostgreSQL descriptor, existing New Query command descriptor, and resolver determine connected/disconnected availability; the existing `newQuery()` and `openTab()` handler remains unchanged. Execute and Explain remain resolver-controlled with their local `running` guard. There are no other mature Query Toolbar lifecycle commands to migrate: Stop/cancel, transaction controls, Save Query, Run Selected, Run Current Statement, Format SQL, and Refresh Result have no current toolbar entry. This batch changes no query execution, IPC, Rust runtime, editor provider, result contract, profile, or storage coupling. Renderer and native desktop coverage assert New Query, Execute, and Explain availability across connection states, while native coverage also verifies live query execution and results.
+
+## Navigator / Object Model Coupling
+
+Navigator / Object Model Provider Migration is NOT STARTED. The current
+Navigator runtime is still a PostgreSQL-specific implementation in
+`ToolPostgres`, not a consumer of live shared object nodes.
+
+- The tree is built directly in JSX through `treeRow(...)`, rather than from a
+  shared node contract or provider child loader.
+- Metadata loads directly through `postgres_catalog_schemas` and
+  `postgres_catalog_search`.
+- Table open/browse depends on the PostgreSQL-only local `CatalogItem`, its
+  `schema`, and `postgres_table_data`.
+- Tree identity is insufficiently scoped: the connection uses
+  `connection:${connection.id}`, while database is `database`, schemas use
+  `schema:${name}`, the tables group is `tables`, and relations use
+  `object:${object.name}`. These keys do not consistently include connection,
+  database, schema, and object hierarchy, creating cross-connection or
+  cross-schema collision risk.
+- Selection is split between `selectedId` and `schema`; no shared selected
+  Navigator-node model exists.
+- Expand/collapse state is a local `Record<string, boolean>` whose keys are
+  not consistently full object identities.
+- Toolbar refresh calls `setSchema(schema)`. When the value is unchanged this
+  does not guarantee a metadata reload, so it is not a reliable provider
+  metadata refresh path.
+- There is no explicit `onDoubleClick` or double-click command. The current
+  native E2E's apparent double-click table-open success can result from the
+  same click handler running twice; double-click interaction parity is not
+  implemented.
 
 ## Risks To Preserve During Migration
 
