@@ -116,6 +116,7 @@ Not migrated:
 - Added live `DatabaseObjectNode`, provider-aware opaque object references, and deterministic scoped node IDs.
 - Added a PostgreSQL object loader that maps existing `postgres_catalog_schemas` and `postgres_catalog_search` responses into `connection -> catalog -> schema -> group -> relation` nodes.
 - `ToolPostgres` now uses the shared `DatabaseNavigator` renderer. PostgreSQL metadata hierarchy construction and metadata IPC are outside the renderer.
+- Shared live object model: YES. `DatabaseNavigator` and the PostgreSQL object loader are in production.
 - Expand and selection state use stable shared node IDs. Refresh reloads expanded Navigator nodes through the loader and issues fresh metadata requests.
 - PostgreSQL table opening remains on the existing `postgres_table_data` path after the adapter decodes the relation reference.
 - Single-click relation open remains preserved; explicit double-click semantics are deferred.

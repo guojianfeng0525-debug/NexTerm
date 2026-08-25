@@ -4,6 +4,11 @@ Date: 2026-08-25
 
 This design implements only the roadmap's shared core and migration of current PostgreSQL P0 capability. It intentionally excludes new providers, designers, import/export, backup/restore, synchronization, automation, BI, and AI.
 
+Implementation progress and completed Feature Batches are tracked in
+`docs/database/database-development-status.md`. This design document records
+architecture, dependency direction, and design boundaries; it is not the
+authoritative progress log.
+
 ## Architecture Before
 
 ```text
@@ -89,27 +94,29 @@ It returns the shared contracts above. The PostgreSQL adapter retains all `pg_ca
 
 ### Current Implementation
 
-The Navigator runtime remains PostgreSQL-specific and lives inside
-`src/components/toolbox/tool-postgres.tsx`. It directly calls
-`postgres_catalog_schemas` and `postgres_catalog_search`, then constructs tree
-rows through local JSX and `treeRow(...)`.
-
-Its current fixed hierarchy is:
+The current PostgreSQL Navigator consumes the Shared Object Model:
 
 ```text
-connection -> database -> schema -> tables group -> relation
+Existing PostgreSQL Metadata
+  -> PostgreSQL Object Loader / Adapter
+  -> Shared DatabaseObjectNode
+  -> DatabaseNavigator
+  -> Existing PostgreSQL Object Open Runtime
 ```
 
-Table opening remains coupled to the local PostgreSQL `CatalogItem` shape,
-its `schema`, and `postgres_table_data`. The `connection`, `catalog`,
-`schema`, `group`, `object`, and `relation` types currently present in
-`src/lib/database/types.ts` are declarative provider-descriptor metadata;
-they are not the live Navigator node contract.
+The shared foundation includes `DatabaseObjectNode`, `DatabaseObjectNodeId`,
+`DatabaseObjectReference`, `createDatabaseObjectNodeId`,
+`postgresql-object-loader.ts`, and `DatabaseNavigator`. The PostgreSQL loader
+owns `postgres_catalog_*` mapping and relation-reference decoding for the
+existing `postgres_table_data` object-open path. The renderer does not inspect
+PostgreSQL fields or construct the PostgreSQL hierarchy.
 
-### Target Architecture
+### Future Architecture
 
-The planned shared Navigator renders provider-returned nodes. It does not
-synthesize PostgreSQL schema/table levels.
+Additional providers should contribute their own object loader/adapter and
+reuse `DatabaseNavigator`; they must not copy the tree renderer, identity,
+selection, or expand/collapse behavior. More object kinds and Navicat
+interaction parity are future work, not current implementation.
 
 ```text
 DatabaseObjectNode
@@ -141,14 +148,13 @@ Shared Navigator Renderer
 The shared renderer must not branch on `if (provider === "postgresql")` or
 interpret a PostgreSQL schema/table hierarchy to load children.
 
-### Migration Status
+### Foundation Scope
 
-- Navigator / Object Model Provider Migration: COMPLETE for the current PostgreSQL hierarchy.
-- `DatabaseObjectNode` is the live Navigator contract: stable ID, parent ID, provider ID, shared kind/role, presentation metadata, action flags, and an opaque provider reference.
-- `createDatabaseObjectNodeId` scopes every node by provider, connection, and typed hierarchy path.
-- `postgresql-object-loader.ts` is the active PostgreSQL adapter. It owns `postgres_catalog_*` mapping and reference decoding for existing table browse requests.
-- `DatabaseNavigator` is provider-neutral and renders shared nodes only; it does not inspect PostgreSQL fields or branch by provider.
-- Child loading remains lazy. Refresh reloads expanded nodes through the active loader.
+- Navigator / Object Model Shared Foundation: IMPLEMENTED.
+- PostgreSQL Runtime Adoption: IMPLEMENTED.
+- Multi-provider Adoption: NOT YET IMPLEMENTED.
+- Extended Object Type Coverage: PARTIAL.
+- Navicat Interaction Parity: INCOMPLETE.
 
 ## Command Architecture
 
@@ -209,28 +215,11 @@ Registry entries carry `windows`, `linux`, and `macos` bindings independently; u
 | generic IPC DTOs and database session registry | driver client, SSH/TLS mapping, catalog SQL, completion, query/explain/table adapters |
 | native/browser E2E harness | PostgreSQL fixture and provider-specific assertions |
 
-## Migration Slices
+## Implementation Status
 
-Only one slice is implemented and verified at a time.
-
-### Current implementation status
-
-- Shared Core Foundation: COMPLETE.
-- Atomic Slice 1: COMPLETE. Tested shared TypeScript contracts, static PostgreSQL-only registry, command descriptors, and non-executing resolver are implemented.
-- Atomic Slice 2: COMPLETE. `database.query.explain` toolbar availability in `ToolPostgres` consumes the PostgreSQL descriptor through the Shared Command Resolver.
-- Atomic Slice 3: COMPLETE. `database.query.execute` toolbar availability in `ToolPostgres` consumes the PostgreSQL descriptor through the Shared Command Resolver.
-- Atomic Slice 4: COMPLETE. `database.connection.disconnect` toolbar availability in `ToolPostgres` consumes the PostgreSQL descriptor through the Shared Command Resolver.
-- Shared Runtime Adoption: PARTIAL. The live PostgreSQL UI uses the Shared Command Resolver for `database.query.explain`, `database.query.execute`, and `database.connection.disconnect` availability only. Command execution is not migrated: Explain still calls `execute(true)` then `postgres_explain`, Execute still calls `execute()` then `postgres_execute`, and Disconnect still calls `postgres_disconnect`; all continue through the existing PostgreSQL IPC and Rust paths. PostgreSQL execution, IPC, storage, navigator, editor, and session/runtime contracts are not migrated to a provider core. Navigator/Object Model Provider Migration remains NOT STARTED; the Provider-Aware Object Model section above is target architecture, not a live runtime implementation.
-
-### Planned broader migration stages
-
-1. Define tested shared TypeScript contracts, static registry, command descriptor/resolver and shortcut scope types. No visual behavior change. COMPLETE as Atomic Slice 1.
-2. Add shared Rust command DTOs, `DatabaseState`, and a PostgreSQL adapter that delegates to existing behavior. Keep raw `postgres_*` commands temporarily for migration tests.
-3. Migrate profiles/storage and config lifecycle to generic database profiles with an atomic PostgreSQL migration.
-4. Extract `DatabaseWorkspaceShell`, generic navigator/tab/result contracts, then mount the PostgreSQL contribution through it. Preserve browser E2E.
-5. Migrate P0 commands/first context menus and M17-confirmed scoped shortcuts. Add unit and renderer tests.
-6. Add `database-smoke.desktop.e2e.ts`: launch real Tauri, unlock isolated profile, open Database, assert navigator/workspace, create a query tab and activate it. This is native UI verification but does not require a server.
-7. Add disposable PostgreSQL native contract/integration fixture for connect, metadata, execution, paging, Explain and safety behavior.
+Detailed implementation progress, completed Feature Batches, verification, and
+the recommended next batch are maintained exclusively in
+`docs/database/database-development-status.md`.
 
 ## Architecture Guard
 
