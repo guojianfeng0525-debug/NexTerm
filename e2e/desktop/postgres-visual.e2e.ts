@@ -36,6 +36,7 @@ describe('PostgreSQL visual workspace', () => {
     await browser.saveScreenshot('./test-results/postgres/debug-after-connect.png');
     await expect($('[data-testid="postgres-run"]')).toBeEnabled();
     await expect($('[data-testid="postgres-explain"]')).toBeEnabled();
+    await expect($('[data-testid="postgres-disconnect"]')).toBeEnabled();
     await $('button=users').waitForDisplayed();
     await browser.saveScreenshot('./test-results/postgres/02-database-tree.png');
     await browser.saveScreenshot('./test-results/postgres/03-object-list.png');
@@ -63,5 +64,9 @@ describe('PostgreSQL visual workspace', () => {
     await browser.pause(500);
     await browser.saveScreenshot('./test-results/postgres/06-table-data.png');
     await expect($('button=users')).toBeDisplayed();
+
+    await $('[data-testid="postgres-disconnect"]').click();
+    await expect($('[data-testid="postgres-connect"]')).toBeEnabled();
+    await expect($('[data-testid="postgres-disconnect"]')).not.toBeExisting();
   });
 });

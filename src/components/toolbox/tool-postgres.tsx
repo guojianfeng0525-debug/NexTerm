@@ -149,6 +149,14 @@ export function ToolPostgres() {
     provider: postgresqlProvider,
     connectionState: connected ? "connected" : "disconnected",
   });
+  const disconnectCommand = resolveDatabaseCommand(
+    "database.connection.disconnect",
+    {
+      scope: "DATABASE",
+      provider: postgresqlProvider,
+      connectionState: connected ? "connected" : "disconnected",
+    },
+  );
   const catalogLookup: PostgresCatalogLookup | undefined = connected
     ? async (request) =>
         invoke("postgres_catalog_search", {
@@ -459,21 +467,26 @@ export function ToolPostgres() {
             ? `${draft.database} / ${schema ?? ""}`
             : t("toolbox.postgres.disconnected")}
         </span>
-        <ToolButton
-          icon={connected ? <Unplug /> : <Database />}
-          label={
-            connected
-              ? t("toolbox.postgres.disconnect")
-              : t("toolbox.postgres.connect")
-          }
-          onClick={() =>
-            connected
-              ? void invoke("postgres_disconnect", {
-                  connectionId: draft.id,
-                }).then(() => setConnected(false))
-              : setConfigOpen(true)
-          }
-        />
+        {connected ? (
+          <ToolButton
+            icon={<Unplug />}
+            label={t("toolbox.postgres.disconnect")}
+            disabled={disconnectCommand.state !== "enabled"}
+            onClick={() =>
+              void invoke("postgres_disconnect", {
+                connectionId: draft.id,
+              }).then(() => setConnected(false))
+            }
+            data-testid="postgres-disconnect"
+          />
+        ) : (
+          <ToolButton
+            icon={<Database />}
+            label={t("toolbox.postgres.connect")}
+            onClick={() => setConfigOpen(true)}
+            data-testid="postgres-connect"
+          />
+        )}
       </header>
       <div className="flex min-h-0 flex-1">
         <aside

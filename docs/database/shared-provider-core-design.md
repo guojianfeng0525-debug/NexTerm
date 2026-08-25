@@ -168,9 +168,12 @@ Only one slice is implemented and verified at a time.
 
 ### Current implementation status
 
+- Shared Core Foundation: COMPLETE.
 - Atomic Slice 1: COMPLETE. Tested shared TypeScript contracts, static PostgreSQL-only registry, command descriptors, and non-executing resolver are implemented.
 - Atomic Slice 2: COMPLETE. `database.query.explain` toolbar availability in `ToolPostgres` consumes the PostgreSQL descriptor through the Shared Command Resolver.
-- Shared Runtime Adoption: PARTIAL. Only Explain command availability has entered the live PostgreSQL UI. PostgreSQL execution, IPC, storage, navigator, editor, and session/runtime contracts are not migrated to a provider core.
+- Atomic Slice 3: COMPLETE. `database.query.execute` toolbar availability in `ToolPostgres` consumes the PostgreSQL descriptor through the Shared Command Resolver.
+- Atomic Slice 4: COMPLETE. `database.connection.disconnect` toolbar availability in `ToolPostgres` consumes the PostgreSQL descriptor through the Shared Command Resolver.
+- Shared Runtime Adoption: PARTIAL. The live PostgreSQL UI uses the Shared Command Resolver for `database.query.explain`, `database.query.execute`, and `database.connection.disconnect` availability only. Command execution is not migrated: Explain still calls `execute(true)` then `postgres_explain`, Execute still calls `execute()` then `postgres_execute`, and Disconnect still calls `postgres_disconnect`; all continue through the existing PostgreSQL IPC and Rust paths. PostgreSQL execution, IPC, storage, navigator, editor, and session/runtime contracts are not migrated to a provider core.
 
 ### Planned broader migration stages
 

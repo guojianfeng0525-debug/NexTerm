@@ -36,6 +36,37 @@ describe("database command resolver", () => {
     });
   });
 
+  it("enables Disconnect for PostgreSQL in a connected database scope", () => {
+    expect(
+      resolveDatabaseCommand(
+        "database.connection.disconnect",
+        { ...connectedNavigatorContext, scope: "DATABASE" },
+      ),
+    ).toMatchObject({
+      state: "enabled",
+      descriptor: { id: "database.connection.disconnect" },
+    });
+  });
+
+  it("disables Disconnect while disconnected", () => {
+    expect(
+      resolveDatabaseCommand("database.connection.disconnect", {
+        ...connectedNavigatorContext,
+        scope: "DATABASE",
+        connectionState: "disconnected",
+      }),
+    ).toMatchObject({ state: "disabled", reason: "connection-state" });
+  });
+
+  it("hides Disconnect outside its registered scope", () => {
+    expect(
+      resolveDatabaseCommand("database.connection.disconnect", {
+        ...connectedNavigatorContext,
+        scope: "QUERY_EDITOR",
+      }),
+    ).toEqual({ state: "hidden", reason: "wrong-scope" });
+  });
+
   it("enables an object command when the provider supports it in the active scope", () => {
     expect(
       resolveDatabaseCommand("database.object.open", connectedNavigatorContext),

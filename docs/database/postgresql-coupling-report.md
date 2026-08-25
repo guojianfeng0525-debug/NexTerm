@@ -47,6 +47,10 @@ Infrastructure established; migration pending. `src/lib/database/` now contains 
 
 `ToolPostgres` now consumes the shared resolver for the existing `database.query.execute` toolbar button. Before this slice, the toolbar independently encoded `!connected`; now the PostgreSQL provider descriptor, shared Execute descriptor, and resolver determine connection-level availability. The local `running` guard remains in the Query Workspace. The empty-SQL guard remains in `execute()` and the button continues to be enabled for empty SQL, preserving the prior behavior. The action still calls `execute()` and the existing `postgres_execute` IPC path, so this slice changes availability only, not execution, persistence, backend contracts, or workspace structure. Renderer and native desktop coverage assert disconnected, connected, empty-SQL, and running states.
 
+## Slice 4 Status
+
+`ToolPostgres` now consumes the shared resolver for the existing `database.connection.disconnect` toolbar entry. Before this slice, the toolbar independently used its local `connected` state as the implied Disconnect availability rule; now the PostgreSQL provider descriptor, shared Disconnect descriptor, and resolver determine whether Disconnect is enabled. The existing toolbar continues to render its Connect entry while disconnected and Disconnect entry while connected. The Disconnect handler still invokes `postgres_disconnect` and performs the existing local state update, so this slice changes availability only, not disconnect execution, IPC, Rust session cleanup, persistence, backend contracts, or workspace structure. Renderer and native desktop coverage assert disconnected, connected, and post-disconnect states.
+
 ## Risks To Preserve During Migration
 
 - Do not weaken SSH host-key fingerprint checking, certificate validation, mTLS support, bounded timeouts, quoted identifiers, or primary-key update validation in `postgres.rs`.

@@ -2,6 +2,24 @@ import { expect, test } from '@playwright/test';
 
 test.describe('PostgreSQL workspace', () => {
   test('opens the Navicat-style workspace and connection settings', async ({ page }) => {
+    await page.addInitScript(() => {
+      Object.assign(window, {
+        __TAURI_INTERNALS__: {
+          invoke: (command: string) => {
+            if (command === 'postgres_connect') {
+              return Promise.resolve({ serverVersion: '16.0' });
+            }
+            if (command === 'postgres_catalog_schemas') {
+              return Promise.resolve(['public']);
+            }
+            if (command === 'postgres_catalog_search') {
+              return Promise.resolve([]);
+            }
+            return Promise.resolve(undefined);
+          },
+        },
+      });
+    });
     await page.goto('/');
     const setupPassword = page.getByRole('button', { name: 'Set Password' });
     if (await setupPassword.isVisible()) {
@@ -14,6 +32,8 @@ test.describe('PostgreSQL workspace', () => {
     await expect(page.getByTestId('postgres-toolbar')).toBeVisible();
     await expect(page.getByTestId('postgres-run')).toBeDisabled();
     await expect(page.getByTestId('postgres-explain')).toBeDisabled();
+    await expect(page.getByTestId('postgres-connect')).toBeEnabled();
+    await expect(page.getByTestId('postgres-disconnect')).toHaveCount(0);
     await page.screenshot({ path: 'test-results/postgres/01-main-workspace.png', fullPage: true });
 
     await page.getByTestId('postgres-new-connection').click();
@@ -30,5 +50,12 @@ test.describe('PostgreSQL workspace', () => {
     await page.screenshot({ path: 'test-results/postgres/08-connection-ssh.png', fullPage: true });
     await dialog.getByRole('button', { name: 'SSL / TLS' }).click();
     await page.screenshot({ path: 'test-results/postgres/09-connection-tls.png', fullPage: true });
+
+    await dialog.getByRole('button', { name: 'General' }).click();
+    await dialog.getByRole('button', { name: 'Connect', exact: true }).click();
+    await expect(page.getByTestId('postgres-disconnect')).toBeEnabled();
+    await page.getByTestId('postgres-disconnect').click();
+    await expect(page.getByTestId('postgres-disconnect')).toHaveCount(0);
+    await expect(page.getByTestId('postgres-connect')).toBeEnabled();
   });
 });
