@@ -221,6 +221,6 @@ export interface NoteItem {
 
 /* ── Toolbox tab view ids ────────────────────────────────────────────────── */
 
-export type ToolboxViewId = 'apps' | 'vault' | 'tunnels' | 'services' | 'notes' | 'history' | 'documents' | 'jar' | 'postgres' | 'sqlite';
+export type ToolboxViewId = 'apps' | 'vault' | 'tunnels' | 'services' | 'notes' | 'history' | 'documents' | 'jar' | 'postgres' | 'sqlite' | 'mysql';
 
-export const TOOLBOX_VIEW_IDS: ToolboxViewId[] = ['apps', 'vault', 'tunnels', 'services', 'notes', 'history', 'documents', 'jar', 'postgres', 'sqlite'];
+export const TOOLBOX_VIEW_IDS: ToolboxViewId[] = ['apps', 'vault', 'tunnels', 'services', 'notes', 'history', 'documents', 'jar', 'postgres', 'sqlite', 'mysql'];

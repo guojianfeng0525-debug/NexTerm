@@ -5,6 +5,7 @@ import {
   listDatabaseProviders,
   postgresqlProvider,
   sqliteProvider,
+  mysqlProvider,
 } from "@/lib/database/provider-registry";
 
 describe("database provider registry", () => {
@@ -18,13 +19,16 @@ describe("database provider registry", () => {
     expect(hasDatabaseProvider("unknown")).toBe(false);
   });
 
-  it("lists PostgreSQL and SQLite by stable provider identity", () => {
+  it("lists PostgreSQL, SQLite, and MySQL by stable provider identity", () => {
     expect(listDatabaseProviders().map((provider) => provider.id)).toEqual([
       "postgresql",
       "sqlite",
+      "mysql",
     ]);
     expect(getDatabaseProvider("sqlite")).toBe(sqliteProvider);
     expect(hasDatabaseProvider("sqlite")).toBe(true);
+    expect(getDatabaseProvider("mysql")).toBe(mysqlProvider);
+    expect(hasDatabaseProvider("mysql")).toBe(true);
   });
 
   it("reports only PostgreSQL capabilities implemented by the current provider", () => {

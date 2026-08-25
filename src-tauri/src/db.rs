@@ -25,7 +25,7 @@ use tauri::State;
 
 /// Allow-listed normalized tables. Table names are validated against this
 /// list before being interpolated into SQL, so no injection is possible.
-pub const TABLES: [&str; 39] = [
+pub const TABLES: [&str; 40] = [
     "connections",
     "folders",
     "active_connections",
@@ -45,6 +45,7 @@ pub const TABLES: [&str; 39] = [
     "api_request_history",
     "postgres_connections",
     "database_sqlite_connections",
+    "database_mysql_connections",
     // Preferences — normalized single-row tables (no JSON blob columns).
     "app_settings",
     "layout_config",
@@ -594,6 +595,7 @@ fn pk_column(table: &str) -> Result<&'static str, String> {
         "api_request_history" => "id",
         "postgres_connections" => "id",
         "database_sqlite_connections" => "id",
+        "database_mysql_connections" => "id",
         "app_settings" => "id",
         "layout_config" => "id",
         "terminal_appearance" => "id",
@@ -1153,6 +1155,19 @@ CREATE TABLE IF NOT EXISTS "database_sqlite_connections" (
   environment TEXT NOT NULL DEFAULT 'development',
   file_path TEXT NOT NULL DEFAULT '',
   read_only INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS "database_mysql_connections" (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL DEFAULT '',
+  group_name TEXT,
+  environment TEXT NOT NULL DEFAULT 'development',
+  host TEXT NOT NULL DEFAULT '',
+  port INTEGER NOT NULL DEFAULT 3306,
+  database_name TEXT NOT NULL DEFAULT '',
+  username TEXT NOT NULL DEFAULT '',
+  password TEXT,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );

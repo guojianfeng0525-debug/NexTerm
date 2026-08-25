@@ -46,7 +46,30 @@ export const sqliteProvider: DatabaseProviderDescriptor = {
   },
 };
 
-const providers = [postgresqlProvider, sqliteProvider] as const;
+/** P0 network provider. Transport and runtime stay MySQL-specific. */
+export const mysqlProvider: DatabaseProviderDescriptor = {
+  id: "mysql",
+  displayName: "MySQL (Experimental)",
+  family: "relational",
+  capabilities: {
+    supportsSchemas: true,
+    supportsTransactions: false,
+    explain: "none",
+    supportsResultEditing: false,
+    supportsPagination: false,
+    supportsSshTunnel: false,
+    supportsTls: false,
+    supportsReadOnlyConnection: false,
+    supportsCodeCompletion: true,
+    supportsRelations: true,
+  },
+  objectModel: {
+    hierarchy: ["connection", "catalog", "group", "object"],
+    objectRoles: ["relation"],
+  },
+};
+
+const providers = [postgresqlProvider, sqliteProvider, mysqlProvider] as const;
 
 export function getDatabaseProvider(
   id: string,

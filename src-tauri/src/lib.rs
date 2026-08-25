@@ -11,6 +11,7 @@ mod os_detect;
 mod proxy;
 mod postgres;
 mod sqlite;
+mod mysql;
 mod rdp_client;
 mod sftp_client;
 pub mod ssh;
@@ -460,8 +461,9 @@ pub fn run() {
         })
         .manage(connection_manager)
         .manage(toolbox::ToolboxState::default())
-        .manage(postgres::PostgresState::default())
-        .manage(sqlite::SqliteState::default())
+            .manage(postgres::PostgresState::default())
+            .manage(sqlite::SqliteState::default())
+            .manage(mysql::MysqlState::default())
         .invoke_handler(tauri::generate_handler![
             commands::ssh_connect,
             commands::ssh_cancel_connect,
@@ -585,6 +587,11 @@ pub fn run() {
             sqlite::sqlite_disconnect,
             sqlite::sqlite_execute,
             sqlite::sqlite_catalog_objects,
+            // MySQL database workspace (experimental P0 provider)
+            mysql::mysql_connect,
+            mysql::mysql_disconnect,
+            mysql::mysql_execute,
+            mysql::mysql_catalog_objects,
             // JAR decompiler commands
             jar_commands::jar_project_open,
             jar_commands::jar_project_reopen,

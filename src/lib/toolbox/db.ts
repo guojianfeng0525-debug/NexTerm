@@ -33,6 +33,7 @@ export type DbTable =
   | 'api_request_history'
   | 'postgres_connections'
   | 'database_sqlite_connections'
+  | 'database_mysql_connections'
   | 'app_settings'
   | 'layout_config'
   | 'terminal_appearance'

@@ -40,6 +40,7 @@ const ToolJarDecompiler = lazy(() => import('./components/toolbox/tool-jar-decom
 import { ToolApiDebug } from './components/toolbox/tool-api-debug';
 import { ToolPostgres } from './components/toolbox/tool-postgres';
 import { ToolSqlite } from './components/toolbox/tool-sqlite';
+import { ToolMySql } from './components/toolbox/tool-mysql';
 import { ErrorBoundary } from './components/error-boundary';
 import { initializeAllStorage } from './lib/storage-init';
 import type { TerminalTab } from './lib/terminal-group-types';
@@ -106,7 +107,8 @@ function AppContent() {
     const handleDatabaseProviderSelection = (event: Event) => {
       const providerId = (event as CustomEvent<string>).detail;
       if (providerId === 'postgresql') setSection('postgres');
-      if (providerId === 'sqlite') setSection('sqlite');
+        if (providerId === 'sqlite') setSection('sqlite');
+        if (providerId === 'mysql') setSection('mysql');
     };
     window.addEventListener('nexterm:database-provider-selected', handleDatabaseProviderSelection);
     return () => window.removeEventListener('nexterm:database-provider-selected', handleDatabaseProviderSelection);
@@ -1961,6 +1963,9 @@ function AppContent() {
           </div>
           <div className={cn('absolute inset-0 bg-background', section === 'sqlite' ? '' : 'hidden')}>
             <ToolSqlite />
+          </div>
+          <div className={cn('absolute inset-0 bg-background', section === 'mysql' ? '' : 'hidden')}>
+            <ToolMySql />
           </div>
           {section === 'jar' && (
             <div className="absolute inset-0 bg-background">

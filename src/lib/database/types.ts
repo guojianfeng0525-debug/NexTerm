@@ -1,4 +1,4 @@
-export const DATABASE_PROVIDER_IDS = ["postgresql", "sqlite"] as const;
+export const DATABASE_PROVIDER_IDS = ["postgresql", "sqlite", "mysql"] as const;
 
 export type DatabaseProviderId = (typeof DATABASE_PROVIDER_IDS)[number];
 

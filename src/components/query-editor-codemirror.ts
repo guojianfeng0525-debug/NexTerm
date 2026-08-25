@@ -1,5 +1,5 @@
 import type { CompletionContext, CompletionResult } from "@codemirror/autocomplete";
-import { PostgreSQL, SQLite } from "@codemirror/lang-sql";
+import { MySQL, PostgreSQL, SQLite } from "@codemirror/lang-sql";
 import type { DatabaseQueryEditorContext } from "@/lib/database/query-editor";
 import {
   postgresCatalogCompletionSource,
@@ -10,6 +10,7 @@ import {
 export function queryEditorDialect(context: DatabaseQueryEditorContext) {
   if (context.languageId === "sql.postgresql") return PostgreSQL;
   if (context.languageId === "sql.sqlite") return SQLite;
+  if (context.languageId === "sql.mysql") return MySQL;
   return undefined;
 }
 
@@ -17,7 +18,7 @@ export function queryEditorCompletionSource(
   context: DatabaseQueryEditorContext,
 ) {
   return (completionContext: CompletionContext): CompletionResult | Promise<CompletionResult | null> | null => {
-    if (context.languageId === "sql.sqlite") {
+    if (context.languageId === "sql.sqlite" || context.languageId === "sql.mysql") {
       if (!context.complete) return null;
       return context.complete({ kind: "relation", prefix: "" }).then((items) => ({
         from: completionContext.pos,

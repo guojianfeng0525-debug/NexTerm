@@ -2,7 +2,7 @@
 
 Date: 2026-08-25
 
-This design records the shared frontend/domain architecture validated by PostgreSQL and the experimental SQLite P0 provider. It intentionally excludes shared backend runtime/IPC, designers, import/export, backup/restore, synchronization, automation, BI, and AI.
+This design records the shared frontend/domain architecture validated by PostgreSQL plus the experimental SQLite and MySQL P0 providers. It intentionally excludes shared backend runtime/IPC, designers, import/export, backup/restore, synchronization, automation, BI, and AI.
 
 Implementation progress and completed Feature Batches are tracked in
 `docs/database/database-development-status.md`. This design document records
@@ -21,17 +21,17 @@ authoritative progress log.
        ------------------------------------------------
                             ^
                             |
-                Provider-specific frontend hosts
-                   /                         \
-          ToolPostgres                    ToolSqlite
-               |                              |
-        postgres_* IPC                   sqlite_* IPC
-               |                              |
- PostgreSQL runtime: network,       SQLite runtime: local file,
- tokio-postgres, SSH/TLS/auth       rusqlite, locking/file semantics
+                 Provider-specific frontend hosts
+              /              |                 \
+       ToolPostgres      ToolSqlite          ToolMySql
+            |                |                   |
+     postgres_* IPC     sqlite_* IPC       mysql_* IPC
+            |                |                   |
+ PostgreSQL runtime   SQLite runtime      MySQL runtime:
+ tokio-postgres       rusqlite            mysql_async
 ```
 
-The shared profile envelope, command resolver, object model/Navigator, query-editor context/CodeEditor, result contract/pane, and workspace composition are implemented and validated by both providers. `DatabaseWorkspaceShell` owns shared UI composition; `ToolPostgres` and `ToolSqlite` remain provider-specific runtime/orchestration hosts. Runtime and IPC remain provider-specific.
+The shared profile envelope, command resolver, object model/Navigator, query-editor context/CodeEditor, result contract/pane, and workspace composition are implemented and validated by all three providers. `DatabaseWorkspaceShell` owns shared UI composition; `ToolPostgres`, `ToolSqlite`, and `ToolMySql` remain provider-specific runtime/orchestration hosts. Runtime and IPC remain provider-specific.
 
 ## Shared Workspace Composition
 
@@ -40,18 +40,18 @@ The shared profile envelope, command resolver, object model/Navigator, query-edi
                     UI composition only
                     /               \
                    /                 \
-        ToolPostgres                 ToolSqlite
-             |                           |
-        postgres_* IPC              sqlite_* IPC
-             |                           |
-    PostgreSQL runtime             SQLite runtime
+      ToolPostgres      ToolSqlite          ToolMySql
+           |                |                   |
+    postgres_* IPC     sqlite_* IPC       mysql_* IPC
+           |                |                   |
+ PostgreSQL runtime   SQLite runtime      MySQL runtime
 ```
 
 `DatabaseWorkspaceShell` owns only the shared toolbar host, Navigator placement, query-tab host, workspace region, and optional status region. Provider hosts supply all slot content and callbacks, so the shell does not call provider IPC, own a runtime handle, or interpret provider payloads. Provider-specific editor/result composition remains host-owned where table paging and local-file behavior differ.
 
 ## Deferred Runtime Boundary
 
-Current architecture intentionally keeps runtime and IPC provider-specific. PostgreSQL has network sessions, `tokio-postgres`, SSH/TLS/authentication, schemas, textual Explain, `postgres_*` IPC, and `PostgresState`. SQLite has existing local-file semantics, `rusqlite`, local locking, no SSH/TLS or PostgreSQL schema hierarchy, `sqlite_*` IPC, and independent runtime state.
+Current architecture intentionally keeps runtime and IPC provider-specific. PostgreSQL has network sessions, `tokio-postgres`, SSH/TLS/authentication, schemas, textual Explain, `postgres_*` IPC, and `PostgresState`. SQLite has existing local-file semantics, `rusqlite`, local locking, no SSH/TLS or PostgreSQL schema hierarchy, `sqlite_*` IPC, and independent runtime state. MySQL has network sessions, `mysql_async`, MySQL catalog hierarchy, `mysql_*` IPC, and `MysqlState`.
 
 No generic `database_*` IPC, generic `DatabaseState`, runtime provider, session manager, or query executor is implemented or committed as a target shape. A future runtime abstraction requires evidence of meaningful duplication across real providers; shared frontend/domain adoption does not imply a shared backend runtime.
 
@@ -265,7 +265,7 @@ Registry entries carry `windows`, `linux`, and `macos` bindings independently; u
 | Profile envelope and provider-selection connection dialog | PostgreSQL network fields and SQLite file-path fields; provider-specific persistence adapters |
 | Navigator, CodeEditor, and result pane | provider object loader, query context, result adapter, and object-open callback |
 | Command registry, enablement, shortcut/context-menu resolution | object action contributions and capability values |
-| Workspace composition | Not yet shared. Batch 11 may extract UI-only toolbar, Navigator placement, query tabs, editor/result split, and status layout from the two hosts. |
+| Workspace composition | Shared through `DatabaseWorkspaceShell`; `ToolPostgres` and `ToolSqlite` retain provider-specific runtime orchestration and workspace slots. |
 | Runtime and IPC | `postgres_*` / PostgreSQL runtime and `sqlite_*` / SQLite runtime remain provider-specific. |
 | native/browser E2E harness | PostgreSQL fixture and provider-specific assertions |
 
@@ -280,5 +280,5 @@ the recommended next batch are maintained exclusively in
 An experimental SQLite P0 provider now supplies those adapters and reuses the
 shared profile, Navigator, CodeEditor, result pane, and command resolver.
 Renderer and native validation, including the PostgreSQL regression, are
-complete. This evidence justifies evaluating a UI-only workspace-shell extraction
-because it has two real callers. It does not justify a generic runtime/IPC rewrite.
+complete. This evidence justified the completed UI-only `DatabaseWorkspaceShell`
+extraction with two real callers. It does not justify a generic runtime/IPC rewrite.

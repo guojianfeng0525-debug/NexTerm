@@ -21,6 +21,7 @@ import { migrateLegacyStorage } from './migration';
 import { hydrateJarStorage } from './toolbox/jar-storage';
 import { hydratePostgresConnections } from './toolbox/postgres-storage';
 import { hydrateSqliteConnections } from './toolbox/sqlite-storage';
+import { hydrateMySQLConnections } from './toolbox/mysql-storage';
 
 /**
  * Hydrate every SQLite-backed store. Never throws — each store degrades to
@@ -49,6 +50,7 @@ export async function initializeAllStorage(): Promise<void> {
     hydrateJarStorage(),
     hydratePostgresConnections(),
     hydrateSqliteConnections(),
+    hydrateMySQLConnections(),
   ]);
   // Run after all initial reads finish because VACUUM requires an exclusive lock.
   await compactDocumentHistory();

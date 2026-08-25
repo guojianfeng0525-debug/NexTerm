@@ -8,9 +8,9 @@ PostgreSQL is the first current provider. The long-term target is a Shared Datab
 
 ## Current Architecture
 
-- Shared frontend/domain adoption: VALIDATED with PostgreSQL and experimental SQLite P0. The shared provider core, command resolver, profile envelope, provider-selection connection dialog, object model/Navigator, query-editor context/CodeEditor, result contracts, and result pane have two real providers.
-- Shared Workspace Shell: IMPLEMENTED for toolbar host, Navigator placement, query-tab host, workspace region, and optional status region. `ToolPostgres` and `ToolSqlite` retain provider runtime orchestration and provider-specific workspace slots.
-- Provider runtime and IPC: PROVIDER-SPECIFIC. PostgreSQL retains `postgres_*` IPC and `PostgresState`; SQLite retains `sqlite_*` IPC and independent `rusqlite` runtime state.
+- Shared frontend/domain adoption: VALIDATED with PostgreSQL, experimental SQLite P0, and experimental MySQL P0. The shared provider core, command resolver, profile envelope, provider-selection connection dialog, object model/Navigator, query-editor context/CodeEditor, result contracts, and result pane have three real providers.
+- Shared Workspace Shell: IMPLEMENTED for toolbar host, Navigator placement, query-tab host, workspace region, and optional status region. `ToolPostgres`, `ToolSqlite`, and `ToolMySql` retain provider runtime orchestration and provider-specific workspace slots.
+- Provider runtime and IPC: PROVIDER-SPECIFIC. PostgreSQL retains `postgres_*` IPC and `PostgresState`; SQLite retains `sqlite_*` IPC and independent `rusqlite` runtime state; MySQL retains `mysql_*` IPC and `MysqlState` using `mysql_async`.
 - Generic runtime, generic `database_*` IPC, and generic `DatabaseState`: NOT IMPLEMENTED / DEFERRED.
 
 ## Completed Atomic Slices
@@ -158,6 +158,13 @@ Not migrated:
 - Provider hosts keep all runtime calls, metadata loading, query context construction, result adaptation, connection/profile dialogs, and provider-specific UI. `postgres_*`, `sqlite_*`, Rust, and persistence are unchanged.
 - Focused shell/SQLite tests, PostgreSQL and SQLite renderer tests, debug Tauri build, and sequential PostgreSQL live-fixture plus SQLite real-file native tests pass.
 
+### Feature Batch 12 - MySQL Provider Vertical Slice - COMPLETE
+
+- Added an experimental MySQL P0 provider with an independent `mysql_async` runtime, `MysqlState`, and `mysql_*` IPC. No generic runtime, `database_*` IPC, or `DatabaseState` was added.
+- MySQL profiles use isolated encrypted persistence. Its provider host maps MySQL Navigator metadata, query-editor context/completion, runtime results, and commands through the existing shared frontend/domain contracts.
+- SSH, TLS, Explain, result editing, and expanded paging remain deferred and are not declared as MySQL product capabilities.
+- Final verification passed focused tests, all three renderer suites, debug Tauri build, i18n, affected-file lint, MySQL Rust format/tests, and sequential PostgreSQL live-Docker, SQLite real-file, and MySQL live-Docker native suites. MySQL native verifies lossless `9007199254740993` BIGINT and `1234567890.123456789` DECIMAL rendering.
+
 ## Last Known Verification
 
 These are the latest known results from Feature Batches 9 and 10 verification.
@@ -226,21 +233,22 @@ Detailed analysis remains in `postgresql-coupling-report.md`.
 
 | Area | Status |
 | --- | --- |
-| Shared Frontend / Domain | VALIDATED for PostgreSQL + experimental SQLite P0 |
-| Shared Workspace Shell | COMPLETE: UI-only shell used by PostgreSQL + SQLite |
-| Provider Runtime / IPC | PROVIDER-SPECIFIC: `postgres_*` / `PostgresState` and `sqlite_*` / SQLite runtime |
+| Shared Frontend / Domain | VALIDATED for PostgreSQL + experimental SQLite P0 + experimental MySQL P0 |
+| Shared Workspace Shell | COMPLETE: UI-only shell used by PostgreSQL + SQLite + MySQL |
+| Provider Runtime / IPC | PROVIDER-SPECIFIC: `postgres_*` / `PostgresState`, `sqlite_*` / SQLite runtime, and `mysql_*` / `MysqlState` |
 | Generic Runtime / IPC | NOT IMPLEMENTED / DEFERRED |
-| Generic Connection Profile | COMPLETE for PostgreSQL + SQLite saved-profile envelope adoption |
+| Generic Connection Profile | COMPLETE for PostgreSQL + SQLite + MySQL saved-profile envelope adoption |
 | Generic Storage | NOT STARTED |
-| Navigator Migration | COMPLETE for PostgreSQL and SQLite P0 provider object loaders |
-| CodeEditor Provider Migration | COMPLETE for PostgreSQL and SQLite query-editor contexts |
-| Shared Result / Data Contract | COMPLETE for PostgreSQL and SQLite P0 runtime adapters |
+| Navigator Migration | COMPLETE for PostgreSQL, SQLite P0, and MySQL P0 provider object loaders |
+| CodeEditor Provider Migration | COMPLETE for PostgreSQL, SQLite, and MySQL query-editor contexts |
+| Shared Result / Data Contract | COMPLETE for PostgreSQL, SQLite P0, and MySQL P0 runtime adapters |
 | Command Execution Migration | NOT STARTED |
 | PostgreSQL IPC Migration | NOT STARTED |
 | Rust Runtime Migration | NOT STARTED |
 | Context Menu Parity | NOT STARTED |
 | Shortcut Parity | NOT STARTED |
 | Second Provider | COMPLETE: experimental SQLite P0 implemented and natively validated |
+| Third Provider | COMPLETE: experimental MySQL P0 implemented and natively validated |
 | Future Additional Providers | NOT STARTED |
 
 ## Next Target
@@ -261,10 +269,10 @@ Runtime remains provider-specific after the workspace extraction. Any runtime-bo
 
 ## Session Handoff
 
-- What changed: Feature Batch 11 added `DatabaseWorkspaceShell` as the UI-only composition boundary used by both provider hosts. Its shared tab host preserves host-owned tab state and its slots preserve existing Navigator, editor, result, toolbar, and status behavior.
-- What did not change: PostgreSQL/SQLite execution, IPC, `PostgresState`, SQLite runtime state, storage format, crypto, frontend mutation UI, CSV export, context menus, shortcuts, and generic runtime/IPC design.
-- Tests: focused shell/SQLite tests, both renderer suites, debug Tauri build, touched-file lint, `git diff --check`, and both native desktop suites pass. PostgreSQL native uses a live Docker fixture; SQLite native uses a temporary real file.
-- Real Tauri status: both PostgreSQL (live Docker fixture) and SQLite (temporary real file) native suites pass.
+- What changed: Feature Batch 12 added experimental MySQL P0 with an independent `mysql_async` runtime, `MysqlState`, `mysql_*` IPC, encrypted profiles, MySQL Navigator/query/result adapters, CodeMirror dialect, and native fixture coverage. It also fixed the controlled port input so an empty native number field does not append a new value to the default port.
+- What did not change: PostgreSQL/SQLite execution, IPC, `PostgresState`, SQLite runtime state, frontend mutation UI, CSV export, context menus, shortcuts, and generic runtime/IPC design.
+- Tests: focused MySQL tests, all three renderer suites, debug Tauri build, and sequential PostgreSQL, SQLite, and MySQL native suites pass. MySQL native verifies precise integer/decimal result rendering and the port input regression is covered for empty editing, `3307`, and the valid `1-65535` range.
+- Real Tauri status: PostgreSQL and MySQL use isolated live Docker fixtures; SQLite uses a temporary real file. All three native suites pass on the same final debug binary.
 - Known warnings: historical Rust warnings may remain; they were not Slice 2 build failures.
 - Generic command execution remains explicitly out of scope.
 

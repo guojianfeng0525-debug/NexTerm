@@ -1,6 +1,6 @@
 import type { DatabaseProviderId } from "./types";
 
-export type DatabaseQueryLanguageId = "sql.standard" | "sql.postgresql" | "sql.sqlite";
+export type DatabaseQueryLanguageId = "sql.standard" | "sql.postgresql" | "sql.sqlite" | "sql.mysql";
 export type DatabaseCompletionKind = "relation" | "column" | "function" | "type";
 
 export interface DatabaseCompletionRequest {

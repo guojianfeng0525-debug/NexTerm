@@ -52,6 +52,7 @@ base64 = "0.22"
 sys-locale = "0.3"
 reqwest = { version = "0.12", features = ["json", "stream", "blocking", "multipart"] }
 rusqlite = { version = "0.32", features = ["bundled", "backup"] }
+mysql_async = "0.36"
 betteroffice-docx = "0.1.0"
 betteroffice-xlsx = "0.1.0"
 docx-parse = { package = "betteroffice-docx-parse", version = "0.1.0" }
