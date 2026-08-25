@@ -1,5 +1,15 @@
 import { expect } from '@wdio/globals';
 
+async function configureTheme(label: '深色' | '浅色') {
+  await $('button:has(svg.lucide-settings)').click();
+  const settingsDialog = await $('[role="dialog"]');
+  await settingsDialog.$('button=界面').click();
+  await settingsDialog.$('[role="combobox"]').click();
+  await $(`[role="option"]=${label}`).click();
+  await settingsDialog.$('button=保存设置').click();
+  await settingsDialog.waitForExist({ reverse: true });
+}
+
 describe('PostgreSQL visual workspace', () => {
   before(async () => {
     await browser.tauri.switchWindow('main');
@@ -11,6 +21,7 @@ describe('PostgreSQL visual workspace', () => {
     await $('#app-lock-password').setValue(password);
     await $('#app-lock-confirm').setValue(password);
     await $('#app-lock-submit, button.w-full').click();
+    await configureTheme('深色');
 
     const postgres = await $('[data-testid="toolbox-nav-postgres"]');
     await postgres.waitForDisplayed();
@@ -20,13 +31,16 @@ describe('PostgreSQL visual workspace', () => {
 
     const dialog = await $('[data-testid="postgres-connection-dialog"]');
     await browser.saveScreenshot('./test-results/database-visual/postgres-dialog-after.png');
-    await browser.execute(() => document.documentElement.classList.remove('dark'));
+    await browser.keys('Escape');
+    await dialog.waitForExist({ reverse: true });
+    await configureTheme('浅色');
+    await $('[data-testid="postgres-new-connection"]').click();
+    const lightDialog = await $('[data-testid="postgres-connection-dialog"]');
     await browser.saveScreenshot('./test-results/database-visual/postgres-dialog-light-after.png');
     await browser.setWindowSize(960, 700);
     await browser.saveScreenshot('./test-results/database-visual/postgres-dialog-small-after.png');
     await browser.setWindowSize(2048, 1200);
-    await browser.execute(() => document.documentElement.classList.add('dark'));
-    const inputs = await dialog.$$('input');
+    const inputs = await lightDialog.$$('input');
     for (const input of inputs) await input.clearValue();
     await inputs[0].setValue('NexTerm Visual PostgreSQL');
     await inputs[1].setValue('127.0.0.1');
@@ -38,7 +52,7 @@ describe('PostgreSQL visual workspace', () => {
     await inputs[3].setValue('nexterm_e2e');
     await inputs[4].setValue('nexterm_e2e');
     await inputs[5].setValue('nexterm_e2e');
-    await dialog.$('button=连接').click();
+    await lightDialog.$('button=连接').click();
 
     await browser.pause(2_000);
     await browser.saveScreenshot('./test-results/postgres/debug-after-connect.png');
@@ -74,13 +88,13 @@ describe('PostgreSQL visual workspace', () => {
     await workspace.$('table').waitForDisplayed();
     expect((await workspace.$$('tbody tr')).length).toBeGreaterThan(0);
     await browser.saveScreenshot('./test-results/postgres/05-query-result.png');
+    await configureTheme('深色');
     await browser.saveScreenshot('./test-results/database-visual/postgres-workspace-after.png');
-    await browser.execute(() => document.documentElement.classList.remove('dark'));
+    await configureTheme('浅色');
     await browser.saveScreenshot('./test-results/database-visual/postgres-workspace-light-after.png');
     await browser.setWindowSize(960, 700);
     await browser.saveScreenshot('./test-results/database-visual/postgres-workspace-small-after.png');
     await browser.setWindowSize(2048, 1200);
-    await browser.execute(() => document.documentElement.classList.add('dark'));
 
     const tablesGroup = await $('[data-node-id*="/group:relations"]');
     await tablesGroup.click();

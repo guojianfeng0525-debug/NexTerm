@@ -1,5 +1,15 @@
 import { expect } from '@wdio/globals';
 
+async function configureTheme(label: '深色' | '浅色') {
+  await $('button:has(svg.lucide-settings)').click();
+  const settingsDialog = await $('[role="dialog"]');
+  await settingsDialog.$('button=界面').click();
+  await settingsDialog.$('[role="combobox"]').click();
+  await $(`[role="option"]=${label}`).click();
+  await settingsDialog.$('button=保存设置').click();
+  await settingsDialog.waitForExist({ reverse: true });
+}
+
 describe('SQLite native workspace', () => {
   before(async () => {
     await browser.tauri.switchWindow('main');
@@ -14,23 +24,27 @@ describe('SQLite native workspace', () => {
     await $('#app-lock-password').setValue(password);
     await $('#app-lock-confirm').setValue(password);
     await $('#app-lock-submit, button.w-full').click();
+    await configureTheme('深色');
 
     await $('[data-testid="toolbox-nav-sqlite"]').waitForDisplayed();
     await $('[data-testid="toolbox-nav-sqlite"]').click();
     await $('[data-testid="sqlite-new-connection"]').click();
     const dialog = await $('[data-testid="sqlite-connection-dialog"]');
     await browser.saveScreenshot('./test-results/database-visual/sqlite-dialog-after.png');
-    await browser.execute(() => document.documentElement.classList.remove('dark'));
+    await browser.keys('Escape');
+    await dialog.waitForExist({ reverse: true });
+    await configureTheme('浅色');
+    await $('[data-testid="sqlite-new-connection"]').click();
+    const lightDialog = await $('[data-testid="sqlite-connection-dialog"]');
     await browser.saveScreenshot('./test-results/database-visual/sqlite-dialog-light-after.png');
     await browser.setWindowSize(960, 700);
     await browser.saveScreenshot('./test-results/database-visual/sqlite-dialog-small-after.png');
     await browser.setWindowSize(2048, 1200);
-    await browser.execute(() => document.documentElement.classList.add('dark'));
-    const inputs = await dialog.$$('input');
+    const inputs = await lightDialog.$$('input');
     await inputs[0]!.clearValue();
     await inputs[0]!.setValue('NexTerm Native SQLite');
     await inputs[1]!.setValue(fixturePath);
-    await dialog.$('button=打开').click();
+    await lightDialog.$('button=打开').click();
 
     await expect($('[data-testid="sqlite-disconnect"]')).toBeEnabled();
     await $('button=users').waitForDisplayed();
