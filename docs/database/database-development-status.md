@@ -121,6 +121,13 @@ Not migrated:
 - PostgreSQL table opening remains on the existing `postgres_table_data` path after the adapter decodes the relation reference.
 - Single-click relation open remains preserved; explicit double-click semantics are deferred.
 
+### Feature Batch 7 - Query Provider / CodeEditor Integration - COMPLETE
+
+- Added provider-neutral `DatabaseQueryEditorContext`, query language identity, and semantic completion contracts.
+- `ToolPostgres` now creates a PostgreSQL query context through `postgresql-query-editor.ts`; `CodeEditor` receives only that shared context.
+- CodeMirror PostgreSQL dialect/completion integration is isolated in `query-editor-codemirror.ts`; `CodeEditor` has no PostgreSQL imports or PostgreSQL-specific props.
+- Query execution, Explain execution, IPC, Rust, profiles, storage, Navigator, and result architecture remain unchanged.
+
 ## Last Known Verification
 
 These are the latest known results from Feature Batch 5 verification.
@@ -135,6 +142,9 @@ These are the latest known results from Feature Batch 5 verification.
 | Feature Batch 6 focused Vitest | 20 PASS |
 | Feature Batch 6 renderer E2E | PASS |
 | Feature Batch 6 native Tauri E2E | PASS |
+| Feature Batch 7 focused completion tests | PASS |
+| Feature Batch 7 renderer E2E | PASS |
+| Feature Batch 7 native Tauri E2E | PASS |
 | `git diff --check` | PASS |
 
 ## Native Tauri Desktop E2E
@@ -152,7 +162,7 @@ Browser E2E remains a renderer-regression layer and is not Native Desktop E2E.
 - `PostgresConnection` and `postgres_connections`
 - Configuration import/export and encryption/re-encryption
 - PostgreSQL object loader and table browse translation
-- CodeEditor PostgreSQL dialect/completion and `postgresCatalog`
+- PostgreSQL completion semantics, catalog IPC mapping, and CodeMirror bridge
 - `postgres_*` IPC and Rust `PostgresState`
 - PostgreSQL-specific result contracts
 
@@ -165,7 +175,7 @@ Detailed analysis remains in `postgresql-coupling-report.md`.
 | Generic Connection Profile | NOT STARTED |
 | Generic Storage | NOT STARTED |
 | Navigator Migration | COMPLETE for PostgreSQL connection/catalog/schema/relation runtime |
-| CodeEditor Provider Migration | NOT STARTED |
+| CodeEditor Provider Migration | COMPLETE for PostgreSQL query-editor context |
 | Command Execution Migration | NOT STARTED |
 | PostgreSQL IPC Migration | NOT STARTED |
 | Rust Runtime Migration | NOT STARTED |
@@ -175,7 +185,7 @@ Detailed analysis remains in `postgresql-coupling-report.md`.
 
 ## Recommendation Only
 
-Recommended next Feature Batch: Query Provider / CodeEditor Integration.
+Recommended next Feature Batch: Shared Result / Data Contract.
 
 This is a recommendation only, not active implementation.
 

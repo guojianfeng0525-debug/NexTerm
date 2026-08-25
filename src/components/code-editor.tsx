@@ -10,9 +10,9 @@ import { syntaxHighlighting, defaultHighlightStyle, indentOnInput, bracketMatchi
 import { searchKeymap, highlightSelectionMatches, setSearchQuery, findNext, findPrevious, SearchQuery } from "@codemirror/search";
 import { oneDark } from "@codemirror/theme-one-dark";
 import { autocompletion, completionKeymap } from "@codemirror/autocomplete";
-import { PostgreSQL } from "@codemirror/lang-sql";
 import { loadEditorConfig, EDITOR_CONFIG_CHANGED_EVENT, type EditorConfig } from "@/lib/editor-config";
-import { postgresCatalogCompletionSource, postgresCompletionSource, type PostgresCatalogLookup } from "@/lib/postgres-completion";
+import { genericSqlQueryEditorContext, type DatabaseQueryEditorContext } from "@/lib/database/query-editor";
+import { queryEditorCompletionSource, queryEditorDialect } from "@/components/query-editor-codemirror";
 import type { NoteLanguage } from "@/lib/toolbox/toolbox-types";
 
 // Language imports
@@ -61,7 +61,7 @@ const batchMode = simpleMode({
 export function getLanguageByName(language: NoteLanguage): Extension | null {
   switch (language) {
     case "sql":
-      return sql({ dialect: PostgreSQL });
+      return sql();
     case "shell":
       return StreamLanguage.define(legacyShell);
     case "cmd":
@@ -156,7 +156,7 @@ function getLanguageExtension(filename: string): Extension | null {
     case "kts":
       return java();
     case "sql":
-      return sql({ dialect: PostgreSQL });
+      return sql();
     case "php":
       return php();
     case "sh":
@@ -190,8 +190,8 @@ interface CodeEditorProps {
   dark?: boolean;
   /** Additional CSS class for the wrapper */
   className?: string;
-  /** Optional connected PostgreSQL catalog lookup for table/column/function completion. */
-  postgresCatalog?: PostgresCatalogLookup;
+  /** Provider-neutral database query context. */
+  queryContext?: DatabaseQueryEditorContext;
 }
 
 export function CodeEditor({
@@ -202,12 +202,12 @@ export function CodeEditor({
   readOnly = false,
   dark = true,
   className = "",
-  postgresCatalog,
+  queryContext,
 }: CodeEditorProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
   const onChangeRef = useRef(onChange);
-  const postgresCatalogRef = useRef<PostgresCatalogLookup | undefined>(postgresCatalog);
+  const queryContextRef = useRef<DatabaseQueryEditorContext>(queryContext ?? genericSqlQueryEditorContext);
   const { t } = useTranslation();
   const [editorConfig, setEditorConfig] = useState<EditorConfig>(() => loadEditorConfig());
   // Custom themed + i18n search panel (replaces CodeMirror's built-in panel).
@@ -229,8 +229,8 @@ export function CodeEditor({
   }, [onChange]);
 
   useEffect(() => {
-    postgresCatalogRef.current = postgresCatalog;
-  }, [postgresCatalog]);
+    queryContextRef.current = queryContext ?? genericSqlQueryEditorContext;
+  }, [queryContext]);
 
   const buildExtensions = useCallback((): Extension[] => {
     const exts: Extension[] = [
@@ -319,13 +319,18 @@ export function CodeEditor({
     }
 
     // Explicit language takes precedence over filename-based detection
-    const lang = language ? getLanguageByName(language) : getLanguageExtension(filename);
+    const isSql = language === "sql" || filename.toLowerCase().endsWith(".sql");
+    const lang = isSql
+      ? sql({ dialect: queryEditorDialect(queryContextRef.current) })
+      : language
+        ? getLanguageByName(language)
+        : getLanguageExtension(filename);
     if (lang) {
       exts.push(lang);
     }
 
-    if (language === "sql" || filename.toLowerCase().endsWith(".sql")) {
-      exts.push(autocompletion({ override: [(context) => postgresCatalogRef.current ? postgresCatalogCompletionSource(context, postgresCatalogRef.current) : postgresCompletionSource(context)], activateOnTyping: true }));
+    if (isSql) {
+      exts.push(autocompletion({ override: [(context) => queryEditorCompletionSource(queryContextRef.current)(context)], activateOnTyping: true }));
     }
 
     return exts;

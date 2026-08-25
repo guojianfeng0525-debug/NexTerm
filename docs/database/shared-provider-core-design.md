@@ -158,6 +158,15 @@ interpret a PostgreSQL schema/table hierarchy to load children.
 
 ## Command Architecture
 
+## Provider-Aware Query Editor
+
+`DatabaseQueryEditorContext` is the shared semantic editor contract. It carries
+provider identity when present, query language identity, scoped connection/catalog/schema
+metadata, and an optional semantic completion resolver. It has no CodeMirror or
+PostgreSQL dependency. PostgreSQL creates this context through its query-editor
+adapter; CodeMirror dialect and completion conversion live in the editor integration
+layer. Generic SQL files use an explicit provider-free SQL context.
+
 Every UI entry invokes `database.dispatch(commandId, context)`. A command has an ID, permitted scopes, capability requirements, state/permission predicate, destructive/confirmation metadata, label/shortcut metadata, and one handler. The handler is the only business action path.
 
 Initial command set, limited to present PostgreSQL P0 and confirmed interaction work:

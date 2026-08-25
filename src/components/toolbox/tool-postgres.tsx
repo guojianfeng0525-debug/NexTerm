@@ -42,6 +42,7 @@ import type {
   PostgresEnvironment,
   PostgresSslMode,
 } from "@/lib/toolbox/toolbox-types";
+import { createPostgresQueryEditorContext } from "@/lib/database/postgresql-query-editor";
 import type { PostgresCatalogLookup } from "@/lib/postgres-completion";
 import { resolveDatabaseCommand } from "@/lib/database/command-registry";
 import { postgresqlProvider } from "@/lib/database/provider-registry";
@@ -669,7 +670,16 @@ export function ToolPostgres() {
                     value={tab.sql}
                     onChange={(sql) => patchTab(tab.id, { sql, dirty: true })}
                     language="sql"
-                    postgresCatalog={catalogLookup}
+                    queryContext={
+                      catalogLookup
+                        ? createPostgresQueryEditorContext({
+                            connectionId: draft.id,
+                            catalog: draft.database,
+                            schema: schema ?? undefined,
+                            lookup: catalogLookup,
+                          })
+                        : undefined
+                    }
                     className="h-full"
                   />
                 </div>
