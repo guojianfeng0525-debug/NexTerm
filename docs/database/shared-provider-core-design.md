@@ -47,7 +47,24 @@ The shared profile envelope, command resolver, object model/Navigator, query-edi
  PostgreSQL runtime   SQLite runtime      MySQL runtime
 ```
 
-`DatabaseWorkspaceShell` owns only the shared toolbar host, Navigator placement, query-tab host, workspace region, and optional status region. Provider hosts supply all slot content and callbacks, so the shell does not call provider IPC, own a runtime handle, or interpret provider payloads. Provider-specific editor/result composition remains host-owned where table paging and local-file behavior differ.
+`DatabaseWorkspaceShell` owns only the shared toolbar host, Navigator placement, query-tab host, workspace region, and optional status region. `ToolPostgres`, `ToolSqlite`, and `ToolMySql` supply all slot content and callbacks, so the shell does not call provider IPC, own a runtime handle, or interpret provider payloads. Provider-specific editor/result composition remains host-owned where table paging, local-file behavior, and provider result capabilities differ.
+
+## Shared Connection Dialog Composition
+
+```text
+                DatabaseConnectionDialogShell
+                         UI composition only
+          -----------------------------------
+          |                |                |
+     PostgreSQL         SQLite           MySQL
+       sections          sections          sections
+```
+
+`DatabaseConnectionDialogShell` owns modal geometry, header, section rail,
+content viewport, form layout primitives, and footer. Provider hosts contribute
+field content, available sections, provider validation, primary action, and
+runtime behavior. Dialog composition is shared; forms, provider configuration,
+validation logic, runtime, and IPC are not generic.
 
 ## Deferred Runtime Boundary
 
@@ -262,12 +279,12 @@ Registry entries carry `windows`, `linux`, and `macos` bindings independently; u
 
 | Shared layer | Provider-host contribution |
 | --- | --- |
-| Profile envelope and provider-selection connection dialog | PostgreSQL network fields and SQLite file-path fields; provider-specific persistence adapters |
+| Profile envelope and connection-dialog composition | `DatabaseConnectionDialogShell` supplies shared geometry, header, section rail, content viewport, form grid, and footer. PostgreSQL and MySQL provide network fields; SQLite provides file-path fields; all validation, actions, and persistence adapters remain provider-specific. |
 | Navigator, CodeEditor, and result pane | provider object loader, query context, result adapter, and object-open callback |
 | Command registry, enablement, shortcut/context-menu resolution | object action contributions and capability values |
-| Workspace composition | Shared through `DatabaseWorkspaceShell`; `ToolPostgres` and `ToolSqlite` retain provider-specific runtime orchestration and workspace slots. |
-| Runtime and IPC | `postgres_*` / PostgreSQL runtime and `sqlite_*` / SQLite runtime remain provider-specific. |
-| native/browser E2E harness | PostgreSQL fixture and provider-specific assertions |
+| Workspace composition | Shared through `DatabaseWorkspaceShell`; `ToolPostgres`, `ToolSqlite`, and `ToolMySql` retain provider-specific runtime orchestration and workspace slots. |
+| Runtime and IPC | `postgres_*` / PostgreSQL runtime, `sqlite_*` / SQLite runtime, and `mysql_*` / MySQL runtime remain provider-specific. |
+| native/browser E2E harness | PostgreSQL live Docker, SQLite real-file, and MySQL live Docker fixtures with provider-specific assertions |
 
 ## Implementation Status
 
@@ -277,8 +294,11 @@ the recommended next batch are maintained exclusively in
 
 ## Architecture Guard
 
-An experimental SQLite P0 provider now supplies those adapters and reuses the
-shared profile, Navigator, CodeEditor, result pane, and command resolver.
-Renderer and native validation, including the PostgreSQL regression, are
-complete. This evidence justified the completed UI-only `DatabaseWorkspaceShell`
-extraction with two real callers. It does not justify a generic runtime/IPC rewrite.
+Experimental SQLite and MySQL P0 providers now supply those adapters and reuse
+the shared profile, Navigator, CodeEditor, result pane, command resolver, and
+`DatabaseWorkspaceShell`. Renderer and native validation, including PostgreSQL
+regressions, are complete. This three-provider evidence justified the completed
+UI-only `DatabaseWorkspaceShell` extraction. It does not justify a generic
+runtime/IPC rewrite. `DatabaseConnectionDialogShell` now provides the separate
+shared UI composition boundary without making provider configuration, validation,
+runtime, or IPC generic.

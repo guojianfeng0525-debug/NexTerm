@@ -20,6 +20,12 @@ describe('PostgreSQL visual workspace', () => {
 
     const dialog = await $('[data-testid="postgres-connection-dialog"]');
     await browser.saveScreenshot('./test-results/database-visual/postgres-dialog-after.png');
+    await browser.execute(() => document.documentElement.classList.remove('dark'));
+    await browser.saveScreenshot('./test-results/database-visual/postgres-dialog-light-after.png');
+    await browser.setWindowSize(960, 700);
+    await browser.saveScreenshot('./test-results/database-visual/postgres-dialog-small-after.png');
+    await browser.setWindowSize(2048, 1200);
+    await browser.execute(() => document.documentElement.classList.add('dark'));
     const inputs = await dialog.$$('input');
     for (const input of inputs) await input.clearValue();
     await inputs[0].setValue('NexTerm Visual PostgreSQL');

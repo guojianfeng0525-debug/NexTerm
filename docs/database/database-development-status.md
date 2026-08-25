@@ -10,6 +10,7 @@ PostgreSQL is the first current provider. The long-term target is a Shared Datab
 
 - Shared frontend/domain adoption: VALIDATED with PostgreSQL, experimental SQLite P0, and experimental MySQL P0. The shared provider core, command resolver, profile envelope, provider-selection connection dialog, object model/Navigator, query-editor context/CodeEditor, result contracts, and result pane have three real providers.
 - Shared Workspace Shell: IMPLEMENTED for toolbar host, Navigator placement, query-tab host, workspace region, and optional status region. `ToolPostgres`, `ToolSqlite`, and `ToolMySql` retain provider runtime orchestration and provider-specific workspace slots.
+- Shared Connection Dialog Shell: IMPLEMENTED as `DatabaseConnectionDialogShell` for modal geometry, header, section rail, scrollable content viewport, form grid, and fixed footer. `ToolPostgres`, `ToolSqlite`, and `ToolMySql` provide their own fields, available sections, validation semantics, primary-action semantics, and runtime behavior.
 - Provider runtime and IPC: PROVIDER-SPECIFIC. PostgreSQL retains `postgres_*` IPC and `PostgresState`; SQLite retains `sqlite_*` IPC and independent `rusqlite` runtime state; MySQL retains `mysql_*` IPC and `MysqlState` using `mysql_async`.
 - Generic runtime, generic `database_*` IPC, and generic `DatabaseState`: NOT IMPLEMENTED / DEFERRED.
 
@@ -173,6 +174,14 @@ Not migrated:
 - Native visual evidence is captured under the ignored `test-results/database-visual/` directory: populated PostgreSQL, SQLite, and MySQL workspaces; all three connection dialogs; PostgreSQL light and compact-window views.
 - No runtime, IPC, Rust, profile, persistence, or query execution changes were made. Remaining intentional provider differences are limited to existing capabilities: PostgreSQL retains its filter, resizable Navigator/results, pagination, status bar, and SSH/TLS pages.
 
+### Feature Batch 14 - Shared Database Connection Dialog Shell - COMPLETE
+
+- Implemented `DatabaseConnectionDialogShell`, shared by PostgreSQL, SQLite, and MySQL. It owns modal geometry, header, section rail, scrollable content viewport, shared form grid primitives, and fixed footer.
+- Provider hosts retain field content, section availability, validation semantics, primary-action semantics, and runtime behavior. Dialog composition is shared; provider configuration, validation, runtime, and IPC remain provider-specific.
+- Real Tauri visual review: PASS. PostgreSQL Dark, Light, and Small 960x700: PASS. SQLite Dark, Light, and Small 960x700: PASS. MySQL Dark, Light, and Small 960x700: PASS. Cross-provider consistency: PASS. Prior P1 dialog inconsistency: RESOLVED.
+- Focused tests: PASS. PostgreSQL, SQLite, and MySQL renderer suites: PASS. Debug Tauri build: PASS. PostgreSQL, SQLite, and MySQL native suites: PASS sequentially. No product changes were made during final visual closure.
+- Runtime, IPC, Rust, persistence, profile contracts, query runtime, and provider capability claims are unchanged. Screenshot captures remain ignored runtime evidence under `test-results/database-visual/`.
+
 ## Last Known Verification
 
 These are the latest known results from Feature Batch 13 verification.
@@ -216,7 +225,11 @@ These are the latest known results from Feature Batch 13 verification.
 | Feature Batch 13 renderer E2E | PASS: PostgreSQL, SQLite, MySQL workspace suites |
 | Feature Batch 13 debug Tauri build | PASS |
 | Feature Batch 13 native desktop E2E | PASS sequentially: PostgreSQL live Docker, SQLite real file, MySQL live Docker |
-| Feature Batch 13 real Tauri visual review | PASS: populated workspaces, dialogs, dark, PostgreSQL light, and 960x700 compact window |
+| Feature Batch 14 focused tests | PASS |
+| Feature Batch 14 renderer E2E | PASS: PostgreSQL, SQLite, MySQL workspace suites |
+| Feature Batch 14 debug Tauri build | PASS |
+| Feature Batch 14 native desktop E2E | PASS sequentially: PostgreSQL live Docker, SQLite real file, MySQL live Docker |
+| Feature Batch 14 real Tauri visual review | PASS: PostgreSQL, SQLite, and MySQL dialogs in dark, light, and 960x700 small-window views; cross-provider consistency PASS; prior P1 resolved |
 | Repository-wide Rust formatter check | PRE-EXISTING REPOSITORY DIFFERENCES |
 
 ## Native Tauri Desktop E2E
@@ -247,6 +260,7 @@ Detailed analysis remains in `postgresql-coupling-report.md`.
 | --- | --- |
 | Shared Frontend / Domain | VALIDATED for PostgreSQL + experimental SQLite P0 + experimental MySQL P0 |
 | Shared Workspace Shell | COMPLETE: UI-only shell used by PostgreSQL + SQLite + MySQL |
+| Shared Connection Dialog Shell | COMPLETE: `DatabaseConnectionDialogShell` used by PostgreSQL + SQLite + MySQL |
 | Provider Runtime / IPC | PROVIDER-SPECIFIC: `postgres_*` / `PostgresState`, `sqlite_*` / SQLite runtime, and `mysql_*` / `MysqlState` |
 | Generic Runtime / IPC | NOT IMPLEMENTED / DEFERRED |
 | Generic Connection Profile | COMPLETE for PostgreSQL + SQLite + MySQL saved-profile envelope adoption |
@@ -265,7 +279,7 @@ Detailed analysis remains in `postgresql-coupling-report.md`.
 
 ## Next Target
 
-Runtime remains provider-specific after the workspace extraction. Any runtime-boundary work requires a new evidence-based design batch; generic runtime and IPC remain deferred.
+MySQL remains EXPERIMENTAL / P0. The recommended next batch is MySQL Connection Security Parity, focused on evidence-backed SSH and TLS transport support. Runtime remains provider-specific; generic runtime and IPC remain deferred.
 
 ## Permanent Architecture Constraints
 
@@ -285,10 +299,10 @@ Every database batch that changes visible UI must include a real Tauri visual re
 
 ## Session Handoff
 
-- What changed: Feature Batch 13 normalized shared database UI density, Navigator/tab active and focus treatment, result-grid empty/row behavior, and SQLite/MySQL connection-dialog shells. Native E2E now emits ignored visual evidence for populated provider workspaces and dialogs.
-- What did not change: provider runtime/IPC, query execution, profiles/storage, `PostgresState`, SQLite/MySQL runtime state, frontend mutation UI, CSV export, context menus, shortcuts, and generic runtime/IPC design.
-- Tests: focused database component tests, all three renderer suites, i18n parity, debug Tauri build, and sequential PostgreSQL, SQLite, and MySQL native suites pass.
-- Real Tauri status: PostgreSQL and MySQL use isolated live Docker fixtures; SQLite uses a temporary real file. Final native passes used one debug binary. Visual review includes populated dark workspaces for all providers plus PostgreSQL light and 960x700 compact views.
+- What changed: Feature Batch 14 added `DatabaseConnectionDialogShell` for PostgreSQL, SQLite, and MySQL dialog composition. Native E2E captures ignored dialog evidence for dark, light, and 960x700 small-window views.
+- What did not change: provider runtime/IPC, query execution, profiles/storage, `PostgresState`, SQLite/MySQL runtime state, frontend mutation UI, CSV export, context menus, shortcuts, generic runtime/IPC design, and provider capability claims.
+- Tests: focused shell tests, all three renderer suites, debug Tauri build, and sequential PostgreSQL, SQLite, and MySQL native suites pass.
+- Real Tauri status: PostgreSQL and MySQL use isolated live Docker fixtures; SQLite uses a temporary real file. Visual review passes for all three dialogs in dark, light, and 960x700 small-window views; the prior P1 dialog inconsistency is resolved.
 - Known warnings: historical Rust warnings may remain; they were not Slice 2 build failures.
 - Generic command execution remains explicitly out of scope.
 

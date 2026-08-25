@@ -20,6 +20,12 @@ describe('SQLite native workspace', () => {
     await $('[data-testid="sqlite-new-connection"]').click();
     const dialog = await $('[data-testid="sqlite-connection-dialog"]');
     await browser.saveScreenshot('./test-results/database-visual/sqlite-dialog-after.png');
+    await browser.execute(() => document.documentElement.classList.remove('dark'));
+    await browser.saveScreenshot('./test-results/database-visual/sqlite-dialog-light-after.png');
+    await browser.setWindowSize(960, 700);
+    await browser.saveScreenshot('./test-results/database-visual/sqlite-dialog-small-after.png');
+    await browser.setWindowSize(2048, 1200);
+    await browser.execute(() => document.documentElement.classList.add('dark'));
     const inputs = await dialog.$$('input');
     await inputs[0]!.clearValue();
     await inputs[0]!.setValue('NexTerm Native SQLite');

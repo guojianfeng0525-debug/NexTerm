@@ -17,12 +17,6 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -49,6 +43,12 @@ import { DatabaseNavigator } from "@/components/toolbox/database-navigator";
 import { DatabaseResultPane } from "@/components/toolbox/database-result-pane";
 import { DatabaseWorkspaceShell } from "@/components/toolbox/database-workspace-shell";
 import { DatabaseProviderSelect } from "@/components/toolbox/database-provider-select";
+import {
+  DatabaseConnectionDialogShell,
+  DatabaseConnectionField,
+  DatabaseConnectionFormGrid,
+  DatabaseConnectionToggleRow,
+} from "@/components/toolbox/database-connection-dialog-shell";
 import {
   createPostgresNavigatorConnectionNode,
   getPostgresRelationReference,
@@ -833,31 +833,21 @@ function ConnectionDialog({
 }) {
   const config = draft.providerConfig;
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent
-        className="!inset-0 !m-auto !h-[560px] !w-[720px] !max-w-[calc(100vw-32px)] !translate-x-0 !translate-y-0 overflow-hidden rounded-md p-0"
-        data-testid="postgres-connection-dialog"
-      >
-        <DialogHeader className="border-b px-4 py-3">
-          <DialogTitle className="text-sm">
-            {t("toolbox.postgres.connectionSettings")}
-          </DialogTitle>
-        </DialogHeader>
-        <div className="flex min-h-0 flex-1">
-          <aside className="w-36 shrink-0 border-r bg-muted/20 p-1.5">
-            {(["general", "ssh", "tls"] as DialogPage[]).map((item) => (
-              <button
-                key={item}
-                type="button"
-                className={`block h-7 w-full rounded-sm px-2 text-left text-[12px] ${page === item ? "bg-primary/10 text-primary" : "hover:bg-muted"}`}
-                onClick={() => setPage(item)}
-              >
-                {t(`toolbox.postgres.connectionTabs.${item}`)}
-              </button>
-            ))}
-          </aside>
-          <div className="min-w-0 flex-1 overflow-auto p-4">
-            <div className="grid grid-cols-2 gap-3">
+    <DatabaseConnectionDialogShell
+      open={open}
+      onOpenChange={onOpenChange}
+      testId="postgres-connection-dialog"
+      title={t("toolbox.postgres.connectionSettings")}
+      sections={(["general", "ssh", "tls"] as DialogPage[]).map((id) => ({ id, label: t(`toolbox.postgres.connectionTabs.${id}`) }))}
+      activeSection={page}
+      onActiveSectionChange={(section) => setPage(section as DialogPage)}
+      saveLabel={t("common.save")}
+      primaryLabel={t("toolbox.postgres.connect")}
+      onSave={() => void save()}
+      onPrimary={() => void connect()}
+      busy={connecting}
+    >
+      <DatabaseConnectionFormGrid>
               {page === "general" && (
                 <>
                   <Field label={t("toolbox.postgres.provider")}>
@@ -930,13 +920,13 @@ function ConnectionDialog({
                       </SelectContent>
                     </Select>
                   </Field>
-                  <div className="flex items-center gap-2 pt-6">
+                  <DatabaseConnectionToggleRow>
                     <Switch
                       checked={config.readOnly}
                       onCheckedChange={(v) => update("readOnly", v)}
                     />
                     <Label>{t("toolbox.postgres.readOnlyConnection")}</Label>
-                  </div>
+                  </DatabaseConnectionToggleRow>
                 </>
               )}
               {page === "ssh" && (
@@ -1050,32 +1040,8 @@ function ConnectionDialog({
                   )}
                 </>
               )}
-            </div>
-          </div>
-        </div>
-        <div className="flex justify-end gap-2 border-t px-4 py-3">
-          <Button
-            size="sm"
-            variant="outline"
-            className="rounded-sm"
-            onClick={() => void save()}
-          >
-            {t("common.save")}
-          </Button>
-          <Button
-            size="sm"
-            className="rounded-sm"
-            onClick={() => void connect()}
-            disabled={connecting}
-          >
-            {connecting && (
-              <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
-            )}
-            {t("toolbox.postgres.connect")}
-          </Button>
-        </div>
-      </DialogContent>
-    </Dialog>
+      </DatabaseConnectionFormGrid>
+    </DatabaseConnectionDialogShell>
   );
 }
 function Field({
@@ -1086,10 +1052,7 @@ function Field({
   children: React.ReactNode;
 }) {
   return (
-    <div className="space-y-1">
-      <Label className="text-[11px] text-muted-foreground">{label}</Label>
-      {children}
-    </div>
+    <DatabaseConnectionField label={label}>{children}</DatabaseConnectionField>
   );
 }
 function TextField({

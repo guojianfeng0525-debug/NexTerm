@@ -26,7 +26,7 @@ Build declarative object designer forms, validation, SQL preview/diff/revert, ta
 
 These have the strongest component reuse after Phase 2/3. Deliver one provider at a time: connection/auth, metadata, dialect, data editor, designer, backup/import/export and capability tests. SQLite is deliberately after MySQL/MariaDB because local-file lifecycle requires its own profile and safety decisions.
 
-SQLite P0 architecture validation was completed early as an experimental provider: it validates shared frontend/domain contracts with renderer and native evidence, not full Phase 4 feature parity. The next evaluated extraction is a shared workspace UI composition shell; provider runtime and IPC remain out of scope.
+SQLite and MySQL P0 architecture validation were completed early as experimental providers: they validate shared frontend/domain contracts with renderer and native evidence, not full Phase 4 feature parity. The shared workspace and connection-dialog UI composition shells are implemented for PostgreSQL, SQLite, and MySQL. Provider runtime and IPC remain provider-specific and out of scope for this roadmap phase.
 
 ## Phase 5: Import/Export and Backup/Restore Platform (P1)
 

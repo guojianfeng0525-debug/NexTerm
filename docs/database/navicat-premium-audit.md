@@ -57,7 +57,7 @@ The matrix does not document every suggested context-menu item, mouse gesture, o
 
 ## Current NexTerm finding
 
-NexTerm currently has a pending PostgreSQL-only Toolbox workspace, not a `Database` platform. It provides a connection dialog with PostgreSQL credentials, SSH tunnel, TLS, read-only mode and encrypted local profile persistence; an object navigator limited to schemas and relations; CodeMirror PostgreSQL editing/completion; execute and textual `EXPLAIN`; result display; table paging; and a backend-safe primary-key update command that is not wired into the grid UI.
+NexTerm currently has a shared Database platform validated by PostgreSQL plus experimental SQLite and MySQL P0 providers, not a PostgreSQL-only Toolbox workspace. PostgreSQL provides a connection dialog with credentials, SSH tunnel, TLS, read-only mode and encrypted local profile persistence; an object navigator limited to schemas and relations; CodeMirror PostgreSQL editing/completion; execute and textual `EXPLAIN`; result display; table paging; and a backend-safe primary-key update command that is not wired into the grid UI. SQLite and MySQL P0 reuse the shared frontend/domain and workspace composition while retaining provider-specific runtime capability boundaries.
 
 Evidence: `src/components/toolbox/tool-postgres.tsx`, `src-tauri/src/postgres.rs`, `src/lib/toolbox/postgres-storage.ts`, `src/lib/postgres-completion.ts`, and `tests/postgres-workspace.e2e.spec.ts`.
 

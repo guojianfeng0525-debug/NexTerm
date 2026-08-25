@@ -20,12 +20,16 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import { CodeEditor } from "@/components/code-editor";
 import { DatabaseNavigator } from "@/components/toolbox/database-navigator";
 import { DatabaseProviderSelect } from "@/components/toolbox/database-provider-select";
 import { DatabaseResultPane } from "@/components/toolbox/database-result-pane";
 import { DatabaseWorkspaceShell } from "@/components/toolbox/database-workspace-shell";
+import {
+  DatabaseConnectionDialogShell,
+  DatabaseConnectionField,
+  DatabaseConnectionFormGrid,
+} from "@/components/toolbox/database-connection-dialog-shell";
 import { generateId } from "@/lib/toolbox/toolbox-storage";
 import { resolveDatabaseCommand } from "@/lib/database/command-registry";
 import { mysqlProvider } from "@/lib/database/provider-registry";
@@ -425,16 +429,21 @@ export function ToolMySql() {
         )
       }
     >
-      <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
-        <DialogContent
-          className="!inset-0 !m-auto !h-[min(600px,calc(100vh-32px))] !w-[560px] !max-w-[calc(100vw-32px)] !translate-x-0 !translate-y-0 gap-0 overflow-hidden rounded-md p-0"
-          data-testid="mysql-connection-dialog"
-        >
-          <DialogHeader className="border-b px-4 py-3">
-            <DialogTitle className="text-sm">{t("toolbox.mysql.connectionSettings")}</DialogTitle>
-          </DialogHeader>
-          <div className="min-h-0 flex-1 overflow-auto p-4">
-          <div className="grid gap-3">
+      <DatabaseConnectionDialogShell
+        open={dialogOpen}
+        onOpenChange={setDialogOpen}
+        testId="mysql-connection-dialog"
+        title={t("toolbox.postgres.connectionSettings")}
+        sections={[{ id: "general", label: t("toolbox.postgres.connectionTabs.general") }]}
+        activeSection="general"
+        onActiveSectionChange={() => undefined}
+        saveLabel={t("common.save")}
+        primaryLabel={t("toolbox.mysql.connect")}
+        onSave={() => void save()}
+        onPrimary={() => void connect()}
+        busy={connecting}
+      >
+          <DatabaseConnectionFormGrid>
             <Field label={t("toolbox.mysql.provider")}>
               <DatabaseProviderSelect
                 value="mysql"
@@ -526,30 +535,8 @@ export function ToolMySql() {
                 }
               />
             </Field>
-          </div>
-          </div>
-          <div className="flex justify-end gap-2 border-t px-4 py-3">
-            <Button
-              size="sm"
-              type="button"
-              variant="outline"
-              className="rounded-sm"
-              onClick={() => void save()}
-            >
-              {t("common.save")}
-            </Button>
-            <Button
-              size="sm"
-              type="button"
-              className="rounded-sm"
-              onClick={() => void connect()}
-              disabled={connecting}
-            >
-              {t("toolbox.mysql.connect")}
-            </Button>
-          </div>
-        </DialogContent>
-      </Dialog>
+          </DatabaseConnectionFormGrid>
+      </DatabaseConnectionDialogShell>
       {deleteTarget && (
         <Dialog open onOpenChange={() => setDeleteTarget(null)}>
           <DialogContent>
@@ -586,10 +573,7 @@ function Field({
   readonly children: React.ReactNode;
 }) {
   return (
-    <div className="grid gap-1">
-      <Label>{label}</Label>
-      {children}
-    </div>
+    <DatabaseConnectionField label={label}>{children}</DatabaseConnectionField>
   );
 }
 function ToolButton({

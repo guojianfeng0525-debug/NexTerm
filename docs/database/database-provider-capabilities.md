@@ -39,6 +39,15 @@ Legend: `T` target capability, `P` provider-specific/phase-later, `-` not applic
 | User/security | T | T | - | T | T | T | T | P |
 | Server/command monitor | T | T | - | T | T | T | T | P |
 
+## Current Provider Coverage
+
+- PostgreSQL: PRODUCTION BASELINE.
+- SQLite: EXPERIMENTAL / P0 / VALIDATED. Renderer and native desktop validation use a deterministic temporary real file.
+- MySQL: EXPERIMENTAL / P0 / VALIDATED. Renderer and native desktop validation use an isolated live Docker fixture.
+- Future providers: NOT IMPLEMENTED.
+
+The shared frontend/domain layer, `DatabaseWorkspaceShell`, and `DatabaseConnectionDialogShell` are validated by all three current providers. The dialog shell shares composition only; provider capabilities, configuration, validation, runtime, and IPC remain provider-specific.
+
 ## Experimental SQLite P0
 
 SQLite is a real production-registered experimental P0 provider, not a full
@@ -48,11 +57,21 @@ completion, and shared result rendering. It does not expose schemas,
 transactions, Explain, result editing, paging, SSH, or TLS. Renderer and
 native dual-provider validation are complete.
 
+## Experimental MySQL P0
+
+MySQL is a real production-registered experimental P0 provider, not a PostgreSQL
+core-parity claim. The current implementation supports encrypted profile
+persistence, network connect/disconnect, Navigator metadata, MySQL query-editor
+context/completion at the current scope, query execution, shared result rendering,
+and `DatabaseWorkspaceShell`. SSH, TLS, read-only connection semantics, Explain,
+result editing, expanded paging, and transactions UI remain unsupported or
+deferred. Renderer and native desktop validation are complete.
+
 ## Current Runtime Boundary
 
-PostgreSQL retains its narrow live-client registry in `src-tauri/src/postgres.rs`, secure SSH fingerprint verification, TLS root/client validation, bounded query timeout, identifier quoting, primary-key validation, `postgres_*` IPC, and `PostgresState`. SQLite retains its existing-file `rusqlite` runtime and `sqlite_*` IPC.
+PostgreSQL retains its narrow live-client registry in `src-tauri/src/postgres.rs`, secure SSH fingerprint verification, TLS root/client validation, bounded query timeout, identifier quoting, primary-key validation, `postgres_*` IPC, and `PostgresState`. SQLite retains its existing-file `rusqlite` runtime and `sqlite_*` IPC. MySQL retains its independent `mysql_async` runtime, `mysql_*` IPC, and `MysqlState`.
 
-The existing `PostgresConnection` persistence adapts to `DatabaseConnectionProfile` with `providerId: "postgresql"` and provider-owned settings. A generic backend session service or generic IPC is deferred: the real providers have material runtime differences, and no generic target API has been selected.
+PostgreSQL, SQLite, and MySQL each adapt provider-owned settings to the shared `DatabaseConnectionProfile` envelope while retaining isolated persistence. A generic backend session service, generic IPC, `DatabaseState`, and a unified runtime facade are deferred: the real providers have material runtime differences, and no generic target API has been selected.
 
 ## Safety rules
 
