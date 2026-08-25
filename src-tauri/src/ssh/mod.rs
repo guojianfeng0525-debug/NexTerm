@@ -619,12 +619,6 @@ impl SshClient {
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to request PTY on the session: {e}"))?;
 
-            // Servers that accept these standard SSH environment requests use
-            // UTF-8 for their interactive session. Servers that reject
-            // AcceptEnv keep their configured locale, preserving compatibility.
-            let _ = channel.set_env(false, "LANG", "C.UTF-8").await;
-            let _ = channel.set_env(false, "LC_CTYPE", "C.UTF-8").await;
-
             // A `cd` written after request_shell goes through readline and is
             // therefore saved in the remote shell's Up-arrow history. For
             // Bash sessions start the login shell through an exec request

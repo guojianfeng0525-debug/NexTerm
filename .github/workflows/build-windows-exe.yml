@@ -90,7 +90,7 @@ jobs:
 
           Write-Host "Resolving the official Fixed Version .cab ($env:ARCH) link..."
           $page = (Invoke-WebRequest -Uri "https://developer.microsoft.com/en-us/microsoft-edge/webview2/" -UseBasicParsing).Content
-          $pattern = "https:\\u002F\\u002F[^\"']*?Microsoft\.WebView2\.FixedVersionRuntime\.\d+\.\d+\.\d+\.\d+\.$env:ARCH\.cab"
+          $pattern = 'https:\\u002F\\u002F[^"'']*?Microsoft\.WebView2\.FixedVersionRuntime\.\d+\.\d+\.\d+\.\d+\.' + [regex]::Escape($env:ARCH) + '\.cab'
           $m = [regex]::Match($page, $pattern)
           if (-not $m.Success) {
             Write-Error "Could not locate the WebView2 Fixed Version .cab ($env:ARCH) link on the official page"
