@@ -31,7 +31,7 @@ authoritative progress log.
  tokio-postgres, SSH/TLS/auth       rusqlite, locking/file semantics
 ```
 
-The shared profile envelope, command resolver, object model/Navigator, query-editor context/CodeEditor, and result contract/pane are implemented and validated by both providers. Workspace composition remains owned by the two provider hosts. Runtime and IPC remain provider-specific.
+The shared profile envelope, command resolver, object model/Navigator, query-editor context/CodeEditor, result contract/pane, and workspace composition are implemented and validated by both providers. `DatabaseWorkspaceShell` owns shared UI composition; `ToolPostgres` and `ToolSqlite` remain provider-specific runtime/orchestration hosts. Runtime and IPC remain provider-specific.
 
 ## Shared Workspace Composition
 
