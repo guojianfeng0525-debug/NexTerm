@@ -139,6 +139,11 @@ export function ToolPostgres() {
   const [tableOffset, setTableOffset] = useState(0);
 
   const tab = tabs.find((item) => item.id === activeTab) ?? tabs[0];
+  const executeCommand = resolveDatabaseCommand("database.query.execute", {
+    scope: "QUERY_EDITOR",
+    provider: postgresqlProvider,
+    connectionState: connected ? "connected" : "disconnected",
+  });
   const explainCommand = resolveDatabaseCommand("database.query.explain", {
     scope: "QUERY_EDITOR",
     provider: postgresqlProvider,
@@ -602,8 +607,9 @@ export function ToolPostgres() {
                 <ToolButton
                   icon={<Play />}
                   label={t("toolbox.postgres.run")}
-                  disabled={!connected || running}
+                  disabled={executeCommand.state !== "enabled" || running}
                   onClick={() => void execute()}
+                  data-testid="postgres-run"
                 />
                 {tab.type === "query" && (
                   <ToolButton

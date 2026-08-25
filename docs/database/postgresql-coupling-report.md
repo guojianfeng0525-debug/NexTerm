@@ -43,6 +43,10 @@ Infrastructure established; migration pending. `src/lib/database/` now contains 
 
 `ToolPostgres` now consumes the shared resolver for the existing `database.query.explain` toolbar button. Its availability is resolved from the PostgreSQL provider descriptor's textual Explain capability and the current query-editor connection state; the existing local `running` guard remains in place. The action still calls `execute(true)` and the existing `postgres_explain` IPC path, so this slice changes only command availability, not execution, persistence, backend contracts, or workspace structure. Browser and native desktop coverage assert the disconnected and connected states respectively.
 
+## Slice 3 Status
+
+`ToolPostgres` now consumes the shared resolver for the existing `database.query.execute` toolbar button. Before this slice, the toolbar independently encoded `!connected`; now the PostgreSQL provider descriptor, shared Execute descriptor, and resolver determine connection-level availability. The local `running` guard remains in the Query Workspace. The empty-SQL guard remains in `execute()` and the button continues to be enabled for empty SQL, preserving the prior behavior. The action still calls `execute()` and the existing `postgres_execute` IPC path, so this slice changes availability only, not execution, persistence, backend contracts, or workspace structure. Renderer and native desktop coverage assert disconnected, connected, empty-SQL, and running states.
+
 ## Risks To Preserve During Migration
 
 - Do not weaken SSH host-key fingerprint checking, certificate validation, mTLS support, bounded timeouts, quoted identifiers, or primary-key update validation in `postgres.rs`.

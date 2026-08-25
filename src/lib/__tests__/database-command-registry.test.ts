@@ -12,6 +12,18 @@ const connectedNavigatorContext: DatabaseCommandContext = {
 };
 
 describe("database command resolver", () => {
+  it("enables Execute for PostgreSQL in a connected query editor", () => {
+    expect(
+      resolveDatabaseCommand("database.query.execute", {
+        ...connectedNavigatorContext,
+        scope: "QUERY_EDITOR",
+      }),
+    ).toMatchObject({
+      state: "enabled",
+      descriptor: { id: "database.query.execute" },
+    });
+  });
+
   it("enables Explain for PostgreSQL in a connected query editor", () => {
     expect(
       resolveDatabaseCommand("database.query.explain", {

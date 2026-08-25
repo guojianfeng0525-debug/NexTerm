@@ -10,7 +10,7 @@ PostgreSQL is the first current provider. The long-term target is a Shared Datab
 
 - PostgreSQL-first runtime.
 - Shared TypeScript Database Core is established.
-- Provider Runtime Adoption has started, but only for one command's availability.
+- Provider Runtime Adoption is partial: Explain and Execute command availability use the Shared Command Resolver.
 - UI, storage, IPC, navigator, and editor remain largely PostgreSQL-specific.
 
 ## Completed Atomic Slices
@@ -50,16 +50,37 @@ Not migrated:
 - Rust execution
 - Generic command execution
 
+### Atomic Slice 3 - COMPLETE
+
+`database.query.execute` toolbar availability now follows:
+
+```text
+PostgreSQL Provider Descriptor
+  -> Shared Command Descriptor
+  -> Shared Command Resolver
+  -> ToolPostgres Query Toolbar
+```
+
+The resolver owns connection-level availability. The Query Workspace retains its local `running` guard. The existing empty-SQL guard remains in `execute()` and the existing Run button stays enabled for empty SQL, preserving behavior.
+
+Not migrated:
+
+- `execute()` and `execute(true)`
+- `postgres_execute` and `postgres_*` IPC
+- Rust execution
+- Generic command execution
+
 ## Last Known Verification
 
-These are the latest known results from the completed Slice 2 verification, not verification rerun in every later documentation-only session.
+These are the latest known results from the completed Slice 3 verification.
 
 | Check | Result |
 | --- | --- |
 | `pnpm tauri build --debug --no-bundle` | PASS |
 | `pnpm e2e --spec e2e/desktop/postgres-visual.e2e.ts` | PASS |
 | Live PostgreSQL | YES |
-| Focused Vitest | 11 PASS |
+| Focused Vitest | 12 PASS |
+| Renderer E2E: `tests/postgres-workspace.e2e.spec.ts` | PASS |
 | `git diff --check` | PASS |
 
 ## Native Tauri Desktop E2E
@@ -73,7 +94,7 @@ Browser E2E remains a renderer-regression layer and is not Native Desktop E2E.
 
 ## Current Remaining Coupling
 
-- `ToolPostgres`
+- `ToolPostgres` execution, query-editor, navigator, result, and storage paths
 - `PostgresConnection` and `postgres_connections`
 - Configuration import/export and encryption/re-encryption
 - Fixed PostgreSQL navigator hierarchy
@@ -98,7 +119,7 @@ Detailed analysis remains in `postgresql-coupling-report.md`.
 
 ## Recommendation Only
 
-Recommended Atomic Slice 3: migrate `database.query.execute` toolbar availability to the Shared Database Command Resolver.
+Recommended Atomic Slice 4: migrate `database.connection.disconnect` availability for the existing PostgreSQL connection toolbar entry to the Shared Command Resolver.
 
 This is a recommendation only, not active implementation.
 
@@ -116,11 +137,11 @@ This is a recommendation only, not active implementation.
 
 ## Session Handoff
 
-- What changed: Slice 1 created the Shared TypeScript foundation; Slice 2 migrated Explain toolbar availability only.
+- What changed: Slice 1 created the Shared TypeScript foundation; Slice 2 migrated Explain toolbar availability; Slice 3 migrated Execute toolbar availability.
 - What did not change: PostgreSQL execution, IPC, profiles, storage, navigator, editor, result contracts, context menus, and shortcuts.
 - Tests: see Last Known Verification; this documentation-only session does not rerun product tests.
 - Real Tauri status: available, uses live PostgreSQL, last known result PASS.
 - Known warnings: historical Rust warnings may remain; they were not Slice 2 build failures.
-- Recommended next atomic slice: migrate Query Execute toolbar availability, because it has an adjacent real caller and preserves execution behavior.
+- Recommended next atomic slice: migrate `database.connection.disconnect` availability for the existing connection toolbar entry; command execution remains explicitly out of scope.
 
 Last updated: 2026-08-25

@@ -34,6 +34,7 @@ describe('PostgreSQL visual workspace', () => {
 
     await browser.pause(2_000);
     await browser.saveScreenshot('./test-results/postgres/debug-after-connect.png');
+    await expect($('[data-testid="postgres-run"]')).toBeEnabled();
     await expect($('[data-testid="postgres-explain"]')).toBeEnabled();
     await $('button=users').waitForDisplayed();
     await browser.saveScreenshot('./test-results/postgres/02-database-tree.png');
@@ -42,11 +43,18 @@ describe('PostgreSQL visual workspace', () => {
     const workspace = await $('[data-testid="postgres-workspace"]');
     const editor = await workspace.$('.cm-content');
     await editor.click();
+    await editor.clearValue();
+    await expect($('[data-testid="postgres-run"]')).toBeEnabled();
+    await editor.setValue('SELECT pg_sleep(1);');
+    await $('[data-testid="postgres-run"]').click();
+    await expect($('[data-testid="postgres-run"]')).toBeDisabled();
+    await expect($('[data-testid="postgres-run"]')).toBeEnabled();
+    await editor.clearValue();
     await editor.setValue(
       'SELECT id, username, email, age, active, credit, created_at, last_login FROM public.users ORDER BY username LIMIT 20;',
     );
     await browser.saveScreenshot('./test-results/postgres/04-query-editor.png');
-    await workspace.$('button[title="运行"]').click();
+    await $('[data-testid="postgres-run"]').click();
     await workspace.$('table').waitForDisplayed();
     await expect(await workspace.$$('tbody tr')).toBeElementsArrayOfSize(20);
     await browser.saveScreenshot('./test-results/postgres/05-query-result.png');

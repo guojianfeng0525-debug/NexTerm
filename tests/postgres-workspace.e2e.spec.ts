@@ -12,6 +12,7 @@ test.describe('PostgreSQL workspace', () => {
     await page.getByTestId('toolbox-nav-postgres').click();
     await expect(page.getByTestId('postgres-workspace')).toBeVisible();
     await expect(page.getByTestId('postgres-toolbar')).toBeVisible();
+    await expect(page.getByTestId('postgres-run')).toBeDisabled();
     await expect(page.getByTestId('postgres-explain')).toBeDisabled();
     await page.screenshot({ path: 'test-results/postgres/01-main-workspace.png', fullPage: true });
 
