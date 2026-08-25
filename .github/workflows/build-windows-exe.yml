@@ -17,6 +17,20 @@ permissions:
 jobs:
   build-windows-portable:
     runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            rust_target: ''
+            tauri_args: ''
+            exe_path: src-tauri/target/release/nexterm.exe
+            archive: NexTerm-portable.zip
+          - arch: x86
+            rust_target: i686-pc-windows-msvc
+            tauri_args: --target i686-pc-windows-msvc
+            exe_path: src-tauri/target/i686-pc-windows-msvc/release/nexterm.exe
+            archive: NexTerm-portable-x86.zip
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -34,6 +48,8 @@ jobs:
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -58,24 +74,26 @@ jobs:
           perl --version | Select-Object -First 1
           nasm -v
 
-      # Download the official WebView2 Fixed Version Runtime (.cab, x64) and
+      # Download the official WebView2 Fixed Version Runtime matching the app
       # expand it. This is Microsoft's distribution format for fixed-version
       # runtimes — the extracted folder contains msedge.exe + msedge.dll and is
       # used as the Fixed Runtime for the portable build. The exact version is
       # captured into the runtime manifest by the packaging script, so every
       # build artifact pins the version it was built against.
-      - name: Download & expand WebView2 Fixed Runtime (x64)
+      - name: Download & expand WebView2 Fixed Runtime (${{ matrix.arch }})
         shell: pwsh
+        env:
+          ARCH: ${{ matrix.arch }}
         run: |
           $outDir = "$env:RUNNER_TEMP\webview2-runtime"
           New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 
-          Write-Host "Resolving the official Fixed Version .cab (x64) link..."
+          Write-Host "Resolving the official Fixed Version .cab ($env:ARCH) link..."
           $page = (Invoke-WebRequest -Uri "https://developer.microsoft.com/en-us/microsoft-edge/webview2/" -UseBasicParsing).Content
-          $pattern = 'https:\\u002F\\u002F[^"'']*?Microsoft\.WebView2\.FixedVersionRuntime\.\d+\.\d+\.\d+\.\d+\.x64\.cab'
+          $pattern = "https:\\u002F\\u002F[^\"']*?Microsoft\.WebView2\.FixedVersionRuntime\.\d+\.\d+\.\d+\.\d+\.$env:ARCH\.cab"
           $m = [regex]::Match($page, $pattern)
           if (-not $m.Success) {
-            Write-Error "Could not locate the WebView2 Fixed Version .cab (x64) link on the official page"
+            Write-Error "Could not locate the WebView2 Fixed Version .cab ($env:ARCH) link on the official page"
             exit 1
           }
           $cabUrl = $m.Value.Replace('\u002F', '/')
@@ -114,18 +132,18 @@ jobs:
 
       - name: Build release binary
         shell: pwsh
-        run: pnpm tauri build --no-bundle
+        run: pnpm tauri build --no-bundle ${{ matrix.tauri_args }}
 
       - name: Assemble portable distribution + ZIP
         shell: pwsh
         run: |
-          node scripts/build-windows-portable.mjs --runtime "$env:RUNNER_TEMP\webview2-runtime"
+          node scripts/build-windows-portable.mjs --exe "${{ matrix.exe_path }}" --runtime "$env:RUNNER_TEMP\webview2-runtime" --arch "${{ matrix.arch }}"
 
       - name: Upload portable artifact (single ZIP)
         uses: actions/upload-artifact@v4
         with:
-          name: NexTerm-portable
-          path: dist/NexTerm-portable.zip
+          name: NexTerm-portable-${{ matrix.arch }}
+          path: dist/${{ matrix.archive }}
           if-no-files-found: error
 
       # Publish a GitHub Release when a version tag (v*) is pushed.
@@ -135,5 +153,5 @@ jobs:
         with:
           tag_name: ${{ inputs.tag || github.ref_name }}
           files: |
-            dist/NexTerm-portable.zip
+            dist/${{ matrix.archive }}
           generate_release_notes: true

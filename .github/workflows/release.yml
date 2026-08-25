@@ -26,15 +26,25 @@ jobs:
         include:
           - platform: macos-latest
             args: '--target aarch64-apple-darwin'
+            rust_target: 'aarch64-apple-darwin'
           - platform: macos-latest
             args: '--target x86_64-apple-darwin'
+            rust_target: 'x86_64-apple-darwin'
           - platform: ubuntu-latest
             args: ''
+            rust_target: ''
           - platform: windows-latest
+            # 64-bit Windows installer (the runner default target).
+            args: '--config {"bundle":{"windows":{"webviewInstallMode":{"type":"downloadBootstrapper","silent":true}}}}'
+            rust_target: ''
+          - platform: windows-latest
+            # 32-bit Windows installer. This is distributed alongside x64,
+            # but is intentionally excluded from the x64 updater manifest.
+            args: '--target i686-pc-windows-msvc --config {"bundle":{"windows":{"webviewInstallMode":{"type":"downloadBootstrapper","silent":true}}}}'
+            rust_target: 'i686-pc-windows-msvc'
             # Windows installer uses the online bootstrapper (the portable
             # workflow ships the Fixed Runtime); avoids requiring WebView2/
             # on this runner.
-            args: '--config {"bundle":{"windows":{"webviewInstallMode":{"type":"downloadBootstrapper","silent":true}}}}'
 
     runs-on: ${{ matrix.platform }}
 
@@ -55,7 +65,7 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+          targets: ${{ matrix.rust_target }}
 
       - name: Rust cache
         uses: swatinem/rust-cache@v2

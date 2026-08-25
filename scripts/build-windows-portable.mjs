@@ -39,7 +39,11 @@ function argValue(name, fallback) {
 const EXE_SOURCE = argValue('--exe', path.join(PROJECT_ROOT, 'src-tauri', 'target', 'release', 'nexterm.exe'));
 const RUNTIME_SOURCE = argValue('--runtime', path.join(PROJECT_ROOT, 'src-tauri', 'runtime', 'webview2'));
 const OUT_DIR = argValue('--out', path.join(PROJECT_ROOT, 'dist'));
-const PORTABLE_NAME = 'NexTerm-portable';
+const ARCH = argValue('--arch', 'x64');
+if (ARCH !== 'x64' && ARCH !== 'x86') {
+  throw new Error(`Unsupported portable architecture: ${ARCH}`);
+}
+const PORTABLE_NAME = ARCH === 'x64' ? 'NexTerm-portable' : `NexTerm-portable-${ARCH}`;
 
 /* ── helpers ─────────────────────────────────────────────────────────────── */
 
@@ -149,13 +153,13 @@ function main() {
     process.exit(1);
   }
 
-  // 2. Architecture must match (x64 only).
+  // 2. Architecture must match the requested portable build.
   const exeArch = peArchitecture(EXE_SOURCE);
   const runtimeArch = peArchitecture(path.join(runtimeRoot, 'msedgewebview2.exe'));
   log('exe-arch', exeArch ?? 'unknown');
   log('runtime-arch', runtimeArch ?? 'unknown');
-  if (exeArch !== 'x64' || runtimeArch !== 'x64') {
-    console.error(`[portable] ERROR: architecture mismatch (exe=${exeArch}, runtime=${runtimeArch}); expected x64 for both.`);
+  if (exeArch !== ARCH || runtimeArch !== ARCH) {
+    console.error(`[portable] ERROR: architecture mismatch (exe=${exeArch}, runtime=${runtimeArch}); expected ${ARCH} for both.`);
     process.exit(1);
   }
 
@@ -171,7 +175,7 @@ function main() {
   const version = runtimeVersion(path.join(runtimeRoot, 'msedgewebview2.exe'));
   const manifest = {
     version,
-    architecture: 'x64',
+    architecture: ARCH,
     type: 'fixed',
   };
   fs.writeFileSync(
