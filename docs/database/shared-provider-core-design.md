@@ -43,7 +43,7 @@ Only the following contracts are needed by capabilities that exist today.
 | Contract | Responsibility | Current PostgreSQL mapping |
 | --- | --- | --- |
 | `DatabaseProviderDescriptor` | ID, display metadata, connection defaults/schema, capability set, object roles, dialect contribution | `postgresql`, port 5432, current PostgreSQL fields/completion |
-| `DatabaseConnectionProfile` | Profile ID, provider ID, label/group/environment/read-only, common transport and versioned provider settings | migrate `PostgresConnection` |
+| `DatabaseConnectionProfile<TProviderId, TProviderConfig>` | Saved profile ID/name/group/environment/timestamps, explicit provider identity, and typed provider configuration | PostgreSQL adapter maps the existing flat persistence DTO |
 | `DatabaseCapabilities` | declared support and current availability used by commands/UI | schemas, transactions, explain, relation browsing, row paging, safe row update, SSH/TLS |
 | `DatabaseObjectId` / `DatabaseObjectNode` | stable ID, parent ID, display name, object role, node kind, selectable/openable flags and action capability names | connection, database, schema, object-group, relation nodes |
 | `DatabaseSession` / `DatabaseOperation` | connection state and scoped busy/error/cancellation state | `PostgresState.clients`, `connecting`, `running` |
@@ -191,6 +191,25 @@ guessing from text values. Query results are explicitly non-editable. Table
 results carry existing primary-key column references and current offset/limit/
 has-more paging metadata, but provider-specific casts, PK validation, and update
 execution remain outside the shared contract.
+
+## Shared Connection Profiles
+
+Saved connection profiles are domain data, not live connection state. The shared
+envelope contains only profile metadata and a typed provider configuration:
+
+```text
+DatabaseConnectionProfile<TProviderId, TProviderConfig>
+  -> PostgreSQL profile adapter
+  -> existing PostgreSQL persistence/archive DTO
+  -> postgres_connections
+```
+
+The envelope does not impose `host`, `port`, credentials, TLS, or SSH on every
+provider. PostgreSQL owns those fields in `PostgreSQLConnectionConfig`; its
+adapter maps to the existing normalized SQLite columns and flat archive v1
+payload. This keeps persistence, encryption, archive compatibility, and stable
+profile IDs frozen while allowing a future file-backed profile configuration to
+use the same envelope.
 
 Initial command set, limited to present PostgreSQL P0 and confirmed interaction work:
 

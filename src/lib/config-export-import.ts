@@ -7,7 +7,12 @@ import { prefGet, prefSet } from './preferences';
 import { verifyAppLock, getAppLockKey } from './toolbox/app-lock';
 import { AppsStorage, OrchestrationsStorage, ServicesStorage, TunnelsStorage, NotesStorage, generateId } from './toolbox/toolbox-storage';
 import { PostgresConnectionsStorage } from './toolbox/postgres-storage';
-import type { NoteItem, PostgresConnection, ServiceConfig, ServiceOrchestration, ToolboxApp } from './toolbox/toolbox-types';
+import {
+  adaptPostgreSQLPersistedProfile,
+  toPostgreSQLPersistedProfile,
+  type PostgreSQLPersistedProfile,
+} from './database/postgresql-profile-adapter';
+import type { NoteItem, ServiceConfig, ServiceOrchestration, ToolboxApp } from './toolbox/toolbox-types';
 import { buildVaultExcel, parseVaultExcel } from './toolbox/vault-excel';
 import { loadRecords, saveRecords } from './toolbox/records-storage';
 import { listDocuments, exportDocument, importDocument, deleteDocument } from './toolbox/documents-storage';
@@ -34,7 +39,8 @@ interface AppConfig {
   services: ServiceConfig[];
   orchestrations: ServiceOrchestration[];
   profiles: ConnectionProfile[];
-  postgresConnections: PostgresConnection[];
+  /** Kept flat for compatibility with existing v1 configuration archives. */
+  postgresConnections: PostgreSQLPersistedProfile[];
 }
 
 const encoder = new TextEncoder();
@@ -115,7 +121,8 @@ export async function exportAllConfig(password: string): Promise<boolean> {
     appearance: prefGet('terminalAppearance', {}), editor: prefGet('nexterm-editor-config', {}),
     language: prefGet('nexterm-language', 'auto'),
     apps: AppsStorage.load(), services: ServicesStorage.load(), orchestrations: OrchestrationsStorage.load(),
-    profiles: ConnectionProfileManager.getProfiles(), postgresConnections: PostgresConnectionsStorage.load(),
+    profiles: ConnectionProfileManager.getProfiles(),
+    postgresConnections: PostgresConnectionsStorage.load().map(toPostgreSQLPersistedProfile),
   };
   const vaultRows = (await loadRecords(key)).map(({ record }) => ({
     name: record.name, address: record.address, username: record.username, password: record.password,
@@ -166,9 +173,12 @@ export async function importAllConfig(merge = false): Promise<boolean> {
   prefSet('nexterm-editor-config', config.editor);
   prefSet('nexterm-language', config.language);
   ConnectionProfileManager.importProfiles(JSON.stringify(config.profiles ?? []), merge);
+  const importedPostgresProfiles = (config.postgresConnections ?? []).map(
+    adaptPostgreSQLPersistedProfile,
+  );
   await PostgresConnectionsStorage.replace(merge
-    ? mergeById(PostgresConnectionsStorage.load(), config.postgresConnections ?? [])
-    : (config.postgresConnections ?? []));
+    ? mergeById(PostgresConnectionsStorage.load(), importedPostgresProfiles)
+    : importedPostgresProfiles);
   AppsStorage.save(merge ? mergeById(AppsStorage.load(), config.apps ?? []) : (config.apps ?? []));
   ServicesStorage.save(merge ? mergeById(ServicesStorage.load(), config.services ?? []) : (config.services ?? []));
   OrchestrationsStorage.save(merge ? mergeById(OrchestrationsStorage.load(), config.orchestrations ?? []) : (config.orchestrations ?? []));

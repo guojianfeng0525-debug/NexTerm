@@ -1,15 +1,21 @@
-/** SQLite-backed PostgreSQL data-source profiles. Secrets are encrypted per field. */
-import type { PostgresConnection } from './toolbox-types';
+/** SQLite-backed PostgreSQL profiles. Secrets are encrypted per field. */
+import {
+  adaptPostgreSQLPersistedProfile,
+  toPostgreSQLPersistedProfile,
+  type PostgreSQLConnectionProfile,
+  type PostgreSQLPersistedProfile,
+} from '../database/postgresql-profile-adapter';
 import { decField, encField, rowClear, rowDelete, rowList, rowUpsert } from './db';
 
-const cache: PostgresConnection[] = [];
+const cache: PostgreSQLConnectionProfile[] = [];
 let initialized = false;
 
 function str(value: unknown): string | undefined {
   return typeof value === 'string' && value.length > 0 ? value : undefined;
 }
 
-async function toRow(connection: PostgresConnection): Promise<Record<string, unknown>> {
+async function toRow(profile: PostgreSQLConnectionProfile): Promise<Record<string, unknown>> {
+  const connection = toPostgreSQLPersistedProfile(profile);
   return {
     id: connection.id, name: connection.name, group_name: connection.group ?? null,
     environment: connection.environment, host: connection.host, port: connection.port, database_name: connection.database,
@@ -26,15 +32,15 @@ async function toRow(connection: PostgresConnection): Promise<Record<string, unk
   };
 }
 
-async function fromRow(row: Record<string, unknown>): Promise<PostgresConnection> {
+async function fromRow(row: Record<string, unknown>): Promise<PostgreSQLConnectionProfile> {
   const environment = row.environment === 'production' || row.environment === 'test' ? row.environment : 'development';
-  return {
+  const profile: PostgreSQLPersistedProfile = {
     id: str(row.id) ?? '', name: str(row.name) ?? '', group: str(row.group_name), environment,
     host: str(row.host) ?? '', port: Number(row.port ?? 5432), database: str(row.database_name) ?? '',
     username: str(row.username) ?? '', password: (await decField(str(row.password))) ?? str(row.password),
     defaultSchema: str(row.default_schema), readOnly: Boolean(row.read_only), autoCommit: Boolean(row.auto_commit),
     sslMode: ['disable', 'allow', 'prefer', 'require', 'verify-ca', 'verify-full'].includes(String(row.ssl_mode))
-      ? row.ssl_mode as PostgresConnection['sslMode'] : 'prefer',
+      ? row.ssl_mode as PostgreSQLPersistedProfile['sslMode'] : 'prefer',
     sslRootCert: str(row.ssl_root_cert), sslClientCert: str(row.ssl_client_cert),
     sslClientKey: (await decField(str(row.ssl_client_key))) ?? str(row.ssl_client_key),
     sslKeyPassphrase: (await decField(str(row.ssl_key_passphrase))) ?? str(row.ssl_key_passphrase),
@@ -46,6 +52,7 @@ async function fromRow(row: Record<string, unknown>): Promise<PostgresConnection
     sshPrivateKeyPassphrase: (await decField(str(row.ssh_private_key_passphrase))) ?? str(row.ssh_private_key_passphrase),
     sshHostKeyFingerprint: str(row.ssh_host_key_fingerprint), createdAt: Number(row.created_at ?? Date.now()), updatedAt: Number(row.updated_at ?? Date.now()),
   };
+  return adaptPostgreSQLPersistedProfile(profile);
 }
 
 function notify(): void {
@@ -65,12 +72,12 @@ export function resetPostgresConnections(): void {
 
 export const PostgresConnectionsStorage = {
   initialized: () => initialized,
-  load: (): PostgresConnection[] => [...cache],
-  async upsert(connection: PostgresConnection): Promise<boolean> {
-    const persisted = await rowUpsert('postgres_connections', await toRow(connection));
+  load: (): PostgreSQLConnectionProfile[] => [...cache],
+  async upsert(profile: PostgreSQLConnectionProfile): Promise<boolean> {
+    const persisted = await rowUpsert('postgres_connections', await toRow(profile));
     if (!persisted) return false;
-    const index = cache.findIndex((item) => item.id === connection.id);
-    if (index === -1) cache.push(connection); else cache[index] = connection;
+    const index = cache.findIndex((item) => item.id === profile.id);
+    if (index === -1) cache.push(profile); else cache[index] = profile;
     notify();
     return true;
   },
@@ -80,7 +87,7 @@ export const PostgresConnectionsStorage = {
     notify();
     await rowDelete('postgres_connections', id);
   },
-  async replace(items: PostgresConnection[]): Promise<void> {
+  async replace(items: PostgreSQLConnectionProfile[]): Promise<void> {
     cache.splice(0, cache.length, ...items);
     await rowClear('postgres_connections');
     await Promise.all(items.map(async (item) => rowUpsert('postgres_connections', await toRow(item))));

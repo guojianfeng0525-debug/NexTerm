@@ -45,6 +45,31 @@ describe('reencryptAll', () => {
     await expect(decryptPayload(oldKey, row.password as string)).rejects.toThrow();
   });
 
+  it('re-encrypts existing PostgreSQL secret columns without changing metadata', async () => {
+    const oldKey = await makeKey('old-pass');
+    const newKey = await makeKey('new-pass');
+    store.set('postgres_connections', new Map([
+      ['pg-1', {
+        id: 'pg-1', host: 'db.example.test',
+        password: await encryptPayload(oldKey, 'database-secret'),
+        ssl_client_key: await encryptPayload(oldKey, 'client-key'),
+        ssl_key_passphrase: null,
+        ssh_password: await encryptPayload(oldKey, 'ssh-secret'),
+        ssh_private_key: null,
+        ssh_private_key_passphrase: null,
+      }],
+    ]));
+
+    await reencryptAll(oldKey, newKey);
+
+    const row = store.get('postgres_connections')!.get('pg-1')!;
+    expect(row.host).toBe('db.example.test');
+    expect(await decryptPayload(newKey, row.password as string)).toBe('database-secret');
+    expect(await decryptPayload(newKey, row.ssl_client_key as string)).toBe('client-key');
+    expect(await decryptPayload(newKey, row.ssh_password as string)).toBe('ssh-secret');
+    await expect(decryptPayload(oldKey, row.password as string)).rejects.toThrow();
+  });
+
   it('rebuilds command tables (encrypted primary keys) without leftovers', async () => {
     const oldKey = await makeKey('old-pass');
     const newKey = await makeKey('new-pass');

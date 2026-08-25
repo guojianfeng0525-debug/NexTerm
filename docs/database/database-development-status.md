@@ -11,7 +11,7 @@ PostgreSQL is the first current provider. The long-term target is a Shared Datab
 - PostgreSQL-first runtime.
 - Shared TypeScript Database Core is established.
 - Provider Runtime Adoption is partial: New Query, Explain, Execute, and Disconnect command availability use the Shared Command Resolver.
-- UI, storage, and IPC remain largely PostgreSQL-specific. The Navigator and result UI consume shared provider-aware contracts through PostgreSQL adapters.
+- UI and IPC remain largely PostgreSQL-specific. Navigator, result UI, and saved-profile flows consume shared provider-aware contracts through PostgreSQL adapters.
 
 ## Completed Atomic Slices
 
@@ -137,9 +137,16 @@ Not migrated:
 - Existing offset paging now uses shared `offset`, `limit`, and `hasMore` metadata derived from PostgreSQL's existing `truncated` response signal. Query results remain non-editable; table results retain existing primary-key metadata as shared column keys.
 - Execution, IPC, Rust, profiles/storage, Navigator, and CodeEditor architecture are unchanged. No database-result CSV export or frontend editable-grid caller exists in the current source, so neither was introduced.
 
+### Feature Batch 9 - Connection Profile Platform - COMPLETE
+
+- Added `DatabaseConnectionProfile<TProviderId, TProviderConfig>` and typed `PostgreSQLConnectionConfig`; host, credentials, read-only, TLS, and SSH remain exclusively provider configuration.
+- Added a production PostgreSQL profile adapter between the shared envelope and the existing flat PostgreSQL persistence/archive DTO.
+- `PostgresConnectionsStorage`, `ToolPostgres`, the connection dialog, Navigator projection, and config archive flow now consume shared PostgreSQL profiles. Connected runtime state remains separate and unchanged.
+- `postgres_connections`, its columns, encryption format, app-lock/re-encryption flow, and archive v1 `postgresConnections` format are intentionally unchanged. Existing flat rows/archives adapt on read; new saves/exports retain the existing format.
+
 ## Last Known Verification
 
-These are the latest known results from Feature Batch 8 verification.
+These are the latest known results from Feature Batch 9 verification.
 
 | Check | Result |
 | --- | --- |
@@ -159,6 +166,12 @@ These are the latest known results from Feature Batch 8 verification.
 | Feature Batch 8 native Tauri E2E | PASS, live PostgreSQL |
 | Feature Batch 8 `pnpm tauri build --debug --no-bundle` | PASS |
 | Feature Batch 8 touched-file lint and `git diff --check` | PASS |
+| Feature Batch 9 focused profile/encryption/archive Vitest | 13 PASS |
+| Feature Batch 9 renderer E2E | PASS |
+| Feature Batch 9 native Tauri E2E | PASS, live PostgreSQL |
+| Feature Batch 9 `pnpm tauri build --debug --no-bundle` | PASS |
+| Feature Batch 9 touched-file lint and `git diff --check` | PASS |
+| Feature Batch 9 full `pnpm lint` | PRE-EXISTING FAILURES outside Batch 9 files |
 | Full `pnpm lint` | PRE-EXISTING FAILURES outside Batch 8 files |
 | `git diff --check` | PASS |
 
@@ -174,8 +187,8 @@ Browser E2E remains a renderer-regression layer and is not Native Desktop E2E.
 ## Current Remaining Coupling
 
 - `ToolPostgres` execution, query-editor, navigator, result, and storage paths
-- `PostgresConnection` and `postgres_connections`
-- Configuration import/export and encryption/re-encryption
+- PostgreSQL profile adapter and intentionally preserved `postgres_connections` persistence/archive DTO
+- PostgreSQL-specific TLS/SSH/read-only settings and provider validation
 - PostgreSQL object loader and table browse translation
 - PostgreSQL completion semantics, catalog IPC mapping, and CodeMirror bridge
 - `postgres_*` IPC and Rust `PostgresState`
@@ -187,7 +200,7 @@ Detailed analysis remains in `postgresql-coupling-report.md`.
 
 | Area | Status |
 | --- | --- |
-| Generic Connection Profile | NOT STARTED |
+| Generic Connection Profile | COMPLETE for PostgreSQL saved-profile envelope/runtime adoption |
 | Generic Storage | NOT STARTED |
 | Navigator Migration | COMPLETE for PostgreSQL connection/catalog/schema/relation runtime |
 | CodeEditor Provider Migration | COMPLETE for PostgreSQL query-editor context |
@@ -201,7 +214,7 @@ Detailed analysis remains in `postgresql-coupling-report.md`.
 
 ## Recommendation Only
 
-Recommended next Feature Batch: Connection Profile Platform.
+Recommended next Feature Batch: Second Provider Architecture Validation.
 
 This is a recommendation only, not active implementation.
 
@@ -219,11 +232,11 @@ This is a recommendation only, not active implementation.
 
 ## Session Handoff
 
-- What changed: Shared provider commands, Navigator nodes, query-editor context, and result/data contracts are each live through PostgreSQL adapters. Query/table result rendering now uses `DatabaseResult` and `DatabaseResultPane`.
-- What did not change: PostgreSQL execution, IPC, Rust, profiles, storage, frontend mutation UI, CSV export, context menus, and shortcuts.
-- Tests: Feature Batch 8 focused contract tests, renderer E2E, debug Tauri build, and native desktop E2E with live PostgreSQL pass.
+- What changed: Saved profiles now use a shared provider-aware envelope with PostgreSQL config and persistence adapters. Existing SQLite storage and archive format remain frozen.
+- What did not change: PostgreSQL execution, IPC, Rust, storage schema, crypto, frontend mutation UI, CSV export, context menus, and shortcuts.
+- Tests: Feature Batch 9 profile/adapter/encryption/archive tests, renderer E2E, debug Tauri build, and native desktop E2E with live PostgreSQL pass.
 - Real Tauri status: available, uses live PostgreSQL, last known result PASS.
 - Known warnings: historical Rust warnings may remain; they were not Slice 2 build failures.
-- Recommended next feature batch: Connection Profile Platform; generic command execution remains explicitly out of scope.
+- Recommended next feature batch: Second Provider Architecture Validation; generic command execution remains explicitly out of scope.
 
 Last updated: 2026-08-25

@@ -38,10 +38,10 @@ import { CodeEditor } from "@/components/code-editor";
 import { generateId } from "@/lib/toolbox/toolbox-storage";
 import { PostgresConnectionsStorage } from "@/lib/toolbox/postgres-storage";
 import type {
-  PostgresConnection,
-  PostgresEnvironment,
-  PostgresSslMode,
-} from "@/lib/toolbox/toolbox-types";
+  PostgreSQLConnectionConfig,
+  PostgreSQLConnectionProfile,
+  PostgreSQLSslMode,
+} from "@/lib/database/postgresql-profile-adapter";
 import { createPostgresQueryEditorContext } from "@/lib/database/postgresql-query-editor";
 import type { PostgresCatalogLookup } from "@/lib/postgres-completion";
 import { resolveDatabaseCommand } from "@/lib/database/command-registry";
@@ -99,22 +99,25 @@ async function loadNavigatorChildren(
   }
 }
 
-function newConnection(): PostgresConnection {
+function newConnection(): PostgreSQLConnectionProfile {
   const now = Date.now();
   return {
     id: generateId("postgres"),
     name: "PostgreSQL",
+    providerId: "postgresql",
     environment: "development",
-    host: "127.0.0.1",
-    port: 5432,
-    database: "postgres",
-    username: "",
-    readOnly: false,
-    autoCommit: true,
-    sslMode: "prefer",
-    sshEnabled: false,
     createdAt: now,
     updatedAt: now,
+    providerConfig: {
+      host: "127.0.0.1",
+      port: 5432,
+      database: "postgres",
+      username: "",
+      readOnly: false,
+      autoCommit: true,
+      sslMode: "prefer",
+      sshEnabled: false,
+    },
   };
 }
 
@@ -128,12 +131,20 @@ function newQuery(): WorkspaceTab {
   };
 }
 
+function toPostgresNavigatorConnection(profile: PostgreSQLConnectionProfile) {
+  return {
+    id: profile.id,
+    name: profile.name,
+    database: profile.providerConfig.database,
+  };
+}
+
 export function ToolPostgres() {
   const { t } = useTranslation();
   const [connections, setConnections] = useState(() =>
     PostgresConnectionsStorage.load(),
   );
-  const [draft, setDraft] = useState<PostgresConnection>(
+  const [draft, setDraft] = useState<PostgreSQLConnectionProfile>(
     () => PostgresConnectionsStorage.load()[0] ?? newConnection(),
   );
   const [, setSelectedId] = useState<string | null>(
@@ -162,6 +173,7 @@ export function ToolPostgres() {
   const [tableOffset, setTableOffset] = useState(0);
 
   const tab = tabs.find((item) => item.id === activeTab) ?? tabs[0];
+  const postgresConfig = draft.providerConfig;
   const executeCommand = resolveDatabaseCommand("database.query.execute", {
     scope: "QUERY_EDITOR",
     provider: postgresqlProvider,
@@ -200,15 +212,22 @@ export function ToolPostgres() {
       ? [draft]
       : connections;
   const navigatorRoots = navigatorConnections.map((connection) =>
-    createPostgresNavigatorConnectionNode(connection),
+    createPostgresNavigatorConnectionNode(toPostgresNavigatorConnection(connection)),
   );
   const navigatorNodes = [
     ...navigatorRoots,
     ...Object.values(navigatorChildren).flatMap((children) => children ?? []),
   ];
-  const update = <K extends keyof PostgresConnection>(
+  const update = <K extends keyof PostgreSQLConnectionConfig>(
     key: K,
-    value: PostgresConnection[K],
+    value: PostgreSQLConnectionConfig[K],
+  ) => setDraft((current) => ({
+    ...current,
+    providerConfig: { ...current.providerConfig, [key]: value },
+  }));
+  const updateProfile = <K extends "name" | "environment">(
+    key: K,
+    value: PostgreSQLConnectionProfile[K],
   ) => setDraft((current) => ({ ...current, [key]: value }));
 
   useEffect(() => {
@@ -222,7 +241,9 @@ export function ToolPostgres() {
     if (!connected) return;
 
     const loadInitialNavigatorPath = async () => {
-      const connection = createPostgresNavigatorConnectionNode(draft);
+      const connection = createPostgresNavigatorConnectionNode(
+        toPostgresNavigatorConnection(draft),
+      );
       const catalog = await loadNavigatorChildren(
         connection,
         t("toolbox.postgres.tables"),
@@ -286,9 +307,9 @@ export function ToolPostgres() {
   const save = async () => {
     if (
       !draft.name.trim() ||
-      !draft.host.trim() ||
-      !draft.database.trim() ||
-      !draft.username.trim()
+      !postgresConfig.host.trim() ||
+      !postgresConfig.database.trim() ||
+      !postgresConfig.username.trim()
     ) {
       toast.error(t("toolbox.postgres.required"));
       return;
@@ -321,27 +342,27 @@ export function ToolPostgres() {
         {
           request: {
             connectionId: draft.id,
-            host: draft.host,
-            port: draft.port,
-            database: draft.database,
-            username: draft.username,
-            password: draft.password,
-            readOnly: draft.readOnly,
-            sslMode: draft.sslMode,
-            sslRootCert: draft.sslRootCert,
-            sslClientCert: draft.sslClientCert,
-            sslClientKey: draft.sslClientKey,
-            ssh: draft.sshEnabled
+            host: postgresConfig.host,
+            port: postgresConfig.port,
+            database: postgresConfig.database,
+            username: postgresConfig.username,
+            password: postgresConfig.password,
+            readOnly: postgresConfig.readOnly,
+            sslMode: postgresConfig.sslMode,
+            sslRootCert: postgresConfig.sslRootCert,
+            sslClientCert: postgresConfig.sslClientCert,
+            sslClientKey: postgresConfig.sslClientKey,
+            ssh: postgresConfig.sshEnabled
               ? {
-                  host: draft.sshHost,
-                  port: draft.sshPort ?? 22,
-                  username: draft.sshUsername,
-                  authMethod: draft.sshAuthMethod ?? "password",
-                  password: draft.sshPassword,
-                  privateKey: draft.sshPrivateKey,
-                  privateKeyPath: draft.sshPrivateKeyPath,
-                  privateKeyPassphrase: draft.sshPrivateKeyPassphrase,
-                  hostKeyFingerprint: draft.sshHostKeyFingerprint,
+                  host: postgresConfig.sshHost,
+                  port: postgresConfig.sshPort ?? 22,
+                  username: postgresConfig.sshUsername,
+                  authMethod: postgresConfig.sshAuthMethod ?? "password",
+                  password: postgresConfig.sshPassword,
+                  privateKey: postgresConfig.sshPrivateKey,
+                  privateKeyPath: postgresConfig.sshPrivateKeyPath,
+                  privateKeyPassphrase: postgresConfig.sshPrivateKeyPassphrase,
+                  hostKeyFingerprint: postgresConfig.sshHostKeyFingerprint,
                 }
               : undefined,
           },
@@ -532,7 +553,7 @@ export function ToolPostgres() {
         <div className="flex-1" />
         <span className="mr-2 text-[11px] text-muted-foreground">
           {connected
-            ? `${draft.database} / ${schema ?? ""}`
+            ? `${postgresConfig.database} / ${schema ?? ""}`
             : t("toolbox.postgres.disconnected")}
         </span>
         {connected ? (
@@ -680,7 +701,7 @@ export function ToolPostgres() {
                       catalogLookup
                         ? createPostgresQueryEditorContext({
                             connectionId: draft.id,
-                            catalog: draft.database,
+                            catalog: postgresConfig.database,
                             schema: schema ?? undefined,
                             lookup: catalogLookup,
                           })
@@ -706,7 +727,7 @@ export function ToolPostgres() {
                   void browse(
                     {
                       connectionId: draft.id,
-                      database: draft.database,
+                      database: postgresConfig.database,
                       schema: tab.object.schema,
                       relation: tab.object.name,
                     },
@@ -718,7 +739,7 @@ export function ToolPostgres() {
                   void browse(
                     {
                       connectionId: draft.id,
-                      database: draft.database,
+                      database: postgresConfig.database,
                       schema: tab.object.schema,
                       relation: tab.object.name,
                     },
@@ -761,6 +782,7 @@ export function ToolPostgres() {
         setPage={setDialogPage}
         draft={draft}
         update={update}
+        updateProfile={updateProfile}
         save={save}
         connect={connect}
         connecting={connecting}
@@ -809,6 +831,7 @@ function ConnectionDialog({
   setPage,
   draft,
   update,
+  updateProfile,
   save,
   connect,
   connecting,
@@ -818,16 +841,21 @@ function ConnectionDialog({
   onOpenChange: (open: boolean) => void;
   page: DialogPage;
   setPage: (page: DialogPage) => void;
-  draft: PostgresConnection;
-  update: <K extends keyof PostgresConnection>(
+  draft: PostgreSQLConnectionProfile;
+  update: <K extends keyof PostgreSQLConnectionConfig>(
     key: K,
-    value: PostgresConnection[K],
+    value: PostgreSQLConnectionConfig[K],
+  ) => void;
+  updateProfile: <K extends "name" | "environment">(
+    key: K,
+    value: PostgreSQLConnectionProfile[K],
   ) => void;
   save: () => Promise<void>;
   connect: () => Promise<void>;
   connecting: boolean;
   t: TFunction;
 }) {
+  const config = draft.providerConfig;
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
@@ -859,38 +887,38 @@ function ConnectionDialog({
                   <Field label={t("toolbox.postgres.name")}>
                     <Input
                       value={draft.name}
-                      onChange={(e) => update("name", e.target.value)}
+                      onChange={(e) => updateProfile("name", e.target.value)}
                     />
                   </Field>
                   <Field label={t("toolbox.postgres.host")}>
                     <Input
-                      value={draft.host}
+                      value={config.host}
                       onChange={(e) => update("host", e.target.value)}
                     />
                   </Field>
                   <Field label={t("toolbox.postgres.port")}>
                     <Input
                       type="number"
-                      value={draft.port}
+                      value={config.port}
                       onChange={(e) => update("port", Number(e.target.value))}
                     />
                   </Field>
                   <Field label={t("toolbox.postgres.database")}>
                     <Input
-                      value={draft.database}
+                      value={config.database}
                       onChange={(e) => update("database", e.target.value)}
                     />
                   </Field>
                   <Field label={t("toolbox.postgres.username")}>
                     <Input
-                      value={draft.username}
+                      value={config.username}
                       onChange={(e) => update("username", e.target.value)}
                     />
                   </Field>
                   <Field label={t("toolbox.postgres.password")}>
                     <Input
                       type="password"
-                      value={draft.password ?? ""}
+                      value={config.password ?? ""}
                       onChange={(e) => update("password", e.target.value)}
                     />
                   </Field>
@@ -898,7 +926,7 @@ function ConnectionDialog({
                     <Select
                       value={draft.environment}
                       onValueChange={(v) =>
-                        update("environment", v as PostgresEnvironment)
+                        updateProfile("environment", v as PostgreSQLConnectionProfile["environment"])
                       }
                     >
                       <SelectTrigger>
@@ -917,7 +945,7 @@ function ConnectionDialog({
                   </Field>
                   <div className="flex items-center gap-2 pt-6">
                     <Switch
-                      checked={draft.readOnly}
+                      checked={config.readOnly}
                       onCheckedChange={(v) => update("readOnly", v)}
                     />
                     <Label>{t("toolbox.postgres.readOnlyConnection")}</Label>
@@ -928,21 +956,21 @@ function ConnectionDialog({
                 <>
                   <div className="col-span-2 flex items-center gap-2">
                     <Switch
-                      checked={draft.sshEnabled}
+                      checked={config.sshEnabled}
                       onCheckedChange={(v) => update("sshEnabled", v)}
                     />
                     <Label>{t("toolbox.postgres.sshTunnel")}</Label>
                   </div>
                   <Field label={t("toolbox.postgres.sshHost")}>
                     <Input
-                      value={draft.sshHost ?? ""}
+                      value={config.sshHost ?? ""}
                       onChange={(e) => update("sshHost", e.target.value)}
                     />
                   </Field>
                   <Field label={t("toolbox.postgres.sshPort")}>
                     <Input
                       type="number"
-                      value={draft.sshPort ?? 22}
+                      value={config.sshPort ?? 22}
                       onChange={(e) =>
                         update("sshPort", Number(e.target.value))
                       }
@@ -950,21 +978,21 @@ function ConnectionDialog({
                   </Field>
                   <Field label={t("toolbox.postgres.sshUsername")}>
                     <Input
-                      value={draft.sshUsername ?? ""}
+                      value={config.sshUsername ?? ""}
                       onChange={(e) => update("sshUsername", e.target.value)}
                     />
                   </Field>
                   <Field label={t("toolbox.postgres.sshPassword")}>
                     <Input
                       type="password"
-                      value={draft.sshPassword ?? ""}
+                      value={config.sshPassword ?? ""}
                       onChange={(e) => update("sshPassword", e.target.value)}
                     />
                   </Field>
                   <div className="col-span-2">
                     <Field label={t("toolbox.postgres.sshFingerprint")}>
                       <Input
-                        value={draft.sshHostKeyFingerprint ?? ""}
+                        value={config.sshHostKeyFingerprint ?? ""}
                         onChange={(e) =>
                           update("sshHostKeyFingerprint", e.target.value)
                         }
@@ -977,7 +1005,7 @@ function ConnectionDialog({
                 <>
                   <div className="col-span-2 flex items-center gap-2">
                     <Switch
-                      checked={draft.sslMode !== "disable"}
+                      checked={config.sslMode !== "disable"}
                       onCheckedChange={(enabled) =>
                         update("sslMode", enabled ? "prefer" : "disable")
                       }
@@ -987,12 +1015,12 @@ function ConnectionDialog({
                   <div className="col-span-2">
                     <Field label={t("toolbox.postgres.sslMode")}>
                       <Select
-                        value={draft.sslMode}
+                        value={config.sslMode}
                         onValueChange={(v) =>
-                          update("sslMode", v as PostgresSslMode)
+                          update("sslMode", v as PostgreSQLSslMode)
                         }
                       >
-                        <SelectTrigger disabled={draft.sslMode === "disable"}>
+                        <SelectTrigger disabled={config.sslMode === "disable"}>
                           <SelectValue />
                         </SelectTrigger>
                         <SelectContent>
@@ -1014,21 +1042,21 @@ function ConnectionDialog({
                       </Select>
                     </Field>
                   </div>
-                  {draft.sslMode !== "disable" && (
+                  {config.sslMode !== "disable" && (
                     <>
                       <TextField
                         label={t("toolbox.postgres.sslRootCert")}
-                        value={draft.sslRootCert ?? ""}
+                        value={config.sslRootCert ?? ""}
                         onChange={(v) => update("sslRootCert", v)}
                       />
                       <TextField
                         label={t("toolbox.postgres.sslClientCert")}
-                        value={draft.sslClientCert ?? ""}
+                        value={config.sslClientCert ?? ""}
                         onChange={(v) => update("sslClientCert", v)}
                       />
                       <TextField
                         label={t("toolbox.postgres.sslClientKey")}
-                        value={draft.sslClientKey ?? ""}
+                        value={config.sslClientKey ?? ""}
                         onChange={(v) => update("sslClientKey", v)}
                       />
                     </>
