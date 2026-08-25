@@ -31,6 +31,7 @@ export type DbTable =
   | 'api_collections'
   | 'api_environments'
   | 'api_request_history'
+  | 'postgres_connections'
   | 'app_settings'
   | 'layout_config'
   | 'terminal_appearance'

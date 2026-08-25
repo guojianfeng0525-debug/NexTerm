@@ -23,6 +23,7 @@ const ENCRYPTED_FIELDS: Record<string, string[]> = {
   api_collections: ['request'],
   api_environments: ['variables'],
   api_request_history: ['details'],
+  postgres_connections: ['password', 'ssl_client_key', 'ssl_key_passphrase', 'ssh_password', 'ssh_private_key', 'ssh_private_key_passphrase'],
 };
 
 /** Tables whose primary key is itself encrypted — rebuilt wholesale. */

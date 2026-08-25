@@ -6,7 +6,8 @@ import { ConnectionProfileManager, type ConnectionProfile } from './connection-p
 import { prefGet, prefSet } from './preferences';
 import { verifyAppLock, getAppLockKey } from './toolbox/app-lock';
 import { AppsStorage, OrchestrationsStorage, ServicesStorage, TunnelsStorage, NotesStorage, generateId } from './toolbox/toolbox-storage';
-import type { NoteItem, ServiceConfig, ServiceOrchestration, ToolboxApp } from './toolbox/toolbox-types';
+import { PostgresConnectionsStorage } from './toolbox/postgres-storage';
+import type { NoteItem, PostgresConnection, ServiceConfig, ServiceOrchestration, ToolboxApp } from './toolbox/toolbox-types';
 import { buildVaultExcel, parseVaultExcel } from './toolbox/vault-excel';
 import { loadRecords, saveRecords } from './toolbox/records-storage';
 import { listDocuments, exportDocument, importDocument, deleteDocument } from './toolbox/documents-storage';
@@ -33,6 +34,7 @@ interface AppConfig {
   services: ServiceConfig[];
   orchestrations: ServiceOrchestration[];
   profiles: ConnectionProfile[];
+  postgresConnections: PostgresConnection[];
 }
 
 const encoder = new TextEncoder();
@@ -113,7 +115,7 @@ export async function exportAllConfig(password: string): Promise<boolean> {
     appearance: prefGet('terminalAppearance', {}), editor: prefGet('nexterm-editor-config', {}),
     language: prefGet('nexterm-language', 'auto'),
     apps: AppsStorage.load(), services: ServicesStorage.load(), orchestrations: OrchestrationsStorage.load(),
-    profiles: ConnectionProfileManager.getProfiles(),
+    profiles: ConnectionProfileManager.getProfiles(), postgresConnections: PostgresConnectionsStorage.load(),
   };
   const vaultRows = (await loadRecords(key)).map(({ record }) => ({
     name: record.name, address: record.address, username: record.username, password: record.password,
@@ -154,6 +156,7 @@ export async function importAllConfig(merge = false): Promise<boolean> {
     ServicesStorage.load().forEach((item) => ServicesStorage.remove(item.id));
     OrchestrationsStorage.load().forEach((item) => OrchestrationsStorage.remove(item.id));
     NotesStorage.load().forEach((item) => NotesStorage.remove(item.id));
+    await PostgresConnectionsStorage.replace([]);
   }
   TunnelsStorage.save(merge ? mergeById(TunnelsStorage.load(), tunnels) : tunnels);
   const config = parseJson<AppConfig>(entries, 'app-config.json');
@@ -163,6 +166,9 @@ export async function importAllConfig(merge = false): Promise<boolean> {
   prefSet('nexterm-editor-config', config.editor);
   prefSet('nexterm-language', config.language);
   ConnectionProfileManager.importProfiles(JSON.stringify(config.profiles ?? []), merge);
+  await PostgresConnectionsStorage.replace(merge
+    ? mergeById(PostgresConnectionsStorage.load(), config.postgresConnections ?? [])
+    : (config.postgresConnections ?? []));
   AppsStorage.save(merge ? mergeById(AppsStorage.load(), config.apps ?? []) : (config.apps ?? []));
   ServicesStorage.save(merge ? mergeById(ServicesStorage.load(), config.services ?? []) : (config.services ?? []));
   OrchestrationsStorage.save(merge ? mergeById(OrchestrationsStorage.load(), config.orchestrations ?? []) : (config.orchestrations ?? []));

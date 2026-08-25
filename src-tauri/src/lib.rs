@@ -9,6 +9,7 @@ mod jump;
 mod ls_parser;
 mod os_detect;
 mod proxy;
+mod postgres;
 mod rdp_client;
 mod sftp_client;
 pub mod ssh;
@@ -301,7 +302,11 @@ pub fn run() {
     // Create connection manager
     let connection_manager = Arc::new(ConnectionManager::new());
 
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    #[cfg(debug_assertions)]
+    let builder = builder.plugin(tauri_plugin_wdio_webdriver::init());
+
+    builder
         // Single-instance: a second launch focuses the existing window instead
         // of spawning a whole new WebView2 process group (each instance costs
         // ~7 Chromium processes).
@@ -341,9 +346,15 @@ pub fn run() {
                 // the *user's* executable dir (~/.local/bin on Linux) and is
                 // unsupported on macOS/Windows.
                 let mut opened = false;
-                let exe_dir = std::env::current_exe()
-                    .ok()
-                    .and_then(|p| p.parent().map(|p| p.to_path_buf()));
+                // Desktop E2E sets this explicit profile directory so its encrypted
+                // SQLite data never shares the developer's portable application DB.
+                let e2e_data_dir =
+                    std::env::var_os("NEXTERM_DATA_DIR").map(std::path::PathBuf::from);
+                let exe_dir = e2e_data_dir.or_else(|| {
+                    std::env::current_exe()
+                        .ok()
+                        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+                });
                 if let Some(dir) = exe_dir {
                     if let Err(e) = std::fs::create_dir_all(&dir) {
                         tracing::warn!("Failed to prepare db directory {:?}: {}", dir, e);
@@ -448,6 +459,7 @@ pub fn run() {
         })
         .manage(connection_manager)
         .manage(toolbox::ToolboxState::default())
+        .manage(postgres::PostgresState::default())
         .invoke_handler(tauri::generate_handler![
             commands::ssh_connect,
             commands::ssh_cancel_connect,
@@ -555,6 +567,17 @@ pub fn run() {
             toolbox::api_ws_connect,
             toolbox::api_ws_send,
             toolbox::api_ws_close,
+            // PostgreSQL database workspace
+            postgres::postgres_connect,
+            postgres::postgres_disconnect,
+            postgres::postgres_execute,
+            postgres::postgres_explain,
+            postgres::postgres_transaction,
+            postgres::postgres_table_data,
+            postgres::postgres_table_update,
+            postgres::postgres_catalog_schemas,
+            postgres::postgres_catalog_search,
+            postgres::postgres_ssh_fingerprint,
             // JAR decompiler commands
             jar_commands::jar_project_open,
             jar_commands::jar_project_reopen,

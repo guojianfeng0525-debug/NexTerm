@@ -12,6 +12,7 @@ import {
   History as HistoryIcon,
   Brackets,
   Archive,
+  Database,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { FileText } from 'lucide-react';
@@ -34,7 +35,8 @@ interface NavEntry {
     | 'toolbox.history.title'
     | 'toolbox.apiDebug.title'
     | 'toolbox.documents.title'
-    | 'toolbox.jar.title';
+    | 'toolbox.jar.title'
+    | 'toolbox.postgres.title';
 }
 
 const NAV_ENTRIES: NavEntry[] = [
@@ -48,6 +50,7 @@ const NAV_ENTRIES: NavEntry[] = [
   { id: 'history', icon: HistoryIcon, labelKey: 'toolbox.history.title' },
   { id: 'documents', icon: FileText, labelKey: 'toolbox.documents.title' },
   { id: 'jar', icon: Archive, labelKey: 'toolbox.jar.title' },
+  { id: 'postgres', icon: Database, labelKey: 'toolbox.postgres.title' },
   { id: 'api', icon: Brackets, labelKey: 'toolbox.apiDebug.title' },
 ];
 
@@ -78,6 +81,7 @@ export function ToolboxNav({ section, onSelect }: ToolboxNavProps) {
                 <button
                   type="button"
                   onClick={() => onSelect(id)}
+                  data-testid={`toolbox-nav-${id}`}
                   className={cn(
                     'flex h-9 w-9 items-center justify-center rounded-lg transition-colors',
                     active

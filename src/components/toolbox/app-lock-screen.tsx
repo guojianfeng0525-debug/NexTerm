@@ -161,6 +161,7 @@ export function AppLockScreen({ onUnlock }: AppLockScreenProps) {
             {error && <p className="text-xs text-destructive">{error}</p>}
 
             <Button
+              data-testid="app-lock-submit"
               className="w-full gap-1.5"
               disabled={busy}
               onClick={() => void handleSubmit()}

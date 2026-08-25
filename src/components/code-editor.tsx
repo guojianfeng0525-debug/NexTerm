@@ -9,7 +9,10 @@ import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirro
 import { syntaxHighlighting, defaultHighlightStyle, indentOnInput, bracketMatching, foldGutter, foldKeymap, StreamLanguage } from "@codemirror/language";
 import { searchKeymap, highlightSelectionMatches, setSearchQuery, findNext, findPrevious, SearchQuery } from "@codemirror/search";
 import { oneDark } from "@codemirror/theme-one-dark";
+import { autocompletion, completionKeymap } from "@codemirror/autocomplete";
+import { PostgreSQL } from "@codemirror/lang-sql";
 import { loadEditorConfig, EDITOR_CONFIG_CHANGED_EVENT, type EditorConfig } from "@/lib/editor-config";
+import { postgresCatalogCompletionSource, postgresCompletionSource, type PostgresCatalogLookup } from "@/lib/postgres-completion";
 import type { NoteLanguage } from "@/lib/toolbox/toolbox-types";
 
 // Language imports
@@ -58,7 +61,7 @@ const batchMode = simpleMode({
 export function getLanguageByName(language: NoteLanguage): Extension | null {
   switch (language) {
     case "sql":
-      return sql();
+      return sql({ dialect: PostgreSQL });
     case "shell":
       return StreamLanguage.define(legacyShell);
     case "cmd":
@@ -153,7 +156,7 @@ function getLanguageExtension(filename: string): Extension | null {
     case "kts":
       return java();
     case "sql":
-      return sql();
+      return sql({ dialect: PostgreSQL });
     case "php":
       return php();
     case "sh":
@@ -187,6 +190,8 @@ interface CodeEditorProps {
   dark?: boolean;
   /** Additional CSS class for the wrapper */
   className?: string;
+  /** Optional connected PostgreSQL catalog lookup for table/column/function completion. */
+  postgresCatalog?: PostgresCatalogLookup;
 }
 
 export function CodeEditor({
@@ -197,10 +202,12 @@ export function CodeEditor({
   readOnly = false,
   dark = true,
   className = "",
+  postgresCatalog,
 }: CodeEditorProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
   const onChangeRef = useRef(onChange);
+  const postgresCatalogRef = useRef<PostgresCatalogLookup | undefined>(postgresCatalog);
   const { t } = useTranslation();
   const [editorConfig, setEditorConfig] = useState<EditorConfig>(() => loadEditorConfig());
   // Custom themed + i18n search panel (replaces CodeMirror's built-in panel).
@@ -221,6 +228,10 @@ export function CodeEditor({
     onChangeRef.current = onChange;
   }, [onChange]);
 
+  useEffect(() => {
+    postgresCatalogRef.current = postgresCatalog;
+  }, [postgresCatalog]);
+
   const buildExtensions = useCallback((): Extension[] => {
     const exts: Extension[] = [
       highlightSpecialChars(),
@@ -237,6 +248,7 @@ export function CodeEditor({
         ...historyKeymap,
         ...foldKeymap,
         ...searchKeymap,
+        ...completionKeymap,
         indentWithTab,
         // Override the built-in find panel with our themed search bar.
         {
@@ -310,6 +322,10 @@ export function CodeEditor({
     const lang = language ? getLanguageByName(language) : getLanguageExtension(filename);
     if (lang) {
       exts.push(lang);
+    }
+
+    if (language === "sql" || filename.toLowerCase().endsWith(".sql")) {
+      exts.push(autocompletion({ override: [(context) => postgresCatalogRef.current ? postgresCatalogCompletionSource(context, postgresCatalogRef.current) : postgresCompletionSource(context)], activateOnTyping: true }));
     }
 
     return exts;

@@ -19,6 +19,7 @@ import { compactDocumentHistory, initializeDocumentsStore } from './toolbox/docu
 import { hydrateWorkspace } from './terminal-group-serializer';
 import { migrateLegacyStorage } from './migration';
 import { hydrateJarStorage } from './toolbox/jar-storage';
+import { hydratePostgresConnections } from './toolbox/postgres-storage';
 
 /**
  * Hydrate every SQLite-backed store. Never throws — each store degrades to
@@ -45,6 +46,7 @@ export async function initializeAllStorage(): Promise<void> {
     hydrateWorkspace(),
     initializeDocumentsStore(),
     hydrateJarStorage(),
+    hydratePostgresConnections(),
   ]);
   // Run after all initial reads finish because VACUUM requires an exclusive lock.
   await compactDocumentHistory();

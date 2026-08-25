@@ -219,8 +219,51 @@ export interface NoteItem {
   updatedAt: number;
 }
 
+/* ── PostgreSQL connections ─────────────────────────────────────────────── */
+
+export type PostgresEnvironment = 'development' | 'test' | 'production';
+export type PostgresSslMode = 'disable' | 'allow' | 'prefer' | 'require' | 'verify-ca' | 'verify-full';
+export type PostgresSshAuthMethod = 'password' | 'privateKey';
+
+/** A saved PostgreSQL data source. Secret fields are encrypted at rest. */
+export interface PostgresConnection {
+  id: string;
+  name: string;
+  group?: string;
+  environment: PostgresEnvironment;
+  host: string;
+  port: number;
+  database: string;
+  username: string;
+  password?: string;
+  defaultSchema?: string;
+  readOnly: boolean;
+  autoCommit: boolean;
+  sslMode: PostgresSslMode;
+  sslRootCert?: string;
+  sslClientCert?: string;
+  sslClientKey?: string;
+  sslKeyPassphrase?: string;
+  sshEnabled: boolean;
+  /** ID of the saved NexTerm SSH server selected as this jump host. */
+  sshConnectionId?: string;
+  sshHost?: string;
+  sshPort?: number;
+  sshUsername?: string;
+  sshAuthMethod?: PostgresSshAuthMethod;
+  sshPassword?: string;
+  sshPrivateKey?: string;
+  /** Existing SSH server profile's private-key path, used without duplicating key material. */
+  sshPrivateKeyPath?: string;
+  sshPrivateKeyPassphrase?: string;
+  /** Approved SHA-256 SSH server key fingerprint. */
+  sshHostKeyFingerprint?: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
 /* ── Toolbox tab view ids ────────────────────────────────────────────────── */
 
-export type ToolboxViewId = 'apps' | 'vault' | 'tunnels' | 'services' | 'notes' | 'history' | 'documents' | 'jar';
+export type ToolboxViewId = 'apps' | 'vault' | 'tunnels' | 'services' | 'notes' | 'history' | 'documents' | 'jar' | 'postgres';
 
-export const TOOLBOX_VIEW_IDS: ToolboxViewId[] = ['apps', 'vault', 'tunnels', 'services', 'notes', 'history', 'documents', 'jar'];
+export const TOOLBOX_VIEW_IDS: ToolboxViewId[] = ['apps', 'vault', 'tunnels', 'services', 'notes', 'history', 'documents', 'jar', 'postgres'];

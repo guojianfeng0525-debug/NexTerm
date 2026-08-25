@@ -25,7 +25,7 @@ use tauri::State;
 
 /// Allow-listed normalized tables. Table names are validated against this
 /// list before being interpolated into SQL, so no injection is possible.
-pub const TABLES: [&str; 37] = [
+pub const TABLES: [&str; 38] = [
     "connections",
     "folders",
     "active_connections",
@@ -43,6 +43,7 @@ pub const TABLES: [&str; 37] = [
     "api_collections",
     "api_environments",
     "api_request_history",
+    "postgres_connections",
     // Preferences — normalized single-row tables (no JSON blob columns).
     "app_settings",
     "layout_config",
@@ -155,6 +156,8 @@ impl DbState {
             ("tunnels", "jump_port", "jump_port INTEGER"),
             ("tunnels", "jump_username", "jump_username TEXT"),
             ("tunnels", "jump_password", "jump_password TEXT"),
+            ("postgres_connections", "ssh_private_key_path", "ssh_private_key_path TEXT"),
+            ("postgres_connections", "ssh_connection_id", "ssh_connection_id TEXT"),
             (
                 "app_settings",
                 "command_suggestions",
@@ -588,6 +591,7 @@ fn pk_column(table: &str) -> Result<&'static str, String> {
         "api_collections" => "id",
         "api_environments" => "id",
         "api_request_history" => "id",
+        "postgres_connections" => "id",
         "app_settings" => "id",
         "layout_config" => "id",
         "terminal_appearance" => "id",
@@ -1107,6 +1111,38 @@ CREATE TABLE IF NOT EXISTS "api_request_history" (
   duration_ms INTEGER NOT NULL DEFAULT 0,
   timestamp INTEGER NOT NULL,
   details TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS "postgres_connections" (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL DEFAULT '',
+  group_name TEXT,
+  environment TEXT NOT NULL DEFAULT 'development',
+  host TEXT NOT NULL DEFAULT '',
+  port INTEGER NOT NULL DEFAULT 5432,
+  database_name TEXT NOT NULL DEFAULT '',
+  username TEXT NOT NULL DEFAULT '',
+  password TEXT,
+  default_schema TEXT,
+  read_only INTEGER NOT NULL DEFAULT 0,
+  auto_commit INTEGER NOT NULL DEFAULT 1,
+  ssl_mode TEXT NOT NULL DEFAULT 'prefer',
+  ssl_root_cert TEXT,
+  ssl_client_cert TEXT,
+  ssl_client_key TEXT,
+  ssl_key_passphrase TEXT,
+  ssh_enabled INTEGER NOT NULL DEFAULT 0,
+  ssh_connection_id TEXT,
+  ssh_host TEXT,
+  ssh_port INTEGER,
+  ssh_username TEXT,
+  ssh_auth_method TEXT,
+  ssh_password TEXT,
+  ssh_private_key TEXT,
+  ssh_private_key_path TEXT,
+  ssh_private_key_passphrase TEXT,
+  ssh_host_key_fingerprint TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS "jar_preferences" (
   id INTEGER PRIMARY KEY CHECK (id = 1),
