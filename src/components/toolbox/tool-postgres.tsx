@@ -182,6 +182,16 @@ export function ToolPostgres() {
   const [transactionActive, setTransactionActive] = useState(false);
 
   const tab = tabs.find((item) => item.id === activeTab) ?? tabs[0];
+  useEffect(() => {
+    const pasteSqlNote = (event: Event) => {
+      const detail = (event as CustomEvent<{ content?: string; handled?: boolean }>).detail;
+      if (!detail?.content || !tab) return;
+      patchTab(tab.id, { sql: detail.content, dirty: true });
+      detail.handled = true;
+    };
+    window.addEventListener('nexterm:paste-sql-note', pasteSqlNote);
+    return () => window.removeEventListener('nexterm:paste-sql-note', pasteSqlNote);
+  }, [tab]);
   const tableOffset =
     tab?.result?.kind === "tabular" ? tab.result.pagination?.offset ?? 0 : 0;
   const postgresConfig = draft.providerConfig;

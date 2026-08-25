@@ -53,6 +53,8 @@ export interface ConnectionData {
   jumpUsername?: string;
   jumpPassword?: string; // Encrypted at rest via the SQLite store
   jumpUseKey?: boolean; // Authenticate on the jump host with the same key as the target
+  hostKeyFingerprint?: string;
+  jumpHostKeyFingerprint?: string;
   // SSH-specific advanced
   defaultDirectory?: string; // initial working directory on connect
   compression?: boolean;
@@ -124,6 +126,8 @@ function connToRow(c: ConnectionData): Record<string, unknown> {
     jump_host: c.jumpHost ?? null,
     jump_port: c.jumpPort ?? null,
     jump_username: c.jumpUsername ?? null,
+    host_key_fingerprint: c.hostKeyFingerprint ?? null,
+    jump_host_key_fingerprint: c.jumpHostKeyFingerprint ?? null,
     default_directory: c.defaultDirectory ?? null,
     compression: c.compression ? 1 : 0,
     keep_alive: c.keepAlive ? 1 : 0,
@@ -161,6 +165,8 @@ function rowToConn(row: Record<string, unknown>): ConnectionData {
     jumpHost: (row.jump_host as string) ?? undefined,
     jumpPort: (row.jump_port as number) ?? undefined,
     jumpUsername: (row.jump_username as string) ?? undefined,
+    hostKeyFingerprint: (row.host_key_fingerprint as string) ?? undefined,
+    jumpHostKeyFingerprint: (row.jump_host_key_fingerprint as string) ?? undefined,
     jumpUseKey: !!row.jump_use_key,
     defaultDirectory: (row.default_directory as string) ?? undefined,
     compression: !!row.compression,
@@ -451,10 +457,17 @@ export class ConnectionStorageManager {
 
     if (index === -1) return null;
 
+    const previous = connections[index];
     connections[index] = {
-      ...connections[index],
+      ...previous,
       ...updates,
     };
+    if ((updates.host !== undefined && updates.host !== previous.host) || (updates.port !== undefined && updates.port !== previous.port)) {
+      connections[index].hostKeyFingerprint = undefined;
+    }
+    if ((updates.jumpHost !== undefined && updates.jumpHost !== previous.jumpHost) || (updates.jumpPort !== undefined && updates.jumpPort !== previous.jumpPort)) {
+      connections[index].jumpHostKeyFingerprint = undefined;
+    }
 
     persistConnections(connections);
     return connections[index];

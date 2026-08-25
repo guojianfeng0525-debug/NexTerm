@@ -51,6 +51,7 @@ export interface ConnectionConfig {
   host: string;
   port: number;
   username: string;
+  description?: string;
   authMethod: 'password' | 'publickey' | 'keyboard-interactive' | 'anonymous';
   password?: string;
   privateKeyPath?: string;
@@ -69,6 +70,8 @@ export interface ConnectionConfig {
   jumpUsername?: string;
   jumpPassword?: string;
   jumpUseKey?: boolean;
+  hostKeyFingerprint?: string;
+  jumpHostKeyFingerprint?: string;
 
   // FTP specific
   ftpsEnabled?: boolean;
@@ -119,6 +122,7 @@ export function ConnectionDialog({
     host: '',
     port: 22,
     username: '',
+    description: '',
     authMethod: 'password',
     password: '',
     privateKeyPath: '',
@@ -341,6 +345,24 @@ export function ConnectionDialog({
       return;
     }
 
+    let connectionConfig = config;
+    if ((config.protocol === 'SSH' || config.protocol === 'SFTP') && !config.hostKeyFingerprint) {
+      try {
+        const { fingerprint } = await invoke<{ fingerprint: string }>('ssh_host_key_fingerprint', {
+          request: { host: config.host, port: config.port || 22 },
+        });
+        if (!window.confirm(t('connectionDialog.hostKey.confirm', { host: config.host, port: config.port || 22, fingerprint }))) {
+          resetConnectionState();
+          return;
+        }
+        connectionConfig = { ...config, hostKeyFingerprint: fingerprint };
+      } catch (error) {
+        toast.error(t('connectionDialog.hostKey.probeFailed'), { description: String(error) });
+        resetConnectionState();
+        return;
+      }
+    }
+
 
     // For SFTP/FTP/RDP/VNC protocols, delegate connection to App.tsx (via onConnect)
     // which calls the appropriate Tauri commands.
@@ -356,6 +378,7 @@ export function ConnectionDialog({
             host: config.host,
             port: config.port || (config.protocol === 'FTP' ? 21 : config.protocol === 'RDP' ? 3389 : config.protocol === 'VNC' ? 5900 : 22),
             username: config.username,
+            description: config.description,
             protocol: config.protocol,
             authMethod: config.authMethod,
             password: config.password,
@@ -367,11 +390,11 @@ export function ConnectionDialog({
             proxyPort: config.proxyPort,
             proxyUsername: config.proxyUsername,
             proxyPassword: config.proxyPassword,
-            jumpHost: config.jumpHost,
-            jumpPort: config.jumpPort,
-            jumpUsername: config.jumpUsername,
-            jumpPassword: config.jumpPassword,
-            jumpUseKey: config.jumpUseKey,
+            jumpHost: jumpEnabled ? config.jumpHost : undefined,
+            jumpPort: jumpEnabled ? config.jumpPort : undefined,
+            jumpUsername: jumpEnabled ? config.jumpUsername : undefined,
+            jumpPassword: jumpEnabled ? config.jumpPassword : undefined,
+            jumpUseKey: jumpEnabled ? config.jumpUseKey : undefined,
             defaultDirectory: config.defaultDirectory,
             compression: config.compression,
             keepAlive: config.keepAlive,
@@ -388,6 +411,7 @@ export function ConnectionDialog({
             host: config.host,
             port: config.port || (config.protocol === 'FTP' ? 21 : config.protocol === 'RDP' ? 3389 : config.protocol === 'VNC' ? 5900 : 22),
             username: config.username,
+            description: config.description,
             protocol: config.protocol,
             folder: connectionFolder,
             authMethod: config.authMethod,
@@ -400,11 +424,11 @@ export function ConnectionDialog({
             proxyPort: config.proxyPort,
             proxyUsername: config.proxyUsername,
             proxyPassword: config.proxyPassword,
-            jumpHost: config.jumpHost,
-            jumpPort: config.jumpPort,
-            jumpUsername: config.jumpUsername,
-            jumpPassword: config.jumpPassword,
-            jumpUseKey: config.jumpUseKey,
+            jumpHost: jumpEnabled ? config.jumpHost : undefined,
+            jumpPort: jumpEnabled ? config.jumpPort : undefined,
+            jumpUsername: jumpEnabled ? config.jumpUsername : undefined,
+            jumpPassword: jumpEnabled ? config.jumpPassword : undefined,
+            jumpUseKey: jumpEnabled ? config.jumpUseKey : undefined,
         defaultDirectory: config.defaultDirectory,
             compression: config.compression,
             keepAlive: config.keepAlive,
@@ -416,8 +440,12 @@ export function ConnectionDialog({
           });
         }
 
+        if (connectionConfig.hostKeyFingerprint) {
+          ConnectionStorageManager.updateConnection(connectionId, { hostKeyFingerprint: connectionConfig.hostKeyFingerprint });
+        }
+
         // Delegate actual connection to App.tsx handler
-        onConnect({ ...config, id: connectionId });
+        onConnect({ ...connectionConfig, id: connectionId });
         onOpenChange(false);
 
         if (!editingConnection) {
@@ -438,6 +466,7 @@ export function ConnectionDialog({
         host: config.host,
         port: config.port || 22,
         username: config.username,
+        description: config.description,
         protocol: config.protocol,
         authMethod: config.authMethod,
         password: config.password,
@@ -448,11 +477,11 @@ export function ConnectionDialog({
         proxyPort: config.proxyPort,
         proxyUsername: config.proxyUsername,
         proxyPassword: config.proxyPassword,
-        jumpHost: config.jumpHost,
-        jumpPort: config.jumpPort,
-        jumpUsername: config.jumpUsername,
-        jumpPassword: config.jumpPassword,
-        jumpUseKey: config.jumpUseKey,
+        jumpHost: jumpEnabled ? config.jumpHost : undefined,
+        jumpPort: jumpEnabled ? config.jumpPort : undefined,
+        jumpUsername: jumpEnabled ? config.jumpUsername : undefined,
+        jumpPassword: jumpEnabled ? config.jumpPassword : undefined,
+        jumpUseKey: jumpEnabled ? config.jumpUseKey : undefined,
         defaultDirectory: config.defaultDirectory,
         compression: config.compression,
         keepAlive: config.keepAlive,
@@ -466,6 +495,7 @@ export function ConnectionDialog({
         host: config.host,
         port: config.port || 22,
         username: config.username,
+        description: config.description,
         protocol: config.protocol,
         folder: connectionFolder,
         authMethod: config.authMethod,
@@ -477,11 +507,11 @@ export function ConnectionDialog({
         proxyPort: config.proxyPort,
         proxyUsername: config.proxyUsername,
         proxyPassword: config.proxyPassword,
-        jumpHost: config.jumpHost,
-        jumpPort: config.jumpPort,
-        jumpUsername: config.jumpUsername,
-        jumpPassword: config.jumpPassword,
-        jumpUseKey: config.jumpUseKey,
+        jumpHost: jumpEnabled ? config.jumpHost : undefined,
+        jumpPort: jumpEnabled ? config.jumpPort : undefined,
+        jumpUsername: jumpEnabled ? config.jumpUsername : undefined,
+        jumpPassword: jumpEnabled ? config.jumpPassword : undefined,
+        jumpUseKey: jumpEnabled ? config.jumpUseKey : undefined,
         defaultDirectory: config.defaultDirectory,
         compression: config.compression,
         keepAlive: config.keepAlive,
@@ -494,15 +524,16 @@ export function ConnectionDialog({
       const result = await invoke<{ success: boolean; error?: string }>(
         'ssh_connect',
         {
-          request: buildSshConnectRequest(connectionId, config),
+          request: buildSshConnectRequest(connectionId, connectionConfig),
         }
       );
 
       if (result.success) {
         onConnect({
-          ...config,
+          ...connectionConfig,
           id: connectionId
         });
+        ConnectionStorageManager.updateConnection(connectionId, { hostKeyFingerprint: connectionConfig.hostKeyFingerprint });
         if (!editingConnection) {
           setConfig(defaultConfig);
         }
@@ -585,6 +616,7 @@ const handleCancelConnectionAttempt = async () => {
       host: config.host,
       port: config.port || 22,
       username: config.username,
+      description: config.description,
       protocol: config.protocol,
       authMethod: config.authMethod,
       password: config.password,
@@ -596,6 +628,11 @@ const handleCancelConnectionAttempt = async () => {
       proxyPort: config.proxyPort,
       proxyUsername: config.proxyUsername,
       proxyPassword: config.proxyPassword,
+      jumpHost: jumpEnabled ? config.jumpHost : undefined,
+      jumpPort: jumpEnabled ? config.jumpPort : undefined,
+      jumpUsername: jumpEnabled ? config.jumpUsername : undefined,
+      jumpPassword: jumpEnabled ? config.jumpPassword : undefined,
+      jumpUseKey: jumpEnabled ? config.jumpUseKey : undefined,
       compression: config.compression,
       keepAlive: config.keepAlive,
       keepAliveInterval: config.keepAliveInterval,
@@ -814,6 +851,16 @@ const handleCancelConnectionAttempt = async () => {
                     />
                   </div>
                 )}
+
+                <div className="space-y-2 col-span-2">
+                  <Label htmlFor="connection-description">{t('connectionDialog.label.description')}</Label>
+                  <Input
+                    id="connection-description"
+                    placeholder={t('connectionDialog.placeholder.description')}
+                    value={config.description}
+                    onChange={(e) => updateConfig({ description: e.target.value })}
+                  />
+                </div>
 
                 {/* Default directory — SSH/SFTP open here on connect */}
                 {(config.protocol === 'SSH' || config.protocol === 'SFTP') && (

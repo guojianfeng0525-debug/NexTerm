@@ -50,6 +50,16 @@ export function ToolSqlite() {
   const [activeTab, setActiveTab] = useState(() => tabs[0]?.id ?? "");
   const [running, setRunning] = useState(false);
   const tab = tabs.find((item) => item.id === activeTab) ?? tabs[0];
+  useEffect(() => {
+    const pasteSqlNote = (event: Event) => {
+      const detail = (event as CustomEvent<{ content?: string; handled?: boolean }>).detail;
+      if (!detail?.content || !tab) return;
+      patchTab(tab.id, { sql: detail.content });
+      detail.handled = true;
+    };
+    window.addEventListener('nexterm:paste-sql-note', pasteSqlNote);
+    return () => window.removeEventListener('nexterm:paste-sql-note', pasteSqlNote);
+  }, [tab]);
   const roots = connections.map((connection) => createSqliteNavigatorConnectionNode({ id: connection.id, name: connection.name, filePath: connection.providerConfig.filePath }));
   const nodes = [...roots, ...Object.values(children).flatMap((items) => items ?? [])];
   const executeCommand = resolveDatabaseCommand("database.query.execute", { scope: "QUERY_EDITOR", provider: sqliteProvider, connectionState: connected ? "connected" : "disconnected" });

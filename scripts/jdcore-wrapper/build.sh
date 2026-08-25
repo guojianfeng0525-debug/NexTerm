@@ -7,6 +7,8 @@
 # (https://github.com/java-decompiler/jd-gui/releases/download/v1.6.6/jd-gui-1.6.6.jar).
 #
 # Requires: JDK 9+ (javac + `jar --date` for reproducible output), curl, unzip.
+# The output itself targets Java 8 because NexTerm supports running the
+# decompiler with a Java 8 runtime.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -30,7 +32,7 @@ mkdir -p "$WORK/jdcore"
 
 echo ">> compiling JdCoreDecompiler ..."
 mkdir -p "$WORK/classes"
-javac -cp "$WORK/jdcore" -d "$WORK/classes" "$ROOT/scripts/jdcore-wrapper/JdCoreDecompiler.java"
+javac --release 8 -cp "$WORK/jdcore" -d "$WORK/classes" "$ROOT/scripts/jdcore-wrapper/JdCoreDecompiler.java"
 
 echo ">> merging into jdcore-wrapper.jar ..."
 mkdir -p "$WORK/merged"

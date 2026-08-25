@@ -32,6 +32,7 @@ import {
   cwdScope,
 } from '../lib/suggestion/store';
 import { recordExecutedCommand } from '../lib/command-history';
+import { generateId, NotesStorage } from '../lib/toolbox/toolbox-storage';
 import '@xterm/xterm/css/xterm.css';
 
 interface PtyTerminalProps {
@@ -1726,6 +1727,33 @@ export function PtyTerminal({
     }
   }, []);
 
+  const handleSaveSelectionToNotes = React.useCallback(() => {
+    const content = xtermRef.current?.getSelection().trim();
+    if (!content) return;
+    const now = Date.now();
+    NotesStorage.upsert({
+      id: generateId('note'),
+      title: content.split('\n')[0].slice(0, 80) || t('toolbox.notes.untitled'),
+      language: 'shell',
+      content,
+      createdAt: now,
+      updatedAt: now,
+    });
+    toast.success(t('ptyTerminal.selectionSavedToNotes'));
+  }, [t]);
+
+  React.useEffect(() => {
+    const pasteSavedShellCommand = (event: Event) => {
+      if (!isActive) return;
+      const detail = (event as CustomEvent<{ content?: string; handled?: boolean }>).detail;
+      if (!detail?.content || !xtermRef.current) return;
+      xtermRef.current.paste(detail.content);
+      detail.handled = true;
+    };
+    window.addEventListener('nexterm:paste-shell-note', pasteSavedShellCommand);
+    return () => window.removeEventListener('nexterm:paste-shell-note', pasteSavedShellCommand);
+  }, [isActive]);
+
   return (
     <TerminalContextMenu
       onCopy={handleCopy}
@@ -1737,6 +1765,7 @@ export function PtyTerminal({
       onFindPrevious={handleFindPrevious}
       onSelectAll={handleSelectAll}
       onSaveToFile={handleSaveToFile}
+      onSaveSelectionToNotes={handleSaveSelectionToNotes}
       onReconnect={handleReconnect}
       hasSelection={hasSelection}
       searchActive={searchVisible}
@@ -1889,4 +1918,3 @@ export function PtyTerminal({
     </TerminalContextMenu>
   );
 }
-

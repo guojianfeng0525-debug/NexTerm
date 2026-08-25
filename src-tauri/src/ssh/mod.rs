@@ -1,6 +1,8 @@
 use crate::proxy::ProxyConfig;
 use anyhow::Result;
-use russh::keys::{self, decode_secret_key};
+use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine as _};
+use russh::keys::{self, decode_secret_key, PublicKeyBase64};
+use sha2_10::{Digest, Sha256};
 use russh::*;
 use russh_sftp::client::SftpSession;
 use serde::{Deserialize, Serialize};
@@ -83,6 +85,50 @@ pub fn compression_preferences(enabled: bool) -> &'static [russh::compression::N
     }
 }
 
+/// Canonical OpenSSH-compatible SHA-256 host-key fingerprint.
+pub fn host_key_fingerprint(key: &keys::PublicKey) -> String {
+    format!("SHA256:{}", STANDARD_NO_PAD.encode(Sha256::digest(key.public_key_bytes())))
+}
+
+struct HostKeyProbeClient(Arc<std::sync::Mutex<Option<String>>>);
+
+impl client::Handler for HostKeyProbeClient {
+    type Error = russh::Error;
+
+    async fn check_server_key(&mut self, key: &keys::PublicKey) -> Result<bool, Self::Error> {
+        if let Ok(mut observed) = self.0.lock() {
+            *observed = Some(host_key_fingerprint(key));
+        }
+        Ok(true)
+    }
+}
+
+/// Obtain a server's public host-key fingerprint without authenticating.
+pub async fn probe_host_key(host: &str, port: u16) -> Result<String> {
+    let observed = Arc::new(std::sync::Mutex::new(None));
+    let config = Arc::new(client::Config {
+        preferred: russh::Preferred {
+            key: std::borrow::Cow::Borrowed(PREFERRED_HOST_KEY_ALGOS),
+            ..russh::Preferred::DEFAULT
+        },
+        nodelay: true,
+        ..client::Config::default()
+    });
+    let session = tokio::time::timeout(
+        Duration::from_secs(10),
+        client::connect(config, (host, port), HostKeyProbeClient(Arc::clone(&observed))),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("SSH host-key probe timed out"))??;
+    let _ = session.disconnect(Disconnect::ByApplication, "", "English").await;
+    let fingerprint = observed
+        .lock()
+        .map_err(|_| anyhow::anyhow!("SSH host-key probe failed"))?
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("SSH server did not provide a host key"));
+    fingerprint
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SshConfig {
     pub host: String,
@@ -101,6 +147,8 @@ pub struct SshConfig {
     /// handshake to `host` runs over a direct-tcpip channel opened on the
     /// jump host. `None` connects directly (or via `proxy` when set).
     pub jump: Option<JumpConfig>,
+    pub host_key_fingerprint: Option<String>,
+    pub host_key_verification: bool,
 }
 
 /// SSH jump host (bastion) configuration. The connection to the target host
@@ -112,6 +160,7 @@ pub struct JumpConfig {
     pub username: String,
     /// How the jump host authenticates the user.
     pub auth_method: AuthMethod,
+    pub host_key_fingerprint: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -153,7 +202,16 @@ pub struct PtySession {
     pub cancel: CancellationToken,
 }
 
-pub struct Client;
+pub struct Client {
+    expected_fingerprint: Option<String>,
+    verification_enabled: bool,
+}
+
+impl Client {
+    pub fn new(expected_fingerprint: Option<String>, verification_enabled: bool) -> Self {
+        Self { expected_fingerprint, verification_enabled }
+    }
+}
 
 // russh 0.62's `Handler` trait uses native `impl Future` methods (RPITIT), so
 // `#[async_trait]` must NOT be applied here — it would produce a signature
@@ -163,9 +221,16 @@ impl client::Handler for Client {
 
     async fn check_server_key(
         &mut self,
-        _server_public_key: &keys::PublicKey,
+        server_public_key: &keys::PublicKey,
     ) -> Result<bool, Self::Error> {
-        Ok(true) // In production, verify the server key
+        if !self.verification_enabled {
+            return Ok(true);
+        }
+        let fingerprint = host_key_fingerprint(server_public_key);
+        // Existing unpinned connections remain usable while the frontend
+        // performs its first-use confirmation. Once a fingerprint is stored,
+        // a changed server key is always rejected before authentication.
+        Ok(self.expected_fingerprint.as_ref().is_none_or(|expected| expected == &fingerprint))
     }
 
     async fn disconnected(
@@ -248,7 +313,7 @@ impl SshClient {
                 client::connect(
                     Arc::clone(&ssh_config),
                     (&jump.host[..], jump.port),
-                    Client,
+                    Client::new(jump.host_key_fingerprint.clone(), config.host_key_verification),
                 ),
             )
             .await
@@ -328,7 +393,7 @@ impl SshClient {
                 client::connect_stream(
                     Arc::clone(&jump_target_config),
                     channel.into_stream(),
-                    Client,
+                    Client::new(config.host_key_fingerprint.clone(), config.host_key_verification),
                 ),
             )
             .await
@@ -353,7 +418,7 @@ impl SshClient {
             .map_err(|e| anyhow::anyhow!("Proxy connection failed: {e}"))?;
             tokio::time::timeout(
                 connection_timeout,
-                client::connect_stream(Arc::clone(&ssh_config), stream, Client),
+                client::connect_stream(Arc::clone(&ssh_config), stream, Client::new(config.host_key_fingerprint.clone(), config.host_key_verification)),
             )
             .await
             .map_err(|_| anyhow::anyhow!("Connection timed out after 3 seconds. Please check the host address and network connectivity."))?
@@ -364,7 +429,7 @@ impl SshClient {
                 client::connect(
                     Arc::clone(&ssh_config),
                     (&config.host[..], config.port),
-                    Client,
+                    Client::new(config.host_key_fingerprint.clone(), config.host_key_verification),
                 ),
             )
             .await
@@ -561,11 +626,30 @@ impl SshClient {
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to request PTY on the session: {e}"))?;
 
-            // Start interactive shell
-            channel
-                .request_shell(true)
-                .await
-                .map_err(|e| anyhow::anyhow!("Failed to start shell on the session: {e}"))?;
+            // Servers that accept these standard SSH environment requests use
+            // UTF-8 for their interactive session. Servers that reject
+            // AcceptEnv keep their configured locale, preserving compatibility.
+            let _ = channel.set_env(false, "LANG", "C.UTF-8").await;
+            let _ = channel.set_env(false, "LC_CTYPE", "C.UTF-8").await;
+
+            // A `cd` written after request_shell goes through readline and is
+            // therefore saved in the remote shell's Up-arrow history. For
+            // Bash sessions start the login shell through an exec request
+            // after changing directory instead: the setup command never
+            // reaches readline, while ~/.bash_profile semantics are retained.
+            let default_directory = default_directory.map(str::trim).filter(|dir| !dir.is_empty());
+            if let (Some(dir), Some(_)) = (default_directory, bash_version) {
+                let escaped = dir.replace('\'', "'\\''");
+                channel
+                    .exec(true, format!("cd -- '{}' && exec \"${{SHELL:-/bin/bash}}\" -l", escaped))
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to start shell in default directory: {e}"))?;
+            } else {
+                channel
+                    .request_shell(true)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to start shell on the session: {e}"))?;
+            }
 
             // Create channels for bidirectional communication (like ttyd's pty_buf)
             // Increased capacity for better buffering during fast input
@@ -581,13 +665,10 @@ impl SshClient {
                 input_channel.write_all(&integration_command).await?;
                 input_channel.flush().await?;
             }
-            // Per-server default directory: `cd` into it right after the shell
-            // starts so the session opens at the configured working directory.
-            // Sent through the PTY input path so readline processes it exactly
-            // like user input (handles quoting/expansion the same way).
-            if let Some(dir) = default_directory {
-                let dir = dir.trim();
-                if !dir.is_empty() {
+            // Non-Bash shells cannot be launched portably through an SSH exec
+            // request. Keep the existing compatible fallback for them.
+            if bash_version.is_none() {
+                if let Some(dir) = default_directory {
                     // Single-quote the path and escape embedded quotes so paths
                     // with spaces/special characters are handled safely.
                     let escaped = dir.replace('\'', "'\\''");

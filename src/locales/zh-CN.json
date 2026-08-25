@@ -88,6 +88,10 @@
       "edit": "编辑连接"
     },
     "description": "配置连接设置和身份验证选项",
+    "hostKey": {
+      "confirm": "验证 SSH 服务器身份\n\n{{host}}:{{port}}\n{{fingerprint}}\n\n是否信任此主机密钥并连接？",
+      "probeFailed": "无法获取 SSH 主机密钥"
+    },
     "tab": {
       "connection": "连接",
       "auth": "认证",
@@ -115,6 +119,7 @@
       "host": "主机",
       "port": "端口",
       "username": "用户名",
+      "description": "备注",
       "password": "密码",
       "privateKey": "私钥文件",
       "passphrase": "密码短语（可选）",
@@ -144,6 +149,7 @@
       "host": "192.168.1.100 或 example.com",
       "port": "端口",
       "username": "root",
+      "description": "该服务器的可选备注",
       "password": "输入密码",
       "privateKey": "~/.ssh/id_rsa 或 ~/.ssh/id_ed25519",
       "passphrase": "如果密钥已加密，请输入密码短语",
@@ -678,6 +684,7 @@
     "clearTerminal": "清除终端",
     "clearScrollback": "清除回滚",
     "saveOutputToFile": "保存输出到文件",
+    "saveSelectionToNotes": "收藏选中内容到记事本",
     "closeTabsToLeft": "关闭左侧标签页"
   },
   "syncDialog": {
@@ -1001,6 +1008,7 @@
     "reconnectingTerminal": "正在重新连接终端…",
     "outputSaved": "终端输出已保存",
     "failedToSaveOutput": "保存输出失败",
+    "selectionSavedToNotes": "选中内容已收藏到记事本",
     "suggestions": "命令提示：",
     "select": "选择",
     "useOrRun": "使用/执行",
@@ -1511,6 +1519,10 @@
       "copied": "内容已复制",
       "copyFailed": "复制失败",
       "copyContent": "复制内容",
+      "pasteToTerminal": "粘贴到当前终端",
+      "noActiveTerminal": "请先打开并激活一个终端窗口。",
+      "pasteToSqlEditor": "粘贴到当前 SQL 查询窗口",
+      "noActiveSqlEditor": "请先打开并激活一个数据库查询窗口。",
       "highlighted": "语法高亮",
       "searchPlaceholder": "搜索笔记…",
       "empty": "暂无笔记",

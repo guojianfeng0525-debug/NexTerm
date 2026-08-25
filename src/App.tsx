@@ -12,7 +12,7 @@ import { IntegratedFileBrowser } from './components/integrated-file-browser';
 import { toConnectionConfig } from './lib/connection-config';
 import { ActiveConnectionsManager, ConnectionStorageManager } from './lib/connection-storage';
 import { isDesktopProtocol } from './lib/protocol-config';
-import { buildSshConnectRequest } from './lib/ssh-connect-request';
+import { buildSftpConnectRequest, buildSshConnectRequest } from './lib/ssh-connect-request';
 import { registerRestoration, clearAllRestorations } from './lib/restoration-manager';
 import { useLayout, LayoutProvider } from './lib/layout-context';
 import {
@@ -442,23 +442,7 @@ function AppContent() {
             // SFTP/FTP restoration
             if (isSftp) {
               await withTimeout(
-                invoke('sftp_connect', {
-                  request: {
-                    connection_id: activeConn.connectionId,
-                    host: connectionData.host,
-                    port: connectionData.port || 22,
-                    username: connectionData.username,
-                    auth_method: connectionData.authMethod || 'password',
-                    password: connectionData.password || '',
-                    key_path: connectionData.privateKeyPath || null,
-                    passphrase: connectionData.passphrase || null,
-                    jump_host: connectionData.jumpHost || null,
-                    jump_port: connectionData.jumpPort ?? null,
-                    jump_username: connectionData.jumpUsername || null,
-                    jump_password: connectionData.jumpPassword || null,
-                    jump_use_key: !!connectionData.jumpUseKey,
-                  }
-                }),
+                invoke('sftp_connect', { request: buildSftpConnectRequest(activeConn.connectionId, connectionData) }),
                 CONNECT_TIMEOUT_MS,
                 `sftp_connect ${connectionData.name}`,
               );
@@ -668,23 +652,7 @@ function AppContent() {
 
         try {
           if (isSftp) {
-            await invoke('sftp_connect', {
-              request: {
-                connection_id: sessionId,
-                host: connectionData.host,
-                port: connectionData.port || 22,
-                username: connectionData.username,
-                auth_method: connectionData.authMethod || 'password',
-                password: connectionData.password || '',
-                key_path: connectionData.privateKeyPath || null,
-                passphrase: connectionData.passphrase || null,
-                jump_host: connectionData.jumpHost || null,
-                jump_port: connectionData.jumpPort ?? null,
-                jump_username: connectionData.jumpUsername || null,
-                jump_password: connectionData.jumpPassword || null,
-                jump_use_key: !!connectionData.jumpUseKey,
-              }
-            });
+            await invoke('sftp_connect', { request: buildSftpConnectRequest(sessionId, connectionData) });
           } else {
             await invoke('ftp_connect', {
               request: {
@@ -848,18 +816,7 @@ function AppContent() {
 
         try {
           if (isSftp) {
-            await invoke('sftp_connect', {
-              request: {
-                connection_id: duplicateId,
-                host: connectionData.host,
-                port: connectionData.port || 22,
-                username: connectionData.username,
-                auth_method: connectionData.authMethod || 'password',
-                password: connectionData.password || '',
-                key_path: connectionData.privateKeyPath || null,
-                passphrase: connectionData.passphrase || null,
-              }
-            });
+            await invoke('sftp_connect', { request: buildSftpConnectRequest(duplicateId, connectionData) });
           } else {
             await invoke('ftp_connect', {
               request: {
@@ -973,18 +930,7 @@ function AppContent() {
         }
 
         if (isSftp) {
-          await invoke('sftp_connect', {
-            request: {
-              connection_id: tabId,
-              host: connectionData.host,
-              port: connectionData.port || 22,
-              username: connectionData.username,
-              auth_method: connectionData.authMethod || 'password',
-              password: connectionData.password || '',
-              key_path: connectionData.privateKeyPath || null,
-              passphrase: connectionData.passphrase || null,
-            }
-          });
+          await invoke('sftp_connect', { request: buildSftpConnectRequest(tabId, connectionData) });
         } else {
           await invoke('ftp_connect', {
             request: {
@@ -1140,18 +1086,7 @@ function AppContent() {
       if (isFileBrowser) {
         try {
           if (isSftp) {
-            await invoke('sftp_connect', {
-              request: {
-                connection_id: tabId,
-                host: config.host,
-                port: config.port || 22,
-                username: config.username,
-                auth_method: config.authMethod || 'password',
-                password: config.password || '',
-                key_path: config.privateKeyPath || null,
-                passphrase: config.passphrase || null,
-              }
-            });
+            await invoke('sftp_connect', { request: buildSftpConnectRequest(tabId, config) });
           } else {
             await invoke('ftp_connect', {
               request: {
@@ -1252,18 +1187,7 @@ function AppContent() {
 
         try {
           if (isSftp) {
-            await invoke('sftp_connect', {
-              request: {
-                connection_id: tabId,
-                host: config.host,
-                port: config.port || 22,
-                username: config.username,
-                auth_method: config.authMethod || 'password',
-                password: config.password || '',
-                key_path: config.privateKeyPath || null,
-                passphrase: config.passphrase || null,
-              }
-            });
+            await invoke('sftp_connect', { request: buildSftpConnectRequest(tabId, config) });
           } else {
             await invoke('ftp_connect', {
               request: {
@@ -1490,18 +1414,7 @@ function AppContent() {
 
         try {
           if (isSftp) {
-            await invoke('sftp_connect', {
-              request: {
-                connection_id: sessionId,
-                host: config.host,
-                port: config.port || 22,
-                username: config.username,
-                auth_method: config.authMethod || 'password',
-                password: config.password || '',
-                key_path: config.privateKeyPath || null,
-                passphrase: config.passphrase || null,
-              }
-            });
+            await invoke('sftp_connect', { request: buildSftpConnectRequest(sessionId, config) });
           } else {
             await invoke('ftp_connect', {
               request: {

@@ -360,6 +360,7 @@ fn build_tunnel_jump(request: &TunnelStartRequest) -> Result<Option<JumpConfig>,
                 .clone()
                 .ok_or("Jump host password is required")?,
         },
+        host_key_fingerprint: None,
     }))
 }
 

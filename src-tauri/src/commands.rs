@@ -38,7 +38,13 @@ pub struct ConnectRequest {
     /// When `true`, the jump host authenticates with the same public key
     /// (and passphrase) used for the target host.
     pub jump_use_key: Option<bool>,
+    pub host_key_fingerprint: Option<String>,
+    pub jump_host_key_fingerprint: Option<String>,
+    #[serde(default = "default_host_key_verification")]
+    pub host_key_verification: bool,
 }
+
+fn default_host_key_verification() -> bool { true }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct MemoryStats {
@@ -128,6 +134,25 @@ pub struct CommandResponse {
     pub error: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct HostKeyProbeRequest {
+    pub host: String,
+    pub port: u16,
+}
+
+#[derive(Debug, Serialize)]
+pub struct HostKeyProbeResponse {
+    pub fingerprint: String,
+}
+
+#[tauri::command]
+pub async fn ssh_host_key_fingerprint(request: HostKeyProbeRequest) -> Result<HostKeyProbeResponse, String> {
+    crate::ssh::probe_host_key(&request.host, request.port)
+        .await
+        .map(|fingerprint| HostKeyProbeResponse { fingerprint })
+        .map_err(|error| error.to_string())
+}
+
 #[tauri::command]
 pub async fn ssh_connect(
     request: ConnectRequest,
@@ -170,6 +195,8 @@ pub async fn ssh_connect(
         keepalive_max,
         proxy,
         jump,
+        host_key_fingerprint: request.host_key_fingerprint,
+        host_key_verification: request.host_key_verification,
     };
 
     match state
@@ -228,6 +255,8 @@ fn build_ssh_config_from_request(request: &ConnectRequest) -> Result<SshConfig, 
         keepalive_max,
         proxy,
         jump,
+        host_key_fingerprint: request.host_key_fingerprint.clone(),
+        host_key_verification: request.host_key_verification,
     })
 }
 
@@ -474,6 +503,7 @@ fn build_jump(request: &ConnectRequest) -> Result<Option<JumpConfig>, String> {
         &request.jump_username,
         &request.jump_password,
         request.jump_use_key.unwrap_or(false),
+        &request.jump_host_key_fingerprint,
         &request.key_path,
         &request.passphrase,
     )
@@ -488,6 +518,7 @@ fn build_jump_fields(
     jump_use_key: bool,
     key_path: &Option<String>,
     passphrase: &Option<String>,
+    jump_host_key_fingerprint: &Option<String>,
 ) -> Result<Option<JumpConfig>, String> {
     let host = jump_host.clone().filter(|h| !h.trim().is_empty());
     let Some(host) = host else {
@@ -521,6 +552,7 @@ fn build_jump_fields(
         port,
         username,
         auth_method,
+        host_key_fingerprint: jump_host_key_fingerprint.clone(),
     }))
 }
 
@@ -533,6 +565,7 @@ fn build_jump_sftp(request: &SftpConnectRequest) -> Result<Option<JumpConfig>, S
         &request.jump_username,
         &request.jump_password,
         request.jump_use_key.unwrap_or(false),
+        &request.jump_host_key_fingerprint,
         &request.key_path,
         &request.passphrase,
     )
@@ -2645,6 +2678,10 @@ pub struct SftpConnectRequest {
     /// When `true`, the jump host authenticates with the same public key
     /// (and passphrase) used for the target host.
     pub jump_use_key: Option<bool>,
+    pub host_key_fingerprint: Option<String>,
+    pub jump_host_key_fingerprint: Option<String>,
+    #[serde(default = "default_host_key_verification")]
+    pub host_key_verification: bool,
 }
 
 #[tauri::command]
@@ -2670,6 +2707,8 @@ pub async fn sftp_connect(
         username: request.username,
         auth_method: auth,
         jump,
+        host_key_fingerprint: request.host_key_fingerprint,
+        host_key_verification: request.host_key_verification,
     };
 
     match state
@@ -4212,6 +4251,9 @@ mod proxy_config_tests {
             jump_username: None,
             jump_password: None,
             jump_use_key: None,
+            host_key_fingerprint: None,
+            jump_host_key_fingerprint: None,
+            host_key_verification: false,
         }
     }
 
@@ -4302,6 +4344,9 @@ mod jump_config_tests {
             jump_username: Some("jumpuser".to_string()),
             jump_password: Some("jumppass".to_string()),
             jump_use_key: Some(false),
+            host_key_fingerprint: None,
+            jump_host_key_fingerprint: None,
+            host_key_verification: false,
         }
     }
 

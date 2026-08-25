@@ -95,7 +95,7 @@ export function transferQueueReducer(
 
     case "PROGRESS": {
       return state.map((item) =>
-        item.id === action.id
+        item.id === action.id && item.status === "transferring"
           ? {
               ...item,
               progress: action.progress,
@@ -108,7 +108,9 @@ export function transferQueueReducer(
 
     case "COMPLETE": {
       return state.map((item) =>
-        item.id === action.id
+        // A cancelled request may still resolve after the UI cancellation.
+        // Never let that late completion resurrect it as a successful transfer.
+        item.id === action.id && item.status === "transferring"
           ? {
               ...item,
               status: "completed" as const,
@@ -121,7 +123,7 @@ export function transferQueueReducer(
 
     case "FAIL": {
       return state.map((item) =>
-        item.id === action.id
+        item.id === action.id && item.status === "transferring"
           ? {
               ...item,
               status: "failed" as const,

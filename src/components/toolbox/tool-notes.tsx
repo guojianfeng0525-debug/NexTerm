@@ -27,7 +27,7 @@ import {
 const CodeEditor = lazy(() => import('@/components/code-editor').then((m) => ({ default: m.CodeEditor })));
 import { NotesStorage, generateId } from '@/lib/toolbox/toolbox-storage';
 import type { NoteItem, NoteLanguage } from '@/lib/toolbox/toolbox-types';
-import { StickyNote, Plus, Search, Trash2, Copy, Pin, PinOff, FileCode2 } from 'lucide-react';
+import { StickyNote, Plus, Search, Trash2, Copy, Pin, PinOff, FileCode2, Send } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 type NoteLangLabelKey =
@@ -162,6 +162,22 @@ export function ToolNotes() {
     patchSelected({ pinned: !selected?.pinned });
   }, [patchSelected, selected?.pinned]);
 
+  const pasteShellContent = useCallback(() => {
+    if (!selected?.content) return;
+    const detail: { content: string; handled?: boolean } = { content: selected.content };
+    window.dispatchEvent(new CustomEvent('nexterm:paste-shell-note', { detail }));
+    if (!detail.handled) {
+      toast.error(t('toolbox.notes.noActiveTerminal'));
+    }
+  }, [selected, t]);
+
+  const pasteSqlContent = useCallback(() => {
+    if (!selected?.content) return;
+    const detail: { content: string; handled?: boolean } = { content: selected.content };
+    window.dispatchEvent(new CustomEvent('nexterm:paste-sql-note', { detail }));
+    if (!detail.handled) toast.error(t('toolbox.notes.noActiveSqlEditor'));
+  }, [selected, t]);
+
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     const list = q
@@ -279,6 +295,16 @@ export function ToolNotes() {
                 <Button size="icon" variant="ghost" className="h-8 w-8 shrink-0" onClick={() => void copyContent()} title={t('toolbox.notes.copyContent')}>
                   <Copy className="h-4 w-4" />
                 </Button>
+                {selected.language === 'shell' && (
+                  <Button size="icon" variant="ghost" className="h-8 w-8 shrink-0" onClick={pasteShellContent} title={t('toolbox.notes.pasteToTerminal')}>
+                    <Send className="h-4 w-4" />
+                  </Button>
+                )}
+                {selected.language === 'sql' && (
+                  <Button size="icon" variant="ghost" className="h-8 w-8 shrink-0" onClick={pasteSqlContent} title={t('toolbox.notes.pasteToSqlEditor')}>
+                    <Send className="h-4 w-4" />
+                  </Button>
+                )}
                 <Button size="icon" variant="ghost" className="h-8 w-8 shrink-0 text-destructive hover:text-destructive" onClick={() => setDeleteTarget(selected)} title={t('common.delete')}>
                   <Trash2 className="h-4 w-4" />
                 </Button>

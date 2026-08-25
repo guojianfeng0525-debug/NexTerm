@@ -23,6 +23,8 @@ mod tests {
             keepalive_max: None,
             proxy: None,
             jump: None,
+            host_key_fingerprint: None,
+            host_key_verification: false,
         }
     }
 
@@ -105,6 +107,8 @@ mod tests {
             keepalive_max: None,
             proxy: None,
             jump: None,
+            host_key_fingerprint: None,
+            host_key_verification: false,
         };
 
         let result = client_write.connect(&config).await;
@@ -302,6 +306,8 @@ mod shell_integration_tests {
                 keepalive_max: Some(3),
                 proxy: None,
                 jump: None,
+                host_key_fingerprint: None,
+                host_key_verification: false,
             })
             .await
             .expect("connect to Docker SSH server");
@@ -452,6 +458,8 @@ Byby5sb2NhbAECAw==
             keepalive_max: None,
             proxy: None,
             jump: None,
+            host_key_fingerprint: None,
+            host_key_verification: false,
         };
 
         let mut client = SshClient::new();
@@ -604,7 +612,7 @@ mod compression_pref_tests {
 #[tokio::test]
 async fn disconnected_clean_end_is_ok() {
     use russh::client::Handler;
-    let mut client = super::Client;
+    let mut client = super::Client::new(None, false);
     let reason = russh::client::DisconnectReason::Error(russh::Error::Disconnect);
     let res = client.disconnected(reason).await;
     assert!(res.is_ok(), "clean Disconnect must not fail");
@@ -613,7 +621,7 @@ async fn disconnected_clean_end_is_ok() {
 #[tokio::test]
 async fn disconnected_received_is_ok() {
     use russh::client::Handler;
-    let mut client = super::Client;
+    let mut client = super::Client::new(None, false);
     let info = russh::client::RemoteDisconnectInfo {
         reason_code: russh::Disconnect::ByApplication,
         message: String::new(),

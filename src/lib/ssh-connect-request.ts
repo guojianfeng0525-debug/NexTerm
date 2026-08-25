@@ -31,6 +31,8 @@ export interface SshConnectRequestSource {
   jumpUsername?: string;
   jumpPassword?: string;
   jumpUseKey?: boolean;
+  hostKeyFingerprint?: string;
+  jumpHostKeyFingerprint?: string;
 }
 
 export interface SshConnectRequest {
@@ -56,6 +58,27 @@ export interface SshConnectRequest {
   jump_username: string | null;
   jump_password: string | null;
   jump_use_key: boolean;
+  host_key_fingerprint: string | null;
+  jump_host_key_fingerprint: string | null;
+}
+
+/** Standalone SFTP accepts the same authentication and jump-host fields. */
+export interface SftpConnectRequest {
+  connection_id: string;
+  host: string;
+  port: number;
+  username: string;
+  auth_method: string;
+  password: string | null;
+  key_path: string | null;
+  passphrase: string | null;
+  jump_host: string | null;
+  jump_port: number | null;
+  jump_username: string | null;
+  jump_password: string | null;
+  jump_use_key: boolean;
+  host_key_fingerprint: string | null;
+  jump_host_key_fingerprint: string | null;
 }
 
 /**
@@ -99,5 +122,33 @@ export function buildSshConnectRequest(
     jump_username: jumpEnabled ? (source.jumpUsername || null) : null,
     jump_password: jumpEnabled && !source.jumpUseKey ? (source.jumpPassword ?? null) : null,
     jump_use_key: jumpEnabled && !!source.jumpUseKey,
+    host_key_fingerprint: source.hostKeyFingerprint || null,
+    jump_host_key_fingerprint: jumpEnabled ? (source.jumpHostKeyFingerprint || null) : null,
+  };
+}
+
+/** Build an SFTP request so every connect path retains jump-host settings. */
+export function buildSftpConnectRequest(
+  connectionId: string,
+  source: SshConnectRequestSource,
+): SftpConnectRequest {
+  const jumpEnabled = !!source.jumpHost?.trim();
+
+  return {
+    connection_id: connectionId,
+    host: source.host,
+    port: source.port || 22,
+    username: source.username,
+    auth_method: source.authMethod || 'password',
+    password: source.password ?? null,
+    key_path: source.privateKeyPath || null,
+    passphrase: source.passphrase || null,
+    jump_host: jumpEnabled ? (source.jumpHost || null) : null,
+    jump_port: jumpEnabled ? (source.jumpPort ?? 22) : null,
+    jump_username: jumpEnabled ? (source.jumpUsername || null) : null,
+    jump_password: jumpEnabled && !source.jumpUseKey ? (source.jumpPassword ?? null) : null,
+    jump_use_key: jumpEnabled && !!source.jumpUseKey,
+    host_key_fingerprint: source.hostKeyFingerprint || null,
+    jump_host_key_fingerprint: jumpEnabled ? (source.jumpHostKeyFingerprint || null) : null,
   };
 }

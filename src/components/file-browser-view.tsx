@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useReducer, useRef } from "react";
 import { useTranslation } from 'react-i18next';
-import { invoke } from "@tauri-apps/api/core";
+import { Channel, invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
 import {
   WifiOff,
@@ -164,6 +164,28 @@ export function FileBrowserView({
 
     const doTransfer = async () => {
       try {
+        // The backend emits small, throttled byte samples. Derive rate here so
+        // the UI stays independent from the transport implementation.
+        const lastSample = { bytes: 0, time: Date.now() };
+        const onProgress = new Channel<{ totalBytes: number; transferredBytes: number }>();
+        onProgress.onmessage = ({ totalBytes, transferredBytes }) => {
+          const now = Date.now();
+          const elapsedSeconds = (now - lastSample.time) / 1000;
+          const bytesSinceLastSample = transferredBytes - lastSample.bytes;
+          const speed = elapsedSeconds > 0 && bytesSinceLastSample >= 0
+            ? Math.round(bytesSinceLastSample / elapsedSeconds)
+            : 0;
+          lastSample.bytes = transferredBytes;
+          lastSample.time = now;
+          dispatchTransfer({
+            type: "PROGRESS",
+            id: nextItem.id,
+            progress: totalBytes > 0 ? Math.min(100, Math.round((transferredBytes / totalBytes) * 100)) : 0,
+            bytesTransferred: transferredBytes,
+            speed,
+          });
+        };
+
         if (nextItem.direction === "upload") {
           const result = await invoke<{ success: boolean; error?: string }>(
             "upload_remote_file",
@@ -171,6 +193,7 @@ export function FileBrowserView({
               connectionId,
               localPath: nextItem.sourcePath,
               remotePath: nextItem.destinationPath,
+              onProgress,
             },
           );
           if (result.success) {
@@ -190,6 +213,7 @@ export function FileBrowserView({
               connectionId,
               remotePath: nextItem.sourcePath,
               localPath: nextItem.destinationPath,
+              onProgress,
             },
           );
           if (result.success) {

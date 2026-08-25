@@ -88,6 +88,10 @@
       "edit": "Edit Connection"
     },
     "description": "Configure connection settings and authentication options",
+    "hostKey": {
+      "confirm": "Verify SSH server identity\n\n{{host}}:{{port}}\n{{fingerprint}}\n\nTrust this host key and connect?",
+      "probeFailed": "Could not retrieve the SSH host key"
+    },
     "tab": {
       "connection": "Connection",
       "auth": "Auth",
@@ -115,6 +119,7 @@
       "host": "Host",
       "port": "Port",
       "username": "Username",
+      "description": "Remarks",
       "password": "Password",
       "privateKey": "Private Key File",
       "passphrase": "Passphrase (optional)",
@@ -144,6 +149,7 @@
       "host": "192.168.1.100 or example.com",
       "port": "Port",
       "username": "root",
+      "description": "Optional remarks for this server",
       "password": "Enter password",
       "privateKey": "~/.ssh/id_rsa or ~/.ssh/id_ed25519",
       "passphrase": "Enter passphrase if key is encrypted",
@@ -678,6 +684,7 @@
     "clearTerminal": "Clear Terminal",
     "clearScrollback": "Clear Scrollback",
     "saveOutputToFile": "Save Output to File",
+    "saveSelectionToNotes": "Save Selection to Notes",
     "closeTabsToLeft": "Close Tabs to Left"
   },
   "syncDialog": {
@@ -1001,6 +1008,7 @@
     "reconnectingTerminal": "Reconnecting terminal…",
     "outputSaved": "Terminal output saved",
     "failedToSaveOutput": "Failed to save output",
+    "selectionSavedToNotes": "Selection saved to Notes",
     "suggestions": "Command hints:",
     "select": "select",
     "useOrRun": "use / run",
@@ -1515,6 +1523,10 @@
       "copied": "Content copied",
       "copyFailed": "Copy failed",
       "copyContent": "Copy content",
+      "pasteToTerminal": "Paste into active terminal",
+      "noActiveTerminal": "Open and activate a terminal before pasting.",
+      "pasteToSqlEditor": "Paste into active SQL editor",
+      "noActiveSqlEditor": "Open and activate a database query editor before pasting.",
       "highlighted": "Highlighted",
       "searchPlaceholder": "Search notes…",
       "empty": "No notes yet",

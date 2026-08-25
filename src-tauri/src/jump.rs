@@ -6,7 +6,7 @@
 //! payload runs inside that channel. This is the SSH equivalent of OpenSSH's
 //! `ProxyJump`.
 
-use crate::ssh::{load_private_key, AuthMethod, Client, JumpConfig, PREFERRED_HOST_KEY_ALGOS};
+use crate::ssh::{compression_preferences, load_private_key, AuthMethod, Client, JumpConfig, PREFERRED_HOST_KEY_ALGOS};
 use anyhow::Result;
 use russh::*;
 use std::borrow::Cow;
@@ -43,6 +43,9 @@ pub async fn connect_via_jump(
     let ssh_config = client::Config {
         preferred: russh::Preferred {
             key: Cow::Borrowed(PREFERRED_HOST_KEY_ALGOS),
+            // russh 0.62 can close direct-tcpip channels early when zlib is
+            // negotiated on a jump hop. Tunnels are already encrypted.
+            compression: Cow::Borrowed(compression_preferences(false)),
             ..russh::Preferred::DEFAULT
         },
         keepalive_interval: keepalive,
@@ -57,7 +60,7 @@ pub async fn connect_via_jump(
         client::connect(
             Arc::new(ssh_config),
             (&jump.host[..], jump.port),
-            Client,
+            Client::new(jump.host_key_fingerprint.clone(), false),
         ),
     )
     .await

@@ -28,6 +28,7 @@ interface TerminalContextMenuProps {
   onFindPrevious?: () => void;
   onSelectAll: () => void;
   onSaveToFile: () => void;
+  onSaveSelectionToNotes: () => void;
   onReconnect?: () => void;
   hasSelection: boolean;
   searchActive?: boolean;
@@ -55,6 +56,7 @@ export function TerminalContextMenu({
   onFindPrevious,
   onSelectAll,
   onSaveToFile,
+  onSaveSelectionToNotes,
   onReconnect,
   hasSelection,
   searchActive = false,
@@ -122,6 +124,10 @@ export function TerminalContextMenu({
         <ContextMenuItem onClick={onSaveToFile}>
           <FileText className="mr-2 h-4 w-4" />
           <span>{t('contextMenu.saveOutputToFile')}</span>
+        </ContextMenuItem>
+        <ContextMenuItem onClick={onSaveSelectionToNotes} disabled={!hasSelection}>
+          <FileText className="mr-2 h-4 w-4" />
+          <span>{t('contextMenu.saveSelectionToNotes')}</span>
         </ContextMenuItem>
         
         {onReconnect && (

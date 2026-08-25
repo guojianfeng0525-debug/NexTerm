@@ -108,6 +108,16 @@ export function ToolMySql() {
   >({});
   const [selected, setSelected] = useState<DatabaseObjectNodeId | null>(null);
   const tab = tabs.find((item) => item.id === activeTab) ?? tabs[0];
+  useEffect(() => {
+    const pasteSqlNote = (event: Event) => {
+      const detail = (event as CustomEvent<{ content?: string; handled?: boolean }>).detail;
+      if (!detail?.content || !tab) return;
+      setTabs((current) => current.map((item) => item.id === tab.id ? { ...item, sql: detail.content! } : item));
+      detail.handled = true;
+    };
+    window.addEventListener('nexterm:paste-sql-note', pasteSqlNote);
+    return () => window.removeEventListener('nexterm:paste-sql-note', pasteSqlNote);
+  }, [tab]);
   const executeCommand = resolveDatabaseCommand("database.query.execute", {
     scope: "QUERY_EDITOR",
     provider: mysqlProvider,
