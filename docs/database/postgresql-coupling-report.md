@@ -48,5 +48,5 @@ Infrastructure established; migration pending. `src/lib/database/` now contains 
 - Do not weaken SSH host-key fingerprint checking, certificate validation, mTLS support, bounded timeouts, quoted identifiers, or primary-key update validation in `postgres.rs`.
 - `CodeEditor` currently leaks PostgreSQL behavior into generic SQL notes/files; changing this requires a separate regression-tested slice.
 - Raw `postgres_*` IPC has already become a UI contract. New generic IPC must be introduced behind an adapter, then callers migrated in one slice; it must not be a flag-day rewrite.
-- Existing uncommitted PostgreSQL work includes broad lockfile changes. Architecture work must avoid discarding or silently rewriting it.
+- If unrelated PostgreSQL or lockfile changes are present in a future worktree, architecture work must not discard or silently rewrite them.
 - Native WDIO is real desktop infrastructure but existing PostgreSQL visual coverage is not a portable fixture; it cannot support a `FULL` parity claim.

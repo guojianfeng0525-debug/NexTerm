@@ -65,7 +65,7 @@ Evidence: `src/components/toolbox/tool-postgres.tsx`, `src-tauri/src/postgres.rs
 
 `FULL` requires UI entry, interaction entry points required by Navicat evidence, frontend logic, IPC/backend/database operation where applicable, error handling, runtime verification, and regression test. `PARTIAL`, `UI_ONLY`, `BACKEND_ONLY`, `BROKEN`, `MISSING`, `UNVERIFIED`, `PLANNED`, `INTENTIONAL_GAP`, and `NOT_APPLICABLE` retain the meanings requested for this audit.
 
-`FULL` is not awarded in this first audit: no capability has a verified native Tauri runtime flow plus complete interaction and regression coverage.
+`FULL` is not awarded in this audit: PostgreSQL has a narrow native Tauri flow backed by live-database E2E, but no capability has complete interaction coverage and regression evidence required for `FULL`.
 
 ## First-pass scorecard
 
@@ -89,7 +89,7 @@ These are evidence-weighted counts from `navicat-premium-feature-matrix.md` and 
 | Shortcut Parity | 0% | no database scope bindings |
 | Context Menu Parity | 0% | no PostgreSQL workspace context menus |
 | Database Provider Coverage | 6% | 1 of 16 official provider families/compatible engines |
-| Automated Test Coverage | 3% | one browser visibility test; no database interaction regression or native desktop test |
+| Automated Test Coverage | limited | browser visibility coverage plus a native Tauri PostgreSQL visual E2E with a live local database; no complete database interaction regression suite |
 
 ## State and safety baseline
 

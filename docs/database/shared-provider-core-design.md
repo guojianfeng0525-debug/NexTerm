@@ -166,7 +166,15 @@ Registry entries carry `windows`, `linux`, and `macos` bindings independently; u
 
 Only one slice is implemented and verified at a time.
 
-1. Define tested shared TypeScript contracts, static registry, command descriptor/resolver and shortcut scope types. No visual behavior change.
+### Current implementation status
+
+- Atomic Slice 1: COMPLETE. Tested shared TypeScript contracts, static PostgreSQL-only registry, command descriptors, and non-executing resolver are implemented.
+- Atomic Slice 2: COMPLETE. `database.query.explain` toolbar availability in `ToolPostgres` consumes the PostgreSQL descriptor through the Shared Command Resolver.
+- Shared Runtime Adoption: PARTIAL. Only Explain command availability has entered the live PostgreSQL UI. PostgreSQL execution, IPC, storage, navigator, editor, and session/runtime contracts are not migrated to a provider core.
+
+### Planned broader migration stages
+
+1. Define tested shared TypeScript contracts, static registry, command descriptor/resolver and shortcut scope types. No visual behavior change. COMPLETE as Atomic Slice 1.
 2. Add shared Rust command DTOs, `DatabaseState`, and a PostgreSQL adapter that delegates to existing behavior. Keep raw `postgres_*` commands temporarily for migration tests.
 3. Migrate profiles/storage and config lifecycle to generic database profiles with an atomic PostgreSQL migration.
 4. Extract `DatabaseWorkspaceShell`, generic navigator/tab/result contracts, then mount the PostgreSQL contribution through it. Preserve browser E2E.
