@@ -20,7 +20,7 @@ function nodeIcon(node: DatabaseObjectNode): ReactNode {
     case "schema":
       return <ListTree className="h-3.5 w-3.5" />;
     case "group":
-      return <Table2 className="h-3.5 w-3.5 text-sky-500" />;
+      return <Table2 className="h-3.5 w-3.5 text-primary" />;
     case "relation":
       return <Table2 className="h-3.5 w-3.5 text-muted-foreground" />;
   }
@@ -61,6 +61,7 @@ export function DatabaseNavigator({
 
       if (isFilteredRelation) return null;
 
+      const selected = selectedNodeId === node.id;
       return (
         <div key={node.id}>
           <button
@@ -70,7 +71,7 @@ export function DatabaseNavigator({
               if (node.expandable) onToggle(node);
               if (node.openable) onOpen(node);
             }}
-            className={`flex h-6 w-full items-center gap-1 px-1 text-left text-[12px] ${selectedNodeId === node.id ? "bg-primary/10 text-primary" : "hover:bg-accent/70"}`}
+            className={`flex h-6 w-full items-center gap-1 px-1 text-left text-[12px] outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring ${selected ? "bg-primary/10 text-primary" : "hover:bg-accent/70"}`}
             data-testid="database-navigator-node"
             data-node-id={node.id}
           >

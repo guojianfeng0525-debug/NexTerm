@@ -8,6 +8,7 @@ const application = resolve('src-tauri/target/debug/nexterm');
 const dataDir = process.env.NEXTERM_DATA_DIR ?? mkdtempSync(join(tmpdir(), 'nexterm-wdio-'));
 const sqliteFixturePath = join(dataDir, `sqlite-e2e-${Date.now()}.db`);
 mkdirSync('./test-results/wdio/failures', { recursive: true });
+mkdirSync('./test-results/database-visual', { recursive: true });
 
 // The fixture lives beside the isolated application data directory, never in a
 // user-selected location. The desktop spec only types this real path into the UI.

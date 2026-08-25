@@ -69,13 +69,23 @@ export function DatabaseResultPane({
                   {row.map((cell, cellIndex) => (
                     <td
                       key={`${index}:${cellIndex}`}
-                      className="whitespace-nowrap border-b border-r px-2 py-1.5 select-text"
+                      className="whitespace-nowrap border-b border-r px-2 py-1 select-text"
                     >
                       {cell ?? <span className="text-muted-foreground">{labels.null}</span>}
                     </td>
                   ))}
                 </tr>
               ))}
+              {!tabularResult.rows.length && (
+                <tr>
+                  <td
+                    colSpan={tabularResult.columns.length + 1}
+                    className="h-16 px-3 text-center text-[12px] text-muted-foreground"
+                  >
+                    {labels.ready}
+                  </td>
+                </tr>
+              )}
             </tbody>
           </table>
           {paged && pagination && (

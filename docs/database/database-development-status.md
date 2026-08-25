@@ -165,9 +165,17 @@ Not migrated:
 - SSH, TLS, Explain, result editing, and expanded paging remain deferred and are not declared as MySQL product capabilities.
 - Final verification passed focused tests, all three renderer suites, debug Tauri build, i18n, affected-file lint, MySQL Rust format/tests, and sequential PostgreSQL live-Docker, SQLite real-file, and MySQL live-Docker native suites. MySQL native verifies lossless `9007199254740993` BIGINT and `1234567890.123456789` DECIMAL rendering.
 
+### Feature Batch 13 - Database UI Visual Consistency & Polish - COMPLETE
+
+- Completed a real Tauri visual audit using populated PostgreSQL live-Docker, SQLite real-file, and MySQL live-Docker fixtures. Dark populated workspaces and connection dialogs were inspected for all three providers; PostgreSQL also captured light and 960x700 compact-window evidence.
+- Normalized shared Navigator active/focus treatment, icon color, compact result rows, tab active/focus treatment, and Navigator scroll behavior. Successful zero-row result sets now retain table context and show the existing ready message.
+- SQLite and MySQL connection dialogs now use the same bounded, Tauri-safe header/content/footer shell as PostgreSQL, including a scrollable content area and fixed action footer. PostgreSQL TLS text fields now use tokenized input background/focus treatment.
+- Native visual evidence is captured under the ignored `test-results/database-visual/` directory: populated PostgreSQL, SQLite, and MySQL workspaces; all three connection dialogs; PostgreSQL light and compact-window views.
+- No runtime, IPC, Rust, profile, persistence, or query execution changes were made. Remaining intentional provider differences are limited to existing capabilities: PostgreSQL retains its filter, resizable Navigator/results, pagination, status bar, and SSH/TLS pages.
+
 ## Last Known Verification
 
-These are the latest known results from Feature Batches 9 and 10 verification.
+These are the latest known results from Feature Batch 13 verification.
 
 | Check | Result |
 | --- | --- |
@@ -205,6 +213,10 @@ These are the latest known results from Feature Batches 9 and 10 verification.
 | PostgreSQL renderer regression after SQLite | PASS |
 | SQLite native desktop E2E | PASS: profile persistence, connect, Navigator, query, result, disconnect |
 | PostgreSQL native regression after SQLite | PASS: profile persistence, connect, Navigator, query, result, Explain, disconnect |
+| Feature Batch 13 renderer E2E | PASS: PostgreSQL, SQLite, MySQL workspace suites |
+| Feature Batch 13 debug Tauri build | PASS |
+| Feature Batch 13 native desktop E2E | PASS sequentially: PostgreSQL live Docker, SQLite real file, MySQL live Docker |
+| Feature Batch 13 real Tauri visual review | PASS: populated workspaces, dialogs, dark, PostgreSQL light, and 960x700 compact window |
 | Repository-wide Rust formatter check | PRE-EXISTING REPOSITORY DIFFERENCES |
 
 ## Native Tauri Desktop E2E
@@ -267,12 +279,16 @@ Runtime remains provider-specific after the workspace extraction. Any runtime-bo
 - Keep each feature batch narrowly scoped and independently verified.
 - Every completed feature batch updates this status file.
 
+## Permanent Visual Quality Gate
+
+Every database batch that changes visible UI must include a real Tauri visual review with populated data, dark-theme evidence, light-theme evidence when affected, a small-window check, cross-provider consistency review, and screenshots. Functional renderer and native E2E remain required and do not substitute for visual acceptance.
+
 ## Session Handoff
 
-- What changed: Feature Batch 12 added experimental MySQL P0 with an independent `mysql_async` runtime, `MysqlState`, `mysql_*` IPC, encrypted profiles, MySQL Navigator/query/result adapters, CodeMirror dialect, and native fixture coverage. It also fixed the controlled port input so an empty native number field does not append a new value to the default port.
-- What did not change: PostgreSQL/SQLite execution, IPC, `PostgresState`, SQLite runtime state, frontend mutation UI, CSV export, context menus, shortcuts, and generic runtime/IPC design.
-- Tests: focused MySQL tests, all three renderer suites, debug Tauri build, and sequential PostgreSQL, SQLite, and MySQL native suites pass. MySQL native verifies precise integer/decimal result rendering and the port input regression is covered for empty editing, `3307`, and the valid `1-65535` range.
-- Real Tauri status: PostgreSQL and MySQL use isolated live Docker fixtures; SQLite uses a temporary real file. All three native suites pass on the same final debug binary.
+- What changed: Feature Batch 13 normalized shared database UI density, Navigator/tab active and focus treatment, result-grid empty/row behavior, and SQLite/MySQL connection-dialog shells. Native E2E now emits ignored visual evidence for populated provider workspaces and dialogs.
+- What did not change: provider runtime/IPC, query execution, profiles/storage, `PostgresState`, SQLite/MySQL runtime state, frontend mutation UI, CSV export, context menus, shortcuts, and generic runtime/IPC design.
+- Tests: focused database component tests, all three renderer suites, i18n parity, debug Tauri build, and sequential PostgreSQL, SQLite, and MySQL native suites pass.
+- Real Tauri status: PostgreSQL and MySQL use isolated live Docker fixtures; SQLite uses a temporary real file. Final native passes used one debug binary. Visual review includes populated dark workspaces for all providers plus PostgreSQL light and 960x700 compact views.
 - Known warnings: historical Rust warnings may remain; they were not Slice 2 build failures.
 - Generic command execution remains explicitly out of scope.
 

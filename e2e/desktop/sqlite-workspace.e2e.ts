@@ -19,6 +19,7 @@ describe('SQLite native workspace', () => {
     await $('[data-testid="toolbox-nav-sqlite"]').click();
     await $('[data-testid="sqlite-new-connection"]').click();
     const dialog = await $('[data-testid="sqlite-connection-dialog"]');
+    await browser.saveScreenshot('./test-results/database-visual/sqlite-dialog-after.png');
     const inputs = await dialog.$$('input');
     await inputs[0]!.clearValue();
     await inputs[0]!.setValue('NexTerm Native SQLite');
@@ -37,6 +38,7 @@ describe('SQLite native workspace', () => {
     await result.waitForDisplayed();
     expect(await result.getText()).toContain('Alice');
     expect(await result.getText()).toContain('Bob');
+    await browser.saveScreenshot('./test-results/database-visual/sqlite-workspace-after.png');
     await expect($('[data-testid="sqlite-explain"]')).not.toBeExisting();
 
     await $('[data-testid="sqlite-delete-connection"]').click();

@@ -575,7 +575,7 @@ export function ToolPostgres() {
         )}
       </>}
       navigator={<aside
-          className="relative shrink-0 border-r bg-muted/10"
+          className="relative flex min-h-0 shrink-0 flex-col border-r bg-muted/10"
           style={{ width: navigatorWidth }}
         >
           <div className="flex h-8 items-center gap-1 border-b px-2">
@@ -596,7 +596,7 @@ export function ToolPostgres() {
               />
             </div>
           </div>
-          <div className="overflow-auto py-1">
+            <div className="min-h-0 flex-1 overflow-auto py-1">
             <DatabaseNavigator
               roots={navigatorRoots}
               childrenByParent={navigatorChildren}
@@ -640,7 +640,7 @@ export function ToolPostgres() {
       activeTabId={activeTab}
       onActivateTab={setActiveTab}
       onCloseTab={closeTab}
-      tabClassName={(_, active) => `group flex h-8 min-w-28 items-center gap-1 border-r px-2 text-[12px] ${active ? "bg-background font-medium" : "text-muted-foreground hover:bg-muted/50"}`}
+      tabClassName={(_, active) => `group flex h-8 min-w-28 items-center gap-1 border-r px-2 text-[12px] outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring ${active ? "bg-background font-medium text-foreground" : "text-muted-foreground hover:bg-muted/50"}`}
       workspace={tab && (
             <section className="flex min-h-0 flex-1 flex-col">
               <div className="flex h-8 shrink-0 items-center gap-1 border-b bg-muted/10 px-2">
@@ -1105,7 +1105,7 @@ function TextField({
     <div className="col-span-2 space-y-1">
       <Label className="text-[11px] text-muted-foreground">{label}</Label>
       <textarea
-        className="h-16 w-full resize-none rounded-sm border bg-background p-2 font-mono text-[11px]"
+         className="h-16 w-full resize-none rounded-sm border bg-input-background p-2 font-mono text-[11px] outline-none focus-visible:border-ring focus-visible:ring-1 focus-visible:ring-ring"
         value={value}
         onChange={(e) => onChange(e.target.value)}
       />

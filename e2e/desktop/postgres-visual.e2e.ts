@@ -19,6 +19,7 @@ describe('PostgreSQL visual workspace', () => {
     await $('[data-testid="postgres-new-connection"]').click();
 
     const dialog = await $('[data-testid="postgres-connection-dialog"]');
+    await browser.saveScreenshot('./test-results/database-visual/postgres-dialog-after.png');
     const inputs = await dialog.$$('input');
     for (const input of inputs) await input.clearValue();
     await inputs[0].setValue('NexTerm Visual PostgreSQL');
@@ -67,6 +68,13 @@ describe('PostgreSQL visual workspace', () => {
     await workspace.$('table').waitForDisplayed();
     expect((await workspace.$$('tbody tr')).length).toBeGreaterThan(0);
     await browser.saveScreenshot('./test-results/postgres/05-query-result.png');
+    await browser.saveScreenshot('./test-results/database-visual/postgres-workspace-after.png');
+    await browser.execute(() => document.documentElement.classList.remove('dark'));
+    await browser.saveScreenshot('./test-results/database-visual/postgres-workspace-light-after.png');
+    await browser.setWindowSize(960, 700);
+    await browser.saveScreenshot('./test-results/database-visual/postgres-workspace-small-after.png');
+    await browser.setWindowSize(2048, 1200);
+    await browser.execute(() => document.documentElement.classList.add('dark'));
 
     const tablesGroup = await $('[data-node-id*="/group:relations"]');
     await tablesGroup.click();

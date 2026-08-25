@@ -321,14 +321,14 @@ export function ToolMySql() {
         </>
       }
       navigator={
-        <aside className="w-72 shrink-0 border-r bg-muted/10">
+        <aside className="flex min-h-0 w-72 shrink-0 flex-col border-r bg-muted/10">
           <div className="flex h-8 items-center gap-1 border-b px-2">
-            <FolderTree className="h-3.5 w-3.5" />
-            <span className="text-[11px] font-semibold">
+            <FolderTree className="h-3.5 w-3.5 text-muted-foreground" />
+            <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
               {t("toolbox.mysql.navigator")}
             </span>
           </div>
-          <div className="overflow-auto py-1">
+          <div className="min-h-0 flex-1 overflow-auto py-1">
             <DatabaseNavigator
               roots={roots}
               childrenByParent={children}
@@ -365,10 +365,9 @@ export function ToolMySql() {
         if (id === activeTab)
           setActiveTab(tabs.find((item) => item.id !== id)?.id ?? "");
       }}
-      tabClassName={() =>
-        "flex h-8 min-w-28 items-center gap-1 border-r px-2 text-[12px]"
+      tabClassName={(_, active) =>
+        `group flex h-8 min-w-28 items-center gap-1 border-r px-2 text-[12px] outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring ${active ? "bg-background font-medium text-foreground" : "text-muted-foreground hover:bg-muted/50"}`
       }
-      tabStripClassName="flex h-8 shrink-0 border-b"
       workspace={
         tab && (
           <section className="flex min-h-0 flex-1 flex-col">
@@ -428,12 +427,13 @@ export function ToolMySql() {
     >
       <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
         <DialogContent
-          className="!inset-0 !m-auto !h-fit !w-[560px] !max-w-[calc(100vw-32px)] !translate-x-0 !translate-y-0"
+          className="!inset-0 !m-auto !h-[min(600px,calc(100vh-32px))] !w-[560px] !max-w-[calc(100vw-32px)] !translate-x-0 !translate-y-0 gap-0 overflow-hidden rounded-md p-0"
           data-testid="mysql-connection-dialog"
         >
-          <DialogHeader>
-            <DialogTitle>{t("toolbox.mysql.connectionSettings")}</DialogTitle>
+          <DialogHeader className="border-b px-4 py-3">
+            <DialogTitle className="text-sm">{t("toolbox.mysql.connectionSettings")}</DialogTitle>
           </DialogHeader>
+          <div className="min-h-0 flex-1 overflow-auto p-4">
           <div className="grid gap-3">
             <Field label={t("toolbox.mysql.provider")}>
               <DatabaseProviderSelect
@@ -527,16 +527,21 @@ export function ToolMySql() {
               />
             </Field>
           </div>
-          <div className="flex justify-end gap-2">
+          </div>
+          <div className="flex justify-end gap-2 border-t px-4 py-3">
             <Button
+              size="sm"
               type="button"
               variant="outline"
+              className="rounded-sm"
               onClick={() => void save()}
             >
               {t("common.save")}
             </Button>
             <Button
+              size="sm"
               type="button"
+              className="rounded-sm"
               onClick={() => void connect()}
               disabled={connecting}
             >
