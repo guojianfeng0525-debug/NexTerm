@@ -26,6 +26,8 @@ Build declarative object designer forms, validation, SQL preview/diff/revert, ta
 
 These have the strongest component reuse after Phase 2/3. Deliver one provider at a time: connection/auth, metadata, dialect, data editor, designer, backup/import/export and capability tests. SQLite is deliberately after MySQL/MariaDB because local-file lifecycle requires its own profile and safety decisions.
 
+SQLite P0 architecture validation was completed early as an experimental provider: it validates shared frontend/domain contracts with renderer and native evidence, not full Phase 4 feature parity. The next evaluated extraction is a shared workspace UI composition shell; provider runtime and IPC remain out of scope.
+
 ## Phase 5: Import/Export and Backup/Restore Platform (P1)
 
 Add stream-based wizard profiles, mapping/preview/error policy, TXT/CSV/JSON/XML first, then Excel/DBF/ODBC where platform support is justified. Add provider-owned backup/restore adapters, progress/cancel/history and explicit destructive confirmation. Do not shell out to provider tools without argument escaping, availability checks, logs, cancellation and credential protections.

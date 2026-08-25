@@ -48,9 +48,11 @@ completion, and shared result rendering. It does not expose schemas,
 transactions, Explain, result editing, paging, SSH, or TLS. Renderer and
 native dual-provider validation are complete.
 
-## Existing PostgreSQL migration
+## Current Runtime Boundary
 
-Move the narrow live-client registry in `src-tauri/src/postgres.rs` behind a database session service. Preserve its secure SSH fingerprint verification, TLS root/client validation, bounded query timeout, identifier quoting, and primary-key validation. Do not expose its raw `postgres_*` IPC commands as the long-term UI contract. The existing `PostgresConnection` persisted profile becomes versioned `DatabaseConnectionProfile` with `providerId: "postgresql"` and provider-owned settings.
+PostgreSQL retains its narrow live-client registry in `src-tauri/src/postgres.rs`, secure SSH fingerprint verification, TLS root/client validation, bounded query timeout, identifier quoting, primary-key validation, `postgres_*` IPC, and `PostgresState`. SQLite retains its existing-file `rusqlite` runtime and `sqlite_*` IPC.
+
+The existing `PostgresConnection` persistence adapts to `DatabaseConnectionProfile` with `providerId: "postgresql"` and provider-owned settings. A generic backend session service or generic IPC is deferred: the real providers have material runtime differences, and no generic target API has been selected.
 
 ## Safety rules
 

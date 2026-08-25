@@ -8,10 +8,10 @@ PostgreSQL is the first current provider. The long-term target is a Shared Datab
 
 ## Current Architecture
 
-- PostgreSQL-first runtime.
-- Shared TypeScript Database Core is established.
-- Provider Runtime Adoption is partial: New Query, Explain, Execute, and Disconnect command availability use the Shared Command Resolver.
-- UI and IPC remain largely PostgreSQL-specific. Navigator, result UI, and saved-profile flows consume shared provider-aware contracts through PostgreSQL adapters.
+- Shared frontend/domain adoption: VALIDATED with PostgreSQL and experimental SQLite P0. The shared provider core, command resolver, profile envelope, provider-selection connection dialog, object model/Navigator, query-editor context/CodeEditor, result contracts, and result pane have two real providers.
+- Shared Workspace Shell: NOT IMPLEMENTED. `ToolPostgres` and `ToolSqlite` still own workspace UI composition.
+- Provider runtime and IPC: PROVIDER-SPECIFIC. PostgreSQL retains `postgres_*` IPC and `PostgresState`; SQLite retains `sqlite_*` IPC and independent `rusqlite` runtime state.
+- Generic runtime, generic `database_*` IPC, and generic `DatabaseState`: NOT IMPLEMENTED / DEFERRED.
 
 ## Completed Atomic Slices
 
@@ -26,7 +26,7 @@ PostgreSQL is the first current provider. The long-term target is a Shared Datab
 
 Constraints:
 
-- The production registry contains only PostgreSQL.
+- At Slice 1, the production registry contained only PostgreSQL. It now contains PostgreSQL and experimental SQLite P0.
 - Explain capability is `none | text | visual`; PostgreSQL declares `text`.
 - The resolver resolves availability only and does not execute commands.
 
@@ -152,6 +152,11 @@ Not migrated:
 - The experimental SQLite toolbox entry includes a file-picker flow. SQLite profiles persist in the isolated `database_sqlite_connections` table because SQLite reserves the `sqlite_` table-name prefix.
 - The shared provider-selection connection dialog and SQLite profile create/edit/delete UI are implemented. Focused frontend tests, both renderer E2E suites, SQLite Rust tests, i18n, debug Tauri build, and native desktop E2E for both providers pass.
 
+### Feature Batch 11 - Shared Database Workspace Shell - NOT STARTED
+
+- Goal: extract only proven duplicated workspace UI composition from `ToolPostgres` and `ToolSqlite`.
+- Runtime, IPC, Rust, and profile persistence changes are out of scope. Generic runtime and generic IPC are not proposed.
+
 ## Last Known Verification
 
 These are the latest known results from Feature Batches 9 and 10 verification.
@@ -220,23 +225,26 @@ Detailed analysis remains in `postgresql-coupling-report.md`.
 
 | Area | Status |
 | --- | --- |
-| Generic Connection Profile | COMPLETE for PostgreSQL saved-profile envelope/runtime adoption |
+| Shared Frontend / Domain | VALIDATED for PostgreSQL + experimental SQLite P0 |
+| Shared Workspace Shell | NOT IMPLEMENTED; Feature Batch 11 next target |
+| Provider Runtime / IPC | PROVIDER-SPECIFIC: `postgres_*` / `PostgresState` and `sqlite_*` / SQLite runtime |
+| Generic Runtime / IPC | NOT IMPLEMENTED / DEFERRED |
+| Generic Connection Profile | COMPLETE for PostgreSQL + SQLite saved-profile envelope adoption |
 | Generic Storage | NOT STARTED |
-| Navigator Migration | COMPLETE for PostgreSQL connection/catalog/schema/relation runtime |
-| CodeEditor Provider Migration | COMPLETE for PostgreSQL query-editor context |
-| Shared Result / Data Contract | COMPLETE for PostgreSQL query and table browse runtime |
+| Navigator Migration | COMPLETE for PostgreSQL and SQLite P0 provider object loaders |
+| CodeEditor Provider Migration | COMPLETE for PostgreSQL and SQLite query-editor contexts |
+| Shared Result / Data Contract | COMPLETE for PostgreSQL and SQLite P0 runtime adapters |
 | Command Execution Migration | NOT STARTED |
 | PostgreSQL IPC Migration | NOT STARTED |
 | Rust Runtime Migration | NOT STARTED |
 | Context Menu Parity | NOT STARTED |
 | Shortcut Parity | NOT STARTED |
-| Additional Providers | COMPLETE for experimental SQLite P0 architecture validation; broader provider support remains future work |
+| Second Provider | COMPLETE: experimental SQLite P0 implemented and natively validated |
+| Future Additional Providers | NOT STARTED |
 
-## Recommendation Only
+## Next Target
 
-No database-platform migration is currently active. Future provider work must begin with a concrete product caller.
-
-This is a recommendation only, not active implementation.
+Feature Batch 11 evaluates and extracts only demonstrated shared Database Workspace UI composition. It must preserve provider-owned runtime orchestration and existing IPC.
 
 ## Permanent Architecture Constraints
 

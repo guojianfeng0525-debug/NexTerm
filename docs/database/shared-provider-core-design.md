@@ -2,39 +2,58 @@
 
 Date: 2026-08-25
 
-This design implements only the roadmap's shared core and migration of current PostgreSQL P0 capability. It intentionally excludes new providers, designers, import/export, backup/restore, synchronization, automation, BI, and AI.
+This design records the shared frontend/domain architecture validated by PostgreSQL and the experimental SQLite P0 provider. It intentionally excludes shared backend runtime/IPC, designers, import/export, backup/restore, synchronization, automation, BI, and AI.
 
 Implementation progress and completed Feature Batches are tracked in
 `docs/database/database-development-status.md`. This design document records
 architecture, dependency direction, and design boundaries; it is not the
 authoritative progress log.
 
-## Architecture Before
+## Current Architecture
 
 ```text
-Toolbox postgres view
-  -> ToolPostgres monolith
-  -> PostgresConnectionsStorage / PostgresConnection
-  -> postgres_* Tauri commands
-  -> PostgresState + tokio-postgres client map
+                    Shared frontend/domain
+                            |
+       ------------------------------------------------
+       |              |             |                 |
+   Profile         Navigator     Query Editor      Result Pane
+       |              |             |                 |
+       ------------------------------------------------
+                            ^
+                            |
+                Provider-specific frontend hosts
+                   /                         \
+          ToolPostgres                    ToolSqlite
+               |                              |
+        postgres_* IPC                   sqlite_* IPC
+               |                              |
+ PostgreSQL runtime: network,       SQLite runtime: local file,
+ tokio-postgres, SSH/TLS/auth       rusqlite, locking/file semantics
 ```
 
-The frontend owns a PostgreSQL schema/table hierarchy and directly selects PostgreSQL behavior. One backend module is both driver adapter and platform boundary.
+The shared profile envelope, command resolver, object model/Navigator, query-editor context/CodeEditor, and result contract/pane are implemented and validated by both providers. Workspace composition remains owned by the two provider hosts. Runtime and IPC remain provider-specific.
 
-## Architecture After
+## Batch 11 Target: Shared Workspace Composition
 
 ```text
-Toolbox database view
-  -> DatabaseWorkspaceShell
-  -> Database command registry + shortcut/context-menu adapters
-  -> static DatabaseProvider registry
-  -> selected PostgreSQL provider contribution
-  -> generic Tauri database_* commands
-  -> DatabaseState dispatches to PostgreSQLProvider
-  -> PostgreSQL driver, catalog SQL and dialect services
+                 DatabaseWorkspaceShell
+                    UI composition only
+                    /               \
+                   /                 \
+        ToolPostgres                 ToolSqlite
+             |                           |
+        postgres_* IPC              sqlite_* IPC
+             |                           |
+    PostgreSQL runtime             SQLite runtime
 ```
 
-This is a static in-process registry, not a dynamic plugin system. Adding a provider later must add one provider contribution and adapter, not a second shell, tab system, result grid, command resolver, context menu or shortcut system.
+If implemented, `DatabaseWorkspaceShell` owns only shared toolbar, Navigator placement, query-tab host, editor/result layout, status region, and connected/disconnected presentation. It does not call provider IPC, own a runtime handle, or interpret provider payloads.
+
+## Deferred Runtime Boundary
+
+Current architecture intentionally keeps runtime and IPC provider-specific. PostgreSQL has network sessions, `tokio-postgres`, SSH/TLS/authentication, schemas, textual Explain, `postgres_*` IPC, and `PostgresState`. SQLite has existing local-file semantics, `rusqlite`, local locking, no SSH/TLS or PostgreSQL schema hierarchy, `sqlite_*` IPC, and independent runtime state.
+
+No generic `database_*` IPC, generic `DatabaseState`, runtime provider, session manager, or query executor is implemented or committed as a target shape. A future runtime abstraction requires evidence of meaningful duplication across real providers; shared frontend/domain adoption does not imply a shared backend runtime.
 
 ## Minimal Shared Contracts
 
@@ -46,7 +65,6 @@ Only the following contracts are needed by capabilities that exist today.
 | `DatabaseConnectionProfile<TProviderId, TProviderConfig>` | Saved profile ID/name/group/environment/timestamps, explicit provider identity, and typed provider configuration | PostgreSQL adapter maps the existing flat persistence DTO |
 | `DatabaseCapabilities` | declared support and current availability used by commands/UI | schemas, transactions, explain, relation browsing, row paging, safe row update, SSH/TLS |
 | `DatabaseObjectId` / `DatabaseObjectNode` | stable ID, parent ID, display name, object role, node kind, selectable/openable flags and action capability names | connection, database, schema, object-group, relation nodes |
-| `DatabaseSession` / `DatabaseOperation` | connection state and scoped busy/error/cancellation state | `PostgresState.clients`, `connecting`, `running` |
 | `DatabaseResult` / `DatabaseTabularResult` | tabular, command, and empty result kinds; positional rows/cells, command tags, truncation, and minimal editability | PostgreSQL result adapter maps `postgres_execute`, `postgres_explain`, and `postgres_table_data` |
 | `DatabaseResultColumn` / `DatabaseResultPagination` | stable ordinal column keys/labels, optional semantic/provider-native type identity, and existing offset pagination | PostgreSQL adapter maps column names, PK names, offset/limit, and `truncated` |
 
@@ -71,24 +89,6 @@ Future capability names listed in `database-provider-capabilities.md` (materiali
 Slice 1 implements the TypeScript-only foundation in `src/lib/database/`: `DatabaseProviderDescriptor`, typed `DatabaseCapabilities`, the static PostgreSQL-only registry, and command descriptor/resolution types. The implemented capability set is schemas, transactions, textual Explain, backend-supported result editing, pagination, SSH tunneling, TLS, read-only connections, code completion, and relations. `explain` is structured as `none | text | visual`; PostgreSQL reports `text` and does not claim visual Explain.
 
 The resolver is intentionally non-executing. It resolves `enabled`, `disabled`, or `hidden` from a command ID, active scope, connection state, and provider capability requirements. Its six initial IDs cover connect, disconnect, new query, object open, query execute, and query Explain. There is no UI, IPC, context-menu, shortcut, or executor integration in this slice.
-
-## Provider Boundary
-
-The Rust core should define one `DatabaseProvider` adapter with methods for current P0 operations:
-
-```text
-connect / disconnect
-metadata hierarchy
-execute / cancel when supported
-begin / commit / rollback when supported
-explain when supported
-read page
-update row when supported
-```
-
-It returns the shared contracts above. The PostgreSQL adapter retains all `pg_catalog` SQL, PostgreSQL quoting/casts, `single_statement` parsing, `tokio-postgres` driver objects, and TLS fallback semantics. It is not split into `ConnectionAdapter`, `MetadataProvider`, `ObjectProvider`, `QueryProvider`, `DataProvider`, and `ExplainProvider`: those would all have one implementation and create ceremony without a present caller.
-
-`DesignerProvider`, `ImportExportProvider`, `BackupProvider`, `SecurityProvider`, and `MonitorProvider` are not introduced in this phase. Their product requirements remain documented in the audit; future work can extend the single provider boundary when one has a shared consumer.
 
 ## Provider-Aware Object Model
 
@@ -167,7 +167,7 @@ PostgreSQL dependency. PostgreSQL creates this context through its query-editor
 adapter; CodeMirror dialect and completion conversion live in the editor integration
 layer. Generic SQL files use an explicit provider-free SQL context.
 
-Every UI entry invokes `database.dispatch(commandId, context)`. A command has an ID, permitted scopes, capability requirements, state/permission predicate, destructive/confirmation metadata, label/shortcut metadata, and one handler. The handler is the only business action path.
+The shared command resolver evaluates command IDs, scopes, capability requirements, and connection state. Provider hosts retain action callbacks and execution ownership; there is no generic command dispatcher or executor.
 
 ## Shared Result / Data Contracts
 
@@ -258,14 +258,15 @@ DIALOG -> QUERY_EDITOR or DATA_GRID -> MODEL/ER_DIAGRAM -> NAVIGATOR
 
 Registry entries carry `windows`, `linux`, and `macos` bindings independently; unknown Navicat mappings remain undefined, rather than mechanically converting Ctrl to Command. It checks existing application/terminal bindings before registration. It preserves the existing editable-target and `.xterm` protections. The first bindings are only M17-confirmed Windows query/grid commands after their matching commands exist; `Ctrl+N` remains grid-only because it conflicts with terminal new-session globally.
 
-## Shared UI and PostgreSQL Layer
+## Shared UI and Provider Hosts
 
-| Shared layer | PostgreSQL contribution |
+| Shared layer | Provider-host contribution |
 | --- | --- |
-| Database shell, toolbar host, navigator host, tab strip, query layout, result-grid host, status bar | default profile values, PostgreSQL connection fields, provider icon/name |
+| Profile envelope and provider-selection connection dialog | PostgreSQL network fields and SQLite file-path fields; provider-specific persistence adapters |
+| Navigator, CodeEditor, and result pane | provider object loader, query context, result adapter, and object-open callback |
 | Command registry, enablement, shortcut/context-menu resolution | object action contributions and capability values |
-| profile lifecycle and secret envelope | provider settings serialization and SSL-mode mapping |
-| generic IPC DTOs and database session registry | driver client, SSH/TLS mapping, catalog SQL, completion, query/explain/table adapters |
+| Workspace composition | Not yet shared. Batch 11 may extract UI-only toolbar, Navigator placement, query tabs, editor/result split, and status layout from the two hosts. |
+| Runtime and IPC | `postgres_*` / PostgreSQL runtime and `sqlite_*` / SQLite runtime remain provider-specific. |
 | native/browser E2E harness | PostgreSQL fixture and provider-specific assertions |
 
 ## Implementation Status
@@ -279,5 +280,5 @@ the recommended next batch are maintained exclusively in
 An experimental SQLite P0 provider now supplies those adapters and reuses the
 shared profile, Navigator, CodeEditor, result pane, and command resolver.
 Renderer and native validation, including the PostgreSQL regression, are
-complete. This evidence does not justify a generic runtime/IPC rewrite or a
-workspace-shell extraction without a concrete caller.
+complete. This evidence justifies evaluating a UI-only workspace-shell extraction
+because it has two real callers. It does not justify a generic runtime/IPC rewrite.
