@@ -47,8 +47,8 @@ Only the following contracts are needed by capabilities that exist today.
 | `DatabaseCapabilities` | declared support and current availability used by commands/UI | schemas, transactions, explain, relation browsing, row paging, safe row update, SSH/TLS |
 | `DatabaseObjectId` / `DatabaseObjectNode` | stable ID, parent ID, display name, object role, node kind, selectable/openable flags and action capability names | connection, database, schema, object-group, relation nodes |
 | `DatabaseSession` / `DatabaseOperation` | connection state and scoped busy/error/cancellation state | `PostgresState.clients`, `connecting`, `running` |
-| `DatabaseQueryRequest` / `DatabaseQueryResult` | execution text, selected-range intent, result sets/message metadata, page limits | `postgres_execute`, `postgres_explain` |
-| `DatabasePageRequest` / `DatabasePageResult` | provider object reference, cursor/offset, typed cells, columns, row identity and editability | `postgres_table_data` |
+| `DatabaseResult` / `DatabaseTabularResult` | tabular, command, and empty result kinds; positional rows/cells, command tags, truncation, and minimal editability | PostgreSQL result adapter maps `postgres_execute`, `postgres_explain`, and `postgres_table_data` |
+| `DatabaseResultColumn` / `DatabaseResultPagination` | stable ordinal column keys/labels, optional semantic/provider-native type identity, and existing offset pagination | PostgreSQL adapter maps column names, PK names, offset/limit, and `truncated` |
 
 `DatabaseCapabilities` starts small and concrete:
 
@@ -168,6 +168,29 @@ adapter; CodeMirror dialect and completion conversion live in the editor integra
 layer. Generic SQL files use an explicit provider-free SQL context.
 
 Every UI entry invokes `database.dispatch(commandId, context)`. A command has an ID, permitted scopes, capability requirements, state/permission predicate, destructive/confirmation metadata, label/shortcut metadata, and one handler. The handler is the only business action path.
+
+## Shared Result / Data Contracts
+
+The shared result contract is intentionally positional. SQL permits duplicate output
+labels, so rows are arrays aligned to ordinal `DatabaseResultColumn` keys rather
+than objects indexed by column name. SQL NULL is represented by `null`; string
+values remain provider-serialized to avoid precision loss for values such as
+PostgreSQL `int8` and `numeric`.
+
+```text
+PostgreSQL Runtime DTO
+  -> PostgreSQL Result Adapter
+  -> DatabaseResult (tabular | command | empty)
+  -> DatabaseResultPane
+```
+
+`DatabaseResultColumn` can carry a provider-neutral semantic type and opaque
+provider-native type name. The present PostgreSQL simple-query IPC does not
+provide type metadata, so its adapter deliberately emits `unknown` rather than
+guessing from text values. Query results are explicitly non-editable. Table
+results carry existing primary-key column references and current offset/limit/
+has-more paging metadata, but provider-specific casts, PK validation, and update
+execution remain outside the shared contract.
 
 Initial command set, limited to present PostgreSQL P0 and confirmed interaction work:
 

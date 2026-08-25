@@ -12,7 +12,7 @@ test.describe('PostgreSQL workspace', () => {
     await page.addInitScript(() => {
       Object.assign(window, {
         __TAURI_INTERNALS__: {
-          invoke: (command: string) => {
+          invoke: (command: string, args?: { request?: { offset?: number } }) => {
             if (command === 'postgres_connect') {
               return Promise.resolve({ serverVersion: '16.0' });
             }
@@ -25,7 +25,13 @@ test.describe('PostgreSQL workspace', () => {
               return Promise.resolve([{ kind: 'relation', schema: 'public', name: 'users' }]);
             }
             if (command === 'postgres_table_data') {
-              return Promise.resolve({ columns: ['id'], rows: [['1']], truncated: false });
+              const offset = args?.request?.offset ?? 0;
+              return Promise.resolve({
+                columns: ['id'],
+                rows: [[String(offset + 1)]],
+                primaryKeyColumns: ['id'],
+                truncated: true,
+              });
             }
             return Promise.resolve(undefined);
           },
@@ -76,6 +82,11 @@ test.describe('PostgreSQL workspace', () => {
     await expect(
       page.getByTestId('postgres-workspace').getByRole('main').getByRole('button', { name: 'users', exact: true }),
     ).toBeVisible();
+    const resultGrid = page.getByTestId('postgres-workspace').getByRole('main').locator('table');
+    await expect(resultGrid).toContainText('1');
+    await page.getByRole('button', { name: 'Next', exact: true }).click();
+    await expect(resultGrid).toContainText('101');
+    await expect(page.getByRole('button', { name: 'Previous', exact: true })).toBeEnabled();
 
     const tables = navigator.getByRole('button', { name: 'Tables', exact: true });
     await tables.click();

@@ -1154,7 +1154,9 @@
       "disconnected": "Disconnected",
       "executing": "Executing...",
       "ready": "Ready",
+      "result": "Result 1",
       "message": "Message",
+      "null": "NULL",
       "connectionTabs": {
         "general": "General",
         "ssh": "SSH",

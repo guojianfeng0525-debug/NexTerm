@@ -47,24 +47,25 @@ import type { PostgresCatalogLookup } from "@/lib/postgres-completion";
 import { resolveDatabaseCommand } from "@/lib/database/command-registry";
 import { postgresqlProvider } from "@/lib/database/provider-registry";
 import { DatabaseNavigator } from "@/components/toolbox/database-navigator";
+import { DatabaseResultPane } from "@/components/toolbox/database-result-pane";
 import {
   createPostgresNavigatorConnectionNode,
   getPostgresRelationReference,
   loadPostgresNavigatorChildren,
   type PostgresRelationReference,
 } from "@/lib/database/postgresql-object-loader";
+import {
+  adaptPostgresQueryResult,
+  adaptPostgresTableResult,
+  type PostgresQueryRuntimeResult,
+  type PostgresTableRuntimeResult,
+} from "@/lib/database/postgresql-result-adapter";
+import type { DatabaseResult } from "@/lib/database/result-types";
 import type {
   DatabaseObjectNode,
   DatabaseObjectNodeId,
 } from "@/lib/database/types";
 
-type Result = {
-  columns: string[];
-  rows: Array<Array<string | null>>;
-  commandTags?: string[];
-  primaryKeyColumns?: string[];
-  truncated: boolean;
-};
 type TableObject = { schema: string; name: string };
 type WorkspaceTab = {
   id: string;
@@ -72,7 +73,7 @@ type WorkspaceTab = {
   title: string;
   object?: TableObject;
   sql: string;
-  result: Result | null;
+  result: DatabaseResult | null;
   dirty?: boolean;
 };
 type DialogPage = "general" | "ssh" | "tls";
@@ -386,9 +387,11 @@ export function ToolPostgres() {
     setRunning(true);
     try {
       patchTab(tab.id, {
-        result: await invoke<Result>(
-          explain ? "postgres_explain" : "postgres_execute",
-          { request: { connectionId: draft.id, sql: tab.sql } },
+        result: adaptPostgresQueryResult(
+          await invoke<PostgresQueryRuntimeResult>(
+            explain ? "postgres_explain" : "postgres_execute",
+            { request: { connectionId: draft.id, sql: tab.sql } },
+          ),
         ),
       });
     } catch (error) {
@@ -426,15 +429,18 @@ export function ToolPostgres() {
     setRunning(true);
     try {
       patchTab(id, {
-        result: await invoke<Result>("postgres_table_data", {
-          request: {
-            connectionId: reference.connectionId,
-            schema: object.schema,
-            table: object.name,
-            limit: pageSize,
-            offset,
-          },
-        }),
+        result: adaptPostgresTableResult(
+          await invoke<PostgresTableRuntimeResult>("postgres_table_data", {
+            request: {
+              connectionId: reference.connectionId,
+              schema: object.schema,
+              table: object.name,
+              limit: pageSize,
+              offset,
+            },
+          }),
+          { offset, limit: pageSize },
+        ),
       });
     } catch (error) {
       toast.error(t("toolbox.postgres.queryFailed"), {
@@ -691,11 +697,10 @@ export function ToolPostgres() {
                 className="h-1 shrink-0 cursor-row-resize border-y bg-muted/50"
                 onPointerDown={() => setResultDragging(true)}
               />
-              <ResultPane
+              <DatabaseResultPane
                 result={tab.result}
                 height={resultHeight}
-                table={tab.type === "table"}
-                offset={tableOffset}
+                paged={tab.type === "table"}
                 onPrevious={() =>
                   tab.object &&
                   void browse(
@@ -720,7 +725,16 @@ export function ToolPostgres() {
                     tableOffset + pageSize,
                   )
                 }
-                t={t}
+                labels={{
+                  result: t("toolbox.postgres.result"),
+                  message: t("toolbox.postgres.message"),
+                  ready: t("toolbox.postgres.ready"),
+                  null: t("toolbox.postgres.null"),
+                  previous: t("toolbox.postgres.previous"),
+                  next: t("toolbox.postgres.next"),
+                  rowsRange: (from, to) =>
+                    t("toolbox.postgres.rowsRange", { from, to }),
+                }}
               />
             </section>
           )}
@@ -787,111 +801,6 @@ function ToolButton({
 }
 function Separator() {
   return <span className="mx-1 h-4 w-px bg-border" />;
-}
-function ResultPane({
-  result,
-  height,
-  table,
-  offset,
-  onPrevious,
-  onNext,
-  t,
-}: {
-  result: Result | null;
-  height: number;
-  table: boolean;
-  offset: number;
-  onPrevious: () => void;
-  onNext: () => void;
-  t: TFunction;
-}) {
-  return (
-    <section className="shrink-0 overflow-auto border-t" style={{ height }}>
-      <div className="flex h-7 items-center border-b bg-muted/20 px-2 text-[11px]">
-        <span className="border-r pr-3 font-medium">
-          {result ? "Result 1" : t("toolbox.postgres.message")}
-        </span>
-        <span className="ml-2 text-muted-foreground">
-          {result?.commandTags?.join(" · ")}
-        </span>
-      </div>
-      {result ? (
-        <>
-          <table className="w-full border-collapse text-[12px]">
-            <thead className="sticky top-0 z-10 bg-muted">
-              <tr>
-                <th className="w-10 border-b border-r px-2 text-right font-normal text-muted-foreground">
-                  #
-                </th>
-                {result.columns.map((column) => (
-                  <th
-                    key={column}
-                    className="whitespace-nowrap border-b border-r px-2 py-1 text-left font-medium"
-                  >
-                    {column}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {result.rows.map((row, index) => (
-                <tr key={index} className="hover:bg-primary/5">
-                  {" "}
-                  <td className="border-b border-r px-2 text-right text-muted-foreground">
-                    {offset + index + 1}
-                  </td>
-                  {row.map((cell, cellIndex) => (
-                    <td
-                      key={`${index}:${cellIndex}`}
-                      className="whitespace-nowrap border-b border-r px-2 py-1.5 select-text"
-                    >
-                      {cell ?? (
-                        <span className="text-muted-foreground">NULL</span>
-                      )}
-                    </td>
-                  ))}
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          {table && (
-            <div className="sticky bottom-0 flex h-7 items-center gap-1 border-t bg-background px-2 text-[11px]">
-              <span>
-                {t("toolbox.postgres.rowsRange", {
-                  from: offset + 1,
-                  to: offset + result.rows.length,
-                })}
-              </span>
-              <div className="ml-auto flex gap-1">
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  className="h-6 rounded-sm px-2 text-[11px]"
-                  disabled={!offset}
-                  onClick={onPrevious}
-                >
-                  {t("toolbox.postgres.previous")}
-                </Button>
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  className="h-6 rounded-sm px-2 text-[11px]"
-                  disabled={result.rows.length < pageSize}
-                  onClick={onNext}
-                >
-                  {t("toolbox.postgres.next")}
-                </Button>
-              </div>
-            </div>
-          )}
-        </>
-      ) : (
-        <div className="p-3 text-[12px] text-muted-foreground">
-          {t("toolbox.postgres.ready")}
-        </div>
-      )}
-    </section>
-  );
 }
 function ConnectionDialog({
   open,

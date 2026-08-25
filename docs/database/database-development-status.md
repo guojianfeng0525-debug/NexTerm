@@ -11,7 +11,7 @@ PostgreSQL is the first current provider. The long-term target is a Shared Datab
 - PostgreSQL-first runtime.
 - Shared TypeScript Database Core is established.
 - Provider Runtime Adoption is partial: New Query, Explain, Execute, and Disconnect command availability use the Shared Command Resolver.
-- UI, storage, IPC, and editor remain largely PostgreSQL-specific. The Navigator now consumes a shared provider-aware object model through the PostgreSQL adapter.
+- UI, storage, and IPC remain largely PostgreSQL-specific. The Navigator and result UI consume shared provider-aware contracts through PostgreSQL adapters.
 
 ## Completed Atomic Slices
 
@@ -128,9 +128,18 @@ Not migrated:
 - CodeMirror PostgreSQL dialect/completion integration is isolated in `query-editor-codemirror.ts`; `CodeEditor` has no PostgreSQL imports or PostgreSQL-specific props.
 - Query execution, Explain execution, IPC, Rust, profiles, storage, Navigator, and result architecture remain unchanged.
 
+### Feature Batch 8 - Shared Result / Data Contract - COMPLETE
+
+- Added provider-neutral tabular, command, and empty result contracts, positional row/cell values, column metadata, pagination metadata, and minimal editability metadata.
+- Added the production PostgreSQL result adapter. Existing `postgres_execute`, `postgres_explain`, and `postgres_table_data` responses now cross this boundary once before reaching the shared result pane.
+- `DatabaseResultPane` renders only shared result contracts. It has no PostgreSQL imports, raw IPC DTOs, or PostgreSQL type branches.
+- Current IPC serializes all cells as `string | null`; the contract preserves that serialization exactly, including SQL NULL and large numeric strings. Type metadata is representable but remains `unknown`/absent until an existing IPC supplies it.
+- Existing offset paging now uses shared `offset`, `limit`, and `hasMore` metadata derived from PostgreSQL's existing `truncated` response signal. Query results remain non-editable; table results retain existing primary-key metadata as shared column keys.
+- Execution, IPC, Rust, profiles/storage, Navigator, and CodeEditor architecture are unchanged. No database-result CSV export or frontend editable-grid caller exists in the current source, so neither was introduced.
+
 ## Last Known Verification
 
-These are the latest known results from Feature Batch 5 verification.
+These are the latest known results from Feature Batch 8 verification.
 
 | Check | Result |
 | --- | --- |
@@ -145,6 +154,12 @@ These are the latest known results from Feature Batch 5 verification.
 | Feature Batch 7 focused completion tests | PASS |
 | Feature Batch 7 renderer E2E | PASS |
 | Feature Batch 7 native Tauri E2E | PASS |
+| Feature Batch 8 focused Vitest | 4 PASS |
+| Feature Batch 8 renderer E2E | PASS |
+| Feature Batch 8 native Tauri E2E | PASS, live PostgreSQL |
+| Feature Batch 8 `pnpm tauri build --debug --no-bundle` | PASS |
+| Feature Batch 8 touched-file lint and `git diff --check` | PASS |
+| Full `pnpm lint` | PRE-EXISTING FAILURES outside Batch 8 files |
 | `git diff --check` | PASS |
 
 ## Native Tauri Desktop E2E
@@ -164,7 +179,7 @@ Browser E2E remains a renderer-regression layer and is not Native Desktop E2E.
 - PostgreSQL object loader and table browse translation
 - PostgreSQL completion semantics, catalog IPC mapping, and CodeMirror bridge
 - `postgres_*` IPC and Rust `PostgresState`
-- PostgreSQL-specific result contracts
+- PostgreSQL result adapter and raw `postgres_*` result IPC DTOs; current IPC has no column type/nullability metadata
 
 Detailed analysis remains in `postgresql-coupling-report.md`.
 
@@ -176,6 +191,7 @@ Detailed analysis remains in `postgresql-coupling-report.md`.
 | Generic Storage | NOT STARTED |
 | Navigator Migration | COMPLETE for PostgreSQL connection/catalog/schema/relation runtime |
 | CodeEditor Provider Migration | COMPLETE for PostgreSQL query-editor context |
+| Shared Result / Data Contract | COMPLETE for PostgreSQL query and table browse runtime |
 | Command Execution Migration | NOT STARTED |
 | PostgreSQL IPC Migration | NOT STARTED |
 | Rust Runtime Migration | NOT STARTED |
@@ -185,7 +201,7 @@ Detailed analysis remains in `postgresql-coupling-report.md`.
 
 ## Recommendation Only
 
-Recommended next Feature Batch: Shared Result / Data Contract.
+Recommended next Feature Batch: Connection Profile Platform.
 
 This is a recommendation only, not active implementation.
 
@@ -203,11 +219,11 @@ This is a recommendation only, not active implementation.
 
 ## Session Handoff
 
-- What changed: Slice 1 created the Shared TypeScript foundation; Slice 2 migrated Explain toolbar availability; Slice 3 migrated Execute toolbar availability; Slice 4 migrated Disconnect toolbar availability; Feature Batch 5 migrated New Query toolbar availability.
-- What did not change: PostgreSQL execution, IPC, profiles, storage, editor, result contracts, context menus, and shortcuts. Navigator remains PostgreSQL-backed but now renders shared provider-aware live nodes.
-- Tests: see Last Known Verification; this documentation-only session does not rerun product tests.
+- What changed: Shared provider commands, Navigator nodes, query-editor context, and result/data contracts are each live through PostgreSQL adapters. Query/table result rendering now uses `DatabaseResult` and `DatabaseResultPane`.
+- What did not change: PostgreSQL execution, IPC, Rust, profiles, storage, frontend mutation UI, CSV export, context menus, and shortcuts.
+- Tests: Feature Batch 8 focused contract tests, renderer E2E, debug Tauri build, and native desktop E2E with live PostgreSQL pass.
 - Real Tauri status: available, uses live PostgreSQL, last known result PASS.
 - Known warnings: historical Rust warnings may remain; they were not Slice 2 build failures.
-- Recommended next feature batch: Query Provider / CodeEditor Integration; command execution remains explicitly out of scope.
+- Recommended next feature batch: Connection Profile Platform; generic command execution remains explicitly out of scope.
 
 Last updated: 2026-08-25
