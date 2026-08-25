@@ -157,6 +157,14 @@ export function ToolPostgres() {
       connectionState: connected ? "connected" : "disconnected",
     },
   );
+  const newQueryCommand = resolveDatabaseCommand(
+    "database.workspace.newQuery",
+    {
+      scope: "DATABASE",
+      provider: postgresqlProvider,
+      connectionState: connected ? "connected" : "disconnected",
+    },
+  );
   const catalogLookup: PostgresCatalogLookup | undefined = connected
     ? async (request) =>
         invoke("postgres_catalog_search", {
@@ -440,6 +448,7 @@ export function ToolPostgres() {
         <ToolButton
           icon={<FileCode2 />}
           label={t("toolbox.postgres.newQuery")}
+          disabled={newQueryCommand.state !== "enabled"}
           onClick={() => {
             const query = newQuery();
             openTab(query);

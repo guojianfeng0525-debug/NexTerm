@@ -10,7 +10,7 @@ PostgreSQL is the first current provider. The long-term target is a Shared Datab
 
 - PostgreSQL-first runtime.
 - Shared TypeScript Database Core is established.
-- Provider Runtime Adoption is partial: Explain, Execute, and Disconnect command availability use the Shared Command Resolver.
+- Provider Runtime Adoption is partial: New Query, Explain, Execute, and Disconnect command availability use the Shared Command Resolver.
 - UI, storage, IPC, navigator, and editor remain largely PostgreSQL-specific.
 
 ## Completed Atomic Slices
@@ -90,16 +90,37 @@ Not migrated:
 - Rust execution and session cleanup
 - Generic command execution
 
+## Feature Batches
+
+### Feature Batch 5 - Query Command Adoption - COMPLETE
+
+`database.workspace.newQuery` toolbar availability now follows:
+
+```text
+PostgreSQL Provider Descriptor
+  -> Shared Command Descriptor
+  -> Shared Command Resolver
+  -> ToolPostgres New Query Toolbar Entry
+```
+
+The existing `newQuery()` and `openTab()` handler path is unchanged. New Query is disabled while disconnected and enabled when connected, as defined by the existing shared command descriptor. `database.query.execute` and `database.query.explain` remain resolver-controlled, with their existing local `running` guards.
+
+Not migrated:
+
+- Query execution, IPC, and Rust runtime
+- Stop/cancel, transactions, save, format, selected/current-statement execution, and result refresh: no mature Query Toolbar entry exists
+- Generic command execution
+
 ## Last Known Verification
 
-These are the latest known results from the completed Slice 3 verification.
+These are the latest known results from Feature Batch 5 verification.
 
 | Check | Result |
 | --- | --- |
 | `pnpm tauri build --debug --no-bundle` | PASS |
 | `pnpm e2e --spec e2e/desktop/postgres-visual.e2e.ts` | PASS |
 | Live PostgreSQL | YES |
-| Focused Vitest | 15 PASS |
+| Focused Vitest: `database-command-registry.test.ts` | 13 PASS |
 | Renderer E2E: `tests/postgres-workspace.e2e.spec.ts` | PASS |
 | `git diff --check` | PASS |
 
@@ -141,7 +162,7 @@ Detailed analysis remains in `postgresql-coupling-report.md`.
 
 ## Recommendation Only
 
-Recommended Atomic Slice 5: determine the next smallest production UI consumer of the existing Shared Command Resolver after reviewing live PostgreSQL coupling.
+Recommended next Feature Batch: Navigator / Object Model Provider Migration.
 
 This is a recommendation only, not active implementation.
 
@@ -154,16 +175,16 @@ This is a recommendation only, not active implementation.
 - No abstraction without a real caller.
 - Command Resolver does not execute commands.
 - Browser E2E is not Native Desktop E2E.
-- One Atomic Slice at a time.
-- Every completed Slice updates this status file.
+- Keep each feature batch narrowly scoped and independently verified.
+- Every completed feature batch updates this status file.
 
 ## Session Handoff
 
-- What changed: Slice 1 created the Shared TypeScript foundation; Slice 2 migrated Explain toolbar availability; Slice 3 migrated Execute toolbar availability; Slice 4 migrated Disconnect toolbar availability.
+- What changed: Slice 1 created the Shared TypeScript foundation; Slice 2 migrated Explain toolbar availability; Slice 3 migrated Execute toolbar availability; Slice 4 migrated Disconnect toolbar availability; Feature Batch 5 migrated New Query toolbar availability.
 - What did not change: PostgreSQL execution, IPC, profiles, storage, navigator, editor, result contracts, context menus, and shortcuts.
 - Tests: see Last Known Verification; this documentation-only session does not rerun product tests.
 - Real Tauri status: available, uses live PostgreSQL, last known result PASS.
 - Known warnings: historical Rust warnings may remain; they were not Slice 2 build failures.
-- Recommended next atomic slice: select one smallest existing PostgreSQL UI caller that can consume the Shared Command Resolver; command execution remains explicitly out of scope.
+- Recommended next feature batch: Navigator / Object Model Provider Migration; command execution remains explicitly out of scope.
 
 Last updated: 2026-08-25

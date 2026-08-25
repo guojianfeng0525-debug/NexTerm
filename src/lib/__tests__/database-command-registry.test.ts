@@ -48,6 +48,28 @@ describe("database command resolver", () => {
     });
   });
 
+  it("enables New Query for PostgreSQL in a connected database scope", () => {
+    expect(
+      resolveDatabaseCommand("database.workspace.newQuery", {
+        ...connectedNavigatorContext,
+        scope: "DATABASE",
+      }),
+    ).toMatchObject({
+      state: "enabled",
+      descriptor: { id: "database.workspace.newQuery" },
+    });
+  });
+
+  it("disables New Query while disconnected", () => {
+    expect(
+      resolveDatabaseCommand("database.workspace.newQuery", {
+        ...connectedNavigatorContext,
+        scope: "DATABASE",
+        connectionState: "disconnected",
+      }),
+    ).toMatchObject({ state: "disabled", reason: "connection-state" });
+  });
+
   it("disables Disconnect while disconnected", () => {
     expect(
       resolveDatabaseCommand("database.connection.disconnect", {

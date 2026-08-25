@@ -32,6 +32,7 @@ test.describe('PostgreSQL workspace', () => {
     await expect(page.getByTestId('postgres-toolbar')).toBeVisible();
     await expect(page.getByTestId('postgres-run')).toBeDisabled();
     await expect(page.getByTestId('postgres-explain')).toBeDisabled();
+    await expect(page.getByTestId('postgres-new-query')).toBeDisabled();
     await expect(page.getByTestId('postgres-connect')).toBeEnabled();
     await expect(page.getByTestId('postgres-disconnect')).toHaveCount(0);
     await page.screenshot({ path: 'test-results/postgres/01-main-workspace.png', fullPage: true });
@@ -54,6 +55,7 @@ test.describe('PostgreSQL workspace', () => {
     await dialog.getByRole('button', { name: 'General' }).click();
     await dialog.getByRole('button', { name: 'Connect', exact: true }).click();
     await expect(page.getByTestId('postgres-disconnect')).toBeEnabled();
+    await expect(page.getByTestId('postgres-new-query')).toBeEnabled();
     await page.getByTestId('postgres-disconnect').click();
     await expect(page.getByTestId('postgres-disconnect')).toHaveCount(0);
     await expect(page.getByTestId('postgres-connect')).toBeEnabled();

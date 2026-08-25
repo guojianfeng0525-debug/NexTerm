@@ -15,6 +15,7 @@ describe('PostgreSQL visual workspace', () => {
     const postgres = await $('[data-testid="toolbox-nav-postgres"]');
     await postgres.waitForDisplayed();
     await postgres.click();
+    await expect($('[data-testid="postgres-new-query"]')).toBeDisabled();
     await $('[data-testid="postgres-new-connection"]').click();
 
     const dialog = await $('[data-testid="postgres-connection-dialog"]');
@@ -36,6 +37,7 @@ describe('PostgreSQL visual workspace', () => {
     await browser.saveScreenshot('./test-results/postgres/debug-after-connect.png');
     await expect($('[data-testid="postgres-run"]')).toBeEnabled();
     await expect($('[data-testid="postgres-explain"]')).toBeEnabled();
+    await expect($('[data-testid="postgres-new-query"]')).toBeEnabled();
     await expect($('[data-testid="postgres-disconnect"]')).toBeEnabled();
     await $('button=users').waitForDisplayed();
     await browser.saveScreenshot('./test-results/postgres/02-database-tree.png');

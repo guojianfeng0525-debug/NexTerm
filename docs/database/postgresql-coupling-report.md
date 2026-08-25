@@ -51,6 +51,10 @@ Infrastructure established; migration pending. `src/lib/database/` now contains 
 
 `ToolPostgres` now consumes the shared resolver for the existing `database.connection.disconnect` toolbar entry. Before this slice, the toolbar independently used its local `connected` state as the implied Disconnect availability rule; now the PostgreSQL provider descriptor, shared Disconnect descriptor, and resolver determine whether Disconnect is enabled. The existing toolbar continues to render its Connect entry while disconnected and Disconnect entry while connected. The Disconnect handler still invokes `postgres_disconnect` and performs the existing local state update, so this slice changes availability only, not disconnect execution, IPC, Rust session cleanup, persistence, backend contracts, or workspace structure. Renderer and native desktop coverage assert disconnected, connected, and post-disconnect states.
 
+## Feature Batch 5 Status
+
+`ToolPostgres` now consumes the shared resolver for the existing `database.workspace.newQuery` toolbar entry. The PostgreSQL descriptor, existing New Query command descriptor, and resolver determine connected/disconnected availability; the existing `newQuery()` and `openTab()` handler remains unchanged. Execute and Explain remain resolver-controlled with their local `running` guard. There are no other mature Query Toolbar lifecycle commands to migrate: Stop/cancel, transaction controls, Save Query, Run Selected, Run Current Statement, Format SQL, and Refresh Result have no current toolbar entry. This batch changes no query execution, IPC, Rust runtime, editor provider, result contract, profile, or storage coupling. Renderer and native desktop coverage assert New Query, Execute, and Explain availability across connection states, while native coverage also verifies live query execution and results.
+
 ## Risks To Preserve During Migration
 
 - Do not weaken SSH host-key fingerprint checking, certificate validation, mTLS support, bounded timeouts, quoted identifiers, or primary-key update validation in `postgres.rs`.
