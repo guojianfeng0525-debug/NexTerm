@@ -4,6 +4,7 @@ import {
   hasDatabaseProvider,
   listDatabaseProviders,
   postgresqlProvider,
+  sqliteProvider,
 } from "@/lib/database/provider-registry";
 
 describe("database provider registry", () => {
@@ -17,10 +18,13 @@ describe("database provider registry", () => {
     expect(hasDatabaseProvider("unknown")).toBe(false);
   });
 
-  it("lists providers in stable registration order", () => {
+  it("lists PostgreSQL and SQLite by stable provider identity", () => {
     expect(listDatabaseProviders().map((provider) => provider.id)).toEqual([
       "postgresql",
+      "sqlite",
     ]);
+    expect(getDatabaseProvider("sqlite")).toBe(sqliteProvider);
+    expect(hasDatabaseProvider("sqlite")).toBe(true);
   });
 
   it("reports only PostgreSQL capabilities implemented by the current provider", () => {
@@ -37,5 +41,21 @@ describe("database provider registry", () => {
       supportsRelations: true,
     });
     expect(postgresqlProvider.capabilities.explain).not.toBe("visual");
+  });
+
+  it("declares SQLite as a local experimental P0 provider", () => {
+    expect(sqliteProvider.displayName).toContain("Experimental");
+    expect(sqliteProvider.capabilities).toMatchObject({
+      supportsSchemas: false,
+      supportsTransactions: false,
+      explain: "none",
+      supportsResultEditing: false,
+      supportsPagination: false,
+      supportsSshTunnel: false,
+      supportsTls: false,
+      supportsReadOnlyConnection: true,
+      supportsCodeCompletion: true,
+      supportsRelations: true,
+    });
   });
 });

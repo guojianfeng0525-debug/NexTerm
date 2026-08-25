@@ -10,6 +10,7 @@ mod ls_parser;
 mod os_detect;
 mod proxy;
 mod postgres;
+mod sqlite;
 mod rdp_client;
 mod sftp_client;
 pub mod ssh;
@@ -460,6 +461,7 @@ pub fn run() {
         .manage(connection_manager)
         .manage(toolbox::ToolboxState::default())
         .manage(postgres::PostgresState::default())
+        .manage(sqlite::SqliteState::default())
         .invoke_handler(tauri::generate_handler![
             commands::ssh_connect,
             commands::ssh_cancel_connect,
@@ -578,6 +580,11 @@ pub fn run() {
             postgres::postgres_catalog_schemas,
             postgres::postgres_catalog_search,
             postgres::postgres_ssh_fingerprint,
+            // SQLite database workspace (experimental P0 provider)
+            sqlite::sqlite_connect,
+            sqlite::sqlite_disconnect,
+            sqlite::sqlite_execute,
+            sqlite::sqlite_catalog_objects,
             // JAR decompiler commands
             jar_commands::jar_project_open,
             jar_commands::jar_project_reopen,

@@ -35,6 +35,12 @@ describe('PostgreSQL visual workspace', () => {
 
     await browser.pause(2_000);
     await browser.saveScreenshot('./test-results/postgres/debug-after-connect.png');
+    if (!(await $('[data-testid="postgres-run"]').isEnabled())) {
+      const errors = await $$('[data-sonner-toast][data-type="error"]');
+      const details: string[] = [];
+      for (const toast of errors) details.push(await toast.getText());
+      throw new Error(`PostgreSQL E2E connection did not complete: ${details.join(' | ') || 'no error toast found'}`);
+    }
     await expect($('[data-testid="postgres-run"]')).toBeEnabled();
     await expect($('[data-testid="postgres-explain"]')).toBeEnabled();
     await expect($('[data-testid="postgres-new-query"]')).toBeEnabled();

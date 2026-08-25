@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -5,7 +6,18 @@ import type { Options } from '@wdio/types';
 
 const application = resolve('src-tauri/target/debug/nexterm');
 const dataDir = process.env.NEXTERM_DATA_DIR ?? mkdtempSync(join(tmpdir(), 'nexterm-wdio-'));
+const sqliteFixturePath = join(dataDir, `sqlite-e2e-${Date.now()}.db`);
 mkdirSync('./test-results/wdio/failures', { recursive: true });
+
+// The fixture lives beside the isolated application data directory, never in a
+// user-selected location. The desktop spec only types this real path into the UI.
+execFileSync('sqlite3', [sqliteFixturePath, [
+  'CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL, active INTEGER NOT NULL);',
+  "INSERT INTO users (id, name, active) VALUES (1, 'Alice', 1), (2, 'Bob', 0);",
+  'CREATE TABLE projects (id INTEGER PRIMARY KEY, name TEXT NOT NULL);',
+  "INSERT INTO projects (id, name) VALUES (10, 'NexTerm');",
+].join('\n')]);
+process.env.NEXTERM_SQLITE_E2E_PATH = sqliteFixturePath;
 
 export const config: Options.Testrunner = {
   runner: 'local',

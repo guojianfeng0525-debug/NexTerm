@@ -39,6 +39,7 @@ const ToolDocuments = lazy(() => import('./components/toolbox/tool-documents').t
 const ToolJarDecompiler = lazy(() => import('./components/toolbox/tool-jar-decompiler').then((m) => ({ default: m.ToolJarDecompiler })));
 import { ToolApiDebug } from './components/toolbox/tool-api-debug';
 import { ToolPostgres } from './components/toolbox/tool-postgres';
+import { ToolSqlite } from './components/toolbox/tool-sqlite';
 import { ErrorBoundary } from './components/error-boundary';
 import { initializeAllStorage } from './lib/storage-init';
 import type { TerminalTab } from './lib/terminal-group-types';
@@ -101,6 +102,15 @@ function AppContent() {
   // Workspace section controlled by the page's directory bar: the connection
   // workspace, a terminal-only view, or one of the five toolbox tools.
   const [section, setSection] = useState<WorkspaceSection>('connection');
+  useEffect(() => {
+    const handleDatabaseProviderSelection = (event: Event) => {
+      const providerId = (event as CustomEvent<string>).detail;
+      if (providerId === 'postgresql') setSection('postgres');
+      if (providerId === 'sqlite') setSection('sqlite');
+    };
+    window.addEventListener('nexterm:database-provider-selected', handleDatabaseProviderSelection);
+    return () => window.removeEventListener('nexterm:database-provider-selected', handleDatabaseProviderSelection);
+  }, []);
 
   // App lock: every launch starts locked — the lock screen shows "set a
   // password" on first run and "enter password" afterwards. Nothing else is
@@ -1948,6 +1958,9 @@ function AppContent() {
           </div>
           <div className={cn('absolute inset-0 bg-background', section === 'postgres' ? '' : 'hidden')}>
             <ToolPostgres />
+          </div>
+          <div className={cn('absolute inset-0 bg-background', section === 'sqlite' ? '' : 'hidden')}>
+            <ToolSqlite />
           </div>
           {section === 'jar' && (
             <div className="absolute inset-0 bg-background">

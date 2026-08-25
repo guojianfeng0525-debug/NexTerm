@@ -23,7 +23,7 @@ Product baseline: `navicat-premium-audit.md`, Feature Matrix, interaction, conte
 | i18n | `src/locales/en.json`, `src/locales/zh-CN.json` | Database vocabulary is under `toolbox.postgres`. | Yes: `database.*` actions/state labels. | PostgreSQL display/default text. | Split common strings from provider contributions while preserving translations. |
 | Dependencies | `src-tauri/Cargo.toml`, `src-tauri/src/lib.rs`, `package.json` | PostgreSQL driver crates and registration are application-level. | Yes: core provider registration. | PostgreSQL driver crates/module. | Keep drivers provider-scoped; only core contracts live in database modules. |
 | Shortcuts/context menus | `src/lib/keyboard-shortcuts.ts`, `ToolPostgres` | No database scope registry; PostgreSQL workspace has no context menus. | Yes: command, scope, enablement and menu renderer infrastructure. | Provider/object action contributions. | Build command resolution before adding confirmed PostgreSQL P0 entries. |
-| Tests | `src/lib/__tests__/postgres-*.test.ts`, `src-tauri/tests/postgres_integration.rs`, `tests/postgres-workspace.e2e.spec.ts`, `e2e/desktop/postgres-visual.e2e.ts` | Browser E2E only checks visibility; ignored Rust test bypasses Tauri; desktop test depends on external local DB and localized selectors. | Yes: contract fixtures, command/scope tests, native smoke harness. | PostgreSQL fixture assertions, TLS/SSH/catalog/PK cases. | Preserve browser E2E; add database native smoke independent of a server, then a disposable PostgreSQL fixture suite. |
+| Tests | `src/lib/__tests__/postgres-*.test.ts`, `src-tauri/tests/postgres_integration.rs`, `tests/postgres-workspace.e2e.spec.ts`, `e2e/desktop/postgres-visual.e2e.ts` | Browser E2E is a renderer layer; native desktop coverage uses a dedicated local Docker PostgreSQL fixture. | Yes: contract fixtures, command/scope tests, native smoke harness. | PostgreSQL fixture assertions, TLS/SSH/catalog/PK cases. | Preserve browser E2E and the native fixture suite; keep server-specific assertions provider-owned. |
 
 ## Reusable Existing Primitives
 
@@ -88,3 +88,11 @@ Feature Batch 6 moves the live PostgreSQL Navigator to a shared object model.
 - Raw `postgres_*` IPC has already become a UI contract. New generic IPC must be introduced behind an adapter, then callers migrated in one slice; it must not be a flag-day rewrite.
 - If unrelated PostgreSQL or lockfile changes are present in a future worktree, architecture work must not discard or silently rewrite them.
 - Native WDIO is real desktop infrastructure but existing PostgreSQL visual coverage is not a portable fixture; it cannot support a `FULL` parity claim.
+
+## Feature Batch 10 Validation
+
+The experimental SQLite P0 provider passed renderer and native desktop coverage
+alongside the PostgreSQL regression. This validates the existing shared profile,
+Navigator, query-editor, result, and command-resolver boundaries for a
+file-backed provider. It does not migrate PostgreSQL `postgres_*` IPC or
+`PostgresState` into a generic backend runtime.

@@ -25,7 +25,7 @@ use tauri::State;
 
 /// Allow-listed normalized tables. Table names are validated against this
 /// list before being interpolated into SQL, so no injection is possible.
-pub const TABLES: [&str; 38] = [
+pub const TABLES: [&str; 39] = [
     "connections",
     "folders",
     "active_connections",
@@ -44,6 +44,7 @@ pub const TABLES: [&str; 38] = [
     "api_environments",
     "api_request_history",
     "postgres_connections",
+    "database_sqlite_connections",
     // Preferences — normalized single-row tables (no JSON blob columns).
     "app_settings",
     "layout_config",
@@ -592,6 +593,7 @@ fn pk_column(table: &str) -> Result<&'static str, String> {
         "api_environments" => "id",
         "api_request_history" => "id",
         "postgres_connections" => "id",
+        "database_sqlite_connections" => "id",
         "app_settings" => "id",
         "layout_config" => "id",
         "terminal_appearance" => "id",
@@ -1144,6 +1146,16 @@ CREATE TABLE IF NOT EXISTS "postgres_connections" (
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS "database_sqlite_connections" (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL DEFAULT '',
+  group_name TEXT,
+  environment TEXT NOT NULL DEFAULT 'development',
+  file_path TEXT NOT NULL DEFAULT '',
+  read_only INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS "jar_preferences" (
   id INTEGER PRIMARY KEY CHECK (id = 1),
   font_size REAL NOT NULL DEFAULT 12,
@@ -1470,6 +1482,26 @@ mod upsert_tests {
             )
             .unwrap();
         assert_eq!(count, 1, "connection row must be persisted");
+    }
+
+    #[test]
+    fn creates_and_upserts_sqlite_connection_profiles_without_reserved_names() {
+        let state = open_test_db();
+        let mut row = serde_json::Map::new();
+        row.insert("id".into(), json!("sqlite-profile"));
+        row.insert("name".into(), json!("Fixture SQLite"));
+        row.insert("environment".into(), json!("test"));
+        row.insert("file_path".into(), json!("/tmp/fixture.db"));
+        row.insert("read_only".into(), json!(0));
+        row.insert("created_at".into(), json!(1));
+        row.insert("updated_at".into(), json!(1));
+        upsert_raw(&state, "database_sqlite_connections", row).expect("SQLite profile upsert must succeed");
+
+        let conn = state.conn.lock().unwrap();
+        let name: String = conn
+            .query_row("SELECT name FROM database_sqlite_connections WHERE id='sqlite-profile'", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(name, "Fixture SQLite");
     }
 
     /// Mirrors the frontend `connToRow` + `persistConnection` output (every

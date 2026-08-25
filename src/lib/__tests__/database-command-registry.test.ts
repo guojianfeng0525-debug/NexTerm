@@ -3,7 +3,7 @@ import {
   resolveDatabaseCommand,
   type DatabaseCommandContext,
 } from "@/lib/database/command-registry";
-import { postgresqlProvider } from "@/lib/database/provider-registry";
+import { postgresqlProvider, sqliteProvider } from "@/lib/database/provider-registry";
 
 const connectedNavigatorContext: DatabaseCommandContext = {
   scope: "NAVIGATOR",
@@ -150,5 +150,19 @@ describe("database command resolver", () => {
     expect(
       resolveDatabaseCommand("database.unknown", connectedNavigatorContext),
     ).toEqual({ state: "hidden", reason: "unknown-command" });
+  });
+
+  it("resolves SQLite commands from its descriptor without UI provider branches", () => {
+    const connectedSqlite = {
+      scope: "QUERY_EDITOR" as const,
+      provider: sqliteProvider,
+      connectionState: "connected" as const,
+    };
+
+    expect(resolveDatabaseCommand("database.query.execute", connectedSqlite)).toMatchObject({ state: "enabled" });
+    expect(resolveDatabaseCommand("database.query.execute", { ...connectedSqlite, connectionState: "disconnected" })).toMatchObject({ state: "disabled", reason: "connection-state" });
+    expect(resolveDatabaseCommand("database.query.explain", connectedSqlite)).toMatchObject({ state: "disabled", reason: "missing-capability" });
+    expect(resolveDatabaseCommand("database.workspace.newQuery", { ...connectedSqlite, scope: "DATABASE" })).toMatchObject({ state: "enabled" });
+    expect(resolveDatabaseCommand("database.connection.disconnect", { ...connectedSqlite, scope: "DATABASE" })).toMatchObject({ state: "enabled" });
   });
 });

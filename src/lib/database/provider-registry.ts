@@ -23,7 +23,30 @@ export const postgresqlProvider: DatabaseProviderDescriptor = {
   },
 };
 
-const providers = [postgresqlProvider] as const;
+/** P0 local-file provider. It intentionally exposes no network transport. */
+export const sqliteProvider: DatabaseProviderDescriptor = {
+  id: "sqlite",
+  displayName: "SQLite (Experimental)",
+  family: "relational",
+  capabilities: {
+    supportsSchemas: false,
+    supportsTransactions: false,
+    explain: "none",
+    supportsResultEditing: false,
+    supportsPagination: false,
+    supportsSshTunnel: false,
+    supportsTls: false,
+    supportsReadOnlyConnection: true,
+    supportsCodeCompletion: true,
+    supportsRelations: true,
+  },
+  objectModel: {
+    hierarchy: ["connection", "catalog", "group", "object"],
+    objectRoles: ["relation"],
+  },
+};
+
+const providers = [postgresqlProvider, sqliteProvider] as const;
 
 export function getDatabaseProvider(
   id: string,

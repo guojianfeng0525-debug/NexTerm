@@ -36,7 +36,8 @@ interface NavEntry {
     | 'toolbox.apiDebug.title'
     | 'toolbox.documents.title'
     | 'toolbox.jar.title'
-    | 'toolbox.postgres.title';
+    | 'toolbox.postgres.title'
+    | 'toolbox.sqlite.title';
 }
 
 const NAV_ENTRIES: NavEntry[] = [
@@ -51,6 +52,7 @@ const NAV_ENTRIES: NavEntry[] = [
   { id: 'documents', icon: FileText, labelKey: 'toolbox.documents.title' },
   { id: 'jar', icon: Archive, labelKey: 'toolbox.jar.title' },
   { id: 'postgres', icon: Database, labelKey: 'toolbox.postgres.title' },
+  { id: 'sqlite', icon: Database, labelKey: 'toolbox.sqlite.title' },
   { id: 'api', icon: Brackets, labelKey: 'toolbox.apiDebug.title' },
 ];
 

@@ -48,6 +48,7 @@ import { resolveDatabaseCommand } from "@/lib/database/command-registry";
 import { postgresqlProvider } from "@/lib/database/provider-registry";
 import { DatabaseNavigator } from "@/components/toolbox/database-navigator";
 import { DatabaseResultPane } from "@/components/toolbox/database-result-pane";
+import { DatabaseProviderSelect } from "@/components/toolbox/database-provider-select";
 import {
   createPostgresNavigatorConnectionNode,
   getPostgresRelationReference,
@@ -884,6 +885,17 @@ function ConnectionDialog({
             <div className="grid grid-cols-2 gap-3">
               {page === "general" && (
                 <>
+                  <Field label={t("toolbox.postgres.provider")}>
+                    <DatabaseProviderSelect
+                      value="postgresql"
+                      onValueChange={(providerId) => {
+                        if (providerId !== "postgresql") {
+                          onOpenChange(false);
+                          window.dispatchEvent(new CustomEvent("nexterm:database-provider-selected", { detail: providerId }));
+                        }
+                      }}
+                    />
+                  </Field>
                   <Field label={t("toolbox.postgres.name")}>
                     <Input
                       value={draft.name}

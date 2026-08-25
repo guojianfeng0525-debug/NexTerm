@@ -39,6 +39,15 @@ Legend: `T` target capability, `P` provider-specific/phase-later, `-` not applic
 | User/security | T | T | - | T | T | T | T | P |
 | Server/command monitor | T | T | - | T | T | T | T | P |
 
+## Experimental SQLite P0
+
+SQLite is a real production-registered experimental P0 provider, not a full
+Navicat parity claim. The current implementation supports existing local file
+open, read-only open mode, table/view metadata, SQL execution, table-name
+completion, and shared result rendering. It does not expose schemas,
+transactions, Explain, result editing, paging, SSH, or TLS. Renderer and
+native dual-provider validation are complete.
+
 ## Existing PostgreSQL migration
 
 Move the narrow live-client registry in `src-tauri/src/postgres.rs` behind a database session service. Preserve its secure SSH fingerprint verification, TLS root/client validation, bounded query timeout, identifier quoting, and primary-key validation. Do not expose its raw `postgres_*` IPC commands as the long-term UI contract. The existing `PostgresConnection` persisted profile becomes versioned `DatabaseConnectionProfile` with `providerId: "postgresql"` and provider-owned settings.

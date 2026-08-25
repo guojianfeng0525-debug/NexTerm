@@ -144,15 +144,24 @@ Not migrated:
 - `PostgresConnectionsStorage`, `ToolPostgres`, the connection dialog, Navigator projection, and config archive flow now consume shared PostgreSQL profiles. Connected runtime state remains separate and unchanged.
 - `postgres_connections`, its columns, encryption format, app-lock/re-encryption flow, and archive v1 `postgresConnections` format are intentionally unchanged. Existing flat rows/archives adapt on read; new saves/exports retain the existing format.
 
+### Feature Batch 10 - SQLite Architecture Validation - COMPLETE
+
+- A real experimental SQLite P0 provider is registered alongside PostgreSQL. It uses the shared profile envelope with `SQLiteConnectionConfig`, isolated `database_sqlite_connections` persistence, and an existing-file-only `rusqlite` runtime.
+- SQLite owns `sqlite_connect`, `sqlite_disconnect`, `sqlite_execute`, and `sqlite_catalog_objects`; PostgreSQL IPC and `PostgresState` remain unchanged.
+- SQLite maps its metadata, query context/completion, and runtime results into the shared `DatabaseObjectNode`, `DatabaseNavigator`, `CodeEditor`, `DatabaseResult`, `DatabaseResultPane`, and command resolver.
+- The experimental SQLite toolbox entry includes a file-picker flow. SQLite profiles persist in the isolated `database_sqlite_connections` table because SQLite reserves the `sqlite_` table-name prefix.
+- The shared provider-selection connection dialog and SQLite profile create/edit/delete UI are implemented. Focused frontend tests, both renderer E2E suites, SQLite Rust tests, i18n, debug Tauri build, and native desktop E2E for both providers pass.
+
 ## Last Known Verification
 
-These are the latest known results from Feature Batch 9 verification.
+These are the latest known results from Feature Batches 9 and 10 verification.
 
 | Check | Result |
 | --- | --- |
 | `pnpm tauri build --debug --no-bundle` | PASS |
-| `pnpm e2e --spec e2e/desktop/postgres-visual.e2e.ts` | PASS |
-| Live PostgreSQL | YES |
+| `pnpm e2e --spec e2e/desktop/postgres-visual.e2e.ts` | PASS: live dedicated Docker fixture |
+| `pnpm e2e --spec e2e/desktop/sqlite-workspace.e2e.ts` | PASS: temporary real SQLite file |
+| Live PostgreSQL | YES: dedicated Docker fixture |
 | Focused Vitest: `database-command-registry.test.ts` | 13 PASS |
 | Renderer E2E: `tests/postgres-workspace.e2e.spec.ts` | PASS |
 | Feature Batch 6 focused Vitest | 20 PASS |
@@ -174,13 +183,24 @@ These are the latest known results from Feature Batch 9 verification.
 | Feature Batch 9 full `pnpm lint` | PRE-EXISTING FAILURES outside Batch 9 files |
 | Full `pnpm lint` | PRE-EXISTING FAILURES outside Batch 8 files |
 | `git diff --check` | PASS |
+| SQLite Rust focused tests | PASS |
+| `pnpm build` with SQLite | PASS |
+| `pnpm tauri build --debug --no-bundle` with SQLite | PASS |
+| SQLite i18n parity and touched new-file lint | PASS |
+| SQLite frontend focused tests | PASS: 34 focused tests across provider contracts and SQLite profile UI |
+| SQLite renderer E2E | PASS |
+| PostgreSQL renderer regression after SQLite | PASS |
+| SQLite native desktop E2E | PASS: profile persistence, connect, Navigator, query, result, disconnect |
+| PostgreSQL native regression after SQLite | PASS: profile persistence, connect, Navigator, query, result, Explain, disconnect |
+| Repository-wide Rust formatter check | PRE-EXISTING REPOSITORY DIFFERENCES |
 
 ## Native Tauri Desktop E2E
 
-- Status: AVAILABLE
-- Test: `e2e/desktop/postgres-visual.e2e.ts`
-- Uses Real PostgreSQL: YES
-- Last Known Result: PASS
+- Status: PASS
+- Tests: `e2e/desktop/postgres-visual.e2e.ts`, `e2e/desktop/sqlite-workspace.e2e.ts`
+- Uses Real PostgreSQL: YES, dedicated Docker fixture
+- Uses Real SQLite: YES, deterministic temporary file fixture
+- Last Known Result: both provider suites PASS
 
 Browser E2E remains a renderer-regression layer and is not Native Desktop E2E.
 
@@ -210,11 +230,11 @@ Detailed analysis remains in `postgresql-coupling-report.md`.
 | Rust Runtime Migration | NOT STARTED |
 | Context Menu Parity | NOT STARTED |
 | Shortcut Parity | NOT STARTED |
-| Additional Providers | NOT STARTED |
+| Additional Providers | COMPLETE for experimental SQLite P0 architecture validation; broader provider support remains future work |
 
 ## Recommendation Only
 
-Recommended next Feature Batch: Second Provider Architecture Validation.
+No database-platform migration is currently active. Future provider work must begin with a concrete product caller.
 
 This is a recommendation only, not active implementation.
 
@@ -232,11 +252,11 @@ This is a recommendation only, not active implementation.
 
 ## Session Handoff
 
-- What changed: Saved profiles now use a shared provider-aware envelope with PostgreSQL config and persistence adapters. Existing SQLite storage and archive format remain frozen.
-- What did not change: PostgreSQL execution, IPC, Rust, storage schema, crypto, frontend mutation UI, CSV export, context menus, and shortcuts.
-- Tests: Feature Batch 9 profile/adapter/encryption/archive tests, renderer E2E, debug Tauri build, and native desktop E2E with live PostgreSQL pass.
-- Real Tauri status: available, uses live PostgreSQL, last known result PASS.
+- What changed: Feature Batch 10 added and validated an experimental SQLite P0 implementation using the existing shared profile, navigator, editor, result, and command contracts. Its profile table is `database_sqlite_connections`, avoiding SQLite's reserved `sqlite_` prefix.
+- What did not change: PostgreSQL execution, IPC, `PostgresState`, storage format, crypto, frontend mutation UI, CSV export, context menus, shortcuts, and generic runtime/IPC design.
+- Tests: 34 focused tests, both renderer suites, SQLite Rust focused tests, frontend build, debug Tauri build, i18n parity, touched-file lint, and both native desktop suites pass.
+- Real Tauri status: both PostgreSQL (live Docker fixture) and SQLite (temporary real file) native suites pass.
 - Known warnings: historical Rust warnings may remain; they were not Slice 2 build failures.
-- Recommended next feature batch: Second Provider Architecture Validation; generic command execution remains explicitly out of scope.
+- Generic command execution remains explicitly out of scope.
 
 Last updated: 2026-08-25

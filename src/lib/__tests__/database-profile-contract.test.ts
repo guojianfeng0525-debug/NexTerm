@@ -5,6 +5,7 @@ import {
   type PostgreSQLPersistedProfile,
 } from "@/lib/database/postgresql-profile-adapter";
 import type { DatabaseConnectionProfile } from "@/lib/database/profile-types";
+import type { SQLiteConnectionProfile } from "@/lib/database/sqlite-profile";
 
 const persisted: PostgreSQLPersistedProfile = {
   id: "postgres-existing-id",
@@ -84,5 +85,22 @@ describe("shared database connection profile", () => {
     };
 
     expect(sqliteLike.providerConfig.filename).toBe("/tmp/local.db");
+  });
+
+  it("represents SQLite profiles with only file-backed provider settings", () => {
+    const profile: SQLiteConnectionProfile = {
+      id: "sqlite-local",
+      name: "Local database",
+      providerId: "sqlite",
+      environment: "test",
+      createdAt: 1,
+      updatedAt: 2,
+      providerConfig: { filePath: "/fixtures/local.db", readOnly: true },
+    };
+
+    expect(profile.providerConfig).toEqual({ filePath: "/fixtures/local.db", readOnly: true });
+    expect("host" in profile.providerConfig).toBe(false);
+    expect("sshEnabled" in profile.providerConfig).toBe(false);
+    expect("sslMode" in profile.providerConfig).toBe(false);
   });
 });

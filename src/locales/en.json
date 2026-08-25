@@ -528,6 +528,7 @@
     "local": "Local",
     "remote": "Remote",
     "column": {
+      "provider": "Provider",
       "name": "Name",
       "size": "Size",
       "modified": "Modified",
@@ -1168,6 +1169,7 @@
       "newQuery": "New query",
       "connectionSettings": "Connection settings",
       "queryConsole": "Query console",
+      "provider": "Provider",
       "name": "Name",
       "host": "Host",
       "port": "Port",
@@ -1237,6 +1239,9 @@
         "test": "Test",
         "production": "Production"
       }
+    },
+    "sqlite": {
+      "title": "SQLite (Experimental)", "experimental": "SQLite (Experimental)", "provider": "Provider", "navigator": "Connections", "tables": "Tables", "refresh": "Refresh", "disconnected": "Disconnected", "newConnection": "New connection", "editConnection": "Edit connection", "deleteConnection": "Delete connection", "deleteConfirm": "Delete {{name}}?", "deleted": "SQLite connection deleted", "deleteFailed": "Unable to delete SQLite connection", "newQuery": "New query", "connectionSettings": "SQLite connection settings", "name": "Name", "databaseFile": "Database file", "browse": "Browse", "readOnly": "Read-only connection", "connect": "Open", "disconnect": "Disconnect", "connected": "SQLite database opened", "connectFailed": "Unable to open SQLite database", "saved": "SQLite connection saved", "saveFailed": "Unable to save SQLite connection", "required": "Name and an existing database file are required", "metadataFailed": "Unable to load SQLite objects", "query": "Query", "run": "Run", "queryFailed": "SQLite query failed", "result": "Result 1", "message": "Message", "ready": "Ready", "null": "NULL", "previous": "Previous", "next": "Next", "rowsRange": "Rows {{from}}-{{to}}"
     },
     "apps": {
       "title": "Common Apps",

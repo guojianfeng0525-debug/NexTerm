@@ -4,6 +4,7 @@ import {
   adaptPostgresTableResult,
 } from "@/lib/database/postgresql-result-adapter";
 import type { DatabaseTabularResult } from "@/lib/database/result-types";
+import { adaptSqliteQueryResult } from "@/lib/database/sqlite-result-adapter";
 
 describe("shared database result contracts", () => {
   it("keeps duplicate labels, NULL, and large numeric strings positional", () => {
@@ -84,5 +85,24 @@ describe("shared database result contracts", () => {
         truncated: false,
       }),
     ).toEqual({ kind: "empty" });
+  });
+
+  it("adapts SQLite values into the shared result contract", () => {
+    const result = adaptSqliteQueryResult({
+      columns: ["id", "name", "missing"],
+      rows: [["1", "Alice", null], ["2", "", "value"]],
+      commandTags: [],
+      truncated: true,
+    });
+    expect(result).toMatchObject({
+      kind: "tabular",
+      rows: [["1", "Alice", null], ["2", "", "value"]],
+      truncated: true,
+      editability: { editable: false, primaryKeyColumnKeys: [] },
+    });
+    if (result.kind !== "tabular") throw new Error("expected tabular result");
+    expect(result.columns.slice(0, 2)).toMatchObject([{ key: "column:0", label: "id" }, { key: "column:1", label: "name" }]);
+    expect(adaptSqliteQueryResult({ columns: [], rows: [], commandTags: ["1 rows affected"], truncated: false })).toEqual({ kind: "command", commandTags: ["1 rows affected"] });
+    expect(adaptSqliteQueryResult({ columns: [], rows: [], commandTags: [], truncated: false })).toEqual({ kind: "empty" });
   });
 });

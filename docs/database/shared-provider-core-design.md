@@ -152,7 +152,7 @@ interpret a PostgreSQL schema/table hierarchy to load children.
 
 - Navigator / Object Model Shared Foundation: IMPLEMENTED.
 - PostgreSQL Runtime Adoption: IMPLEMENTED.
-- Multi-provider Adoption: NOT YET IMPLEMENTED.
+- Multi-provider Adoption: VALIDATED for PostgreSQL and the experimental SQLite P0 provider. SQLite reuses the shared profile, Navigator, query-editor context, result contracts, and command resolver; renderer and native dual-provider validation pass.
 - Extended Object Type Coverage: PARTIAL.
 - Navicat Interaction Parity: INCOMPLETE.
 
@@ -209,7 +209,9 @@ provider. PostgreSQL owns those fields in `PostgreSQLConnectionConfig`; its
 adapter maps to the existing normalized SQLite columns and flat archive v1
 payload. This keeps persistence, encryption, archive compatibility, and stable
 profile IDs frozen while allowing a future file-backed profile configuration to
-use the same envelope.
+use the same envelope. The experimental SQLite P0 implementation now does so
+with a file-path configuration and separate persistence; completed renderer
+and native validation proves the envelope can represent a non-network provider.
 
 Initial command set, limited to present PostgreSQL P0 and confirmed interaction work:
 
@@ -274,4 +276,8 @@ the recommended next batch are maintained exclusively in
 
 ## Architecture Guard
 
-After slice 4, a second SQL provider needs only a descriptor, profile settings serializer, connection/metadata/query/page adapter, dialect contribution and provider-specific tests. It must not copy the database shell, workspace tabs, query layout, result grid, command infrastructure, shortcut system, context-menu system or native test harness.
+An experimental SQLite P0 provider now supplies those adapters and reuses the
+shared profile, Navigator, CodeEditor, result pane, and command resolver.
+Renderer and native validation, including the PostgreSQL regression, are
+complete. This evidence does not justify a generic runtime/IPC rewrite or a
+workspace-shell extraction without a concrete caller.
