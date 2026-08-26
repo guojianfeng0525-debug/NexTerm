@@ -41,7 +41,6 @@ async fn connect_through_jump_and_open_pty() {
         auth_method: AuthMethod::Password {
             password: TARGET_PASS.to_string(),
         },
-        compression: true,
         keepalive_interval: Some(60),
         keepalive_max: Some(3),
         proxy: None,

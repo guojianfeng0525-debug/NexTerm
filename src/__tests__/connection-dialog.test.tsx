@@ -69,16 +69,14 @@ describe('Connection Dialog protocol-specific behavior', () => {
       expect(getHiddenFields('SSH')).toEqual([]);
     });
 
-    it('SFTP hides compression, keepAliveInterval, serverAliveCountMax', () => {
+    it('SFTP hides keepAliveInterval and serverAliveCountMax', () => {
       const hidden = getHiddenFields('SFTP');
-      expect(hidden).toContain('compression');
       expect(hidden).toContain('keepAliveInterval');
       expect(hidden).toContain('serverAliveCountMax');
     });
 
-    it('FTP hides compression, keepAliveInterval, serverAliveCountMax', () => {
+    it('FTP hides keepAliveInterval and serverAliveCountMax', () => {
       const hidden = getHiddenFields('FTP');
-      expect(hidden).toContain('compression');
       expect(hidden).toContain('keepAliveInterval');
       expect(hidden).toContain('serverAliveCountMax');
     });
@@ -87,7 +85,7 @@ describe('Connection Dialog protocol-specific behavior', () => {
       const nonSsh: Protocol[] = ['SFTP', 'FTP', 'Telnet', 'Raw', 'Serial'];
       nonSsh.forEach(p => {
         const hidden = getHiddenFields(p);
-        expect(hidden.length).toBe(3);
+        expect(hidden.length).toBe(2);
       });
     });
   });

@@ -32,7 +32,7 @@ const AUTH_METHODS: Record<Protocol, AuthMethod[]> = {
 };
 
 /** SSH-specific fields that should be hidden for non-SSH protocols. */
-const SSH_SPECIFIC_FIELDS = ['compression', 'keepAliveInterval', 'serverAliveCountMax'] as const;
+const SSH_SPECIFIC_FIELDS = ['keepAliveInterval', 'serverAliveCountMax'] as const;
 
 export type SshSpecificField = (typeof SSH_SPECIFIC_FIELDS)[number];
 

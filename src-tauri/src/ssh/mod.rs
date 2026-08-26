@@ -67,24 +67,6 @@ pub(crate) fn bash_shell_integration_command(version: BashVersion) -> Vec<u8> {
     .into_bytes()
 }
 
-/// Compression algorithms to advertise, ordered so zlib is preferred over none.
-///
-/// Order matters: russh negotiates the first algorithm that the server also
-/// lists, so zlib must come before none for compression to actually take
-/// effect. `zlib@openssh.com` covers servers using OpenSSH's "delayed"
-/// compression. Requires russh's `flate2` feature, which is enabled by default.
-pub fn compression_preferences(enabled: bool) -> &'static [russh::compression::Name] {
-    if enabled {
-        &[
-            russh::compression::ZLIB,
-            russh::compression::ZLIB_LEGACY,
-            russh::compression::NONE,
-        ]
-    } else {
-        &[russh::compression::NONE]
-    }
-}
-
 /// Canonical OpenSSH-compatible SHA-256 host-key fingerprint.
 pub fn host_key_fingerprint(key: &keys::PublicKey) -> String {
     format!("SHA256:{}", STANDARD_NO_PAD.encode(Sha256::digest(key.public_key_bytes())))
@@ -135,8 +117,6 @@ pub struct SshConfig {
     pub port: u16,
     pub username: String,
     pub auth_method: AuthMethod,
-    /// Enable zlib compression negotiation (default: true, matching the UI).
-    pub compression: bool,
     /// Keepalive interval in seconds. `None` disables keepalive.
     pub keepalive_interval: Option<u64>,
     /// Max missed keepalive replies before the connection is closed.
@@ -268,19 +248,10 @@ impl SshClient {
     pub async fn connect(&mut self, config: &SshConfig) -> Result<()> {
         let keepalive_interval = config.keepalive_interval.map(Duration::from_secs);
 
-        // russh 0.62 bug: when a *jump-host* session negotiates zlib
-        // compression, the direct-tcpip channel used to tunnel the target SSH
-        // handshake breaks — the target session dies with "early eof" /
-        // "channel closed" right after connect_stream returns. The tunnel is
-        // already encrypted, so per-hop compression is redundant; disable it
-        // for the whole connection when a jump host is in use (both the jump
-        // hop and the target leg). Direct connections keep zlib compression.
-        let use_compression = config.compression && config.jump.is_none();
-
         let ssh_config = client::Config {
             preferred: russh::Preferred {
                 key: std::borrow::Cow::Borrowed(PREFERRED_HOST_KEY_ALGOS),
-                compression: std::borrow::Cow::Borrowed(compression_preferences(use_compression)),
+                compression: std::borrow::Cow::Borrowed(&[russh::compression::NONE]),
                 ..russh::Preferred::DEFAULT
             },
             // Send a keepalive on the user-configured interval. After the
@@ -297,8 +268,6 @@ impl SshClient {
         // russh `Config` is not `Clone`; share one instance across every hop.
         let ssh_config = Arc::new(ssh_config);
 
-        // The target leg of a jump connection must not re-enable compression
-        // independently — reuse the same (compression-disabled) config.
         let jump_target_config = Arc::clone(&ssh_config);
 
         // Connection timeout: 3 seconds

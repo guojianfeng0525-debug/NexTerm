@@ -141,6 +141,11 @@ impl DbState {
         // Schema evolution for databases created before a column existed.
         // `CREATE TABLE IF NOT EXISTS` never alters existing tables, so any
         // column added after a release must be back-filled here.
+        // NOTE: old databases may retain a legacy `compression` column on
+        // `connections` (SSH zlib compression was removed in FEATURE BATCH 16).
+        // It is a historical ghost column — no code reads or writes it — and is
+        // intentionally left in place; see release notes. Do not add a DROP
+        // COLUMN migration for it.
         for (table, column, ddl) in [
             ("connections", "jump_host", "jump_host TEXT"),
             ("connections", "jump_port", "jump_port INTEGER"),
@@ -971,7 +976,6 @@ CREATE TABLE IF NOT EXISTS "connections" (
   default_directory TEXT,
   terminal_encoding TEXT NOT NULL DEFAULT 'utf-8',
   terminal_startup_mode TEXT NOT NULL DEFAULT 'safe',
-  compression INTEGER NOT NULL DEFAULT 0,
   keep_alive INTEGER NOT NULL DEFAULT 0,
   keep_alive_interval INTEGER,
   server_alive_count_max INTEGER,
@@ -1562,7 +1566,6 @@ mod upsert_tests {
         row.insert("jump_username".into(), json!("ju"));
         row.insert("jump_password".into(), json!("cipher4"));
         row.insert("jump_use_key".into(), json!(0));
-        row.insert("compression".into(), json!(1));
         row.insert("keep_alive".into(), json!(1));
         row.insert("keep_alive_interval".into(), json!(60));
         row.insert("server_alive_count_max".into(), json!(3));

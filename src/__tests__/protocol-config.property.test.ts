@@ -134,13 +134,12 @@ describe('protocol-config property tests', () => {
       );
     });
 
-    it('hidden fields always includes compression & keepAliveInterval for non-SSH', () => {
+    it('hidden fields always includes keepAliveInterval for non-SSH', () => {
       fc.assert(
         fc.property(
           fc.constantFrom<Protocol>('SFTP', 'FTP', 'Telnet', 'Raw', 'Serial'),
           (protocol) => {
             const hidden = getHiddenFields(protocol);
-            expect(hidden).toContain('compression');
             expect(hidden).toContain('keepAliveInterval');
             expect(hidden).toContain('serverAliveCountMax');
           },
@@ -149,7 +148,7 @@ describe('protocol-config property tests', () => {
     });
 
     it('every returned field is a valid SshSpecificField', () => {
-      const validFields: SshSpecificField[] = ['compression', 'keepAliveInterval', 'serverAliveCountMax'];
+      const validFields: SshSpecificField[] = ['keepAliveInterval', 'serverAliveCountMax'];
       fc.assert(
         fc.property(arbitraryProtocol, (protocol) => {
           const hidden = getHiddenFields(protocol);

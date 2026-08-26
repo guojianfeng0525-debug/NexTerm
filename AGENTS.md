@@ -1,11 +1,11 @@
-# AGENTS.md — AI Agent Guide for R-Shell
+# AGENTS.md — AI Agent Guide for NexTerm
 
 ## Project Summary
 
-R-Shell is a modern desktop SSH client built with **React 19 + TypeScript** (frontend) and **Tauri 2 + Rust** (backend). It provides interactive terminal sessions, SFTP file management, system monitoring, and multi-tab session management in a VS Code-like layout.
+NexTerm (formerly R-Shell) is a modern desktop multi-protocol connection workspace built with **React 19 + TypeScript** (frontend) and **Tauri 2 + Rust** (backend). It provides interactive terminal sessions (SSH), SFTP/FTP file management, database toolbox (PostgreSQL / MySQL / SQLite over optional SSH tunnels), document tools, API debugging, and multi-tab session management in a VS Code-like layout.
 
 - **Repository**: `GOODBOY008/r-shell`
-- **Version**: 1.2.0
+- **Version**: 2.7.0+
 - **Package Manager**: pnpm (v9.15.4)
 - **Node Target**: ES2020
 - **Rust Edition**: 2021

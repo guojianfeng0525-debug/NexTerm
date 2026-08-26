@@ -80,7 +80,6 @@ export interface ConnectionConfig {
   defaultDirectory?: string; // initial working directory on connect
   terminalEncoding?: 'utf-8' | 'gbk' | 'gb18030';
   terminalStartupMode?: 'safe' | 'disabled';
-  compression?: boolean;
   keepAlive?: boolean;
   keepAliveInterval?: number;
   serverAliveCountMax?: number;
@@ -92,6 +91,9 @@ export interface ConnectionConfig {
   // VNC specific
   vncColorDepth?: '24' | '16' | '8';
 }
+
+/** Host-key confirmation times out as a cancellation after this long. */
+const HOST_KEY_PROMPT_TIMEOUT_MS = 30_000;
 
 /**
  * Merge form overrides on top of defaults, falling back to the default when a
@@ -142,13 +144,51 @@ export function ConnectionDialog({
     defaultDirectory: '',
     terminalEncoding: 'utf-8',
     terminalStartupMode: 'safe',
-    compression: true,
     keepAlive: true,
     keepAliveInterval: 60,
     serverAliveCountMax: 3
   };
 
   const [config, setConfig] = useState<ConnectionConfig>(defaultConfig);
+  const [hostKeyPrompt, setHostKeyPrompt] = useState<string | null>(null);
+  const hostKeyPromptResolverRef = useRef<((accepted: boolean) => void) | null>(null);
+  const hostKeyPromptTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const clearHostKeyPromptTimeout = useCallback(() => {
+    if (hostKeyPromptTimeoutRef.current) {
+      clearTimeout(hostKeyPromptTimeoutRef.current);
+      hostKeyPromptTimeoutRef.current = null;
+    }
+  }, []);
+
+  const confirmHostKey = useCallback((message: string) => new Promise<boolean>((resolve) => {
+    hostKeyPromptResolverRef.current = resolve;
+    setHostKeyPrompt(message);
+    clearHostKeyPromptTimeout();
+    hostKeyPromptTimeoutRef.current = setTimeout(() => {
+      hostKeyPromptResolverRef.current?.(false);
+      hostKeyPromptResolverRef.current = null;
+      setHostKeyPrompt(null);
+    }, HOST_KEY_PROMPT_TIMEOUT_MS);
+  }), [clearHostKeyPromptTimeout]);
+
+  const resolveHostKeyPrompt = useCallback((accepted: boolean) => {
+    clearHostKeyPromptTimeout();
+    hostKeyPromptResolverRef.current?.(accepted);
+    hostKeyPromptResolverRef.current = null;
+    setHostKeyPrompt(null);
+  }, [clearHostKeyPromptTimeout]);
+
+  // Resolve any in-flight host-key prompt to "cancelled" on unmount so the
+  // awaiting connection flow never hangs on a promise that can no longer be
+  // answered (e.g. the dialog is closed while the probe is pending).
+  useEffect(() => {
+    return () => {
+      clearHostKeyPromptTimeout();
+      hostKeyPromptResolverRef.current?.(false);
+      hostKeyPromptResolverRef.current = null;
+    };
+  }, [clearHostKeyPromptTimeout]);
 
   // UI-only state for the jump-host section: the switch toggles this, and the
   // form fields are shown while it is on. The actual jump config is derived
@@ -355,7 +395,7 @@ export function ConnectionDialog({
         const { fingerprint } = await invoke<{ fingerprint: string }>('ssh_host_key_fingerprint', {
           request: { host: config.host, port: config.port || 22 },
         });
-        if (!window.confirm(t('connectionDialog.hostKey.confirm', { host: config.host, port: config.port || 22, fingerprint }))) {
+        if (!(await confirmHostKey(t('connectionDialog.hostKey.confirm', { host: config.host, port: config.port || 22, fingerprint })))) {
           resetConnectionState();
           return;
         }
@@ -371,7 +411,7 @@ export function ConnectionDialog({
         const { fingerprint } = await invoke<{ fingerprint: string }>('ssh_host_key_fingerprint', {
           request: { host: config.jumpHost, port: config.jumpPort || 22 },
         });
-        if (!window.confirm(t('connectionDialog.hostKey.confirmJump', { host: config.jumpHost, port: config.jumpPort || 22, fingerprint }))) {
+        if (!(await confirmHostKey(t('connectionDialog.hostKey.confirmJump', { host: config.jumpHost, port: config.jumpPort || 22, fingerprint })))) {
           resetConnectionState();
           return;
         }
@@ -418,7 +458,6 @@ export function ConnectionDialog({
             defaultDirectory: config.defaultDirectory,
             terminalEncoding: config.terminalEncoding,
             terminalStartupMode: config.terminalStartupMode,
-            compression: config.compression,
             keepAlive: config.keepAlive,
             keepAliveInterval: config.keepAliveInterval,
             serverAliveCountMax: config.serverAliveCountMax,
@@ -454,7 +493,6 @@ export function ConnectionDialog({
             defaultDirectory: config.defaultDirectory,
             terminalEncoding: config.terminalEncoding,
             terminalStartupMode: config.terminalStartupMode,
-            compression: config.compression,
             keepAlive: config.keepAlive,
             keepAliveInterval: config.keepAliveInterval,
             serverAliveCountMax: config.serverAliveCountMax,
@@ -512,7 +550,6 @@ export function ConnectionDialog({
         defaultDirectory: config.defaultDirectory,
         terminalEncoding: config.terminalEncoding,
         terminalStartupMode: config.terminalStartupMode,
-        compression: config.compression,
         keepAlive: config.keepAlive,
         keepAliveInterval: config.keepAliveInterval,
         serverAliveCountMax: config.serverAliveCountMax,
@@ -544,7 +581,6 @@ export function ConnectionDialog({
         defaultDirectory: config.defaultDirectory,
         terminalEncoding: config.terminalEncoding,
         terminalStartupMode: config.terminalStartupMode,
-        compression: config.compression,
         keepAlive: config.keepAlive,
         keepAliveInterval: config.keepAliveInterval,
         serverAliveCountMax: config.serverAliveCountMax,
@@ -677,7 +713,6 @@ const handleCancelConnectionAttempt = async () => {
       jumpUsername: jumpEnabled ? config.jumpUsername : undefined,
       jumpPassword: jumpEnabled ? config.jumpPassword : undefined,
       jumpUseKey: jumpEnabled ? config.jumpUseKey : undefined,
-      compression: config.compression,
       keepAlive: config.keepAlive,
       keepAliveInterval: config.keepAliveInterval,
       serverAliveCountMax: config.serverAliveCountMax,
@@ -760,6 +795,7 @@ const handleCancelConnectionAttempt = async () => {
   };
 
   return (
+    <>
     <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent className="top-[50%] left-[50%] -translate-x-1/2 -translate-y-1/2 w-[900px] h-[680px] max-w-[90vw] max-h-[90vh] flex flex-col p-0 gap-0">
         <DialogHeader className="px-6 pt-6 pb-4 border-b">
@@ -1361,11 +1397,9 @@ const handleCancelConnectionAttempt = async () => {
           <TabsContent value="advanced" className="flex-1 min-h-0 overflow-y-auto px-6 py-4 space-y-4 mt-0">
             {(() => {
               const hiddenFields = getHiddenFields(config.protocol);
-              const isCompHidden = hiddenFields.includes('compression');
-              const isKaHidden = hiddenFields.includes('keepAliveInterval');
-              const isAllHidden = isCompHidden && isKaHidden;
+               const isKaHidden = hiddenFields.includes('keepAliveInterval');
 
-              if (isAllHidden) {
+               if (isKaHidden) {
                 return (
                   <Card>
                     <CardHeader>
@@ -1394,23 +1428,6 @@ const handleCancelConnectionAttempt = async () => {
                   </CardHeader>
                   <CardContent className="space-y-4">
                     <div className="space-y-4">
-                      {!isCompHidden && (
-                        <div className="flex items-center justify-between">
-                          <div className="space-y-0.5">
-                            <Label>{t('connectionDialog.advanced.enableCompression')}</Label>
-                            <p className="text-sm text-muted-foreground">
-                              {t('connectionDialog.advanced.enableCompressionDesc')}
-                            </p>
-                          </div>
-                          <Switch
-                            checked={config.compression}
-                            onCheckedChange={(checked) => updateConfig({ compression: checked })}
-                          />
-                        </div>
-                      )}
-
-                      {!isCompHidden && !isKaHidden && <Separator />}
-
                       {!isKaHidden && (
                         <>
                           <div className="flex items-center justify-between">
@@ -1477,7 +1494,7 @@ const handleCancelConnectionAttempt = async () => {
                 </div>
                 {saveAsConnection && (
                   <Select value={connectionFolder} onValueChange={setConnectionFolder}>
-                      <SelectTrigger className="w-[200px] h-8">
+                      <SelectTrigger className="w-[200px] h-8" data-testid="connection-folder-select">
                         <SelectValue placeholder={t('connectionDialog.selectFolder')} />
                     </SelectTrigger>
                     <SelectContent>
@@ -1519,5 +1536,18 @@ const handleCancelConnectionAttempt = async () => {
         </DialogFooter>
       </DialogContent>
     </Dialog>
+    <Dialog open={hostKeyPrompt !== null} onOpenChange={(isOpen) => !isOpen && resolveHostKeyPrompt(false)}>
+      <DialogContent className="!inset-0 !m-auto w-[520px] max-w-[90vw]">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2"><Shield className="h-5 w-5 text-amber-500" />{t('common.confirm')}</DialogTitle>
+          <DialogDescription className="whitespace-pre-line break-words font-mono text-xs leading-5">{hostKeyPrompt}</DialogDescription>
+        </DialogHeader>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => resolveHostKeyPrompt(false)}>{t('common.cancel')}</Button>
+          <Button onClick={() => resolveHostKeyPrompt(true)}>{t('common.confirm')}</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+    </>
   );
 }

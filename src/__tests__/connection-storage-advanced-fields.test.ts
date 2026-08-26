@@ -43,14 +43,12 @@ describe('connection-storage advanced & proxy field persistence', () => {
       username: 'root',
       protocol: 'SSH',
       authMethod: 'password',
-      compression: false,
       keepAlive: false,
       keepAliveInterval: 45,
       serverAliveCountMax: 5,
     });
 
     const loaded = ConnectionStorageManager.getConnection('conn-2');
-    expect(loaded?.compression).toBe(false);
     expect(loaded?.keepAlive).toBe(false);
     expect(loaded?.keepAliveInterval).toBe(45);
     expect(loaded?.serverAliveCountMax).toBe(5);
@@ -67,7 +65,6 @@ describe('connection-storage advanced & proxy field persistence', () => {
     });
 
     ConnectionStorageManager.updateConnection('conn-3', {
-      compression: true,
       keepAlive: false,
       keepAliveInterval: 30,
       serverAliveCountMax: 4,
@@ -79,7 +76,6 @@ describe('connection-storage advanced & proxy field persistence', () => {
     });
 
     const loaded = ConnectionStorageManager.getConnection('conn-3');
-    expect(loaded?.compression).toBe(true);
     expect(loaded?.keepAlive).toBe(false);
     expect(loaded?.keepAliveInterval).toBe(30);
     expect(loaded?.serverAliveCountMax).toBe(4);

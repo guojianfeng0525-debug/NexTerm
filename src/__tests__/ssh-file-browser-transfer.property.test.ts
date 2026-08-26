@@ -167,7 +167,12 @@ describe("Property 3: COMPLETE sets terminal state", () => {
         (items, rawIdx) => {
           const idx = rawIdx % items.length;
           const targetId = items[idx].id;
-          const result = transferQueueReducer(items, {
+          // COMPLETE only transitions items that are actively transferring —
+          // a late resolution must never resurrect a non-started item.
+          const state = items.map((item, i) =>
+            i === idx ? { ...item, status: "transferring" as const } : item,
+          );
+          const result = transferQueueReducer(state, {
             type: "COMPLETE",
             id: targetId,
           });
@@ -198,7 +203,11 @@ describe("Property 4: FAIL stores error and sets terminal state", () => {
         (items, rawIdx, errorMsg) => {
           const idx = rawIdx % items.length;
           const targetId = items[idx].id;
-          const result = transferQueueReducer(items, {
+          // FAIL only transitions items that are actively transferring.
+          const state = items.map((item, i) =>
+            i === idx ? { ...item, status: "transferring" as const } : item,
+          );
+          const result = transferQueueReducer(state, {
             type: "FAIL",
             id: targetId,
             error: errorMsg,

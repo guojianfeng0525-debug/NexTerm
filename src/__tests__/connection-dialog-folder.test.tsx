@@ -52,14 +52,13 @@ beforeEach(() => {
 });
 
 /**
- * Helper: get the folder select trigger (second combobox - first is protocol).
- * The dialog has two <Select>s: protocol (SSH/Telnet/...) and folder.
- * We use getAllByRole('combobox') and take the second one.
+ * Helper: get the folder select trigger. The dialog now has more than two
+ * <Select>s (protocol, terminal encoding, terminal startup mode, folder), so
+ * the folder select is identified by an explicit data-testid instead of a
+ * positional combobox index.
  */
 function getFolderSelect() {
-  const combos = screen.getAllByRole('combobox');
-  // combos[0] = protocol select (shows "SSH"), combos[1] = folder select
-  return combos[1];
+  return screen.getByTestId('connection-folder-select');
 }
 
 describe('ConnectionDialog folder pre-selection', () => {
@@ -99,9 +98,10 @@ describe('ConnectionDialog folder pre-selection', () => {
     });
 
     // When editing, saveAsConnection is false, so the folder select is not rendered.
-    // Only the protocol select (combobox) should exist.
+    // The protocol select (combobox) should still be present.
+    expect(screen.queryByTestId('connection-folder-select')).toBeNull();
     const combos = screen.getAllByRole('combobox');
-    expect(combos).toHaveLength(1);
+    expect(combos.length).toBeGreaterThan(0);
     expect(combos[0].textContent).toContain('SSH');
   });
 

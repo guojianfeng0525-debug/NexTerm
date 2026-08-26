@@ -59,7 +59,6 @@ export interface ConnectionData {
   defaultDirectory?: string; // initial working directory on connect
   terminalEncoding?: 'utf-8' | 'gbk' | 'gb18030';
   terminalStartupMode?: 'safe' | 'disabled';
-  compression?: boolean;
   keepAlive?: boolean;
   keepAliveInterval?: number;
   serverAliveCountMax?: number;
@@ -133,7 +132,6 @@ function connToRow(c: ConnectionData): Record<string, unknown> {
     default_directory: c.defaultDirectory ?? null,
     terminal_encoding: c.terminalEncoding ?? 'utf-8',
     terminal_startup_mode: c.terminalStartupMode ?? 'safe',
-    compression: c.compression ? 1 : 0,
     keep_alive: c.keepAlive ? 1 : 0,
     keep_alive_interval: c.keepAliveInterval ?? null,
     server_alive_count_max: c.serverAliveCountMax ?? null,
@@ -175,7 +173,6 @@ function rowToConn(row: Record<string, unknown>): ConnectionData {
     defaultDirectory: (row.default_directory as string) ?? undefined,
     terminalEncoding: (row.terminal_encoding as ConnectionData['terminalEncoding']) ?? 'utf-8',
     terminalStartupMode: (row.terminal_startup_mode as ConnectionData['terminalStartupMode']) ?? 'safe',
-    compression: !!row.compression,
     keepAlive: !!row.keep_alive,
     keepAliveInterval: (row.keep_alive_interval as number) ?? undefined,
     serverAliveCountMax: (row.server_alive_count_max as number) ?? undefined,

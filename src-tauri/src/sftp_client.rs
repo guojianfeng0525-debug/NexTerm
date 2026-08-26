@@ -125,9 +125,7 @@ impl StandaloneSftpClient {
         let ssh_config = client::Config {
             preferred: russh::Preferred {
                 key: std::borrow::Cow::Borrowed(crate::ssh::PREFERRED_HOST_KEY_ALGOS),
-                // Keep both SFTP legs compression-free when a jump host is
-                // present; see the matching terminal policy in SshClient.
-                compression: std::borrow::Cow::Borrowed(crate::ssh::compression_preferences(config.jump.is_none())),
+                compression: std::borrow::Cow::Borrowed(&[russh::compression::NONE]),
                 ..russh::Preferred::DEFAULT
             },
             ..client::Config::default()

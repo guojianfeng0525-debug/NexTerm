@@ -32,10 +32,9 @@ describe('buildSshConnectRequest', () => {
     expect(req.password).toBe('');
   });
 
-  it('applies default advanced settings matching the UI (compression + keepalive 60/3, no proxy)', () => {
+  it('applies default advanced settings matching the UI (keepalive 60/3, no proxy)', () => {
     const req = buildSshConnectRequest('conn-1', baseSource);
 
-    expect(req.compression).toBe(true);
     expect(req.keepalive_enabled).toBe(true);
     expect(req.keepalive_interval).toBe(60);
     expect(req.keepalive_max).toBe(3);
@@ -49,13 +48,11 @@ describe('buildSshConnectRequest', () => {
   it('forwards custom advanced settings', () => {
     const req = buildSshConnectRequest('conn-1', {
       ...baseSource,
-      compression: false,
       keepAlive: true,
       keepAliveInterval: 30,
       serverAliveCountMax: 5,
     });
 
-    expect(req.compression).toBe(false);
     expect(req.keepalive_enabled).toBe(true);
     expect(req.keepalive_interval).toBe(30);
     expect(req.keepalive_max).toBe(5);

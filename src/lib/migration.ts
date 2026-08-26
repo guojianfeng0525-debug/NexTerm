@@ -95,7 +95,7 @@ function connRow(c: ConnectionData): Record<string, unknown> {
     auth_method: c.authMethod ?? null, private_key_path: c.privateKeyPath ?? null,
     ftps_enabled: c.ftpsEnabled ? 1 : 0, proxy_type: c.proxyType ?? null,
     proxy_host: c.proxyHost ?? null, proxy_port: c.proxyPort ?? null,
-    proxy_username: c.proxyUsername ?? null, compression: c.compression ? 1 : 0,
+    proxy_username: c.proxyUsername ?? null,
     keep_alive: c.keepAlive ? 1 : 0, keep_alive_interval: c.keepAliveInterval ?? null,
     server_alive_count_max: c.serverAliveCountMax ?? null, domain: c.domain ?? null,
     rdp_resolution: c.rdpResolution ?? null, vnc_color_depth: c.vncColorDepth ?? null,

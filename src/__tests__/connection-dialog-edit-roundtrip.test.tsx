@@ -1,6 +1,6 @@
 /**
  * Regression tests: editing a saved SSH connection and toggling advanced
- * options (compression, keepalive) must survive a save → re-open round-trip.
+ * keepalive options must survive a save → re-open round-trip.
  *
  * Uses the real ConnectionStorageManager in-memory cache, so it exercises the
  * same storage path as the desktop app.
@@ -42,7 +42,6 @@ function toConfig(data: ConnectionData): ConnectionConfig {
     proxyPort: data.proxyPort,
     proxyUsername: data.proxyUsername,
     proxyPassword: data.proxyPassword,
-    compression: data.compression,
     keepAlive: data.keepAlive,
     keepAliveInterval: data.keepAliveInterval,
     serverAliveCountMax: data.serverAliveCountMax,
@@ -58,56 +57,6 @@ async function switchToAdvancedTab() {
 }
 
 describe('edit advanced options round-trip (real storage)', () => {
-  it('compression OFF survives save → re-open as OFF', async () => {
-    ConnectionStorageManager.saveConnectionWithId('c1', {
-      name: 'My Server',
-      host: 'example.com',
-      port: 22,
-      username: 'root',
-      protocol: 'SSH',
-      authMethod: 'password',
-      compression: true,
-      keepAlive: true,
-      keepAliveInterval: 60,
-      serverAliveCountMax: 3,
-    });
-
-    const editing = toConfig(ConnectionStorageManager.getConnection('c1')!);
-
-    // First edit session: turn compression OFF and save.
-    const { unmount } = render(
-      <ConnectionDialog
-        open
-        onOpenChange={vi.fn()}
-        onConnect={vi.fn()}
-        editingConnection={editing}
-      />,
-    );
-    await switchToAdvancedTab();
-    const switches = await screen.findAllByRole('switch');
-    expect(switches[0].getAttribute('data-state')).toBe('checked'); // compression starts ON
-    fireEvent.click(switches[0]); // compression → OFF
-    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
-    unmount();
-
-    // The stored value must now be false.
-    const stored = ConnectionStorageManager.getConnection('c1')!;
-    expect(stored.compression).toBe(false);
-
-    // Second edit session: re-open from storage and assert the switch is OFF.
-    render(
-      <ConnectionDialog
-        open
-        onOpenChange={vi.fn()}
-        onConnect={vi.fn()}
-        editingConnection={toConfig(stored)}
-      />,
-    );
-    await switchToAdvancedTab();
-    const switches2 = await screen.findAllByRole('switch');
-    expect(switches2[0].getAttribute('data-state')).toBe('unchecked');
-  });
-
   it('keepalive interval edit survives save → re-open', async () => {
     ConnectionStorageManager.saveConnectionWithId('c1', {
       name: 'My Server',
@@ -116,7 +65,6 @@ describe('edit advanced options round-trip (real storage)', () => {
       username: 'root',
       protocol: 'SSH',
       authMethod: 'password',
-      compression: true,
       keepAlive: true,
       keepAliveInterval: 60,
       serverAliveCountMax: 3,

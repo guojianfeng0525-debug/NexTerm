@@ -69,7 +69,7 @@ deferred. Renderer and native desktop validation are complete.
 
 ## Current Runtime Boundary
 
-PostgreSQL retains its narrow live-client registry in `src-tauri/src/postgres.rs`, secure SSH fingerprint verification, TLS root/client validation, bounded query timeout, identifier quoting, primary-key validation, `postgres_*` IPC, and `PostgresState`. SQLite retains its existing-file `rusqlite` runtime and `sqlite_*` IPC. MySQL retains its independent `mysql_async` runtime, `mysql_*` IPC, and `MysqlState`.
+PostgreSQL retains its narrow live-client registry in `src-tauri/src/postgres.rs`, SSH tunneling with explicit first-use host-key trust and persisted profile fingerprint pinning, TLS root/client validation, bounded query timeout, identifier quoting, primary-key validation, `postgres_*` IPC, and `PostgresState`. A PostgreSQL SSH tunnel never opens without a trusted fingerprint, and a changed key is rejected. SQLite retains its existing-file `rusqlite` runtime and `sqlite_*` IPC. MySQL retains its independent `mysql_async` runtime, `mysql_*` IPC, and `MysqlState`.
 
 PostgreSQL, SQLite, and MySQL each adapt provider-owned settings to the shared `DatabaseConnectionProfile` envelope while retaining isolated persistence. A generic backend session service, generic IPC, `DatabaseState`, and a unified runtime facade are deferred: the real providers have material runtime differences, and no generic target API has been selected.
 

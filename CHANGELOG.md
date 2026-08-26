@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### 🔒 PostgreSQL SSH Tunnel Host-Key Trust (TOFU) & SSH Compression Removal
+
+This batch hardens database tunnel security and removes a fragile SSH feature.
+
+### Added
+
+- 🔑 **PostgreSQL SSH Tunnel Host-Key Trust (TOFU)**: First connection to a PostgreSQL instance over an SSH tunnel now probes and displays the SSH server host-key fingerprint in an in-app trust dialog. Confirming persists the fingerprint; subsequent connections verify against it and are rejected on mismatch (`fail-closed`) instead of silently accepting key changes.
+- 🔁 **Re-trust Action on Key Mismatch**: When a tunnel is refused because the server host-key fingerprint changed, the connection toast now offers a "Retrust SSH host key" action that re-probes and re-opens the trust dialog — no need to edit the host/port to clear the stored fingerprint.
+
+### Changed
+
+- 🗑️ **Removed SSH zlib Compression Option**: The advanced SSH "compression" switch and its storage/database fields were removed across the stack. SSH negotiation is hard-coded to `NONE` — jump-host zlib negotiation could crash the direct-tcpip tunnel (russh 0.62), and tunnel traffic is already encrypted, making compression redundant.
+- 🪟 **In-App Host-Key Confirmation**: Host-key confirmation moved from `window.confirm` to an in-app dialog with a 30s auto-cancel timeout and proper cleanup on unmount (no hanging promises).
+- 🧩 **Fingerprint Probe Algorithm Alignment**: The PostgreSQL SSH fingerprint probe now negotiates host-key algorithms with the same `PREFERRED_HOST_KEY_ALGOS` as the SSH/SFTP paths, preventing fingerprint mismatches on multi-host-key servers.
+
+### Fixed
+
+- 🐛 Integration test target no longer references the removed `SshConfig.compression` field (compile error fixed).
+- 🧹 Removed unused `trusted` field from the fingerprint probe response.
+
+### Notes
+
+- Existing databases keep a historical, unread `compression` column in the connections table; it is intentionally retained (no destructive migration). No code reads or writes it.
+- The `docker_pty_survives_parallel_sftp_upload` regression test (PTY session survives parallel SFTP uploads) is available locally behind `#[ignore]`; it requires a local Docker OpenSSH fixture (port 22222) and is not part of CI.
+
 ## [2.7.0] - 2026-08-08
 
 ### 🖥️ NexTerm 2.7 — Terminal-Integrated File Browser & Connections

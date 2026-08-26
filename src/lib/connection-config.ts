@@ -46,7 +46,6 @@ export function toConnectionConfig(data: ConnectionData): ConnectionConfig {
     defaultDirectory: data.defaultDirectory,
     terminalEncoding: data.terminalEncoding,
     terminalStartupMode: data.terminalStartupMode,
-    compression: data.compression,
     keepAlive: data.keepAlive,
     keepAliveInterval: data.keepAliveInterval,
     serverAliveCountMax: data.serverAliveCountMax,

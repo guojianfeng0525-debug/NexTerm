@@ -2,15 +2,19 @@
 //! narrow: configuration stays on the frontend, while live clients and query
 //! results remain in backend memory.
 
-use serde::{Deserialize, Serialize};
 use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine};
-use russh::{client, keys::{PublicKeyBase64, PublicKey}, Preferred};
+use russh::{
+    client,
+    keys::{PublicKey, PublicKeyBase64},
+    Preferred,
+};
+use serde::{Deserialize, Serialize};
 use sha2_10::{Digest, Sha256};
 use std::collections::HashMap;
 use std::io::Cursor;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tokio_postgres::{Client, NoTls, SimpleQueryMessage, tls::MakeTlsConnect};
+use tokio_postgres::{tls::MakeTlsConnect, Client, NoTls, SimpleQueryMessage};
 use tokio_postgres_rustls::MakeRustlsConnect;
 
 const MAX_QUERY_ROWS: usize = 1_000;
@@ -122,12 +126,26 @@ pub struct PostgresSshFingerprintRequest {
 #[serde(rename_all = "camelCase")]
 pub struct PostgresSshFingerprintResponse {
     pub fingerprint: String,
-    pub trusted: bool,
 }
 
 struct FingerprintClient {
     expected: Option<String>,
     observed: Arc<std::sync::Mutex<Option<String>>>,
+}
+
+/// A probe is deliberately separate from the tunnel handler: it observes a
+/// first-use key so the renderer can request consent, but it never authenticates
+/// or opens a PostgreSQL forwarding channel.
+struct FingerprintProbeClient {
+    observed: Arc<std::sync::Mutex<Option<String>>>,
+}
+
+/// PostgreSQL SSH tunnels must always be pinned before authentication.  The
+/// renderer obtains a first-use fingerprint through `postgres_ssh_fingerprint`,
+/// asks for explicit consent, persists it on the PostgreSQL profile, and then
+/// retries this connection with the resulting pin.
+fn fingerprint_matches(expected: Option<&str>, actual: &str) -> bool {
+    expected.is_some_and(|value| value == actual)
 }
 
 fn ssh_fingerprint(key: &PublicKey) -> String {
@@ -143,48 +161,115 @@ impl client::Handler for FingerprintClient {
         if let Ok(mut observed) = self.observed.lock() {
             *observed = Some(fingerprint.clone());
         }
-        Ok(self.expected.as_ref().is_none_or(|expected| expected == &fingerprint))
+        Ok(fingerprint_matches(self.expected.as_deref(), &fingerprint))
     }
 }
 
-async fn open_verified_jump(request: &PostgresConnectRequest, ssh: &PostgresSshConfig) -> Result<(russh::ChannelStream<client::Msg>, client::Handle<FingerprintClient>), String> {
+impl client::Handler for FingerprintProbeClient {
+    type Error = russh::Error;
+
+    async fn check_server_key(&mut self, key: &PublicKey) -> Result<bool, Self::Error> {
+        if let Ok(mut observed) = self.observed.lock() {
+            *observed = Some(ssh_fingerprint(key));
+        }
+        Ok(true)
+    }
+}
+
+async fn open_verified_jump(
+    request: &PostgresConnectRequest,
+    ssh: &PostgresSshConfig,
+) -> Result<
+    (
+        russh::ChannelStream<client::Msg>,
+        client::Handle<FingerprintClient>,
+    ),
+    String,
+> {
     if ssh.host.trim().is_empty() || ssh.username.trim().is_empty() {
         return Err("SSH host and username are required".into());
     }
+    let expected = ssh
+        .host_key_fingerprint
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            "SSH host-key trust is required before opening a PostgreSQL tunnel".to_string()
+        })?;
     let observed = Arc::new(std::sync::Mutex::new(None));
-    let handler = FingerprintClient { expected: ssh.host_key_fingerprint.clone().filter(|value| !value.trim().is_empty()), observed };
+    let handler = FingerprintClient {
+        expected: Some(expected),
+        observed,
+    };
     let config = Arc::new(client::Config {
-        preferred: Preferred { key: std::borrow::Cow::Borrowed(crate::ssh::PREFERRED_HOST_KEY_ALGOS), ..Preferred::DEFAULT },
+        preferred: Preferred {
+            key: std::borrow::Cow::Borrowed(crate::ssh::PREFERRED_HOST_KEY_ALGOS),
+            // Postgres tunnels use a direct-tcpip channel; russh 0.62 may close
+            // it early on zlib negotiation, so disable SSH compression like the
+            // other tunnel paths (src/ssh/mod.rs, src/jump.rs, src/sftp_client.rs).
+            compression: std::borrow::Cow::Borrowed(&[russh::compression::NONE]),
+            ..Preferred::DEFAULT
+        },
         nodelay: true,
         ..client::Config::default()
     });
-    let mut session = tokio::time::timeout(CONNECT_TIMEOUT, client::connect(config, (&ssh.host[..], ssh.port), handler))
-        .await.map_err(|_| "SSH jump connection timed out")?
-        .map_err(|_| "SSH host key fingerprint changed. Refusing to connect.".to_string())?;
+    let mut session = tokio::time::timeout(
+        CONNECT_TIMEOUT,
+        client::connect(config, (&ssh.host[..], ssh.port), handler),
+    )
+    .await
+    .map_err(|_| "SSH jump connection timed out")?
+    .map_err(|_| "SSH host key fingerprint changed. Refusing to connect.".to_string())?;
     let authenticated = match ssh.auth_method.as_str() {
-        "password" => session.authenticate_password(&ssh.username, ssh.password.as_deref().ok_or_else(|| "SSH password is required".to_string())?)
-            .await.map_err(|error| format!("SSH password authentication failed: {error}"))?.success(),
+        "password" => session
+            .authenticate_password(
+                &ssh.username,
+                ssh.password
+                    .as_deref()
+                    .ok_or_else(|| "SSH password is required".to_string())?,
+            )
+            .await
+            .map_err(|error| format!("SSH password authentication failed: {error}"))?
+            .success(),
         "privateKey" => {
-            let key = if let Some(private_key) = ssh.private_key.as_deref().filter(|value| !value.is_empty()) {
+            let key = if let Some(private_key) =
+                ssh.private_key.as_deref().filter(|value| !value.is_empty())
+            {
                 russh::keys::decode_secret_key(private_key, ssh.private_key_passphrase.as_deref())
                     .map_err(|error| format!("Unable to decode SSH private key: {error}"))?
             } else {
                 crate::ssh::load_private_key(
-                    ssh.private_key_path.as_deref().ok_or_else(|| "Saved SSH private-key path is required".to_string())?,
+                    ssh.private_key_path
+                        .as_deref()
+                        .ok_or_else(|| "Saved SSH private-key path is required".to_string())?,
                     ssh.private_key_passphrase.as_deref(),
-                ).map_err(|error| format!("Unable to load SSH private key: {error}"))?
+                )
+                .map_err(|error| format!("Unable to load SSH private key: {error}"))?
             };
-            session.authenticate_publickey(&ssh.username, russh::keys::PrivateKeyWithHashAlg::new(Arc::new(key), Some(russh::keys::HashAlg::Sha256)))
-                .await.map_err(|error| format!("SSH private-key authentication failed: {error}"))?.success()
+            session
+                .authenticate_publickey(
+                    &ssh.username,
+                    russh::keys::PrivateKeyWithHashAlg::new(
+                        Arc::new(key),
+                        Some(russh::keys::HashAlg::Sha256),
+                    ),
+                )
+                .await
+                .map_err(|error| format!("SSH private-key authentication failed: {error}"))?
+                .success()
         }
         _ => return Err("Unsupported SSH authentication method".into()),
     };
     if !authenticated {
         return Err("SSH jump authentication failed".into());
     }
-    let channel = tokio::time::timeout(CONNECT_TIMEOUT, session.channel_open_direct_tcpip(&request.host, request.port as u32, "127.0.0.1", 0))
-        .await.map_err(|_| "Timed out opening SSH channel to PostgreSQL" )?
-        .map_err(|error| format!("Failed to open SSH channel to PostgreSQL: {error}"))?;
+    let channel = tokio::time::timeout(
+        CONNECT_TIMEOUT,
+        session.channel_open_direct_tcpip(&request.host, request.port as u32, "127.0.0.1", 0),
+    )
+    .await
+    .map_err(|_| "Timed out opening SSH channel to PostgreSQL")?
+    .map_err(|error| format!("Failed to open SSH channel to PostgreSQL: {error}"))?;
     Ok((channel.into_stream(), session))
 }
 
@@ -219,18 +304,29 @@ pub struct PostgresQueryResult {
 }
 
 fn config(request: &PostgresConnectRequest) -> Result<tokio_postgres::Config, String> {
-    if request.connection_id.trim().is_empty() || request.host.trim().is_empty() || request.database.trim().is_empty() || request.username.trim().is_empty() {
+    if request.connection_id.trim().is_empty()
+        || request.host.trim().is_empty()
+        || request.database.trim().is_empty()
+        || request.username.trim().is_empty()
+    {
         return Err("Connection name, host, database, and username are required".into());
     }
     let mut config = tokio_postgres::Config::new();
-    config.host(&request.host).port(request.port).dbname(&request.database).user(&request.username);
+    config
+        .host(&request.host)
+        .port(request.port)
+        .dbname(&request.database)
+        .user(&request.username);
     if let Some(password) = &request.password {
         config.password(password);
     }
     Ok(config)
 }
 
-fn certificates(pem: &str, field: &str) -> Result<Vec<rustls::pki_types::CertificateDer<'static>>, String> {
+fn certificates(
+    pem: &str,
+    field: &str,
+) -> Result<Vec<rustls::pki_types::CertificateDer<'static>>, String> {
     rustls_pemfile::certs(&mut Cursor::new(pem.as_bytes()))
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| format!("Invalid {field} PEM certificate: {error}"))
@@ -238,9 +334,15 @@ fn certificates(pem: &str, field: &str) -> Result<Vec<rustls::pki_types::Certifi
 
 fn tls_connector(request: &PostgresConnectRequest) -> Result<MakeRustlsConnect, String> {
     let mut roots = rustls::RootCertStore::empty();
-    if let Some(pem) = request.ssl_root_cert.as_deref().filter(|value| !value.trim().is_empty()) {
+    if let Some(pem) = request
+        .ssl_root_cert
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
         for certificate in certificates(pem, "CA")? {
-            roots.add(certificate).map_err(|error| format!("Invalid CA certificate: {error}"))?;
+            roots
+                .add(certificate)
+                .map_err(|error| format!("Invalid CA certificate: {error}"))?;
         }
     } else {
         let result = rustls_native_certs::load_native_certs();
@@ -256,17 +358,26 @@ fn tls_connector(request: &PostgresConnectRequest) -> Result<MakeRustlsConnect, 
     if roots.is_empty() {
         return Err("No trusted TLS root certificates are available".into());
     }
-    let config = match (request.ssl_client_cert.as_deref(), request.ssl_client_key.as_deref()) {
+    let config = match (
+        request.ssl_client_cert.as_deref(),
+        request.ssl_client_key.as_deref(),
+    ) {
         (Some(cert), Some(key)) if !cert.trim().is_empty() && !key.trim().is_empty() => {
             let certificates = certificates(cert, "client")?;
             let key = rustls_pemfile::private_key(&mut Cursor::new(key.as_bytes()))
                 .map_err(|error| format!("Invalid client private key: {error}"))?
-                .ok_or_else(|| "Client private key PEM does not contain a supported key".to_string())?;
-            rustls::ClientConfig::builder().with_root_certificates(roots).with_client_auth_cert(certificates, key)
+                .ok_or_else(|| {
+                    "Client private key PEM does not contain a supported key".to_string()
+                })?;
+            rustls::ClientConfig::builder()
+                .with_root_certificates(roots)
+                .with_client_auth_cert(certificates, key)
                 .map_err(|error| format!("Invalid client TLS identity: {error}"))?
         }
         (None, None) | (Some(""), None) | (None, Some("")) | (Some(""), Some("")) => {
-            rustls::ClientConfig::builder().with_root_certificates(roots).with_no_client_auth()
+            rustls::ClientConfig::builder()
+                .with_root_certificates(roots)
+                .with_no_client_auth()
         }
         _ => return Err("Both client certificate and private key are required for mTLS".into()),
     };
@@ -278,24 +389,36 @@ async fn open_client(request: &PostgresConnectRequest) -> Result<Arc<Client>, St
     if let Some(ssh) = &request.ssh {
         let (stream, session) = open_verified_jump(request, ssh).await?;
         let client = if request.ssl_mode == "disable" {
-            let (client, connection) = tokio::time::timeout(CONNECT_TIMEOUT, config.connect_raw(stream, NoTls))
-                .await.map_err(|_| "PostgreSQL connection through SSH timed out")?
-                .map_err(|error| format!("PostgreSQL connection through SSH failed: {error}"))?;
+            let (client, connection) =
+                tokio::time::timeout(CONNECT_TIMEOUT, config.connect_raw(stream, NoTls))
+                    .await
+                    .map_err(|_| "PostgreSQL connection through SSH timed out")?
+                    .map_err(|error| {
+                        format!("PostgreSQL connection through SSH failed: {error}")
+                    })?;
             tauri::async_runtime::spawn(async move {
                 let _jump_session = session;
-                if let Err(error) = connection.await { tracing::warn!("PostgreSQL SSH connection ended: {error}"); }
+                if let Err(error) = connection.await {
+                    tracing::warn!("PostgreSQL SSH connection ended: {error}");
+                }
             });
             client
         } else {
             let mut connector = tls_connector(request)?;
             let tls = <MakeRustlsConnect as MakeTlsConnect<russh::ChannelStream<client::Msg>>>::make_tls_connect(&mut connector, &request.host)
                 .map_err(|error| format!("Unable to configure PostgreSQL TLS: {error}"))?;
-            let (client, connection) = tokio::time::timeout(CONNECT_TIMEOUT, config.connect_raw(stream, tls))
-                .await.map_err(|_| "PostgreSQL TLS connection through SSH timed out")?
-                .map_err(|error| format!("PostgreSQL TLS connection through SSH failed: {error}"))?;
+            let (client, connection) =
+                tokio::time::timeout(CONNECT_TIMEOUT, config.connect_raw(stream, tls))
+                    .await
+                    .map_err(|_| "PostgreSQL TLS connection through SSH timed out")?
+                    .map_err(|error| {
+                        format!("PostgreSQL TLS connection through SSH failed: {error}")
+                    })?;
             tauri::async_runtime::spawn(async move {
                 let _jump_session = session;
-                if let Err(error) = connection.await { tracing::warn!("PostgreSQL TLS SSH connection ended: {error}"); }
+                if let Err(error) = connection.await {
+                    tracing::warn!("PostgreSQL TLS SSH connection ended: {error}");
+                }
             });
             client
         };
@@ -317,10 +440,11 @@ async fn open_client(request: &PostgresConnectRequest) -> Result<Arc<Client>, St
         // Rustls verifies both the certificate chain and the configured host name.
         // `require` is intentionally at least as strict as verify-full rather than
         // allowing an insecure certificate-validation bypass.
-        let (client, connection) = tokio::time::timeout(CONNECT_TIMEOUT, config.connect(tls_connector(request)?))
-            .await
-            .map_err(|_| "PostgreSQL TLS connection timed out")?
-            .map_err(|error| format!("PostgreSQL TLS connection failed: {error}"))?;
+        let (client, connection) =
+            tokio::time::timeout(CONNECT_TIMEOUT, config.connect(tls_connector(request)?))
+                .await
+                .map_err(|_| "PostgreSQL TLS connection timed out")?
+                .map_err(|error| format!("PostgreSQL TLS connection failed: {error}"))?;
         tauri::async_runtime::spawn(async move {
             if let Err(error) = connection.await {
                 tracing::warn!("PostgreSQL TLS connection ended: {error}");
@@ -362,12 +486,24 @@ pub async fn postgres_connect(
         .map_err(|error| format!("Failed to read PostgreSQL server version: {error}"))?
         .try_get::<_, String>(0)
         .map_err(|error| format!("Failed to decode PostgreSQL server version: {error}"))?;
-    state.clients.write().await.insert(request.connection_id.clone(), client);
-    Ok(PostgresConnectionStatus { connection_id: request.connection_id, connected: true, database: request.database, server_version })
+    state
+        .clients
+        .write()
+        .await
+        .insert(request.connection_id.clone(), client);
+    Ok(PostgresConnectionStatus {
+        connection_id: request.connection_id,
+        connected: true,
+        database: request.database,
+        server_version,
+    })
 }
 
 #[tauri::command]
-pub async fn postgres_disconnect(connection_id: String, state: tauri::State<'_, PostgresState>) -> Result<(), String> {
+pub async fn postgres_disconnect(
+    connection_id: String,
+    state: tauri::State<'_, PostgresState>,
+) -> Result<(), String> {
     state.clients.write().await.remove(&connection_id);
     Ok(())
 }
@@ -380,11 +516,20 @@ pub async fn postgres_execute(
     if request.sql.trim().is_empty() {
         return Err("SQL cannot be empty".into());
     }
-    let client = state.clients.read().await.get(&request.connection_id).cloned()
+    let client = state
+        .clients
+        .read()
+        .await
+        .get(&request.connection_id)
+        .cloned()
         .ok_or_else(|| "PostgreSQL connection is not active".to_string())?;
-    let limit = request.max_rows.unwrap_or(MAX_QUERY_ROWS).clamp(1, MAX_QUERY_ROWS);
-    let messages = tokio::time::timeout(QUERY_TIMEOUT, client.simple_query(&request.sql)).await
-        .map_err(|_| "PostgreSQL query timed out" )?
+    let limit = request
+        .max_rows
+        .unwrap_or(MAX_QUERY_ROWS)
+        .clamp(1, MAX_QUERY_ROWS);
+    let messages = tokio::time::timeout(QUERY_TIMEOUT, client.simple_query(&request.sql))
+        .await
+        .map_err(|_| "PostgreSQL query timed out")?
         .map_err(|error| format!("PostgreSQL query failed: {error}"))?;
     let mut columns = Vec::new();
     let mut rows = Vec::new();
@@ -394,10 +539,18 @@ pub async fn postgres_execute(
         match message {
             SimpleQueryMessage::Row(row) => {
                 if columns.is_empty() {
-                    columns = row.columns().iter().map(|column| column.name().to_string()).collect();
+                    columns = row
+                        .columns()
+                        .iter()
+                        .map(|column| column.name().to_string())
+                        .collect();
                 }
                 if rows.len() < limit {
-                    rows.push((0..row.len()).map(|index| row.get(index).map(str::to_owned)).collect());
+                    rows.push(
+                        (0..row.len())
+                            .map(|index| row.get(index).map(str::to_owned))
+                            .collect(),
+                    );
                 } else {
                     truncated = true;
                 }
@@ -406,7 +559,12 @@ pub async fn postgres_execute(
             _ => {}
         }
     }
-    Ok(PostgresQueryResult { columns, rows, command_tags, truncated })
+    Ok(PostgresQueryResult {
+        columns,
+        rows,
+        command_tags,
+        truncated,
+    })
 }
 
 #[tauri::command]
@@ -415,18 +573,36 @@ pub async fn postgres_explain(
     state: tauri::State<'_, PostgresState>,
 ) -> Result<PostgresQueryResult, String> {
     let sql = single_statement(&request.sql)?;
-    let client = state.clients.read().await.get(&request.connection_id).cloned()
+    let client = state
+        .clients
+        .read()
+        .await
+        .get(&request.connection_id)
+        .cloned()
         .ok_or_else(|| "PostgreSQL connection is not active".to_string())?;
-    let messages = tokio::time::timeout(QUERY_TIMEOUT, client.simple_query(&format!("EXPLAIN {sql}"))).await
-        .map_err(|_| "PostgreSQL EXPLAIN timed out")?
-        .map_err(|error| format!("PostgreSQL EXPLAIN failed: {error}"))?;
+    let messages = tokio::time::timeout(
+        QUERY_TIMEOUT,
+        client.simple_query(&format!("EXPLAIN {sql}")),
+    )
+    .await
+    .map_err(|_| "PostgreSQL EXPLAIN timed out")?
+    .map_err(|error| format!("PostgreSQL EXPLAIN failed: {error}"))?;
     let mut rows = Vec::new();
     for message in messages {
         if let SimpleQueryMessage::Row(row) = message {
-            rows.push((0..row.len()).map(|index| row.get(index).map(str::to_owned)).collect());
+            rows.push(
+                (0..row.len())
+                    .map(|index| row.get(index).map(str::to_owned))
+                    .collect(),
+            );
         }
     }
-    Ok(PostgresQueryResult { columns: vec!["QUERY PLAN".into()], rows, command_tags: Vec::new(), truncated: false })
+    Ok(PostgresQueryResult {
+        columns: vec!["QUERY PLAN".into()],
+        rows,
+        command_tags: Vec::new(),
+        truncated: false,
+    })
 }
 
 #[tauri::command]
@@ -434,7 +610,12 @@ pub async fn postgres_transaction(
     request: PostgresTransactionRequest,
     state: tauri::State<'_, PostgresState>,
 ) -> Result<(), String> {
-    let client = state.clients.read().await.get(&request.connection_id).cloned()
+    let client = state
+        .clients
+        .read()
+        .await
+        .get(&request.connection_id)
+        .cloned()
         .ok_or_else(|| "PostgreSQL connection is not active".to_string())?;
     let statement = match request.action.as_str() {
         "begin" => "BEGIN",
@@ -442,7 +623,8 @@ pub async fn postgres_transaction(
         "rollback" => "ROLLBACK",
         _ => return Err("Unsupported PostgreSQL transaction action".into()),
     };
-    tokio::time::timeout(QUERY_TIMEOUT, client.batch_execute(statement)).await
+    tokio::time::timeout(QUERY_TIMEOUT, client.batch_execute(statement))
+        .await
         .map_err(|_| "PostgreSQL transaction action timed out")?
         .map_err(|error| format!("PostgreSQL transaction action failed: {error}"))
 }
@@ -462,12 +644,18 @@ fn single_statement(sql: &str) -> Result<&str, String> {
     for (index, byte) in bytes.iter().enumerate() {
         let next = bytes.get(index + 1).copied();
         if line_comment {
-            if *byte == b'\n' { line_comment = false; }
+            if *byte == b'\n' {
+                line_comment = false;
+            }
             continue;
         }
         if block_depth > 0 {
-            if *byte == b'/' && next == Some(b'*') { block_depth += 1; }
-            if *byte == b'*' && next == Some(b'/') { block_depth -= 1; }
+            if *byte == b'/' && next == Some(b'*') {
+                block_depth += 1;
+            }
+            if *byte == b'*' && next == Some(b'/') {
+                block_depth -= 1;
+            }
             continue;
         }
         if let Some(delimiter) = quote {
@@ -489,7 +677,11 @@ fn single_statement(sql: &str) -> Result<&str, String> {
         }
     }
     let statement = sql.trim();
-    if statement.is_empty() { Err("SQL cannot be empty".into()) } else { Ok(statement) }
+    if statement.is_empty() {
+        Err("SQL cannot be empty".into())
+    } else {
+        Ok(statement)
+    }
 }
 
 #[tauri::command]
@@ -500,41 +692,83 @@ pub async fn postgres_table_data(
     if request.schema.trim().is_empty() || request.table.trim().is_empty() {
         return Err("Schema and table are required".into());
     }
-    let client = state.clients.read().await.get(&request.connection_id).cloned()
+    let client = state
+        .clients
+        .read()
+        .await
+        .get(&request.connection_id)
+        .cloned()
         .ok_or_else(|| "PostgreSQL connection is not active".to_string())?;
     let limit = request.limit.unwrap_or(100).clamp(1, 1_000);
     let offset = request.offset.unwrap_or(0);
-    let relation = format!("{}.{}", quote_identifier(&request.schema), quote_identifier(&request.table));
+    let relation = format!(
+        "{}.{}",
+        quote_identifier(&request.schema),
+        quote_identifier(&request.table)
+    );
     let key_rows = client.query(
         "SELECT a.attname FROM pg_index i JOIN pg_class c ON c.oid = i.indrelid JOIN pg_namespace n ON n.oid = c.relnamespace JOIN unnest(i.indkey) WITH ORDINALITY AS k(attnum, ord) ON true JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = k.attnum WHERE i.indisprimary AND n.nspname = $1 AND c.relname = $2 ORDER BY k.ord",
         &[&request.schema, &request.table],
     ).await.map_err(|error| format!("Failed to load table primary key: {error}"))?;
-    let primary_key_columns: Vec<String> = key_rows.into_iter().filter_map(|row| row.try_get::<_, String>(0).ok()).collect();
+    let primary_key_columns: Vec<String> = key_rows
+        .into_iter()
+        .filter_map(|row| row.try_get::<_, String>(0).ok())
+        .collect();
     let nullable_rows = client.query(
         "SELECT a.attname FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = $1 AND c.relname = $2 AND a.attnum > 0 AND NOT a.attisdropped AND NOT a.attnotnull ORDER BY a.attnum",
         &[&request.schema, &request.table],
     ).await.map_err(|error| format!("Failed to load table nullability: {error}"))?;
-    let nullable_columns: Vec<String> = nullable_rows.into_iter().filter_map(|row| row.try_get::<_, String>(0).ok()).collect();
+    let nullable_columns: Vec<String> = nullable_rows
+        .into_iter()
+        .filter_map(|row| row.try_get::<_, String>(0).ok())
+        .collect();
     // A stable order is required for reliable paging. Tables without a primary
     // key remain browseable but cannot promise stable page boundaries.
     let order = if primary_key_columns.is_empty() {
         String::new()
     } else {
-        format!(" ORDER BY {}", primary_key_columns.iter().map(|column| quote_identifier(column)).collect::<Vec<_>>().join(", "))
+        format!(
+            " ORDER BY {}",
+            primary_key_columns
+                .iter()
+                .map(|column| quote_identifier(column))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
     };
     // The identifiers are quoted locally and all numeric controls are bounded.
     // This endpoint is intentionally limited to a single relation, not arbitrary SQL.
-    let messages = client.simple_query(&format!("SELECT * FROM {relation}{order} LIMIT {limit} OFFSET {offset}")).await
+    let messages = client
+        .simple_query(&format!(
+            "SELECT * FROM {relation}{order} LIMIT {limit} OFFSET {offset}"
+        ))
+        .await
         .map_err(|error| format!("Failed to load table data: {error}"))?;
     let mut columns = Vec::new();
     let mut rows = Vec::new();
     for message in messages {
         if let SimpleQueryMessage::Row(row) = message {
-            if columns.is_empty() { columns = row.columns().iter().map(|column| column.name().to_string()).collect(); }
-            rows.push((0..row.len()).map(|index| row.get(index).map(str::to_owned)).collect());
+            if columns.is_empty() {
+                columns = row
+                    .columns()
+                    .iter()
+                    .map(|column| column.name().to_string())
+                    .collect();
+            }
+            rows.push(
+                (0..row.len())
+                    .map(|index| row.get(index).map(str::to_owned))
+                    .collect(),
+            );
         }
     }
-    Ok(PostgresTableDataResult { columns, truncated: rows.len() == limit, rows, primary_key_columns, nullable_columns })
+    Ok(PostgresTableDataResult {
+        columns,
+        truncated: rows.len() == limit,
+        rows,
+        primary_key_columns,
+        nullable_columns,
+    })
 }
 
 #[tauri::command]
@@ -542,59 +776,117 @@ pub async fn postgres_table_update(
     request: PostgresTableUpdateRequest,
     state: tauri::State<'_, PostgresState>,
 ) -> Result<u64, String> {
-    if request.schema.trim().is_empty() || request.table.trim().is_empty() || request.changes.is_empty() {
+    if request.schema.trim().is_empty()
+        || request.table.trim().is_empty()
+        || request.changes.is_empty()
+    {
         return Err("Schema, table, and at least one changed value are required".into());
     }
-    let client = state.clients.read().await.get(&request.connection_id).cloned()
+    let client = state
+        .clients
+        .read()
+        .await
+        .get(&request.connection_id)
+        .cloned()
         .ok_or_else(|| "PostgreSQL connection is not active".to_string())?;
     let key_rows = client.query(
         "SELECT a.attname, pg_catalog.format_type(a.atttypid, a.atttypmod) FROM pg_index i JOIN pg_class c ON c.oid = i.indrelid JOIN pg_namespace n ON n.oid = c.relnamespace JOIN unnest(i.indkey) WITH ORDINALITY AS k(attnum, ord) ON true JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = k.attnum WHERE i.indisprimary AND n.nspname = $1 AND c.relname = $2 ORDER BY k.ord",
         &[&request.schema, &request.table],
     ).await.map_err(|error| format!("Failed to validate table primary key: {error}"))?;
-    let keys: Vec<(String, String)> = key_rows.into_iter().map(|row| {
-        Ok((
-            row.try_get(0).map_err(|error| format!("Failed to decode primary key: {error}"))?,
-            row.try_get(1).map_err(|error| format!("Failed to decode primary key type: {error}"))?,
-        ))
-    }).collect::<Result<_, String>>()?;
-    if keys.is_empty() || keys.iter().any(|(key, _)| !request.key_values.contains_key(key)) {
+    let keys: Vec<(String, String)> = key_rows
+        .into_iter()
+        .map(|row| {
+            Ok((
+                row.try_get(0)
+                    .map_err(|error| format!("Failed to decode primary key: {error}"))?,
+                row.try_get(1)
+                    .map_err(|error| format!("Failed to decode primary key type: {error}"))?,
+            ))
+        })
+        .collect::<Result<_, String>>()?;
+    if keys.is_empty()
+        || keys
+            .iter()
+            .any(|(key, _)| !request.key_values.contains_key(key))
+    {
         return Err("This table has no usable primary key for a safe update".into());
     }
     let column_rows = client.query(
         "SELECT a.attname, pg_catalog.format_type(a.atttypid, a.atttypmod) FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = $1 AND c.relname = $2 AND a.attnum > 0 AND NOT a.attisdropped",
         &[&request.schema, &request.table],
     ).await.map_err(|error| format!("Failed to load table column types: {error}"))?;
-    let column_types: HashMap<String, String> = column_rows.into_iter().map(|row| {
-        Ok((
-            row.try_get(0).map_err(|error| format!("Failed to decode table column: {error}"))?,
-            row.try_get(1).map_err(|error| format!("Failed to decode table column type: {error}"))?,
-        ))
-    }).collect::<Result<_, String>>()?;
+    let column_types: HashMap<String, String> = column_rows
+        .into_iter()
+        .map(|row| {
+            Ok((
+                row.try_get(0)
+                    .map_err(|error| format!("Failed to decode table column: {error}"))?,
+                row.try_get(1)
+                    .map_err(|error| format!("Failed to decode table column type: {error}"))?,
+            ))
+        })
+        .collect::<Result<_, String>>()?;
     let mut values: Vec<Box<dyn tokio_postgres::types::ToSql + Send + Sync>> = Vec::new();
     let mut assignments = Vec::new();
     for (column, value) in &request.changes {
-        let data_type = column_types.get(column).ok_or_else(|| format!("Unknown table column: {column}"))?;
+        let data_type = column_types
+            .get(column)
+            .ok_or_else(|| format!("Unknown table column: {column}"))?;
         values.push(Box::new(value.clone()));
-        assignments.push(format!("{} = ${}::text::{}", quote_identifier(column), values.len(), data_type));
+        assignments.push(format!(
+            "{} = ${}::text::{}",
+            quote_identifier(column),
+            values.len(),
+            data_type
+        ));
     }
     let mut predicates = Vec::new();
     for (key, data_type) in &keys {
         values.push(Box::new(request.key_values[key].clone()));
-        predicates.push(format!("{} = ${}::text::{}", quote_identifier(key), values.len(), data_type));
+        predicates.push(format!(
+            "{} = ${}::text::{}",
+            quote_identifier(key),
+            values.len(),
+            data_type
+        ));
     }
-    let params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = values.iter()
-        .map(|value| value.as_ref() as &(dyn tokio_postgres::types::ToSql + Sync)).collect();
-    let statement = format!("UPDATE {}.{} SET {} WHERE {}", quote_identifier(&request.schema), quote_identifier(&request.table), assignments.join(", "), predicates.join(" AND "));
-    client.execute(&statement, &params).await.map_err(|error| format!("Failed to update table row: {error}"))
+    let params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = values
+        .iter()
+        .map(|value| value.as_ref() as &(dyn tokio_postgres::types::ToSql + Sync))
+        .collect();
+    let statement = format!(
+        "UPDATE {}.{} SET {} WHERE {}",
+        quote_identifier(&request.schema),
+        quote_identifier(&request.table),
+        assignments.join(", "),
+        predicates.join(" AND ")
+    );
+    client
+        .execute(&statement, &params)
+        .await
+        .map_err(|error| format!("Failed to update table row: {error}"))
 }
 
 #[tauri::command]
-pub async fn postgres_catalog_schemas(connection_id: String, state: tauri::State<'_, PostgresState>) -> Result<Vec<String>, String> {
-    let client = state.clients.read().await.get(&connection_id).cloned()
+pub async fn postgres_catalog_schemas(
+    connection_id: String,
+    state: tauri::State<'_, PostgresState>,
+) -> Result<Vec<String>, String> {
+    let client = state
+        .clients
+        .read()
+        .await
+        .get(&connection_id)
+        .cloned()
         .ok_or_else(|| "PostgreSQL connection is not active".to_string())?;
     let rows = client.query("SELECT nspname FROM pg_namespace WHERE nspname NOT LIKE 'pg_%' AND nspname <> 'information_schema' ORDER BY nspname", &[])
         .await.map_err(|error| format!("Failed to load schemas: {error}"))?;
-    rows.into_iter().map(|row| row.try_get(0).map_err(|error| format!("Failed to decode schema: {error}"))).collect()
+    rows.into_iter()
+        .map(|row| {
+            row.try_get(0)
+                .map_err(|error| format!("Failed to decode schema: {error}"))
+        })
+        .collect()
 }
 
 #[tauri::command]
@@ -602,7 +894,12 @@ pub async fn postgres_catalog_search(
     request: PostgresCatalogSearchRequest,
     state: tauri::State<'_, PostgresState>,
 ) -> Result<Vec<PostgresCatalogItem>, String> {
-    let client = state.clients.read().await.get(&request.connection_id).cloned()
+    let client = state
+        .clients
+        .read()
+        .await
+        .get(&request.connection_id)
+        .cloned()
         .ok_or_else(|| "PostgreSQL connection is not active".to_string())?;
     let limit = request.limit.unwrap_or(100).clamp(1, 100) as i64;
     let prefix = format!("{}%", request.prefix.unwrap_or_default());
@@ -629,18 +926,44 @@ pub async fn postgres_catalog_search(
         ).await,
         _ => return Err("Unsupported PostgreSQL catalog item kind".into()),
     }.map_err(|error| format!("Failed to search PostgreSQL catalog: {error}"))?;
-    rows.into_iter().map(|row| {
-        let schema: String = row.try_get(0).map_err(|error| format!("Failed to decode catalog schema: {error}"))?;
-        let name: String = row.try_get(1).map_err(|error| format!("Failed to decode catalog item: {error}"))?;
-        let detail: String = row.try_get(2).map_err(|error| format!("Failed to decode catalog detail: {error}"))?;
-        Ok(PostgresCatalogItem {
-            kind: request.kind.clone(), schema: Some(schema), name,
-            relation: if request.kind == "column" { request.relation.clone() } else { None },
-            data_type: if request.kind == "column" || request.kind == "type" { Some(detail.clone()) } else { None },
-            signature: if request.kind == "function" { Some(detail.clone()) } else { None },
-            relation_kind: if request.kind == "relation" { Some(detail) } else { None },
+    rows.into_iter()
+        .map(|row| {
+            let schema: String = row
+                .try_get(0)
+                .map_err(|error| format!("Failed to decode catalog schema: {error}"))?;
+            let name: String = row
+                .try_get(1)
+                .map_err(|error| format!("Failed to decode catalog item: {error}"))?;
+            let detail: String = row
+                .try_get(2)
+                .map_err(|error| format!("Failed to decode catalog detail: {error}"))?;
+            Ok(PostgresCatalogItem {
+                kind: request.kind.clone(),
+                schema: Some(schema),
+                name,
+                relation: if request.kind == "column" {
+                    request.relation.clone()
+                } else {
+                    None
+                },
+                data_type: if request.kind == "column" || request.kind == "type" {
+                    Some(detail.clone())
+                } else {
+                    None
+                },
+                signature: if request.kind == "function" {
+                    Some(detail.clone())
+                } else {
+                    None
+                },
+                relation_kind: if request.kind == "relation" {
+                    Some(detail)
+                } else {
+                    None
+                },
+            })
         })
-    }).collect()
+        .collect()
 }
 
 #[tauri::command]
@@ -651,33 +974,71 @@ pub async fn postgres_ssh_fingerprint(
         return Err("SSH host is required".into());
     }
     let observed = Arc::new(std::sync::Mutex::new(None));
-    let handler = FingerprintClient { expected: request.expected_fingerprint.clone(), observed: Arc::clone(&observed) };
-    let config = Arc::new(client::Config { preferred: Preferred::DEFAULT, ..client::Config::default() });
-    let result = tokio::time::timeout(CONNECT_TIMEOUT, client::connect(config, (&request.host[..], request.port), handler))
-        .await
-        .map_err(|_| "SSH host-key probe timed out")?;
-    let fingerprint = observed.lock().map_err(|_| "SSH fingerprint probe failed".to_string())?.clone()
+    let handler = FingerprintProbeClient {
+        observed: Arc::clone(&observed),
+    };
+    let config = Arc::new(client::Config {
+        // Mirror the SSH-side probe negotiation (src/ssh/mod.rs) so both ends
+        // advertise the same host-key algorithm boundary for a given server.
+        preferred: Preferred {
+            key: std::borrow::Cow::Borrowed(crate::ssh::PREFERRED_HOST_KEY_ALGOS),
+            // Also mirror the SSH-side compression policy: never negotiate zlib
+            // on the direct-tcpip channel used for Postgres tunnels.
+            compression: std::borrow::Cow::Borrowed(&[russh::compression::NONE]),
+            ..Preferred::DEFAULT
+        },
+        nodelay: true,
+        ..client::Config::default()
+    });
+    let result = tokio::time::timeout(
+        CONNECT_TIMEOUT,
+        client::connect(config, (&request.host[..], request.port), handler),
+    )
+    .await
+    .map_err(|_| "SSH host-key probe timed out")?;
+    let fingerprint = observed
+        .lock()
+        .map_err(|_| "SSH fingerprint probe failed".to_string())?
+        .clone()
         .ok_or_else(|| "SSH server did not provide a host key".to_string())?;
-    if request.expected_fingerprint.is_some() {
-        result.map_err(|_| "SSH host key fingerprint changed. Refusing to connect.".to_string())?;
-    } else {
-        // The connection is intentionally dropped after probing an untrusted key.
-        let _ = result;
+    if !fingerprint_matches(request.expected_fingerprint.as_deref(), &fingerprint)
+        && request.expected_fingerprint.is_some()
+    {
+        return Err("SSH host key fingerprint changed. Refusing to connect.".to_string());
     }
-    Ok(PostgresSshFingerprintResponse { trusted: request.expected_fingerprint.is_some(), fingerprint })
+    // Close the probe session explicitly (mirrors src/ssh/mod.rs) instead of
+    // dropping it mid-negotiation; connect errors are tolerated here since the
+    // observed fingerprint above is the actual probe result.
+    if let Ok(session) = result {
+        let _ = session
+            .disconnect(russh::Disconnect::ByApplication, "", "English")
+            .await;
+    }
+    Ok(PostgresSshFingerprintResponse { fingerprint })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::single_statement;
+    use super::{fingerprint_matches, single_statement};
 
     #[test]
     fn explain_accepts_one_statement_with_a_trailing_semicolon() {
-        assert_eq!(single_statement("SELECT ';' AS value;").unwrap(), "SELECT ';' AS value");
+        assert_eq!(
+            single_statement("SELECT ';' AS value;").unwrap(),
+            "SELECT ';' AS value"
+        );
     }
 
     #[test]
     fn explain_rejects_a_statement_batch() {
         assert!(single_statement("SELECT 1; DELETE FROM records").is_err());
+    }
+
+    #[test]
+    fn postgres_ssh_host_key_requires_a_pin_and_rejects_mismatch() {
+        let fingerprint = "SHA256:canonical-fingerprint";
+        assert!(fingerprint_matches(Some(fingerprint), fingerprint));
+        assert!(!fingerprint_matches(Some("SHA256:other-key"), fingerprint));
+        assert!(!fingerprint_matches(None, fingerprint));
     }
 }

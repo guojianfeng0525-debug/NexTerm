@@ -18,7 +18,6 @@ mod tests {
             auth_method: AuthMethod::Password {
                 password: TEST_PASSWORD.to_string(),
             },
-            compression: true,
             keepalive_interval: None,
             keepalive_max: None,
             proxy: None,
@@ -102,7 +101,6 @@ mod tests {
             auth_method: AuthMethod::Password {
                 password: "wrongpassword".to_string(),
             },
-            compression: true,
             keepalive_interval: None,
             keepalive_max: None,
             proxy: None,
@@ -301,7 +299,6 @@ mod shell_integration_tests {
                 auth_method: AuthMethod::Password {
                     password: "testpass".to_string(),
                 },
-                compression: true,
                 keepalive_interval: Some(60),
                 keepalive_max: Some(3),
                 proxy: None,
@@ -358,6 +355,7 @@ mod shell_integration_tests {
 
 #[cfg(test)]
 mod key_loading_tests {
+    use crate::ssh::{AuthMethod, SshClient, SshConfig};
     use russh::keys::{decode_secret_key, encode_pkcs8_pem};
     use std::io::Write;
     use tempfile::NamedTempFile;
@@ -453,7 +451,6 @@ Byby5sb2NhbAECAw==
                 key_path: "/nonexistent/path/id_rsa".to_string(),
                 passphrase: None,
             },
-            compression: true,
             keepalive_interval: None,
             keepalive_max: None,
             proxy: None,
@@ -558,51 +555,61 @@ Byby5sb2NhbAECAw==
         }
         key_path.to_string()
     }
-}
 
-#[cfg(test)]
-mod compression_pref_tests {
-    use crate::ssh::compression_preferences;
-    use russh::compression::{NONE, ZLIB, ZLIB_LEGACY};
+    #[tokio::test]
+    #[ignore = "requires the local Docker OpenSSH fixture on port 22222"]
+    async fn docker_pty_survives_parallel_sftp_upload() {
+        let config = SshConfig {
+            host: "127.0.0.1".to_string(),
+            port: 22222,
+            username: "test".to_string(),
+            auth_method: AuthMethod::Password {
+                password: "testpass".to_string(),
+            },
+            keepalive_interval: None,
+            keepalive_max: None,
+            proxy: None,
+            jump: None,
+            host_key_fingerprint: None,
+            host_key_verification: false,
+        };
+        let mut client = SshClient::new();
+        client.connect(&config).await.expect("connect Docker SSH fixture");
+        let pty = client
+            .create_pty_session(80, 24, None)
+            .await
+            .expect("start PTY");
 
-    /// Mirror russh's client-side negotiation: pick the first algorithm in our
-    /// preferred list that the server also advertises (see negotiation.rs).
-    fn negotiate<'a>(
-        our_list: &'a [russh::compression::Name],
-        server_list: &str,
-    ) -> Option<&'a str> {
-        for ours in our_list {
-            if server_list.split(',').any(|s| s == ours.as_ref()) {
-                return Some(ours.as_ref());
+        let temp = tempfile::NamedTempFile::new().expect("create upload fixture");
+        std::fs::write(temp.path(), vec![b'x'; 8 * 1024 * 1024]).expect("write upload fixture");
+        client
+            .upload_file(temp.path().to_str().expect("UTF-8 temp path"), "/home/test/nexterm-transfer-test.bin")
+            .await
+            .expect("upload while PTY is active");
+
+        pty.input_tx
+            .send(b"echo NEXTERM_PTY_STILL_ALIVE\n".to_vec())
+            .await
+            .expect("write PTY input");
+        let output = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let mut seen = Vec::new();
+            loop {
+                let bytes = pty
+                    .output_rx
+                    .lock()
+                    .await
+                    .recv()
+                    .await
+                    .expect("PTY output before close");
+                seen.extend_from_slice(&bytes);
+                if String::from_utf8_lossy(&seen).contains("NEXTERM_PTY_STILL_ALIVE") {
+                    return seen;
+                }
             }
-        }
-        None
-    }
-
-    #[test]
-    fn enabled_prefers_zlib_over_none() {
-        let prefs = compression_preferences(true);
-        assert_eq!(
-            prefs[0], ZLIB,
-            "zlib must come before none or russh picks none"
-        );
-        assert!(prefs.contains(&ZLIB_LEGACY));
-        assert!(prefs.contains(&NONE));
-
-        // OpenSSH with `Compression delayed` advertises none,zlib@openssh.com.
-        assert_eq!(
-            negotiate(prefs, "none,zlib@openssh.com"),
-            Some("zlib@openssh.com")
-        );
-        // OpenSSH with `Compression yes` advertises none,zlib.
-        assert_eq!(negotiate(prefs, "none,zlib"), Some("zlib"));
-    }
-
-    #[test]
-    fn disabled_only_offers_none() {
-        let prefs = compression_preferences(false);
-        assert_eq!(prefs, &[NONE]);
-        assert_eq!(negotiate(prefs, "none,zlib@openssh.com"), Some("none"));
+        })
+        .await
+        .expect("PTY remained responsive after SFTP upload");
+        assert!(String::from_utf8_lossy(&output).contains("NEXTERM_PTY_STILL_ALIVE"));
     }
 }
 

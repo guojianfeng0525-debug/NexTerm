@@ -34,8 +34,17 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { CodeEditor } from "@/components/code-editor";
 import { generateId } from "@/lib/toolbox/toolbox-storage";
+import { ConnectionStorageManager } from "@/lib/connection-storage";
 import { PostgresConnectionsStorage } from "@/lib/toolbox/postgres-storage";
 import type {
   PostgreSQLConnectionConfig,
@@ -90,6 +99,10 @@ type WorkspaceTab = {
   dirty?: boolean;
 };
 type DialogPage = "general" | "ssh" | "tls";
+type PendingPostgresSshTrust = {
+  profile: PostgreSQLConnectionProfile;
+  fingerprint: string;
+};
 
 const pageSize = 100;
 
@@ -208,8 +221,13 @@ export function ToolPostgres() {
   const [configOpen, setConfigOpen] = useState(false);
   const [dialogPage, setDialogPage] = useState<DialogPage>("general");
   const [transactionActive, setTransactionActive] = useState(false);
+  const [pendingSshTrust, setPendingSshTrust] = useState<PendingPostgresSshTrust | null>(null);
 
   const tab = tabs.find((item) => item.id === activeTab) ?? tabs[0];
+  const patchTab = (id: string, patch: Partial<WorkspaceTab>) =>
+    setTabs((current) =>
+      current.map((item) => (item.id === id ? { ...item, ...patch } : item)),
+    );
   useEffect(() => {
     const pasteSqlNote = (event: Event) => {
       const detail = (event as CustomEvent<{ content?: string; handled?: boolean }>).detail;
@@ -270,10 +288,18 @@ export function ToolPostgres() {
   const update = <K extends keyof PostgreSQLConnectionConfig>(
     key: K,
     value: PostgreSQLConnectionConfig[K],
-  ) => setDraft((current) => ({
-    ...current,
-    providerConfig: { ...current.providerConfig, [key]: value },
-  }));
+  ) => setDraft((current) => {
+    const endpointChanged = (key === "sshHost" || key === "sshPort")
+      && current.providerConfig[key] !== value;
+    return {
+      ...current,
+      providerConfig: {
+        ...current.providerConfig,
+        [key]: value,
+        ...(endpointChanged ? { sshHostKeyFingerprint: undefined } : {}),
+      },
+    };
+  });
   const updateProfile = <K extends "name" | "environment">(
     key: K,
     value: PostgreSQLConnectionProfile[K],
@@ -376,10 +402,27 @@ export function ToolPostgres() {
     setSelectedId(saved.id);
     toast.success(t("toolbox.postgres.saved"));
   };
-  const connect = async () => {
+  const probeSshFingerprint = async () => {
+    if (!postgresConfig.sshEnabled || !postgresConfig.sshHost?.trim()) {
+      toast.error(t("toolbox.postgres.sshHostRequired"));
+      return;
+    }
     setConnecting(true);
     try {
-      const saved = { ...draft, updatedAt: Date.now() };
+      const probe = await invoke<{ fingerprint: string }>("postgres_ssh_fingerprint", {
+        request: { host: postgresConfig.sshHost, port: postgresConfig.sshPort ?? 22 },
+      });
+      setPendingSshTrust({ profile: draft, fingerprint: probe.fingerprint });
+    } catch (error) {
+      toast.error(t("toolbox.postgres.fingerprintFailed"), { description: String(error) });
+    } finally {
+      setConnecting(false);
+    }
+  };
+  const connectEstablished = async (profile: PostgreSQLConnectionProfile) => {
+    setConnecting(true);
+    try {
+      const saved = { ...profile, updatedAt: Date.now() };
       if (!(await PostgresConnectionsStorage.upsert(saved))) {
         toast.error(t("toolbox.postgres.saveFailed"));
         return;
@@ -394,28 +437,28 @@ export function ToolPostgres() {
         "postgres_connect",
         {
           request: {
-            connectionId: draft.id,
-            host: postgresConfig.host,
-            port: postgresConfig.port,
-            database: postgresConfig.database,
-            username: postgresConfig.username,
-            password: postgresConfig.password,
-            readOnly: postgresConfig.readOnly,
-            sslMode: postgresConfig.sslMode,
-            sslRootCert: postgresConfig.sslRootCert,
-            sslClientCert: postgresConfig.sslClientCert,
-            sslClientKey: postgresConfig.sslClientKey,
-            ssh: postgresConfig.sshEnabled
+            connectionId: saved.id,
+            host: saved.providerConfig.host,
+            port: saved.providerConfig.port,
+            database: saved.providerConfig.database,
+            username: saved.providerConfig.username,
+            password: saved.providerConfig.password,
+            readOnly: saved.providerConfig.readOnly,
+            sslMode: saved.providerConfig.sslMode,
+            sslRootCert: saved.providerConfig.sslRootCert,
+            sslClientCert: saved.providerConfig.sslClientCert,
+            sslClientKey: saved.providerConfig.sslClientKey,
+            ssh: saved.providerConfig.sshEnabled
               ? {
-                  host: postgresConfig.sshHost,
-                  port: postgresConfig.sshPort ?? 22,
-                  username: postgresConfig.sshUsername,
-                  authMethod: postgresConfig.sshAuthMethod ?? "password",
-                  password: postgresConfig.sshPassword,
-                  privateKey: postgresConfig.sshPrivateKey,
-                  privateKeyPath: postgresConfig.sshPrivateKeyPath,
-                  privateKeyPassphrase: postgresConfig.sshPrivateKeyPassphrase,
-                  hostKeyFingerprint: postgresConfig.sshHostKeyFingerprint,
+                  host: saved.providerConfig.sshHost,
+                  port: saved.providerConfig.sshPort ?? 22,
+                  username: saved.providerConfig.sshUsername,
+                  authMethod: saved.providerConfig.sshAuthMethod ?? "password",
+                  password: saved.providerConfig.sshPassword,
+                  privateKey: saved.providerConfig.sshPrivateKey,
+                  privateKeyPath: saved.providerConfig.sshPrivateKeyPath,
+                  privateKeyPassphrase: saved.providerConfig.sshPrivateKeyPassphrase,
+                  hostKeyFingerprint: saved.providerConfig.sshHostKeyFingerprint,
                 }
               : undefined,
           },
@@ -431,12 +474,46 @@ export function ToolPostgres() {
         t("toolbox.postgres.connected", { version: status.serverVersion }),
       );
     } catch (error) {
-      toast.error(t("toolbox.postgres.connectFailed"), {
-        description: String(error),
-      });
+      const message = String(error);
+      const isHostKeyMismatch = message.includes("host key fingerprint changed");
+      toast.error(
+        isHostKeyMismatch
+          ? t("toolbox.postgres.hostKeyMismatch")
+          : t("toolbox.postgres.connectFailed"),
+        {
+          description: message,
+          ...(isHostKeyMismatch
+            ? {
+                action: {
+                  label: t("toolbox.postgres.retrustHostKey"),
+                  onClick: () => void probeSshFingerprint(),
+                },
+              }
+            : {}),
+        },
+      );
     } finally {
       setConnecting(false);
     }
+  };
+  const connect = async () => {
+    if (!postgresConfig.sshEnabled || postgresConfig.sshHostKeyFingerprint) {
+      await connectEstablished(draft);
+      return;
+    }
+    await probeSshFingerprint();
+  };
+  const trustAndConnect = async () => {
+    if (!pendingSshTrust) return;
+    const trusted = {
+      ...pendingSshTrust.profile,
+      providerConfig: {
+        ...pendingSshTrust.profile.providerConfig,
+        sshHostKeyFingerprint: pendingSshTrust.fingerprint,
+      },
+    };
+    setPendingSshTrust(null);
+    await connectEstablished(trusted);
   };
   const openTab = (next: WorkspaceTab) => {
     setTabs((current) =>
@@ -452,10 +529,6 @@ export function ToolPostgres() {
       setActiveTab(next.at(-1)?.id ?? "");
       return next.length ? next : [newQuery()];
     });
-  const patchTab = (id: string, patch: Partial<WorkspaceTab>) =>
-    setTabs((current) =>
-      current.map((item) => (item.id === id ? { ...item, ...patch } : item)),
-    );
   const execute = async (explain = false) => {
     if (!connected || !tab?.sql.trim()) return;
     setRunning(true);
@@ -1002,6 +1075,35 @@ export function ToolPostgres() {
         connecting={connecting}
         t={t}
       />
+      <Dialog
+        open={pendingSshTrust !== null}
+        onOpenChange={(open) => !open && setPendingSshTrust(null)}
+      >
+        <DialogContent className="!inset-0 !m-auto w-[520px] max-w-[90vw]">
+          <DialogHeader>
+            <DialogTitle>{t("toolbox.postgres.trustHostKeyTitle")}</DialogTitle>
+            <DialogDescription>
+              {t("toolbox.postgres.trustHostKeyDescription")}
+            </DialogDescription>
+          </DialogHeader>
+          <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-2 rounded-md border bg-muted/30 p-3 text-sm">
+            <dt className="text-muted-foreground">{t("toolbox.postgres.sshHost")}</dt>
+            <dd className="break-all font-mono">{pendingSshTrust?.profile.providerConfig.sshHost}</dd>
+            <dt className="text-muted-foreground">{t("toolbox.postgres.sshPort")}</dt>
+            <dd className="font-mono">{pendingSshTrust?.profile.providerConfig.sshPort ?? 22}</dd>
+            <dt className="text-muted-foreground">{t("toolbox.postgres.sshFingerprint")}</dt>
+            <dd className="break-all font-mono text-xs">{pendingSshTrust?.fingerprint}</dd>
+          </dl>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setPendingSshTrust(null)}>
+              {t("common.cancel")}
+            </Button>
+            <Button onClick={() => void trustAndConnect()}>
+              {t("toolbox.postgres.trustAndConnect")}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </DatabaseWorkspaceShell>
   );
 }
@@ -1070,6 +1172,9 @@ function ConnectionDialog({
   t: TFunction;
 }) {
   const config = draft.providerConfig;
+  const sshServers = ConnectionStorageManager.getConnections().filter((connection) =>
+    connection.protocol === "SSH" || connection.protocol === "SFTP",
+  );
   return (
     <DatabaseConnectionDialogShell
       open={open}
@@ -1176,6 +1281,39 @@ function ConnectionDialog({
                     />
                     <Label>{t("toolbox.postgres.sshTunnel")}</Label>
                   </div>
+                  <div className="col-span-2">
+                    <Field label={t("toolbox.postgres.jumpServer")}>
+                      <Select
+                        value={config.sshConnectionId ?? "manual"}
+                        onValueChange={(id) => {
+                          if (id === "manual") {
+                            update("sshConnectionId", undefined);
+                            return;
+                          }
+                          const server = sshServers.find((item) => item.id === id);
+                          if (!server) return;
+                          update("sshEnabled", true);
+                          update("sshConnectionId", server.id);
+                          update("sshHost", server.host);
+                          update("sshPort", server.port);
+                          update("sshUsername", server.username);
+                          update("sshAuthMethod", server.authMethod === "publickey" ? "privateKey" : "password");
+                          update("sshPassword", server.password);
+                          update("sshPrivateKeyPath", server.privateKeyPath);
+                          update("sshPrivateKeyPassphrase", server.passphrase);
+                          update("sshHostKeyFingerprint", server.hostKeyFingerprint);
+                        }}
+                      >
+                        <SelectTrigger><SelectValue placeholder={t("toolbox.postgres.selectJumpServer")} /></SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="manual">{t("toolbox.postgres.sshHost")}</SelectItem>
+                          {sshServers.map((server) => (
+                            <SelectItem key={server.id} value={server.id}>{server.name} ({server.username}@{server.host}:{server.port})</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </Field>
+                  </div>
                   <Field label={t("toolbox.postgres.sshHost")}>
                     <Input
                       value={config.sshHost ?? ""}
@@ -1204,16 +1342,6 @@ function ConnectionDialog({
                       onChange={(e) => update("sshPassword", e.target.value)}
                     />
                   </Field>
-                  <div className="col-span-2">
-                    <Field label={t("toolbox.postgres.sshFingerprint")}>
-                      <Input
-                        value={config.sshHostKeyFingerprint ?? ""}
-                        onChange={(e) =>
-                          update("sshHostKeyFingerprint", e.target.value)
-                        }
-                      />
-                    </Field>
-                  </div>
                 </>
               )}
               {page === "tls" && (

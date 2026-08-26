@@ -1,7 +1,7 @@
 /**
  * Builds the `ssh_connect` invoke request payload.
  *
- * The connection dialog stores advanced SSH options (compression, keepalive)
+ * The connection dialog stores advanced SSH keepalive
  * and proxy options on ConnectionConfig / ConnectionData, but the backend only
  * applies them if they are actually sent across IPC. This helper centralises
  * the mapping so every connect path (dialog, quick connect, restore, duplicate,
@@ -17,7 +17,6 @@ export interface SshConnectRequestSource {
   password?: string;
   privateKeyPath?: string;
   passphrase?: string;
-  compression?: boolean;
   keepAlive?: boolean;
   keepAliveInterval?: number;
   serverAliveCountMax?: number;
@@ -44,7 +43,6 @@ export interface SshConnectRequest {
   password: string | null;
   key_path: string | null;
   passphrase: string | null;
-  compression: boolean;
   keepalive_enabled: boolean;
   keepalive_interval: number | null;
   keepalive_max: number | null;
@@ -84,8 +82,8 @@ export interface SftpConnectRequest {
 /**
  * Build the `ssh_connect` request payload from a connection config.
  *
- * Defaults mirror the connection dialog UI: compression and keepalive enabled
- * (60 s interval, 3 max), no proxy. When keepalive or proxy is disabled the
+ * Defaults mirror the connection dialog UI: keepalive enabled (60 s interval,
+ * 3 max), no proxy. When keepalive or proxy is disabled the
  * corresponding fields are sent as null so the backend disables them.
  */
 export function buildSshConnectRequest(
@@ -108,7 +106,6 @@ export function buildSshConnectRequest(
     password: source.password ?? null,
     key_path: source.privateKeyPath || null,
     passphrase: source.passphrase || null,
-    compression: source.compression !== false,
     keepalive_enabled: keepAlive,
     keepalive_interval: keepAlive ? (source.keepAliveInterval ?? 60) : null,
     keepalive_max: keepAlive ? (source.serverAliveCountMax ?? 3) : null,

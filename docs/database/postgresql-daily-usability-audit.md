@@ -5,7 +5,8 @@
 | Area | Status | Evidence / limitation |
 | --- | --- | --- |
 | Connection management | Full | Encrypted saved profiles, create/edit/delete, connect/disconnect, visible errors/loading. |
-| SSH | Full | Provider-owned SSH tunnel fields and server host-key fingerprint verification remain in `postgres.rs`. |
+| SSH tunnel | Implemented | Provider-owned SSH tunnel fields are implemented; real desktop SSH integration is pending. |
+| SSH server identity | Implemented | Explicit first-use confirmation persists a PostgreSQL profile fingerprint before a tunnel opens; later connections pin it and reject a changed key. Real desktop validation remains pending. |
 | TLS / read-only | Full | PostgreSQL TLS modes and server-side read-only setup remain provider-specific. |
 | Navigator | Full | Connection, database, schema, and lazy table/view/materialized-view groups with stable scoped identity and explicit loading, empty, and error outcomes. |
 | Object types | Partial | Databases, schemas, tables, views, and materialized views are usable. Functions, procedures, sequences, indexes, and triggers are intentionally deferred without a current caller. |

@@ -6,7 +6,7 @@
  * proxy was never persisted to connection storage.
  */
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, within, act } from '@testing-library/react';
 import { ConnectionDialog } from '../components/connection-dialog';
 import { ConnectionStorageManager, resetConnectionsCache } from '../lib/connection-storage';
 
@@ -95,7 +95,13 @@ describe('ConnectionDialog proxy persistence', () => {
   });
 
   it('keeps proxy config when a new connection fails to connect', async () => {
-    mockInvoke.mockResolvedValueOnce({ success: false, error: 'connection refused' });
+    // Host-key TOFU probes the server first, then asks for in-app confirmation
+    // before the tunnel is opened (replacing the old window.confirm).
+    mockInvoke.mockImplementation(async (cmd: string) => {
+      if (cmd === 'ssh_host_key_fingerprint') return { fingerprint: 'SHA256:proxykey' };
+      if (cmd === 'ssh_connect') return { success: false, error: 'connection refused' };
+      return undefined;
+    });
 
     renderDialog();
 
@@ -138,12 +144,30 @@ describe('ConnectionDialog proxy persistence', () => {
     });
 
     // A folder is pre-selected by default ("All Connections"), so no folder
-    // step is needed. Connect — invoke fails with "connection refused".
-    fireEvent.click(screen.getByRole('button', { name: 'Connect' }));
-
-    await vi.waitFor(() => {
-      expect(mockInvoke).toHaveBeenCalledWith('ssh_connect', expect.anything());
+    // step is needed. Connect — the host-key prompt appears first.
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Connect' }));
+      // Flush the probe continuation that opens the host-key prompt.
+      await Promise.resolve();
     });
+
+    // New TOFU flow: confirm the probed host key before connecting.
+    expect(await screen.findByText(/Verify SSH server identity/)).toBeTruthy();
+    const prompt = screen.getByText(/Verify SSH server identity/).closest(
+      '[data-slot="dialog-content"]',
+    );
+    expect(prompt).not.toBeNull();
+    await act(async () => {
+      fireEvent.click(within(prompt as HTMLElement).getByRole('button', { name: 'Confirm' }));
+      // Flush the full post-confirm chain: confirmHostKey → ssh_connect → failure cleanup.
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    // invoke fails with "connection refused" — the full connect flow (probe
+    // confirmation → ssh_connect → failure cleanup) settles inside act.
+    expect(mockInvoke).toHaveBeenCalledWith('ssh_connect', expect.anything());
 
     const connections = ConnectionStorageManager.getConnections();
     expect(connections).toHaveLength(1);
