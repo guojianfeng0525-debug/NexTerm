@@ -15,7 +15,10 @@ function fromRow(row: Record<string, unknown>): SQLiteConnectionProfile {
     id: stringValue(row.id), name: stringValue(row.name), providerId: "sqlite", environment,
     group: typeof row.group_name === "string" ? row.group_name : undefined,
     createdAt: Number(row.created_at ?? Date.now()), updatedAt: Number(row.updated_at ?? Date.now()),
-    providerConfig: { filePath: stringValue(row.file_path), readOnly: Boolean(row.read_only) },
+    providerConfig: {
+      filePath: stringValue(row.file_path), readOnly: Boolean(row.read_only),
+      color: typeof row.color === "string" && row.color.length ? row.color : undefined,
+    },
   };
 }
 
@@ -23,6 +26,7 @@ function toRow(profile: SQLiteConnectionProfile): Record<string, unknown> {
   return {
     id: profile.id, name: profile.name, group_name: profile.group ?? null, environment: profile.environment,
     file_path: profile.providerConfig.filePath, read_only: Number(profile.providerConfig.readOnly),
+    color: profile.providerConfig.color ?? null,
     created_at: profile.createdAt, updated_at: profile.updatedAt,
   };
 }

@@ -186,6 +186,10 @@ impl DbState {
                 "library_id",
                 "library_id TEXT NOT NULL DEFAULT ''",
             ),
+            // B22 connection accent color (accentColor per profile).
+            ("postgres_connections", "color", "color TEXT"),
+            ("database_sqlite_connections", "color", "color TEXT"),
+            ("database_mysql_connections", "color", "color TEXT"),
         ] {
             ensure_column(&conn, table, column, ddl)?;
         }
@@ -1138,6 +1142,7 @@ CREATE TABLE IF NOT EXISTS "postgres_connections" (
   database_name TEXT NOT NULL DEFAULT '',
   username TEXT NOT NULL DEFAULT '',
   password TEXT,
+  color TEXT,
   default_schema TEXT,
   read_only INTEGER NOT NULL DEFAULT 0,
   auto_commit INTEGER NOT NULL DEFAULT 1,
@@ -1167,6 +1172,7 @@ CREATE TABLE IF NOT EXISTS "database_sqlite_connections" (
   environment TEXT NOT NULL DEFAULT 'development',
   file_path TEXT NOT NULL DEFAULT '',
   read_only INTEGER NOT NULL DEFAULT 0,
+  color TEXT,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
@@ -1180,6 +1186,7 @@ CREATE TABLE IF NOT EXISTS "database_mysql_connections" (
   database_name TEXT NOT NULL DEFAULT '',
   username TEXT NOT NULL DEFAULT '',
   password TEXT,
+  color TEXT,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );

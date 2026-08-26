@@ -18,6 +18,13 @@ const Toaster = ({ ...props }: ToasterProps) => {
           warning: "border-yellow-500/30",
           info: "border-blue-500/30",
         },
+        // Small-window adaptive toasts (visual review B-1, v2.9.0): cap the
+        // width so a toast never covers the top toolbar or dialog fields at
+        // 960x700, and keep it below the top bar.
+        style: {
+          maxWidth: "min(360px, calc(100vw - 32px))",
+          marginTop: "40px",
+        },
       }}
       style={
         {

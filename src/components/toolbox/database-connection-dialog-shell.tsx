@@ -46,14 +46,14 @@ export function DatabaseConnectionDialogShell({
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
-        className="!inset-0 !m-auto !h-[min(560px,calc(100vh-32px))] !w-[720px] !max-w-[calc(100vw-32px)] !translate-x-0 !translate-y-0 gap-0 overflow-hidden rounded-md p-0"
+        className="!inset-0 !m-auto flex max-h-[min(560px,calc(100vh-32px))] !w-[720px] !max-w-[calc(100vw-32px)] !translate-x-0 !translate-y-0 flex-col gap-0 overflow-hidden rounded-md p-0"
         data-testid={testId}
       >
         <DialogHeader className="h-12 shrink-0 justify-center border-b px-4 py-0">
           <DialogTitle className="text-sm">{title}</DialogTitle>
         </DialogHeader>
         <div className="flex min-h-0 flex-1">
-          <aside className="w-36 shrink-0 border-r bg-muted/20 p-1.5">
+          <aside className="w-36 shrink-0 overflow-y-auto border-r bg-muted/20 p-1.5">
             {sections.map((section) => (
               <button
                 key={section.id}
@@ -65,7 +65,7 @@ export function DatabaseConnectionDialogShell({
               </button>
             ))}
           </aside>
-          <div className="min-w-0 flex-1 overflow-auto p-4">{children}</div>
+          <div className="min-w-0 flex-1 overflow-y-auto p-4">{children}</div>
         </div>
         <div className="flex h-14 shrink-0 justify-end gap-2 border-t px-4 py-3">
           <Button size="sm" type="button" variant="outline" className="rounded-sm" onClick={onSave}>

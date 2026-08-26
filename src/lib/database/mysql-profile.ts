@@ -6,6 +6,8 @@ export interface MySQLConnectionConfig {
   readonly database: string;
   readonly username: string;
   readonly password?: string;
+  /** Optional connection accent color (B22), `#RRGGBB`. */
+  readonly color?: string;
 }
 
 export type MySQLConnectionProfile = DatabaseConnectionProfile<"mysql", MySQLConnectionConfig>;

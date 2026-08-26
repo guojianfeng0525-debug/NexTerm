@@ -15,7 +15,17 @@ export type DatabaseObjectNodeKind =
   | "group"
   | "object";
 
-export type DatabaseObjectRole = "relation" | "table" | "view" | "materializedView";
+export type DatabaseObjectRole =
+  | "relation"
+  | "table"
+  | "view"
+  | "materializedView"
+  | "function"
+  | "sequence"
+  | "index"
+  | "constraint"
+  | "trigger"
+  | "column";
 
 export type DatabaseObjectIconRole =
   | "connection"
@@ -25,7 +35,23 @@ export type DatabaseObjectIconRole =
   | "relation"
   | "table"
   | "view"
-  | "materializedView";
+  | "materializedView"
+  | "function"
+  | "sequence"
+  | "index"
+  | "constraint"
+  | "trigger"
+  | "column";
+
+/**
+ * Connection node lifecycle badge (B22). Rendered next to connection root
+ * nodes; providers fill it from their live session state.
+ */
+export type DatabaseNodeStatusBadge =
+  | "connected"
+  | "connecting"
+  | "error"
+  | "disconnected";
 
 export type DatabaseObjectNodeId = string & {
   readonly __databaseObjectNodeId: unique symbol;
@@ -63,6 +89,17 @@ export interface DatabaseObjectNode {
   readonly selectable: boolean;
   readonly openable: boolean;
   readonly reference: DatabaseObjectReference;
+  /** Optional accent color (B22), e.g. `#e5484d`. Pure presentation. */
+  readonly accentColor?: string;
+  /** Optional lifecycle badge (B22), rendered next to connection roots. */
+  readonly statusBadge?: DatabaseNodeStatusBadge;
+  /** Optional short text badge, e.g. a group member count. */
+  readonly metaBadge?: string;
+  /**
+   * Distinguishes virtual connection groups (B22, rendered as group headers)
+   * from provider object groups. Undefined = provider object group.
+   */
+  readonly groupKind?: "connection" | "schema";
 }
 
 export type DatabaseExplainCapability = "none" | "text" | "visual";

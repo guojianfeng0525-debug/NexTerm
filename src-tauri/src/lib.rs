@@ -10,6 +10,7 @@ mod ls_parser;
 mod os_detect;
 mod proxy;
 mod postgres;
+mod postgres_catalog;
 mod sqlite;
 mod mysql;
 mod rdp_client;
@@ -589,6 +590,11 @@ pub fn run() {
             postgres::postgres_catalog_schemas,
             postgres::postgres_catalog_search,
             postgres::postgres_ssh_fingerprint,
+            // B21 catalog-domain commands (postgres_catalog.rs)
+            postgres_catalog::postgres_catalog_objects,
+            postgres_catalog::postgres_object_props,
+            postgres_catalog::postgres_object_ddl,
+            postgres_catalog::postgres_drop_object,
             // SQLite database workspace (experimental P0 provider)
             sqlite::sqlite_connect,
             sqlite::sqlite_disconnect,

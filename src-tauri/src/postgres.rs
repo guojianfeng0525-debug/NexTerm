@@ -21,7 +21,7 @@ use tokio_util::sync::CancellationToken;
 
 const MAX_QUERY_ROWS: usize = 1_000;
 const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-const QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+pub(crate) const QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 /// Grace period the cancel/timeout path waits for the in-flight query future
 /// to settle after a server-side `pg_cancel_backend` (security constraint
 /// §4.2.1). Past the grace the connection is torn down instead.
@@ -53,6 +53,32 @@ pub struct PostgresState {
     /// then by caller-provided run id. The cancel path only reads this map and
     /// triggers tokens — it never takes any transaction lock.
     running: std::sync::RwLock<HashMap<String, HashMap<u64, CancellationToken>>>,
+}
+
+impl PostgresState {
+    /// Shared lookup used by the catalog-domain commands in `postgres_catalog.rs`.
+    pub(crate) async fn client(
+        &self,
+        connection_id: &str,
+    ) -> Result<Arc<Client>, String> {
+        self.clients
+            .read()
+            .await
+            .get(connection_id)
+            .cloned()
+            .ok_or_else(|| "PostgreSQL connection is not active".to_string())
+    }
+
+    /// Whether the live connection was opened in read-only mode. The flag is
+    /// read back from the saved connect request (`cancel_configs`), the same
+    /// source the cancel path trusts — never from the frontend.
+    pub(crate) async fn is_read_only(&self, connection_id: &str) -> Result<bool, String> {
+        let configs = self.cancel_configs.read().await;
+        let config = configs
+            .get(connection_id)
+            .ok_or_else(|| "PostgreSQL connection is not active".to_string())?;
+        Ok(config.read_only)
+    }
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -949,13 +975,37 @@ pub async fn postgres_transaction(
         "rollback" => "ROLLBACK",
         _ => return Err("Unsupported PostgreSQL transaction action".into()),
     };
+    // A table-save is mid-flight on this connection: a manual BEGIN would
+    // nest into it and poison the save transaction (security §1.2 / §3).
+    if request.action == "begin" {
+        let modes = state
+            .txn_modes
+            .read()
+            .map_err(|_| "Failed to read transaction state".to_string())?;
+        if modes.get(&request.connection_id).map(String::as_str) == Some("save") {
+            return Err("A table-save transaction is in progress; wait for it to finish before beginning a manual transaction".into());
+        }
+    }
     tokio::time::timeout(QUERY_TIMEOUT, client.batch_execute(statement))
         .await
         .map_err(|_| "PostgreSQL transaction action timed out")?
-        .map_err(|error| format!("PostgreSQL transaction action failed: {error}"))
+        .map_err(|error| format!("PostgreSQL transaction action failed: {error}"))?;
+    // Keep the in-memory transaction marker in sync so `postgres_save_table_changes`
+    // can detect an open manual transaction without a DB-side status query.
+    if let Ok(mut modes) = state.txn_modes.write() {
+        match request.action.as_str() {
+            "begin" => {
+                modes.insert(request.connection_id.clone(), "manual".into());
+            }
+            _ => {
+                modes.remove(&request.connection_id);
+            }
+        }
+    }
+    Ok(())
 }
 
-fn quote_identifier(value: &str) -> String {
+pub(crate) fn quote_identifier(value: &str) -> String {
     format!("\"{}\"", value.replace('"', "\"\""))
 }
 
@@ -1198,7 +1248,7 @@ fn build_insert_statement(
             " RETURNING {}",
             primary_keys
                 .iter()
-                .map(|(key, _)| quote_identifier(key))
+                .map(|(key, _)| format!("{}::text", quote_identifier(key)))
                 .collect::<Vec<_>>()
                 .join(", ")
         )
@@ -1810,6 +1860,16 @@ async fn rollback_save(client: &Client, root: String) -> String {
     }
 }
 
+/// Clears the save-transaction marker on every exit path of
+/// `postgres_save_table_changes` (successful COMMIT or rolled-back failure).
+fn clear_save_marker(state: &PostgresState, connection_id: &str) {
+    if let Ok(mut modes) = state.txn_modes.write() {
+        if modes.get(connection_id).map(String::as_str) == Some("save") {
+            modes.remove(connection_id);
+        }
+    }
+}
+
 #[tauri::command]
 pub async fn postgres_save_table_changes(
     request: PostgresSaveTableChangesRequest,
@@ -1830,22 +1890,28 @@ pub async fn postgres_save_table_changes(
         .ok_or_else(|| "PostgreSQL connection is not active".to_string())?;
     // Fail fast when a manual transaction is open: the save would silently
     // join it instead of owning its own transaction (security §1.2 / §3).
-    // transaction_status: "I"=idle, "T"=in transaction, "E"=failed txn.
-    let status_row = tokio::time::timeout(
-        QUERY_TIMEOUT,
-        client.query("SELECT current_setting('transaction_status')", &[]),
-    )
-    .await
-    .map_err(|_| "PostgreSQL save timed out while checking transaction state")?
-    .map_err(|error| format!("Failed to check transaction state: {error}"))?;
-    let status: String = status_row
-        .first()
-        .and_then(|row| row.get(0))
-        .ok_or_else(|| "Failed to decode transaction state".to_string())?;
-    if status != "I" {
-        return Err(
-            "A transaction is already in progress on this connection; commit or roll it back before saving".into(),
-        );
+    // The authoritative source is the in-memory txn_modes marker, which
+    // `postgres_transaction` maintains (a DB-side `SHOW transaction_status`
+    // does not exist as a GUC and always errors).
+    {
+        let modes = state
+            .txn_modes
+            .read()
+            .map_err(|_| "Failed to read transaction state".to_string())?;
+        if modes.get(&request.connection_id).map(String::as_str) == Some("manual") {
+            return Err(
+                "A transaction is already in progress on this connection; commit or roll it back before saving".into(),
+            );
+        }
+    }
+    // Mark the connection as inside the save transaction so a concurrent
+    // `postgres_transaction begin` cannot interleave (defense in depth).
+    {
+        let mut modes = state
+            .txn_modes
+            .write()
+            .map_err(|_| "Failed to lock transaction state".to_string())?;
+        modes.insert(request.connection_id.clone(), "save".into());
     }
     // Load schema once; every step reuses these whitelists.
     let column_types = load_column_types(&client, &request.schema, &request.table).await?;
@@ -1891,12 +1957,17 @@ pub async fn postgres_save_table_changes(
                             data_type
                         ));
                     }
+                    // Primary-key columns are immutable: they never appear in
+                    // SET assignments (a change to them is rejected above via
+                    // the frontend's keyNames filter) and are used only as
+                    // WHERE predicates keyed by the already-bound change values.
+                    let mut predicates = Vec::new();
                     for (key, data_type) in &primary_keys {
                         let key_value = step.key_values.get(key).ok_or_else(|| {
                             format!("Save step {index}: missing primary key value for {key}")
                         })?;
                         values.push(Box::new(key_value.clone()));
-                        assignments.push(format!(
+                        predicates.push(format!(
                             "{} = ${}::text::{}",
                             quote_identifier(key),
                             values.len(),
@@ -1907,16 +1978,6 @@ pub async fn postgres_save_table_changes(
                         .iter()
                         .map(|value| value.as_ref() as &(dyn tokio_postgres::types::ToSql + Sync))
                         .collect();
-                    let mut predicates = Vec::new();
-                    for (pos, (key, data_type)) in primary_keys.iter().enumerate() {
-                        let param_index = assignments.len() + pos + 1;
-                        predicates.push(format!(
-                            "{} = ${}::text::{}",
-                            quote_identifier(key),
-                            param_index,
-                            data_type
-                        ));
-                    }
                     let statement = format!(
                         "UPDATE {}.{} SET {} WHERE {}",
                         quote_identifier(&request.schema),
@@ -1934,6 +1995,7 @@ pub async fn postgres_save_table_changes(
                     // M3: affected-row validation — a concurrent delete/change
                     // must not silently lose this edit.
                     if row_count != 1 {
+                        clear_save_marker(&state, &request.connection_id);
                         return Err(rollback_save(
                             &client,
                             format!(
@@ -2021,6 +2083,7 @@ pub async fn postgres_save_table_changes(
                     .map_err(|_| "PostgreSQL save timed out on a DELETE")?
                     .map_err(|error| format!("Failed to delete table row: {error}"))?;
                     if row_count != 1 {
+                        clear_save_marker(&state, &request.connection_id);
                         return Err(rollback_save(
                             &client,
                             format!(
@@ -2036,7 +2099,10 @@ pub async fn postgres_save_table_changes(
         };
         match outcome {
             Ok(row_count) => affected_rows.push(row_count),
-            Err(error) => return Err(rollback_save(&client, error).await),
+            Err(error) => {
+                clear_save_marker(&state, &request.connection_id);
+                return Err(rollback_save(&client, error).await);
+            }
         }
     }
     let commit = tokio::time::timeout(QUERY_TIMEOUT, client.batch_execute("COMMIT"))
@@ -2044,6 +2110,7 @@ pub async fn postgres_save_table_changes(
         .map_err(|_| "PostgreSQL save timed out while committing")?
         .map_err(|error| format!("Failed to commit save transaction: {error}"))?;
     drop(commit);
+    clear_save_marker(&state, &request.connection_id);
     Ok(PostgresSaveTableChangesResult {
         insert_primary_keys,
         affected_rows,
@@ -2741,7 +2808,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             statement,
-            "INSERT INTO \"public\".\"users\" (\"name\") VALUES ($1::text::text) RETURNING \"id\""
+            "INSERT INTO \"public\".\"users\" (\"name\") VALUES ($1::text::text) RETURNING \"id\"::text"
         );
         assert_eq!(params, vec![Some("O'Brien".to_string())]);
     }

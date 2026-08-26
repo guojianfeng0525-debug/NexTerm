@@ -7,11 +7,11 @@ let initialized = false;
 const str = (value: unknown): string | undefined => typeof value === "string" && value.length ? value : undefined;
 
 async function toRow(profile: MySQLConnectionProfile): Promise<Record<string, unknown>> {
-  return { id: profile.id, name: profile.name, group_name: profile.group ?? null, environment: profile.environment, host: profile.providerConfig.host, port: profile.providerConfig.port, database_name: profile.providerConfig.database, username: profile.providerConfig.username, password: await encField(profile.providerConfig.password), created_at: profile.createdAt, updated_at: profile.updatedAt };
+  return { id: profile.id, name: profile.name, group_name: profile.group ?? null, environment: profile.environment, host: profile.providerConfig.host, port: profile.providerConfig.port, database_name: profile.providerConfig.database, username: profile.providerConfig.username, password: await encField(profile.providerConfig.password), color: profile.providerConfig.color ?? null, created_at: profile.createdAt, updated_at: profile.updatedAt };
 }
 async function fromRow(row: Record<string, unknown>): Promise<MySQLConnectionProfile> {
   const environment = row.environment === "production" || row.environment === "test" ? row.environment : "development";
-  return { id: str(row.id) ?? "", name: str(row.name) ?? "", providerId: "mysql", environment, group: str(row.group_name), createdAt: Number(row.created_at ?? Date.now()), updatedAt: Number(row.updated_at ?? Date.now()), providerConfig: { host: str(row.host) ?? "", port: Number(row.port ?? 3306), database: str(row.database_name) ?? "", username: str(row.username) ?? "", password: (await decField(str(row.password))) ?? str(row.password) } };
+  return { id: str(row.id) ?? "", name: str(row.name) ?? "", providerId: "mysql", environment, group: str(row.group_name), createdAt: Number(row.created_at ?? Date.now()), updatedAt: Number(row.updated_at ?? Date.now()), providerConfig: { host: str(row.host) ?? "", port: Number(row.port ?? 3306), database: str(row.database_name) ?? "", username: str(row.username) ?? "", password: (await decField(str(row.password))) ?? str(row.password), color: str(row.color) } };
 }
 function notify(): void { window.dispatchEvent(new CustomEvent("nexterm:toolbox-changed", { detail: { kind: "mysql" } })); }
 export async function hydrateMySQLConnections(): Promise<void> { cache.splice(0, cache.length, ...(await Promise.all((await rowList("database_mysql_connections")).map(fromRow)))); initialized = true; }

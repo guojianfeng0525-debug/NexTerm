@@ -1,14 +1,21 @@
-import type { ReactNode } from "react";
+import type { KeyboardEvent, ReactNode } from "react";
 import {
   ChevronDown,
   ChevronRight,
+  Columns,
   Database,
   Eye,
+  FunctionSquare,
+  GitBranch,
+  Link2,
+  ListOrdered,
   ListTree,
   Loader2,
   Table2,
+  Zap,
 } from "lucide-react";
 import type {
+  DatabaseNodeStatusBadge,
   DatabaseObjectNode,
   DatabaseObjectNodeId,
 } from "@/lib/database/types";
@@ -36,6 +43,31 @@ function nodeIcon(node: DatabaseObjectNode): ReactNode {
       return <Eye className="h-3.5 w-3.5 text-muted-foreground" />;
     case "materializedView":
       return <Eye className="h-3.5 w-3.5 text-muted-foreground" />;
+    case "function":
+      return <FunctionSquare className="h-3.5 w-3.5 text-muted-foreground" />;
+    case "sequence":
+      return <ListOrdered className="h-3.5 w-3.5 text-muted-foreground" />;
+    case "index":
+      return <GitBranch className="h-3.5 w-3.5 text-muted-foreground" />;
+    case "constraint":
+      return <Link2 className="h-3.5 w-3.5 text-muted-foreground" />;
+    case "trigger":
+      return <Zap className="h-3.5 w-3.5 text-muted-foreground" />;
+    case "column":
+      return <Columns className="h-3.5 w-3.5 text-muted-foreground" />;
+  }
+}
+
+function statusDotClass(status: DatabaseNodeStatusBadge): string {
+  switch (status) {
+    case "connected":
+      return "bg-emerald-500";
+    case "connecting":
+      return "bg-amber-400 animate-pulse";
+    case "error":
+      return "bg-red-500";
+    case "disconnected":
+      return "bg-muted-foreground/50";
   }
 }
 
@@ -91,6 +123,26 @@ export function DatabaseNavigator({
       if (isFilteredObject) return null;
 
       const selected = selectedNodeId === node.id;
+      const isVirtualGroup = node.kind === "group" && node.groupKind === "connection";
+
+      const handleKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
+        if (event.key === "Enter") {
+          // B21: Enter = double-click. Only `openable` nodes open; prevent
+          // the default click so the open toggle does not double-fire.
+          event.preventDefault();
+          if (node.openable) onOpen(node);
+        }
+      };
+
+      const handleDoubleClick = () => {
+        // Single-click already toggled twice (two click events). For
+        // expandable, non-openable nodes (groups/connections) the net effect
+        // should be a single toggle — Navicat double-clicks a group to
+        // expand/collapse it. Openable nodes open instead.
+        if (node.expandable && !node.openable) onToggle(node);
+        if (node.openable) onOpen(node);
+      };
+
       return (
         <div key={node.id}>
           <ContextMenu onOpenChange={(open) => {
@@ -102,10 +154,11 @@ export function DatabaseNavigator({
             onClick={() => {
               if (node.selectable) onSelect(node);
               if (node.expandable) onToggle(node);
-              if (node.openable) onOpen(node);
             }}
-            className={`flex h-6 w-full items-center gap-1 px-1 text-left text-[12px] outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring ${selected ? "bg-primary/10 text-primary" : "hover:bg-accent/70"}`}
-            data-testid="database-navigator-node"
+            onDoubleClick={handleDoubleClick}
+            onKeyDown={handleKeyDown}
+            className={`flex h-6 w-full items-center gap-1 px-1 text-left text-[12px] outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring ${selected ? "bg-primary/10 text-primary" : "hover:bg-accent/70"} ${isVirtualGroup ? "h-7 border-b border-border/60 bg-accent/40 text-[11px] font-medium uppercase tracking-wide" : ""}`}
+            data-testid={isVirtualGroup ? "connection-group-header" : "database-navigator-node"}
             data-node-id={node.id}
           >
             <span style={{ width: depth * 14 }} />
@@ -118,8 +171,27 @@ export function DatabaseNavigator({
             ) : (
               <span className="w-3.5" />
             )}
+            {node.accentColor ? (
+              <span
+                className="h-2 w-2 shrink-0 rounded-full"
+                style={{ backgroundColor: node.accentColor }}
+                data-testid="database-navigator-accent"
+              />
+            ) : null}
             {nodeIcon(node)}
             <span className="truncate">{node.label}</span>
+            {node.statusBadge ? (
+              <span
+                className={`ml-auto mr-1 h-2 w-2 shrink-0 rounded-full ${statusDotClass(node.statusBadge)}`}
+                data-testid="database-navigator-status"
+                data-status={node.statusBadge}
+              />
+            ) : null}
+            {node.metaBadge ? (
+              <span className="ml-auto mr-1 rounded bg-accent px-1 text-[10px] leading-4 text-muted-foreground">
+                {node.metaBadge}
+              </span>
+            ) : null}
           </button>
             </ContextMenuTrigger>
             {renderContextMenu && (

@@ -79,7 +79,17 @@ describe("PostgreSQL object loader", () => {
       name: "Primary",
       database: "db-a",
     });
-    const labels = { tables: "Tables", views: "Views", materializedViews: "Materialized Views" };
+    const labels = {
+      tables: "Tables",
+      views: "Views",
+      materializedViews: "Materialized Views",
+      functions: "Functions",
+      sequences: "Sequences",
+      columns: "Columns",
+      indexes: "Indexes",
+      constraints: "Constraints",
+      triggers: "Triggers",
+    };
     const [catalog] = await loadPostgresNavigatorChildren(connection, labels);
     const [schema] = await loadPostgresNavigatorChildren(catalog, labels);
     const [group] = await loadPostgresNavigatorChildren(schema, labels);
@@ -93,7 +103,7 @@ describe("PostgreSQL object loader", () => {
       providerId: "postgresql",
       kind: "object",
       objectRole: "table",
-      expandable: false,
+      expandable: true,
       openable: true,
     });
     expect(getPostgresRelationReference(relation)).toEqual({
@@ -118,7 +128,17 @@ describe("PostgreSQL object loader", () => {
       return [];
     });
     Object.assign(window, { __TAURI_INTERNALS__: { invoke } });
-    const labels = { tables: "Tables", views: "Views", materializedViews: "Materialized Views" };
+    const labels = {
+      tables: "Tables",
+      views: "Views",
+      materializedViews: "Materialized Views",
+      functions: "Functions",
+      sequences: "Sequences",
+      columns: "Columns",
+      indexes: "Indexes",
+      constraints: "Constraints",
+      triggers: "Triggers",
+    };
     const connection = createPostgresNavigatorConnectionNode({ id: "connection-a", name: "Primary", database: "db-a" });
     const [catalog] = await loadPostgresNavigatorChildren(connection, labels);
     const schema = (await loadPostgresNavigatorChildren(catalog, labels))[0]!;

@@ -121,7 +121,9 @@ describe('PostgreSQL visual workspace', () => {
     await browser.keys('Escape');
 
     await $('[data-testid="postgres-refresh"]').click();
-    await $('button=users').click();
+    await browser.execute((node: HTMLElement) => {
+      node.dispatchEvent(new MouseEvent('dblclick', { bubbles: true, cancelable: true }));
+    }, await $('button=users'));
     await workspace.$('tbody tr').waitForDisplayed();
     await browser.saveScreenshot('./test-results/postgres/06-table-data.png');
     await expect($('button=users')).toBeDisplayed();
@@ -136,7 +138,9 @@ describe('PostgreSQL visual workspace', () => {
     const viewsGroup = await $('[data-node-id*="/group:views"]');
     await viewsGroup.click();
     await $('button=e2e_users_view').waitForDisplayed();
-    await $('button=e2e_users_view').click();
+    await browser.execute((node: HTMLElement) => {
+      node.dispatchEvent(new MouseEvent('dblclick', { bubbles: true, cancelable: true }));
+    }, await $('button=e2e_users_view'));
     await workspace.$('tbody tr').waitForDisplayed();
     await browser.saveScreenshot('./test-results/postgres/06b-view-data.png');
 

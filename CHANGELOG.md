@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### 🗂️ Navigator Object Coverage & Connection Management (B21 + B22)
+
+**Milestone M2 — 对象与设计**。导航器对象全覆盖 + 连接管理，PostgreSQL 工具箱进一步对齐 Navicat。
+
+### Added (B21 — Navigator Object Coverage)
+
+- 🌳 **六类对象入树**：表四子组（Columns/Indexes/Constraints/Triggers）+ Functions/Sequences 组懒加载；函数重载独立节点（签名区分）；约束类型前缀（PRIMARY KEY/FK/CHECK/UNIQUE）。
+- 📖 **对象查看器**：函数/序列/索引/约束/触发器双击打开只读面板（DDL 预览 + 属性表格，权限错误通用化提示）。
+- 🧭 **导航器语义**：单击选中、双击/Enter 打开（表→数据网格、列→所属表、其余→查看器）、断连缓存只读。
+- 🎯 **对象菜单**：按类型启用的 Open/Copy Name/Generate DDL/Refresh/Drop；Drop 二次确认（AlertDialog + 依赖统计展示）；readOnly 下 Drop disabled；复制限定名（函数含签名/列含表限定）。
+- 🔒 **后端加固**：`postgres_catalog_objects`（六 kind 参数化 + schema 白名单）、`postgres_object_props`、`postgres_object_ddl`（pg_get_viewdef/functiondef 等）、`postgres_drop_object`（白名单 kind→模板、存在性校验、confirmed dry-run、cascade 显式、readOnly 拦截、审计日志）。
+
+### Added (B22 — Connection Management)
+
+- 🎨 **连接颜色与虚拟分组**：color 字段迁移（PG/SQLite/MySQL 同构 + 迁移）；导航器按 group 分组渲染 + 连接节点色点/状态徽标/分组头。
+- 📦 **导入/导出**：JSON 导出默认脱密（`__hasPassword` 标记）+ 可选 AES-GCM（`v1:` 信封）；导入大小/深度/字段白名单/原型键净化/分组名·颜色校验；append/overwrite 合并。
+- 🧪 **批量测试/重连**：连接管理器单项+批量测试（并发≤5、结果矩阵）、断连状态徽标、Reconnect 入口（右键菜单）。
+- 🔑 **11 个新命令 descriptor**（connection.test/batchTest/import/export/reconnect/manager + object.drop/generateDdl/properties + toolbar 控制）。
+
+### Fixed
+
+- 🔧 **B19 复合保存命令 3 个安全级 bug**（真实验证门禁抓到）：`current_setting('transaction_status')` 虚构 GUC 导致保存必失败；uuid 列 `RETURNING` 需 `::text` 否则 PK 回填失效；UPDATE 分支把 PK 写入 SET 子句 + 参数序号错位（主键可被改写风险）。
+- 📐 **视觉门禁 2 Blocking**：Toast 小窗自适应（960x700 不遮挡顶栏/对话框）；SQL/DDL 编辑器默认不折行（长语句横向滚动，不截断）。
+
 ## [2.8.0] - 2026-08-26
 
 **Milestone M1 — 日常核心 Parity 收官**。本版本聚合 B17（数据网格编辑闭环）、B18（过滤/查找/列布局）、B19（查询命令）、B20（快捷键体系）四个 Feature Batch，PostgreSQL 工具箱达到 Navicat 日常核心操作级对齐。

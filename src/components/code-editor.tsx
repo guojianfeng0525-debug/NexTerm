@@ -313,17 +313,26 @@ export function CodeEditor({
     if (editorConfig.bracketMatching || editorConfig.matchBrackets) {
       exts.push(bracketMatching());
     }
-    if (editorConfig.wordWrap) {
+    // SQL/query editors default to no word-wrap so long statements scroll
+    // horizontally instead of wrapping and truncating (visual review B-2,
+    // v2.9.0). A user's explicit editor-config choice still wins.
+    const isSqlEditor =
+      language === "sql" || filename.toLowerCase().endsWith(".sql");
+    if (editorConfig.wordWrap && !isSqlEditor) {
       exts.push(EditorView.lineWrapping);
     }
 
-    // Theme: user-configured theme takes precedence over the `dark` prop
+    // Theme: follow the application UI theme by default; a user's explicit
+    // editor-config choice overrides it. Light UI must never keep a dark
+    // editor (visual review M1, v2.8.0) — so a dark-configured editor is
+    // only applied when the app itself is in dark mode.
     const themeId = editorConfig.theme;
-    if (themeId === "oneDark") {
+    const appDark = document.documentElement.classList.contains("dark");
+    if (themeId === "oneDark" && appDark) {
       exts.push(oneDark);
     } else if (themeId === "light") {
       // No extra extension needed — CodeMirror's base chrome is light
-    } else if (dark) {
+    } else if (dark && appDark) {
       exts.push(oneDark);
     }
 

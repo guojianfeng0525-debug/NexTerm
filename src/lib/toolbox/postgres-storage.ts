@@ -19,7 +19,8 @@ async function toRow(profile: PostgreSQLConnectionProfile): Promise<Record<strin
   return {
     id: connection.id, name: connection.name, group_name: connection.group ?? null,
     environment: connection.environment, host: connection.host, port: connection.port, database_name: connection.database,
-    username: connection.username, password: await encField(connection.password), default_schema: connection.defaultSchema ?? null,
+    username: connection.username, password: await encField(connection.password), color: connection.color ?? null,
+    default_schema: connection.defaultSchema ?? null,
     read_only: Number(connection.readOnly), auto_commit: Number(connection.autoCommit), ssl_mode: connection.sslMode,
     ssl_root_cert: connection.sslRootCert ?? null, ssl_client_cert: connection.sslClientCert ?? null,
     ssl_client_key: await encField(connection.sslClientKey), ssl_key_passphrase: await encField(connection.sslKeyPassphrase),
@@ -38,7 +39,7 @@ async function fromRow(row: Record<string, unknown>): Promise<PostgreSQLConnecti
     id: str(row.id) ?? '', name: str(row.name) ?? '', group: str(row.group_name), environment,
     host: str(row.host) ?? '', port: Number(row.port ?? 5432), database: str(row.database_name) ?? '',
     username: str(row.username) ?? '', password: (await decField(str(row.password))) ?? str(row.password),
-    defaultSchema: str(row.default_schema), readOnly: Boolean(row.read_only), autoCommit: Boolean(row.auto_commit),
+    color: str(row.color), defaultSchema: str(row.default_schema), readOnly: Boolean(row.read_only), autoCommit: Boolean(row.auto_commit),
     sslMode: ['disable', 'allow', 'prefer', 'require', 'verify-ca', 'verify-full'].includes(String(row.ssl_mode))
       ? row.ssl_mode as PostgreSQLPersistedProfile['sslMode'] : 'prefer',
     sslRootCert: str(row.ssl_root_cert), sslClientCert: str(row.ssl_client_cert),

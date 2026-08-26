@@ -59,7 +59,11 @@ async function openUsersTable() {
     await tablesGroup.click();
   }
   await $('button=users').waitForDisplayed({ timeout: 15000 });
-  await $('button=users').click();
+  // B21: single-click selects, double-click opens the data grid. WebDriver/
+  // WebKit does not synthesize a native dblclick, so dispatch it directly.
+  await browser.execute((node: HTMLElement) => {
+    node.dispatchEvent(new MouseEvent('dblclick', { bubbles: true, cancelable: true }));
+  }, await $('button=users'));
   const workspace = await $(WORKSPACE_SELECTOR);
   await workspace.$('tbody tr').waitForDisplayed({ timeout: 15000 });
 }
@@ -144,7 +148,9 @@ describe('PostgreSQL field-value filter (B18 Slice A)', () => {
     const totalBefore = await rowCount();
     expect(totalBefore).toBeGreaterThan(0);
     const filterValue = await firstRowCellText(activeColumn);
-    expect(['t', 'f']).toContain(filterValue);
+    // PostgreSQL booleans render as `t`/`f` (raw text) or `true`/`false`
+    // depending on the result serialization; accept both spellings.
+    expect(['t', 'f', 'true', 'false']).toContain(filterValue);
 
     // --- Filter by field value on the first row's active cell -------------
     const firstCell = await $(

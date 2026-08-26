@@ -16,6 +16,8 @@ export interface PostgreSQLConnectionConfig {
   readonly database: string;
   readonly username: string;
   readonly password?: string;
+  /** Optional connection accent color (B22), `#RRGGBB`. */
+  readonly color?: string;
   readonly defaultSchema?: string;
   readonly readOnly: boolean;
   readonly autoCommit: boolean;
@@ -48,6 +50,8 @@ export interface PostgreSQLPersistedProfile {
   readonly name: string;
   readonly group?: string;
   readonly environment: "development" | "test" | "production";
+  /** Optional connection accent color (B22), `#RRGGBB`. */
+  readonly color?: string;
   readonly host: string;
   readonly port: number;
   readonly database: string;

@@ -106,6 +106,10 @@ import {
 } from "@/components/toolbox/database-navigator";
 import { DatabaseResultPane } from "@/components/toolbox/database-result-pane";
 import {
+  ObjectViewerTab,
+  type ObjectViewerTabState,
+} from "@/components/toolbox/object-viewer-tab";
+import {
   FilterSortDialog,
   type FilterSortDialogLabels,
 } from "@/components/toolbox/filter-sort-dialog";
@@ -118,12 +122,24 @@ import {
   DatabaseConnectionToggleRow,
 } from "@/components/toolbox/database-connection-dialog-shell";
 import {
+  PostgresConnectionManager,
+  CONNECTION_ACCENT_COLORS,
+  type ConnectionTestOutcome,
+} from "@/components/toolbox/postgres-connection-manager";
+import { listConnectionGroupNames } from "@/lib/database/connection-groups";
+
+import {
   createPostgresNavigatorConnectionNode,
+  createPostgresNavigatorGroupNode,
+  getPostgresObjectReference,
   getPostgresRelationReference,
   loadPostgresNavigatorChildren,
   type PostgresNavigatorGroupLabels,
+  type PostgresObjectReference,
   type PostgresRelationReference,
 } from "@/lib/database/postgresql-object-loader";
+import { groupConnectionsByGroup } from "@/lib/database/connection-groups";
+import type { DatabaseNodeStatusBadge } from "@/lib/database/types";
 import {
   adaptPostgresQueryResult,
   adaptPostgresTableResult,
@@ -152,9 +168,16 @@ type PendingInsertRow = {
 };
 type WorkspaceTab = {
   id: string;
-  type: "query" | "table";
+  type: "query" | "table" | "object";
   title: string;
   object?: TableObject;
+  /**
+   * Relation kind for table-type tabs: "view" / "materializedView" are
+   * read-only and must not expose edit controls (visual review M2).
+   */
+  objectRole?: "table" | "view" | "materializedView";
+  /** B21 object viewer payload (function/sequence/index/constraint/trigger/column). */
+  objectReference?: PostgresObjectReference;
   sql: string;
   result: DatabaseResult | null;
   baseline?: DatabaseTabularResult;
@@ -213,6 +236,12 @@ function postgresNavigatorLabels(t: TFunction): PostgresNavigatorGroupLabels {
     tables: t("toolbox.postgres.tables"),
     views: t("toolbox.postgres.views"),
     materializedViews: t("toolbox.postgres.materializedViews"),
+    functions: t("toolbox.postgres.functions"),
+    sequences: t("toolbox.postgres.sequences"),
+    columns: t("toolbox.postgres.columns"),
+    indexes: t("toolbox.postgres.indexes"),
+    constraints: t("toolbox.postgres.constraints"),
+    triggers: t("toolbox.postgres.triggers"),
   };
 }
 
@@ -253,6 +282,8 @@ function toPostgresNavigatorConnection(profile: PostgreSQLConnectionProfile) {
     id: profile.id,
     name: profile.name,
     database: profile.providerConfig.database,
+    group: profile.group?.trim() || undefined,
+    accentColor: profile.providerConfig.color?.trim() || undefined,
   };
 }
 
@@ -293,12 +324,25 @@ export function ToolPostgres() {
   /** CodeMirror view of the active query editor (B19 statement ops). */
   const queryEditorViewRef = useRef<EditorView | null>(null);
   const [configOpen, setConfigOpen] = useState(false);
+  const [managerOpen, setManagerOpen] = useState(false);
   const [dialogPage, setDialogPage] = useState<DialogPage>("general");
   const [transactionActive, setTransactionActive] = useState(false);
   const [pendingSshTrust, setPendingSshTrust] = useState<PendingPostgresSshTrust | null>(null);
   const [saving, setSaving] = useState(false);
   /** Row index (into committed result rows) awaiting delete confirmation. */
   const [deleteTarget, setDeleteTarget] = useState<number | null>(null);
+  /** B21: object awaiting destructive Drop confirmation. */
+  const [objectDropTarget, setObjectDropTarget] = useState<{
+    reference: PostgresObjectReference;
+    kind: string;
+    qualified: string;
+  } | null>(null);
+  /** B21: drop dry-run result (dependents) shown in the confirmation dialog. */
+  const [objectDropPreview, setObjectDropPreview] = useState<{
+    objectExists: boolean;
+    dependentCount: number | null;
+    sampleDependents: readonly string[];
+  } | null>(null);
   /** Tab id awaiting dirty-discard confirmation before closing. */
   const [closeTarget, setCloseTarget] = useState<string | null>(null);
   /** Filter & Sort / Custom Filter dialog mode for the active table tab. */
@@ -366,6 +410,10 @@ export function ToolPostgres() {
   );
   const tableEditingEnabled =
     tab?.type === "table" &&
+    // Views and materialized views are read-only: never show edit controls
+    // (visual review M2, v2.8.0).
+    tab.objectRole !== "view" &&
+    tab.objectRole !== "materializedView" &&
     !postgresConfig.readOnly &&
     tab.result?.kind === "tabular" &&
     tab.result.editability.editable;
@@ -380,9 +428,28 @@ export function ToolPostgres() {
     : connected
       ? [draft]
       : connections;
-  const navigatorRoots = navigatorConnections.map((connection) =>
-    createPostgresNavigatorConnectionNode(toPostgresNavigatorConnection(connection)),
-  );
+  // B22: group connections by their profile.group into virtual group headers
+  // (ungrouped last). Each connection node carries its accent color and the
+  // live session badge.
+  const groupedConnections = groupConnectionsByGroup(navigatorConnections);
+  const navigatorRoots = groupedConnections.flatMap((group) => {
+    const nodes = group.connections.map((connection) => {
+      const live = connection.id === draft.id;
+      const statusBadge: DatabaseNodeStatusBadge = !connected && !connecting
+        ? "disconnected"
+        : connecting && live
+          ? "connecting"
+          : connected && live
+            ? "connected"
+            : "disconnected";
+      return createPostgresNavigatorConnectionNode({
+        ...toPostgresNavigatorConnection(connection),
+        statusBadge: live || !connected ? statusBadge : undefined,
+      });
+    });
+    if (!group.groupName) return nodes;
+    return [createPostgresNavigatorGroupNode(group.groupName), ...nodes];
+  });
   const navigatorNodes = [
     ...navigatorRoots,
     ...Object.values(navigatorChildren).flatMap((children) => children ?? []),
@@ -402,7 +469,7 @@ export function ToolPostgres() {
       },
     };
   });
-  const updateProfile = <K extends "name" | "environment">(
+  const updateProfile = <K extends "name" | "environment" | "group">(
     key: K,
     value: PostgreSQLConnectionProfile[K],
   ) => setDraft((current) => ({ ...current, [key]: value }));
@@ -502,6 +569,8 @@ export function ToolPostgres() {
     }
     setDraft(saved);
     setSelectedId(saved.id);
+    // Saving a connection closes the editor, matching the connect flow.
+    setConfigOpen(false);
     toast.success(t("toolbox.postgres.saved"));
   };
   const probeSshFingerprint = async () => {
@@ -616,6 +685,55 @@ export function ToolPostgres() {
     };
     setPendingSshTrust(null);
     await connectEstablished(trusted);
+  };
+  const testConnection = async (
+    profile: PostgreSQLConnectionProfile,
+  ): Promise<ConnectionTestOutcome> => {
+    // Probe over a throwaway connection id so the session registry and the
+    // connections table are never touched (AC-22C-4).
+    const probeId = `probe-${profile.id}-${Date.now()}`;
+    const started = performance.now();
+    try {
+      const status = await invoke<{ serverVersion: string }>("postgres_connect", {
+        request: {
+          connectionId: probeId,
+          host: profile.providerConfig.host,
+          port: profile.providerConfig.port,
+          database: profile.providerConfig.database,
+          username: profile.providerConfig.username,
+          password: profile.providerConfig.password,
+          readOnly: true,
+          sslMode: profile.providerConfig.sslMode,
+          sslRootCert: profile.providerConfig.sslRootCert,
+          sslClientCert: profile.providerConfig.sslClientCert,
+          sslClientKey: profile.providerConfig.sslClientKey,
+          ssh: profile.providerConfig.sshEnabled
+            ? {
+                host: profile.providerConfig.sshHost,
+                port: profile.providerConfig.sshPort ?? 22,
+                username: profile.providerConfig.sshUsername,
+                authMethod: profile.providerConfig.sshAuthMethod ?? "password",
+                password: profile.providerConfig.sshPassword,
+                privateKey: profile.providerConfig.sshPrivateKey,
+                privateKeyPath: profile.providerConfig.sshPrivateKeyPath,
+                privateKeyPassphrase: profile.providerConfig.sshPrivateKeyPassphrase,
+                hostKeyFingerprint: profile.providerConfig.sshHostKeyFingerprint,
+              }
+            : undefined,
+        },
+      });
+      await invoke("postgres_disconnect", { connectionId: probeId });
+      return {
+        ok: true,
+        latencyMs: Math.round(performance.now() - started),
+        version: status.serverVersion,
+      };
+    } catch (error) {
+      await invoke("postgres_disconnect", { connectionId: probeId }).catch(
+        () => undefined,
+      );
+      return { ok: false, error: String(error) };
+    }
   };
   const openTab = (next: WorkspaceTab) => {
     setTabs((current) =>
@@ -748,6 +866,151 @@ export function ToolPostgres() {
       if (activeRunIdRef.current === runId) activeRunIdRef.current = null;
     }
   };
+  /** B21: open the read-only object viewer tab for a navigator object. */
+  const openObjectViewer = (reference: PostgresObjectReference) => {
+    const tab: WorkspaceTab = {
+      id: `object:${reference.schema}.${reference.name}.${reference.objectKind}`,
+      type: "object",
+      title: reference.name,
+      objectReference: reference,
+      sql: "",
+      result: null,
+    };
+    openTab(tab);
+  };
+
+  /** B21: generate DDL for an object into a read-only query tab. */
+  const generateObjectDdl = async (reference: PostgresObjectReference) => {
+    try {
+      const response = await invoke<{ ddl: string }>("postgres_object_ddl", {
+        request: {
+          connectionId: draft.id,
+          objectType: reference.objectKind,
+          schema: reference.schema,
+          name: reference.name,
+          ...(reference.table ? { relation: reference.table } : {}),
+          ...(reference.signature ? { signature: reference.signature } : {}),
+        },
+      });
+      openTab({
+        id: `ddl:${reference.schema}.${reference.name}.${reference.objectKind}`,
+        type: "query",
+        title: `${reference.name}.ddl`,
+        sql: response.ddl,
+        result: null,
+        dirty: false,
+      });
+    } catch (error) {
+      toast.error(t("toolbox.postgres.queryFailed"), {
+        description: String(error),
+      });
+    }
+  };
+
+  /** Drop kind → localized menu label (B21 §5.3). */
+  const dropLabel = (reference: PostgresObjectReference) => {
+    switch (reference.objectKind) {
+      case "table":
+        return t("toolbox.postgres.dropTable");
+      case "view":
+        return t("toolbox.postgres.dropView");
+      case "materializedView":
+        return t("toolbox.postgres.dropMaterializedView");
+      case "function":
+        return t("toolbox.postgres.dropFunction");
+      case "sequence":
+        return t("toolbox.postgres.dropSequence");
+      case "index":
+        return t("toolbox.postgres.dropIndex");
+      case "constraint":
+        return t("toolbox.postgres.dropConstraint");
+      case "trigger":
+        return t("toolbox.postgres.dropTrigger");
+      default:
+        return t("toolbox.postgres.dropObject");
+    }
+  };
+
+  const quoteQualified = (schema: string, name: string) =>
+    `"${schema.replace(/"/g, '""')}"."${name.replace(/"/g, '""')}"`;
+
+  /** B21: dry-run the drop (existence + dependents) then open the dialog. */
+  const requestObjectDrop = async (reference: PostgresObjectReference) => {
+    try {
+      const preview = await invoke<{
+        objectExists: boolean;
+        dependentCount: number | null;
+        sampleDependents: string[];
+      }>("postgres_drop_object", {
+        request: {
+          connectionId: draft.id,
+          kind: reference.objectKind,
+          schema: reference.schema,
+          name: reference.name,
+          ...(reference.table ? { relation: reference.table } : {}),
+          ...(reference.signature ? { signature: reference.signature } : {}),
+          cascade: false,
+          confirmed: false,
+        },
+      });
+      setObjectDropPreview(preview);
+      setObjectDropTarget({
+        reference,
+        kind: reference.objectKind,
+        qualified: quoteQualified(reference.schema, reference.name),
+      });
+    } catch (error) {
+      toast.error(t("toolbox.postgres.queryFailed"), {
+        description: String(error),
+      });
+    }
+  };
+
+  /** B21: confirm and execute the destructive drop. */
+  const confirmObjectDrop = async () => {
+    if (!objectDropTarget) return;
+    const target = objectDropTarget;
+    setObjectDropTarget(null);
+    setObjectDropPreview(null);
+    try {
+      await invoke("postgres_drop_object", {
+        request: {
+          connectionId: draft.id,
+          kind: target.reference.objectKind,
+          schema: target.reference.schema,
+          name: target.reference.name,
+          ...(target.reference.table
+            ? { relation: target.reference.table }
+            : {}),
+          ...(target.reference.signature
+            ? { signature: target.reference.signature }
+            : {}),
+          cascade: false,
+          confirmed: true,
+        },
+      });
+      toast.success(t("toolbox.postgres.dropSucceeded"));
+      // Refresh the expanded navigator subtree so the object disappears.
+      void refreshNavigator();
+      // Close any object viewer tab bound to the dropped object.
+      setTabs((current) =>
+        current.filter((item) => {
+          if (item.type !== "object" || !item.objectReference) return true;
+          const ref = item.objectReference;
+          return !(
+            ref.schema === target.reference.schema &&
+            ref.name === target.reference.name &&
+            ref.objectKind === target.reference.objectKind
+          );
+        }),
+      );
+    } catch (error) {
+      toast.error(t("toolbox.postgres.dropFailed"), {
+        description: String(error),
+      });
+    }
+  };
+
   const browse = async (
     reference: PostgresRelationReference,
     offset = 0,
@@ -765,6 +1028,7 @@ export function ToolPostgres() {
       type: "table",
       title: object.name,
       object,
+      objectRole: reference.objectRole,
       sql: "",
       result: null,
     });
@@ -1600,8 +1864,38 @@ export function ToolPostgres() {
                 if (relation) setSchema(relation.schema);
               }}
               onOpen={(node) => {
+                // Double-click/Enter on a saved connection opens it (B22).
+                if (node.kind === "connection") {
+                  const connection = navigatorConnections.find(
+                    (item) => item.id === node.reference.path[0],
+                  );
+                  if (connection && connection.id !== draft.id) {
+                    setDraft(connection);
+                    setSelectedId(connection.id);
+                    setConnected(false);
+                  }
+                  if (connection) void connectEstablished(connection);
+                  return;
+                }
                 const relation = getPostgresRelationReference(node);
-                if (relation) void browse(relation);
+                if (relation) {
+                  void browse(relation);
+                  return;
+                }
+                const objectReference = getPostgresObjectReference(node);
+                if (objectReference) {
+                  // Column double-click opens its owning table (D-B21-2).
+                  if (objectReference.objectKind === "column") {
+                    void browse({
+                      connectionId: draft.id,
+                      database: postgresConfig.database,
+                      schema: objectReference.schema,
+                      relation: objectReference.table ?? "",
+                    });
+                    return;
+                  }
+                  openObjectViewer(objectReference);
+                }
               }}
               renderContextMenu={(node) => {
                 const relation = getPostgresRelationReference(node);
@@ -1614,13 +1908,18 @@ export function ToolPostgres() {
                   resolveDatabaseCommand(id, nodeContext).state === "enabled";
                 if (node.kind === "connection") {
                   const connectionId = node.reference.path[0];
+                  const connection = connections.find((item) => item.id === connectionId);
+                  const reconnect = () => {
+                    if (!connection) return;
+                    void connectEstablished(connection);
+                  };
                   return <>
-                    {connected ? <ContextMenuItem disabled={!enabled("database.connection.disconnect")} onSelect={() => void disconnect()}>{t("toolbox.postgres.disconnect")}</ContextMenuItem> : <ContextMenuItem onSelect={() => setConfigOpen(true)}>{t("toolbox.postgres.connect")}</ContextMenuItem>}
+                    {connected ? <ContextMenuItem disabled={!enabled("database.connection.disconnect")} onSelect={() => void disconnect()}>{t("toolbox.postgres.disconnect")}</ContextMenuItem> : <ContextMenuItem onSelect={reconnect}>{t("common.reconnect")}</ContextMenuItem>}
                     <ContextMenuItem disabled={!connected} onSelect={createQuery}>{t("toolbox.postgres.newQuery")}</ContextMenuItem>
                     <ContextMenuItem disabled={!connected} onSelect={() => void refreshNavigator()}>{t("toolbox.postgres.refresh")}</ContextMenuItem>
                     <ContextMenuSeparator />
+                    <ContextMenuItem onSelect={() => setManagerOpen(true)}>{t("toolbox.postgres.connectionManager.menuItem")}</ContextMenuItem>
                     <ContextMenuItem onSelect={() => {
-                      const connection = connections.find((item) => item.id === connectionId);
                       if (connection) setDraft(connection);
                       setConfigOpen(true);
                     }}>{t("common.edit")}</ContextMenuItem>
@@ -1633,11 +1932,60 @@ export function ToolPostgres() {
                     }}>{t("common.delete")}</ContextMenuItem>
                   </>;
                 }
+                const objectReference = getPostgresObjectReference(node);
+                // Relation (table/view/materializedView) objects reuse the
+                // object commands for DDL/drop; open/browse stays the grid.
+                const relationAsObject: PostgresObjectReference | null = relation
+                  ? {
+                      connectionId: draft.id,
+                      database: postgresConfig.database,
+                      schema: relation.schema,
+                      objectKind: relation.objectRole ?? "table",
+                      name: relation.relation,
+                    }
+                  : null;
+                const activeReference = objectReference ?? relationAsObject;
+                const copyValue = () => {
+                  if (relation) return quoteQualifiedPostgresName(relation);
+                  if (!objectReference) return node.label;
+                  const quote = (value: string) =>
+                    `"${value.replace(/"/g, '""')}"`;
+                  switch (objectReference.objectKind) {
+                    case "function":
+                      return objectReference.fullSignature
+                        ? `${quote(objectReference.schema)}.${quote(objectReference.name)}(${objectReference.signature ?? ""})`
+                        : `${quote(objectReference.schema)}.${quote(objectReference.name)}()`;
+                    case "column":
+                      return objectReference.table
+                        ? `${quote(objectReference.schema)}.${quote(objectReference.table)}.${quote(objectReference.name)}`
+                        : `${quote(objectReference.schema)}.${quote(objectReference.name)}`;
+                    default:
+                      return `${quote(objectReference.schema)}.${quote(objectReference.name)}`;
+                  }
+                };
+                const canDrop = connected && !postgresConfig.readOnly;
                 return <>
                   {relation && <ContextMenuItem disabled={!enabled("database.object.open")} onSelect={() => void browse(relation)}>{t("toolbox.postgres.openDataAction")}</ContextMenuItem>}
+                  {objectReference?.objectKind === "function" && <ContextMenuItem disabled={!connected} onSelect={() => openObjectViewer(objectReference)}>{t("toolbox.postgres.openFunction")}</ContextMenuItem>}
+                  {(objectReference?.objectKind === "sequence" ||
+                    objectReference?.objectKind === "index" ||
+                    objectReference?.objectKind === "constraint" ||
+                    objectReference?.objectKind === "trigger") && <ContextMenuItem disabled={!connected} onSelect={() => objectReference && openObjectViewer(objectReference)}>{t("toolbox.postgres.openObject")}</ContextMenuItem>}
+                  <ContextMenuItem disabled={!connected} onSelect={() => void copyText(copyValue())}>{objectReference?.objectKind === "column" ? t("toolbox.postgres.copyColumnName") : t("toolbox.postgres.copyName")}</ContextMenuItem>
+                  {activeReference && activeReference.objectKind !== "constraint" && (
+                    <ContextMenuItem disabled={!connected} onSelect={() => activeReference && void generateObjectDdl(activeReference)}>{t("toolbox.postgres.generateDdl")}</ContextMenuItem>
+                  )}
                   <ContextMenuItem disabled={!connected} onSelect={() => void refreshNavigator()}>{t("toolbox.postgres.refresh")}</ContextMenuItem>
-                  <ContextMenuItem disabled={!connected} onSelect={() => void copyText(relation ? quoteQualifiedPostgresName(relation) : node.label)}>{t("toolbox.postgres.copyName")}</ContextMenuItem>
-                  {!relation && <ContextMenuItem disabled={!connected} onSelect={createQuery}>{t("toolbox.postgres.newQuery")}</ContextMenuItem>}
+                  {!activeReference && <ContextMenuItem disabled={!connected} onSelect={createQuery}>{t("toolbox.postgres.newQuery")}</ContextMenuItem>}
+                  {activeReference && activeReference.objectKind !== "column" && (
+                    <>
+                      <ContextMenuSeparator />
+                      <ContextMenuItem
+                        disabled={!canDrop}
+                        onSelect={() => activeReference && void requestObjectDrop(activeReference)}
+                      >{dropLabel(activeReference)}</ContextMenuItem>
+                    </>
+                  )}
                 </>;
               }}
             />
@@ -1724,8 +2072,7 @@ export function ToolPostgres() {
                             lookup: catalogLookup,
                           })
                         : undefined
-                    }
-                    editorRef={(view) => {
+                    }                    editorRef={(view) => {
                       queryEditorViewRef.current = view;
                     }}
                     className="h-full"
@@ -1735,6 +2082,20 @@ export function ToolPostgres() {
               {tab.type === "table" && (
                 <div className="min-h-0 flex-1 bg-background" />
               )}
+              {tab.type === "object" && tab.objectReference && (
+                <ObjectViewerTab
+                  tab={
+                    {
+                      id: tab.id,
+                      type: "object",
+                      title: tab.title,
+                      object: tab.objectReference,
+                      connectionId: draft.id,
+                    } satisfies ObjectViewerTabState
+                  }
+                />
+              )}
+              {tab.type !== "object" && <>
               <div
                 className="h-1 shrink-0 cursor-row-resize border-y bg-muted/50"
                 onPointerDown={() => setResultDragging(true)}
@@ -1868,6 +2229,7 @@ export function ToolPostgres() {
                   onEditInsertCell={tableEditingEnabled ? editInsertCell : undefined}
                   isInsertCellModified={isInsertCellModified}
               />
+              </>}
             </section>
           )}
       status={<footer className="flex h-6 shrink-0 items-center border-t bg-muted/25 px-2 text-[11px] text-muted-foreground">
@@ -1896,7 +2258,33 @@ export function ToolPostgres() {
         save={save}
         connect={connect}
         connecting={connecting}
+        groupNames={listConnectionGroupNames(connections)}
         t={t}
+      />
+      <PostgresConnectionManager
+        open={managerOpen}
+        onOpenChange={setManagerOpen}
+        profiles={connections.length ? connections : [draft]}
+        connectedIds={connected ? [draft.id] : []}
+        onSaveProfile={async (profile) => {
+          const saved = { ...profile, updatedAt: Date.now() };
+          if (!(await PostgresConnectionsStorage.upsert(saved))) return false;
+          setConnections((current) => [
+            ...current.filter((item) => item.id !== saved.id),
+            saved,
+          ]);
+          if (saved.id === draft.id) setDraft(saved);
+          return true;
+        }}
+        onDeleteProfile={async (id) => {
+          await PostgresConnectionsStorage.remove(id);
+          setConnections((current) =>
+            current.filter((connection) => connection.id !== id),
+          );
+          if (id === draft.id) setConnected(false);
+          return true;
+        }}
+        onTestConnection={testConnection}
       />
       <Dialog
         open={pendingSshTrust !== null}
@@ -1939,6 +2327,41 @@ export function ToolPostgres() {
             <AlertDialogCancel>{t("common.cancel")}</AlertDialogCancel>
             <AlertDialogAction onClick={stageDeleteRow}>
               {t("toolbox.postgres.deleteRecord")}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+      <AlertDialog open={objectDropTarget !== null} onOpenChange={(open) => {
+        if (!open) {
+          setObjectDropTarget(null);
+          setObjectDropPreview(null);
+        }
+      }}>
+        <AlertDialogContent data-testid="postgres-object-drop-confirm">
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t("toolbox.postgres.dropConfirmTitle")}</AlertDialogTitle>
+            <AlertDialogDescription>
+              <p className="break-all font-mono text-destructive">
+                {t("toolbox.postgres.dropConfirm", { object: objectDropTarget?.qualified ?? "" })}
+              </p>
+              {objectDropPreview && objectDropPreview.dependentCount ? (
+                <p className="mt-2 text-muted-foreground">
+                  {t("toolbox.postgres.dropDependents", {
+                    count: String(objectDropPreview.dependentCount),
+                    samples: objectDropPreview.sampleDependents.join(", ") || "-",
+                  })}
+                </p>
+              ) : null}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>{t("common.cancel")}</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              onClick={() => void confirmObjectDrop()}
+              data-testid="postgres-object-drop-confirm-action"
+            >
+              {objectDropTarget ? dropLabel(objectDropTarget.reference) : t("toolbox.postgres.dropObject")}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
@@ -2116,6 +2539,7 @@ function ConnectionDialog({
   save,
   connect,
   connecting,
+  groupNames,
   t,
 }: {
   open: boolean;
@@ -2127,13 +2551,14 @@ function ConnectionDialog({
     key: K,
     value: PostgreSQLConnectionConfig[K],
   ) => void;
-  updateProfile: <K extends "name" | "environment">(
+  updateProfile: <K extends "name" | "environment" | "group">(
     key: K,
     value: PostgreSQLConnectionProfile[K],
   ) => void;
   save: () => Promise<void>;
   connect: () => Promise<void>;
   connecting: boolean;
+  groupNames: readonly string[];
   t: TFunction;
 }) {
   const config = draft.providerConfig;
@@ -2227,6 +2652,50 @@ function ConnectionDialog({
                         )}
                       </SelectContent>
                     </Select>
+                  </Field>
+                  <Field label={t("toolbox.postgres.group")}>
+                    <Input
+                      value={draft.group ?? ""}
+                      list="postgres-connection-group-datalist"
+                      placeholder={t("toolbox.postgres.groupPlaceholder")}
+                      onChange={(e) =>
+                        updateProfile(
+                          "group",
+                          e.target.value.trim() ? e.target.value.trim() : undefined,
+                        )
+                      }
+                    />
+                    <datalist id="postgres-connection-group-datalist">
+                      {groupNames.map((name) => (
+                        <option key={name} value={name} />
+                      ))}
+                    </datalist>
+                  </Field>
+                  <Field label={t("toolbox.postgres.accentColor")}>
+                    <div className="flex flex-wrap items-center gap-2">
+                      {CONNECTION_ACCENT_COLORS.map((color) => {
+                        const active = config.color === color;
+                        return (
+                          <button
+                            key={color}
+                            type="button"
+                            aria-pressed={active}
+                            className={`h-6 w-6 rounded-full border-2 transition ${active ? "border-primary ring-2 ring-primary/30" : "border-border hover:border-foreground/40"}`}
+                            style={{ backgroundColor: color }}
+                            onClick={() => update("color", active ? undefined : color)}
+                          />
+                        );
+                      })}
+                      {config.color && (
+                        <button
+                          type="button"
+                          className="text-[11px] text-muted-foreground underline"
+                          onClick={() => update("color", undefined)}
+                        >
+                          {t("common.clear")}
+                        </button>
+                      )}
+                    </div>
                   </Field>
                   <DatabaseConnectionToggleRow>
                     <Switch
