@@ -5,7 +5,9 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [2.8.0] - 2026-08-26
+
+**Milestone M1 — 日常核心 Parity 收官**。本版本聚合 B17（数据网格编辑闭环）、B18（过滤/查找/列布局）、B19（查询命令）、B20（快捷键体系）四个 Feature Batch，PostgreSQL 工具箱达到 Navicat 日常核心操作级对齐。
 
 ### ⌨️ Query Commands & Keyboard Scopes (B19 + B20)
 
