@@ -14,6 +14,7 @@ import { writeTextFile } from "@tauri-apps/plugin-fs";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 import {
+  Copy,
   Database,
   FileCode2,
   Filter,
@@ -30,6 +31,7 @@ import {
   Table2,
   Undo2,
   Unplug,
+  Wand2,
   X,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -72,6 +74,7 @@ import {
   currentStatementAt,
   toggleLineComment,
 } from "@/lib/database/sql-statement-tokenizer";
+import { formatSql, formatSqlSelection } from "@/lib/database/sql-formatter";
 import { generateId } from "@/lib/toolbox/toolbox-storage";
 import { ConnectionStorageManager } from "@/lib/connection-storage";
 import { PostgresConnectionsStorage } from "@/lib/toolbox/postgres-storage";
@@ -304,6 +307,16 @@ export function ToolPostgres() {
   const [dragging, setDragging] = useState(false);
   const [schema, setSchema] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
+  // Step 2: DDL preview panel state (single-click navigator → formatted DDL).
+  const [ddlPreview, setDdlPreview] = useState<{
+    schema: string;
+    name: string;
+    objectType: string;
+    ddl: string;
+    loading: boolean;
+    error: string | null;
+  } | null>(null);
+  const ddlPreviewTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [expanded, setExpanded] = useState<
     Partial<Record<DatabaseObjectNodeId, boolean>>
   >({});
@@ -551,6 +564,11 @@ export function ToolPostgres() {
       window.removeEventListener("pointerup", end);
     };
   }, [dragging, resultDragging]);
+
+  // Clear DDL preview when switching tabs
+  useEffect(() => {
+    setDdlPreview(null);
+  }, [activeTab]);
 
   const save = async () => {
     if (
@@ -837,6 +855,29 @@ export function ToolPostgres() {
     if (next === doc) return;
     view.dispatch({ changes: { from: 0, to: doc.length, insert: next } });
   };
+  /** Formats SQL in the editor (Ctrl+Shift+F, Step 2).
+   *  No selection = format full document; with selection = format selection only. */
+  const formatSqlInEditor = () => {
+    const view = queryEditorViewRef.current;
+    if (!view || !tab || tab.type !== "query") return;
+    const selection = view.state.selection.main;
+    const hasSelection = selection.to > selection.from;
+    if (hasSelection) {
+      const selected = view.state.doc.sliceString(selection.from, selection.to);
+      const formatted = formatSqlSelection(selected);
+      if (formatted === selected) return;
+      view.dispatch({
+        changes: { from: selection.from, to: selection.to, insert: formatted },
+        selection: { anchor: selection.from, head: selection.from + formatted.length },
+      });
+    } else {
+      const doc = view.state.doc.toString();
+      const formatted = formatSql(doc);
+      if (formatted === doc) return;
+      view.dispatch({ changes: { from: 0, to: doc.length, insert: formatted } });
+      patchTab(tab.id, { sql: formatted });
+    }
+  };
   const runSql = async (sql: string) => {
     if (!tab) return;
     patchTab(tab.id, { sql });
@@ -905,6 +946,31 @@ export function ToolPostgres() {
         description: String(error),
       });
     }
+  };
+  /** Step 2: Load DDL for preview panel (single-click navigator relation). */
+  const loadDdlPreview = async (schemaName: string, name: string, objectType: string) => {
+    setDdlPreview({ schema: schemaName, name, objectType, ddl: "", loading: true, error: null });
+    try {
+      const response = await invoke<{ ddl: string }>("postgres_object_ddl", {
+        request: {
+          connectionId: draft.id,
+          objectType,
+          schema: schemaName,
+          name,
+        },
+      });
+      const formatted = formatSql(response.ddl);
+      setDdlPreview({ schema: schemaName, name, objectType, ddl: formatted, loading: false, error: null });
+    } catch (error) {
+      setDdlPreview({ schema: schemaName, name, objectType, ddl: "", loading: false, error: String(error) });
+    }
+  };
+  /** Step 2: Debounced DDL preview trigger from navigator onSelect. */
+  const scheduleDdlPreview = (schemaName: string, name: string, objectType: string) => {
+    if (ddlPreviewTimerRef.current) clearTimeout(ddlPreviewTimerRef.current);
+    ddlPreviewTimerRef.current = setTimeout(() => {
+      void loadDdlPreview(schemaName, name, objectType);
+    }, 300);
   };
 
   /** Drop kind → localized menu label (B21 §5.3). */
@@ -1633,7 +1699,7 @@ export function ToolPostgres() {
       }
       if (event.key === "Enter" && tab?.type === "query" && !running) {
         event.preventDefault();
-        void execute();
+        void runSelectionOrStatement();
       }
       if (event.key.toLowerCase() === "e" && event.shiftKey && tab?.type === "query" && !running) {
         event.preventDefault();
@@ -1648,6 +1714,12 @@ export function ToolPostgres() {
       if (event.key === "/" && tab?.type === "query") {
         event.preventDefault();
         toggleSqlComment();
+        return;
+      }
+      // Step 2: SQL format (Ctrl+Shift+F / ⌘⇧F).
+      if (event.key.toLowerCase() === "f" && event.shiftKey && tab?.type === "query") {
+        event.preventDefault();
+        formatSqlInEditor();
         return;
       }
       if (
@@ -1862,6 +1934,15 @@ export function ToolPostgres() {
                 if (node.kind === "schema") setSchema(node.label);
                 const relation = getPostgresRelationReference(node);
                 if (relation) setSchema(relation.schema);
+                // Step 2: DDL preview on single-click of table/view/materializedView.
+                if (connected && relation) {
+                  const objRef = getPostgresObjectReference(node);
+                  if (objRef && (objRef.objectKind === "table" || objRef.objectKind === "view" || objRef.objectKind === "materializedView")) {
+                    scheduleDdlPreview(relation.schema, relation.relation, objRef.objectKind);
+                  }
+                } else if (!relation) {
+                  setDdlPreview(null);
+                }
               }}
               onOpen={(node) => {
                 // Double-click/Enter on a saved connection opens it (B22).
@@ -2046,6 +2127,15 @@ export function ToolPostgres() {
                      <ToolButton icon={<Play />} label={t("toolbox.postgres.transaction.rollback")} disabled={!transactionActive} onClick={() => void transaction("rollback")} />
                    </>
                  )}
+                 {tab.type === "query" && (
+                   <ToolButton
+                     icon={<Wand2 />}
+                     label={t("toolbox.postgres.formatSql")}
+                     disabled={!connected}
+                     onClick={() => formatSqlInEditor()}
+                     data-testid="postgres-format-sql"
+                   />
+                 )}
                  {tab.type === "table" && (
                    <>
                      <span className="ml-1 text-[11px] text-muted-foreground">{tab.object?.schema}.{tab.object?.name}</span>
@@ -2057,6 +2147,65 @@ export function ToolPostgres() {
                 <div className="flex-1" />
                 {running && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
               </div>
+              {ddlPreview && tab.type === "query" && (
+                <div className="flex h-64 shrink-0 flex-col border-b" data-testid="ddl-preview-panel">
+                  <div className="flex h-7 items-center gap-1 border-b bg-muted/10 px-2">
+                    <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                      DDL: {ddlPreview.schema}.{ddlPreview.name}
+                    </span>
+                    <div className="flex-1" />
+                    {ddlPreview.loading && <Loader2 className="h-3 w-3 animate-spin" />}
+                    {!ddlPreview.loading && !ddlPreview.error && (
+                      <>
+                        <ToolButton
+                          icon={<Copy />}
+                          label={t("common.copy")}
+                          onClick={() => void writeClipboardText(ddlPreview.ddl)}
+                        />
+                        <ToolButton
+                          icon={<RefreshCw />}
+                          label={t("toolbox.postgres.refresh")}
+                          onClick={() => void loadDdlPreview(ddlPreview.schema, ddlPreview.name, ddlPreview.objectType)}
+                        />
+                        <ToolButton
+                          icon={<FileCode2 />}
+                          label={t("toolbox.postgres.openInEditor")}
+                          onClick={() => {
+                            openTab({
+                              id: `ddl:${ddlPreview.schema}.${ddlPreview.name}.${ddlPreview.objectType}`,
+                              type: "query",
+                              title: `${ddlPreview.name}.ddl`,
+                              sql: ddlPreview.ddl,
+                              result: null,
+                              dirty: false,
+                            });
+                          }}
+                        />
+                      </>
+                    )}
+                    <ToolButton
+                      icon={<X />}
+                      label={t("common.close")}
+                      onClick={() => setDdlPreview(null)}
+                    />
+                  </div>
+                  <div className="min-h-0 flex-1 overflow-auto">
+                    {ddlPreview.error ? (
+                      <div className="flex h-full items-center justify-center text-[12px] text-destructive">
+                        {ddlPreview.error}
+                      </div>
+                    ) : ddlPreview.loading ? (
+                      <div className="flex h-full items-center justify-center">
+                        <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+                      </div>
+                    ) : (
+                      <pre className="sql-editor-container h-full overflow-auto bg-muted/5 p-2 text-[12px] leading-relaxed">
+                        <code className="font-mono">{ddlPreview.ddl}</code>
+                      </pre>
+                    )}
+                  </div>
+                </div>
+              )}
               {tab.type === "query" && (
                 <div className="min-h-0 flex-1">
                   <CodeEditor

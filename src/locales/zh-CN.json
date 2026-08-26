@@ -1280,6 +1280,9 @@
       "copyColumnName": "复制列名",
       "copyFailed": "复制结果数据失败",
       "closeOtherTabs": "关闭其他标签页",
+      "formatSql": "格式化 SQL",
+      "openInEditor": "在编辑器中打开",
+      "ddlPreview": "DDL 预览",
       "environments": {
         "development": "开发",
         "test": "测试",

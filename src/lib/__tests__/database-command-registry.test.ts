@@ -225,8 +225,52 @@ describe("database command resolver", () => {
     })).toMatchObject({ state: "disabled", reason: "missing-capability" });
   });
 
-  it("enables filter commands as read operations without editing capability", () => {
-    const connectedGrid = {
+  it("enables Format SQL for any provider in a connected query editor (Step 2)", () => {
+    expect(
+      resolveDatabaseCommand("database.query.format", {
+        ...connectedNavigatorContext,
+        scope: "QUERY_EDITOR",
+      }),
+    ).toMatchObject({
+      state: "enabled",
+      descriptor: {
+        id: "database.query.format",
+        defaultBinding: "Ctrl+Shift+F",
+      },
+    });
+    // Works for SQLite too — formatting has no capability requirement.
+    expect(
+      resolveDatabaseCommand("database.query.format", {
+        scope: "QUERY_EDITOR",
+        provider: sqliteProvider,
+        connectionState: "connected",
+      }),
+    ).toMatchObject({ state: "enabled" });
+  });
+
+  it("hides Format SQL outside the query editor scope (AC-5)", () => {
+    expect(
+      resolveDatabaseCommand("database.query.format", connectedNavigatorContext),
+    ).toEqual({ state: "hidden", reason: "wrong-scope" });
+    expect(
+      resolveDatabaseCommand("database.query.format", {
+        ...connectedNavigatorContext,
+        scope: "DATA_GRID",
+      }),
+    ).toEqual({ state: "hidden", reason: "wrong-scope" });
+  });
+
+  it("disables Format SQL while disconnected", () => {
+    expect(
+      resolveDatabaseCommand("database.query.format", {
+        ...connectedNavigatorContext,
+        scope: "QUERY_EDITOR",
+        connectionState: "disconnected",
+      }),
+    ).toMatchObject({ state: "disabled", reason: "connection-state" });
+  });
+
+  it("enables filter commands as read operations without editing capability", () => {    const connectedGrid = {
       scope: "DATA_GRID" as const,
       provider: postgresqlProvider,
       connectionState: "connected" as const,

@@ -1280,6 +1280,9 @@
       "copyColumnName": "Copy Column Name",
       "copyFailed": "Failed to copy result data",
       "closeOtherTabs": "Close Other Tabs",
+      "formatSql": "Format SQL",
+      "openInEditor": "Open in Editor",
+      "ddlPreview": "DDL Preview",
       "environments": {
         "development": "Development",
         "test": "Test",

@@ -40,6 +40,7 @@ export const DATABASE_COMMAND_IDS = [
   "database.query.toggleComment",
   "database.query.openFile",
   "database.query.stop",
+  "database.query.format",
   "database.tab.close",
   "database.tab.closeOthers",
   "database.result.copyCell",
@@ -305,6 +306,14 @@ const commands: readonly DatabaseCommandDescriptor[] = [
     requiredCapabilities: [],
     connectionStates: ["connected"],
     defaultBinding: "Ctrl+T",
+  },
+  {
+    id: "database.query.format",
+    labelKey: "database.command.query.format",
+    scopes: ["QUERY_EDITOR"],
+    requiredCapabilities: [],
+    connectionStates: ["connected"],
+    defaultBinding: "Ctrl+Shift+F",
   },
   {
     id: "database.tab.close",
