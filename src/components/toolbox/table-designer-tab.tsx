@@ -1,0 +1,736 @@
+/**
+ * B23 Table Designer — declarative form + DDL preview + toolbar.
+ *
+ * Architecture D-B23-4:
+ * - Diff is computed locally (table-design.ts diffTableDesign).
+ * - DDL generation + validation + execution happen in Rust (postgres_design.rs).
+ * - This component sends the structured change via onApply; it never assembles SQL.
+ */
+
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
+import { useTranslation } from "react-i18next";
+import { toast } from "sonner";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Label } from "@/components/ui/label";
+import {
+  Accordion,
+  AccordionContent,
+  AccordionItem,
+  AccordionTrigger,
+} from "@/components/ui/accordion";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import { ScrollArea } from "@/components/ui/scroll-area";
+import { Save, Undo2, RefreshCw, Plus, Trash2, AlertTriangle } from "lucide-react";
+import {
+  diffTableDesign,
+  draftFromDesign,
+  isChangeEmpty,
+  type TableDesign,
+  type TableDesignDraft,
+  type TableDesignChange,
+  type ColumnDef,
+} from "@/lib/database/table-design";
+
+// ── Props ──────────────────────────────────────────────────────────────────
+
+export interface TableDesignerTabProps {
+  connectionId: string;
+  schema: string;
+  table: string;
+  onLoad: (
+    connectionId: string,
+    schema: string,
+    table: string,
+  ) => Promise<TableDesign>;
+  onApply: (
+    connectionId: string,
+    change: TableDesignChange,
+    confirmed: boolean,
+  ) => Promise<{ ddl: string; warnings: string[]; applied: boolean }>;
+  onRefresh: () => void;
+  readOnly: boolean;
+}
+
+// ── Component ───────────────────────────────────────────────────────────────
+
+export function TableDesignerTab(props: TableDesignerTabProps) {
+  const { t } = useTranslation();
+  const { connectionId, schema, table, onLoad, onApply, onRefresh, readOnly } =
+    props;
+
+  const [design, setDesign] = useState<TableDesign | null>(null);
+  const [draft, setDraft] = useState<TableDesignDraft | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [ddlPreview, setDdlPreview] = useState<string | null>(null);
+  const [warnings, setWarnings] = useState<string[]>([]);
+  const [applying, setApplying] = useState(false);
+  const [showConfirm, setShowConfirm] = useState(false);
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // ── Load ─────────────────────────────────────────────────────────────────
+
+  const loadDesign = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const result = await onLoad(connectionId, schema, table);
+      setDesign(result);
+      setDraft(draftFromDesign(result));
+      setDdlPreview(null);
+      setWarnings([]);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLoading(false);
+    }
+  }, [connectionId, schema, table, onLoad]);
+
+  useEffect(() => {
+    void loadDesign();
+  }, [loadDesign]);
+
+  // ── Diff (local, pure) ───────────────────────────────────────────────────
+
+  const change = useMemo(() => {
+    if (!design || !draft) return null;
+    return diffTableDesign(design, draft);
+  }, [design, draft]);
+
+  const hasChanges = change ? !isChangeEmpty(change) : false;
+
+  // ── Debounced DDL preview (dry-run via onApply confirmed=false) ───────────
+
+  useEffect(() => {
+    if (!change || !hasChanges) {
+      setDdlPreview(null);
+      setWarnings([]);
+      return;
+    }
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    debounceRef.current = setTimeout(() => {
+      void (async () => {
+        try {
+          const result = await onApply(connectionId, change, false);
+          setDdlPreview(result.ddl || null);
+          setWarnings(result.warnings);
+        } catch (e) {
+          setDdlPreview(null);
+          setWarnings([e instanceof Error ? e.message : String(e)]);
+        }
+      })();
+    }, 600);
+    return () => {
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+    };
+  }, [change, hasChanges, connectionId, onApply]);
+
+  // ── Actions ──────────────────────────────────────────────────────────────
+
+  const doApply = useCallback(async () => {
+    if (!change || !hasChanges) return;
+    setApplying(true);
+    try {
+      const result = await onApply(connectionId, change, true);
+      if (result.applied) {
+        toast.success(t("toolbox.postgres.designer.applied"));
+        await loadDesign();
+        onRefresh();
+      }
+    } catch (e) {
+      toast.error(t("toolbox.postgres.designer.applyFailed"), {
+        description: e instanceof Error ? e.message : String(e),
+      });
+    } finally {
+      setApplying(false);
+    }
+  }, [change, hasChanges, connectionId, onApply, t, loadDesign, onRefresh]);
+
+  const handleSave = useCallback(() => {
+    if (!change || !hasChanges || readOnly) return;
+    if (warnings.length > 0) {
+      setShowConfirm(true);
+      return;
+    }
+    void doApply();
+  }, [change, hasChanges, readOnly, warnings, doApply]);
+
+  const handleRevert = useCallback(() => {
+    if (design) {
+      setDraft(draftFromDesign(design));
+      setDdlPreview(null);
+      setWarnings([]);
+    }
+  }, [design]);
+
+  const handleRefresh = useCallback(async () => {
+    await loadDesign();
+    onRefresh();
+  }, [loadDesign, onRefresh]);
+
+  // ── Column operations ─────────────────────────────────────────────────────
+
+  const updateColumn = (index: number, patch: Partial<ColumnDef>) => {
+    if (!draft || readOnly) return;
+    setDraft({
+      ...draft,
+      columns: draft.columns.map((c, i) => (i === index ? { ...c, ...patch } : c)),
+    });
+  };
+
+  const addColumn = () => {
+    if (!draft || readOnly) return;
+    setDraft({
+      ...draft,
+      columns: [
+        ...draft.columns,
+        { name: "", dataType: "text", nullable: true, default: null, comment: null },
+      ],
+    });
+  };
+
+  const removeColumn = (index: number) => {
+    if (!draft || readOnly) return;
+    const removedName = draft.columns[index]?.name;
+    setDraft({
+      ...draft,
+      columns: draft.columns.filter((_, i) => i !== index),
+      primaryKey: removedName
+        ? draft.primaryKey.filter((c) => c !== removedName)
+        : draft.primaryKey,
+    });
+  };
+
+  const togglePrimaryKey = (colName: string) => {
+    if (!draft || readOnly || !colName) return;
+    const isPk = draft.primaryKey.includes(colName);
+    setDraft({
+      ...draft,
+      primaryKey: isPk
+        ? draft.primaryKey.filter((c) => c !== colName)
+        : [...draft.primaryKey, colName],
+    });
+  };
+
+  // ── Constraint operations ────────────────────────────────────────────────
+
+  const addConstraint = () => {
+    if (!draft || readOnly) return;
+    setDraft({
+      ...draft,
+      constraints: [
+        ...draft.constraints,
+        { name: "", type: "u" as const, columns: [] },
+      ],
+    });
+  };
+
+  const removeConstraint = (index: number) => {
+    if (!draft || readOnly) return;
+    setDraft({
+      ...draft,
+      constraints: draft.constraints.filter((_, i) => i !== index),
+    });
+  };
+
+  // ── FK operations ─────────────────────────────────────────────────────────
+
+  const addForeignKey = () => {
+    if (!draft || readOnly) return;
+    setDraft({
+      ...draft,
+      foreignKeys: [
+        ...draft.foreignKeys,
+        {
+          name: "",
+          columns: [],
+          references: { schema: "public", table: "", columns: [] },
+          onDelete: null,
+          onUpdate: null,
+        },
+      ],
+    });
+  };
+
+  const removeForeignKey = (index: number) => {
+    if (!draft || readOnly) return;
+    setDraft({
+      ...draft,
+      foreignKeys: draft.foreignKeys.filter((_, i) => i !== index),
+    });
+  };
+
+  // ── Render ────────────────────────────────────────────────────────────────
+
+  if (loading) {
+    return (
+      <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
+        {t("toolbox.postgres.designer.loading")}
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="flex h-full items-center justify-center text-sm text-destructive">
+        {t("toolbox.postgres.designer.loadFailed")}: {error}
+      </div>
+    );
+  }
+
+  if (!design || !draft) return null;
+
+  const d = t; // shorthand
+
+  return (
+    <div className="flex h-full flex-col" data-testid="table-designer-tab">
+      {/* Toolbar */}
+      <div className="flex h-9 shrink-0 items-center gap-1 border-b bg-muted/10 px-2">
+        <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+          {schema}.{table}
+        </span>
+        <div className="flex-1" />
+        <Button
+          variant="ghost"
+          size="sm"
+          className="h-7 gap-1 rounded-sm px-2 text-[12px]"
+          onClick={handleSave}
+          disabled={!hasChanges || readOnly || applying}
+          data-testid="designer-save"
+        >
+          <Save className="h-3.5 w-3.5" />
+          {d("toolbox.postgres.designer.save")}
+        </Button>
+        <Button
+          variant="ghost"
+          size="sm"
+          className="h-7 gap-1 rounded-sm px-2 text-[12px]"
+          onClick={handleRevert}
+          disabled={!hasChanges || readOnly}
+          data-testid="designer-revert"
+        >
+          <Undo2 className="h-3.5 w-3.5" />
+          {d("toolbox.postgres.designer.revert")}
+        </Button>
+        <Button
+          variant="ghost"
+          size="sm"
+          className="h-7 gap-1 rounded-sm px-2 text-[12px]"
+          onClick={() => void handleRefresh()}
+          data-testid="designer-refresh"
+        >
+          <RefreshCw className="h-3.5 w-3.5" />
+          {d("toolbox.postgres.designer.refresh")}
+        </Button>
+      </div>
+
+      {/* Content */}
+      <ScrollArea className="min-h-0 flex-1">
+        <div className="p-3">
+          {/* Warnings banner */}
+          {warnings.length > 0 && (
+            <div className="mb-3 rounded-md border border-yellow-500/30 bg-yellow-500/5 p-2">
+              <div className="flex items-center gap-1.5 text-[12px] font-medium text-yellow-600 dark:text-yellow-500">
+                <AlertTriangle className="h-3.5 w-3.5" />
+                {warnings.length} warning(s)
+              </div>
+              <ul className="mt-1 space-y-0.5 pl-5 text-[11px] text-muted-foreground">
+                {warnings.map((w, i) => (
+                  <li key={i}>{w}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {/* Columns */}
+          <div className="mb-4">
+            <div className="mb-2 flex items-center gap-2">
+              <h3 className="text-[12px] font-semibold uppercase tracking-wider text-muted-foreground">
+                {d("toolbox.postgres.designer.columns")}
+              </h3>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-6 gap-1 px-2 text-[11px]"
+                onClick={addColumn}
+                disabled={readOnly}
+                data-testid="designer-add-column"
+              >
+                <Plus className="h-3 w-3" />
+                {d("toolbox.postgres.designer.addColumn")}
+              </Button>
+            </div>
+            <div className="overflow-hidden rounded-md border">
+              <table className="w-full text-[12px]">
+                <thead className="bg-muted/30">
+                  <tr>
+                    <th className="w-8 px-2 py-1.5 text-center font-medium">
+                      {d("toolbox.postgres.designer.columnPrimaryKey")}
+                    </th>
+                    <th className="px-2 py-1.5 text-left font-medium">
+                      {d("toolbox.postgres.designer.columnName")}
+                    </th>
+                    <th className="px-2 py-1.5 text-left font-medium">
+                      {d("toolbox.postgres.designer.columnType")}
+                    </th>
+                    <th className="w-12 px-2 py-1.5 text-center font-medium">
+                      {d("toolbox.postgres.designer.columnNullable")}
+                    </th>
+                    <th className="px-2 py-1.5 text-left font-medium">
+                      {d("toolbox.postgres.designer.columnDefault")}
+                    </th>
+                    <th className="px-2 py-1.5 text-left font-medium">
+                      {d("toolbox.postgres.designer.columnComment")}
+                    </th>
+                    <th className="w-8" />
+                  </tr>
+                </thead>
+                <tbody>
+                  {draft.columns.map((col, i) => (
+                    <tr key={i} className="border-t hover:bg-muted/5">
+                      <td className="px-2 py-1 text-center">
+                        <Checkbox
+                          checked={draft.primaryKey.includes(col.name)}
+                          onCheckedChange={() => togglePrimaryKey(col.name)}
+                          disabled={readOnly || !col.name}
+                        />
+                      </td>
+                      <td className="px-2 py-1">
+                        <Input
+                          value={col.name}
+                          onChange={(e) => updateColumn(i, { name: e.target.value })}
+                          disabled={readOnly}
+                          className="h-7 border-0 bg-transparent px-1 text-[12px] focus-visible:ring-1"
+                        />
+                      </td>
+                      <td className="px-2 py-1">
+                        <Input
+                          value={col.dataType}
+                          onChange={(e) => updateColumn(i, { dataType: e.target.value })}
+                          disabled={readOnly}
+                          className="h-7 border-0 bg-transparent px-1 text-[12px] focus-visible:ring-1"
+                        />
+                      </td>
+                      <td className="px-2 py-1 text-center">
+                        <Checkbox
+                          checked={col.nullable}
+                          onCheckedChange={(v) => updateColumn(i, { nullable: v === true })}
+                          disabled={readOnly}
+                        />
+                      </td>
+                      <td className="px-2 py-1">
+                        <Input
+                          value={col.default ?? ""}
+                          onChange={(e) => updateColumn(i, { default: e.target.value || null })}
+                          disabled={readOnly}
+                          placeholder="—"
+                          className="h-7 border-0 bg-transparent px-1 text-[12px] focus-visible:ring-1"
+                        />
+                      </td>
+                      <td className="px-2 py-1">
+                        <Input
+                          value={col.comment ?? ""}
+                          onChange={(e) => updateColumn(i, { comment: e.target.value || null })}
+                          disabled={readOnly}
+                          placeholder="—"
+                          className="h-7 border-0 bg-transparent px-1 text-[12px] focus-visible:ring-1"
+                        />
+                      </td>
+                      <td className="px-1 py-1">
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-6 w-6 p-0"
+                          onClick={() => removeColumn(i)}
+                          disabled={readOnly}
+                        >
+                          <Trash2 className="h-3 w-3" />
+                        </Button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          {/* Table comment */}
+          <div className="mb-4">
+            <Label className="mb-1 text-[12px] font-medium">
+              {d("toolbox.postgres.designer.columnComment")}
+            </Label>
+            <Input
+              value={draft.comment ?? ""}
+              onChange={(e) => setDraft({ ...draft, comment: e.target.value || null })}
+              disabled={readOnly}
+              placeholder="—"
+              className="h-7 text-[12px]"
+            />
+          </div>
+
+          {/* Constraints */}
+          <Accordion type="single" collapsible className="mb-2">
+            <AccordionItem value="constraints" className="rounded-md border px-2">
+              <AccordionTrigger className="py-2 text-[12px] font-semibold uppercase tracking-wider text-muted-foreground">
+                {d("toolbox.postgres.designer.constraints")} ({draft.constraints.length})
+              </AccordionTrigger>
+              <AccordionContent>
+                <div className="pb-2">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="mb-2 h-6 gap-1 px-2 text-[11px]"
+                    onClick={addConstraint}
+                    disabled={readOnly}
+                  >
+                    <Plus className="h-3 w-3" />
+                    {d("toolbox.postgres.designer.addConstraint")}
+                  </Button>
+                  {draft.constraints.map((con, i) => (
+                    <div key={i} className="mb-1 flex items-center gap-2">
+                      <Input
+                        value={con.name}
+                        onChange={(e) =>
+                          setDraft({
+                            ...draft,
+                            constraints: draft.constraints.map((c, j) =>
+                              j === i ? { ...c, name: e.target.value } : c,
+                            ),
+                          })
+                        }
+                        disabled={readOnly}
+                        placeholder={d("toolbox.postgres.designer.constraintName")}
+                        className="h-7 flex-1 text-[12px]"
+                      />
+                      <select
+                        value={con.type}
+                        onChange={(e) =>
+                          setDraft({
+                            ...draft,
+                            constraints: draft.constraints.map((c, j) =>
+                              j === i
+                                ? { ...c, type: e.target.value as "u" | "c" | "x" }
+                                : c,
+                            ),
+                          })
+                        }
+                        disabled={readOnly}
+                        className="h-7 rounded-md border bg-transparent px-1 text-[12px]"
+                      >
+                        <option value="u">UNIQUE</option>
+                        <option value="c">CHECK</option>
+                        <option value="x">EXCLUSION</option>
+                      </select>
+                      <Input
+                        value={con.columns.join(", ")}
+                        onChange={(e) =>
+                          setDraft({
+                            ...draft,
+                            constraints: draft.constraints.map((c, j) =>
+                              j === i
+                                ? {
+                                    ...c,
+                                    columns: e.target.value
+                                      .split(",")
+                                      .map((s) => s.trim())
+                                      .filter(Boolean),
+                                  }
+                                : c,
+                            ),
+                          })
+                        }
+                        disabled={readOnly}
+                        placeholder={d("toolbox.postgres.designer.constraintColumns")}
+                        className="h-7 flex-1 text-[12px]"
+                      />
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-6 w-6 p-0"
+                        onClick={() => removeConstraint(i)}
+                        disabled={readOnly}
+                      >
+                        <Trash2 className="h-3 w-3" />
+                      </Button>
+                    </div>
+                  ))}
+                </div>
+              </AccordionContent>
+            </AccordionItem>
+          </Accordion>
+
+          {/* Foreign Keys */}
+          <Accordion type="single" collapsible className="mb-2">
+            <AccordionItem value="foreignKeys" className="rounded-md border px-2">
+              <AccordionTrigger className="py-2 text-[12px] font-semibold uppercase tracking-wider text-muted-foreground">
+                {d("toolbox.postgres.designer.foreignKeys")} ({draft.foreignKeys.length})
+              </AccordionTrigger>
+              <AccordionContent>
+                <div className="pb-2">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="mb-2 h-6 gap-1 px-2 text-[11px]"
+                    onClick={addForeignKey}
+                    disabled={readOnly}
+                  >
+                    <Plus className="h-3 w-3" />
+                    {d("toolbox.postgres.designer.addForeignKey")}
+                  </Button>
+                  {draft.foreignKeys.map((fk, i) => (
+                    <div key={i} className="mb-1 flex items-center gap-2">
+                      <Input
+                        value={fk.name}
+                        onChange={(e) =>
+                          setDraft({
+                            ...draft,
+                            foreignKeys: draft.foreignKeys.map((f, j) =>
+                              j === i ? { ...f, name: e.target.value } : f,
+                            ),
+                          })
+                        }
+                        disabled={readOnly}
+                        placeholder={d("toolbox.postgres.designer.fkName")}
+                        className="h-7 flex-1 text-[12px]"
+                      />
+                      <Input
+                        value={fk.columns.join(", ")}
+                        onChange={(e) =>
+                          setDraft({
+                            ...draft,
+                            foreignKeys: draft.foreignKeys.map((f, j) =>
+                              j === i
+                                ? {
+                                    ...f,
+                                    columns: e.target.value
+                                      .split(",")
+                                      .map((s) => s.trim())
+                                      .filter(Boolean),
+                                  }
+                                : f,
+                            ),
+                          })
+                        }
+                        disabled={readOnly}
+                        placeholder={d("toolbox.postgres.designer.fkColumns")}
+                        className="h-7 w-24 text-[12px]"
+                      />
+                      <Input
+                        value={fk.references.schema}
+                        onChange={(e) =>
+                          setDraft({
+                            ...draft,
+                            foreignKeys: draft.foreignKeys.map((f, j) =>
+                              j === i
+                                ? {
+                                    ...f,
+                                    references: {
+                                      ...f.references,
+                                      schema: e.target.value,
+                                    },
+                                  }
+                                : f,
+                            ),
+                          })
+                        }
+                        disabled={readOnly}
+                        placeholder={d("toolbox.postgres.designer.fkReferencesSchema")}
+                        className="h-7 w-24 text-[12px]"
+                      />
+                      <Input
+                        value={fk.references.table}
+                        onChange={(e) =>
+                          setDraft({
+                            ...draft,
+                            foreignKeys: draft.foreignKeys.map((f, j) =>
+                              j === i
+                                ? {
+                                    ...f,
+                                    references: {
+                                      ...f.references,
+                                      table: e.target.value,
+                                    },
+                                  }
+                                : f,
+                            ),
+                          })
+                        }
+                        disabled={readOnly}
+                        placeholder={d("toolbox.postgres.designer.fkReferencesTable")}
+                        className="h-7 w-24 text-[12px]"
+                      />
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-6 w-6 p-0"
+                        onClick={() => removeForeignKey(i)}
+                        disabled={readOnly}
+                      >
+                        <Trash2 className="h-3 w-3" />
+                      </Button>
+                    </div>
+                  ))}
+                </div>
+              </AccordionContent>
+            </AccordionItem>
+          </Accordion>
+
+          {/* DDL Preview */}
+          {ddlPreview && (
+            <div className="mt-3">
+              <h3 className="mb-1 text-[12px] font-semibold uppercase tracking-wider text-muted-foreground">
+                {d("toolbox.postgres.designer.ddlPreview")}
+              </h3>
+              <pre className="overflow-x-auto rounded-md border bg-muted/20 p-2 text-[11px] leading-relaxed">
+                <code>{ddlPreview}</code>
+              </pre>
+            </div>
+          )}
+        </div>
+      </ScrollArea>
+
+      {/* Confirmation dialog (when warnings exist) */}
+      <AlertDialog open={showConfirm} onOpenChange={setShowConfirm}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              {d("toolbox.postgres.designer.confirmTitle")}
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              {d("toolbox.postgres.designer.confirmDescription")}
+              <ul className="mt-2 list-disc pl-4">
+                {warnings.map((w, i) => (
+                  <li key={i}>{w}</li>
+                ))}
+              </ul>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>
+              {d("toolbox.postgres.designer.revert")}
+            </AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                setShowConfirm(false);
+                void doApply();
+              }}
+            >
+              {d("toolbox.postgres.designer.confirmAction")}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </div>
+  );
+}

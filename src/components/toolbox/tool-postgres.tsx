@@ -112,6 +112,8 @@ import {
   ObjectViewerTab,
   type ObjectViewerTabState,
 } from "@/components/toolbox/object-viewer-tab";
+import { TableDesignerTab } from "@/components/toolbox/table-designer-tab";
+import type { TableDesign, TableDesignChange } from "@/lib/database/table-design";
 import {
   FilterSortDialog,
   type FilterSortDialogLabels,
@@ -171,7 +173,7 @@ type PendingInsertRow = {
 };
 type WorkspaceTab = {
   id: string;
-  type: "query" | "table" | "object";
+  type: "query" | "table" | "object" | "designer";
   title: string;
   object?: TableObject;
   /**
@@ -760,6 +762,42 @@ export function ToolPostgres() {
         : [...current, next],
     );
     setActiveTab(next.id);
+  };
+  const openDesigner = (schema: string, table: string) => {
+    openTab({
+      id: `designer:${schema}.${table}`,
+      type: "designer",
+      title: `${table} (Design)`,
+      object: { schema, name: table },
+      objectRole: "table",
+      sql: "",
+      result: null,
+    });
+  };
+  const openViewDesigner = async (schema: string, view: string) => {
+    try {
+      const ddl = await invoke<string>("postgres_object_ddl", {
+        request: {
+          connectionId: draft.id,
+          objectType: "view",
+          schema,
+          name: view,
+        },
+      });
+      openTab({
+        id: `designer:${schema}.${view}`,
+        type: "designer",
+        title: `${view} (View)`,
+        object: { schema, name: view },
+        objectRole: "view",
+        sql: ddl,
+        result: null,
+      });
+    } catch (error) {
+      toast.error(t("toolbox.postgres.queryFailed"), {
+        description: String(error),
+      });
+    }
   };
   const closeTab = (id: string) =>
     setTabs((current) => {
@@ -2047,6 +2085,9 @@ export function ToolPostgres() {
                 const canDrop = connected && !postgresConfig.readOnly;
                 return <>
                   {relation && <ContextMenuItem disabled={!enabled("database.object.open")} onSelect={() => void browse(relation)}>{t("toolbox.postgres.openDataAction")}</ContextMenuItem>}
+                  {relation && relation.objectRole === "table" && <ContextMenuItem disabled={!connected} onSelect={() => openDesigner(relation.schema, relation.relation)}>{t("toolbox.postgres.designTable")}</ContextMenuItem>}
+                  {relation && relation.objectRole === "view" && <ContextMenuItem disabled={!connected} onSelect={() => void openViewDesigner(relation.schema, relation.relation)}>{t("toolbox.postgres.designView")}</ContextMenuItem>}
+                  {relation && relation.objectRole === "materializedView" && <ContextMenuItem disabled title={t("toolbox.postgres.materializedViewReadonly")}>{t("toolbox.postgres.designView")}</ContextMenuItem>}
                   {objectReference?.objectKind === "function" && <ContextMenuItem disabled={!connected} onSelect={() => openObjectViewer(objectReference)}>{t("toolbox.postgres.openFunction")}</ContextMenuItem>}
                   {(objectReference?.objectKind === "sequence" ||
                     objectReference?.objectKind === "index" ||
@@ -2096,6 +2137,7 @@ export function ToolPostgres() {
       workspace={tab && (
             <section className="flex min-h-0 flex-1 flex-col">
               <div className="flex h-8 shrink-0 items-center gap-1 border-b bg-muted/10 px-2">
+                {tab.type === "query" && (
                 <ToolButton
                   icon={<Play />}
                   label={t("toolbox.postgres.run")}
@@ -2103,6 +2145,7 @@ export function ToolPostgres() {
                   onClick={() => void execute()}
                   data-testid="postgres-run"
                 />
+                )}
                  {tab.type === "query" && running && (
                   <ToolButton
                     icon={<Square />}
@@ -2244,7 +2287,72 @@ export function ToolPostgres() {
                   }
                 />
               )}
-              {tab.type !== "object" && <>
+              {tab.type === "designer" && tab.objectRole === "table" && tab.object && (
+                <div className="min-h-0 flex-1" data-scope="designer" data-testid="table-designer-root">
+                  <TableDesignerTab
+                    connectionId={draft.id}
+                    schema={tab.object.schema}
+                    table={tab.object.name}
+                    onLoad={async (connId: string, schema: string, table: string) =>
+                      invoke<TableDesign>("postgres_table_design_load", {
+                        request: { connectionId: connId, schema, table },
+                      })
+                    }
+                    onApply={async (connId: string, change: TableDesignChange, confirmed: boolean) =>
+                      invoke<{ ddl: string; warnings: string[]; applied: boolean }>(
+                        "postgres_table_design_apply",
+                        { request: { connectionId: connId, change, confirmed } },
+                      )
+                    }
+                    onRefresh={() => void refreshNavigator()}
+                    readOnly={postgresConfig.readOnly}
+                  />
+                </div>
+              )}
+              {tab.type === "designer" && tab.objectRole === "view" && tab.object && (
+                <div className="flex min-h-0 flex-1 flex-col" data-scope="designer" data-testid="view-designer-root">
+                  <div className="flex h-8 shrink-0 items-center gap-1 border-b bg-muted/10 px-2">
+                    <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                      {t("toolbox.postgres.viewDefinition")}: {tab.object.schema}.{tab.object.name}
+                    </span>
+                    <div className="flex-1" />
+                    <ToolButton
+                      icon={<Save />}
+                      label={t("toolbox.postgres.viewSave")}
+                      disabled={!connected || postgresConfig.readOnly}
+                      onClick={async () => {
+                        if (!tab.object || !tab.sql.trim()) return;
+                        try {
+                          await invoke("postgres_view_save", {
+                            request: {
+                              connectionId: draft.id,
+                              schema: tab.object.schema,
+                              name: tab.object.name,
+                              definition: tab.sql,
+                              confirmed: true,
+                            },
+                          });
+                          toast.success(t("toolbox.postgres.viewSaved"));
+                          patchTab(tab.id, { dirty: false });
+                        } catch (error) {
+                          toast.error(t("toolbox.postgres.viewSaveFailed"), {
+                            description: String(error),
+                          });
+                        }
+                      }}
+                    />
+                  </div>
+                  <div className="min-h-0 flex-1">
+                    <CodeEditor
+                      value={tab.sql}
+                      onChange={(sql) => patchTab(tab.id, { sql, dirty: true })}
+                      language="sql"
+                      className="h-full"
+                    />
+                  </div>
+                </div>
+              )}
+              {tab.type !== "object" && tab.type !== "designer" && <>
               <div
                 className="h-1 shrink-0 cursor-row-resize border-y bg-muted/50"
                 onPointerDown={() => setResultDragging(true)}

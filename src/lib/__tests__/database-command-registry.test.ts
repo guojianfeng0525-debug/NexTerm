@@ -300,4 +300,66 @@ describe("database command resolver", () => {
       scope: "QUERY_EDITOR",
     })).toMatchObject({ state: "hidden", reason: "wrong-scope" });
   });
+
+  it("enables Design Table only in a connected navigator scope (AC-S2A-9)", () => {
+    expect(
+      resolveDatabaseCommand("database.object.design", connectedNavigatorContext),
+    ).toMatchObject({
+      state: "enabled",
+      descriptor: { id: "database.object.design" },
+    });
+    // Hidden outside NAVIGATOR (design commands live in the DESIGNER scope).
+    expect(
+      resolveDatabaseCommand("database.object.design", {
+        ...connectedNavigatorContext,
+        scope: "QUERY_EDITOR",
+      }),
+    ).toEqual({ state: "hidden", reason: "wrong-scope" });
+    // Disabled while disconnected.
+    expect(
+      resolveDatabaseCommand("database.object.design", {
+        ...connectedNavigatorContext,
+        connectionState: "disconnected",
+      }),
+    ).toMatchObject({ state: "disabled", reason: "connection-state" });
+  });
+
+  it("routes designer session commands in the DESIGNER scope only", () => {
+    const designer = {
+      scope: "DESIGNER" as const,
+      provider: postgresqlProvider,
+      connectionState: "connected" as const,
+    };
+    expect(
+      resolveDatabaseCommand("database.design.save", designer),
+    ).toMatchObject({
+      state: "enabled",
+      descriptor: { id: "database.design.save", defaultBinding: "Ctrl+S" },
+    });
+    expect(
+      resolveDatabaseCommand("database.design.revert", designer),
+    ).toMatchObject({
+      state: "enabled",
+      descriptor: { id: "database.design.revert", defaultBinding: "Escape" },
+    });
+    expect(
+      resolveDatabaseCommand("database.design.refresh", designer),
+    ).toMatchObject({ state: "enabled" });
+    expect(
+      resolveDatabaseCommand("database.view.save", designer),
+    ).toMatchObject({ state: "enabled" });
+    // Designer commands never leak into other scopes (scope routing D2).
+    for (const scope of ["NAVIGATOR", "QUERY_EDITOR", "DATA_GRID"] as const) {
+      expect(
+        resolveDatabaseCommand("database.design.save", { ...designer, scope }),
+      ).toEqual({ state: "hidden", reason: "wrong-scope" });
+    }
+    // Disconnected designer session disables everything.
+    expect(
+      resolveDatabaseCommand("database.design.save", {
+        ...designer,
+        connectionState: "disconnected",
+      }),
+    ).toMatchObject({ state: "disabled", reason: "connection-state" });
+  });
 });

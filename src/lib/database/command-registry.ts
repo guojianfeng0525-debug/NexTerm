@@ -10,6 +10,7 @@ export const DATABASE_COMMAND_SCOPES = [
   "WORKSPACE",
   "QUERY_EDITOR",
   "DATA_GRID",
+  "DESIGNER",
 ] as const;
 
 export type DatabaseCommandScope = (typeof DATABASE_COMMAND_SCOPES)[number];
@@ -65,6 +66,11 @@ export const DATABASE_COMMAND_IDS = [
   "database.layout.setRowHeight",
   "database.layout.toggleFieldType",
   "database.layout.toggleComment",
+  "database.object.design",
+  "database.design.save",
+  "database.design.revert",
+  "database.design.refresh",
+  "database.view.save",
 ] as const;
 
 export type DatabaseCommandId = (typeof DATABASE_COMMAND_IDS)[number];
@@ -485,6 +491,43 @@ const commands: readonly DatabaseCommandDescriptor[] = [
     id: "database.layout.toggleComment",
     labelKey: "database.command.layout.toggleComment",
     scopes: ["DATA_GRID"],
+    requiredCapabilities: [],
+    connectionStates: ["connected"],
+  },
+  {
+    id: "database.object.design",
+    labelKey: "database.command.object.design",
+    scopes: ["NAVIGATOR"],
+    requiredCapabilities: [],
+    connectionStates: ["connected"],
+  },
+  {
+    id: "database.design.save",
+    labelKey: "database.command.design.save",
+    scopes: ["DESIGNER"],
+    requiredCapabilities: [],
+    connectionStates: ["connected"],
+    defaultBinding: "Ctrl+S",
+  },
+  {
+    id: "database.design.revert",
+    labelKey: "database.command.design.revert",
+    scopes: ["DESIGNER"],
+    requiredCapabilities: [],
+    connectionStates: ["connected"],
+    defaultBinding: "Escape",
+  },
+  {
+    id: "database.design.refresh",
+    labelKey: "database.command.design.refresh",
+    scopes: ["DESIGNER"],
+    requiredCapabilities: [],
+    connectionStates: ["connected"],
+  },
+  {
+    id: "database.view.save",
+    labelKey: "database.command.view.save",
+    scopes: ["DESIGNER"],
     requiredCapabilities: [],
     connectionStates: ["connected"],
   },

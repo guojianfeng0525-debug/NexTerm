@@ -41,7 +41,7 @@ pub struct PostgresState {
     /// transaction, `Some("save")` = a `postgres_save_table_changes` run is in
     /// progress, `Some("manual")` = an explicit `postgres_transaction` begin.
     /// Short critical sections only; guards are never held across `.await`.
-    txn_modes: std::sync::RwLock<HashMap<String, String>>,
+    pub(crate) txn_modes: std::sync::RwLock<HashMap<String, String>>,
     /// Backend pid per connection, fetched once at connect time with
     /// `SELECT pg_backend_pid()` so the cancel path can target it.
     backends: std::sync::RwLock<HashMap<String, i32>>,
@@ -1296,7 +1296,7 @@ fn build_delete_statement(
 
 /// EXPLAIN must not turn a semicolon-separated batch into an execution path.
 /// Semicolons inside identifiers, string literals, or comments are preserved.
-fn single_statement(sql: &str) -> Result<&str, String> {
+pub(crate) fn single_statement(sql: &str) -> Result<&str, String> {
     let mut quote = None;
     let mut line_comment = false;
     let mut block_depth = 0usize;

@@ -11,6 +11,7 @@ mod os_detect;
 mod proxy;
 mod postgres;
 mod postgres_catalog;
+mod postgres_design;
 mod sqlite;
 mod mysql;
 mod rdp_client;
@@ -612,6 +613,11 @@ pub fn run() {
             postgres_catalog::postgres_object_props,
             postgres_catalog::postgres_object_ddl,
             postgres_catalog::postgres_drop_object,
+            // B23 design-domain commands (postgres_design.rs)
+            postgres_design::postgres_table_design_load,
+            postgres_design::postgres_table_design_apply,
+            postgres_design::postgres_view_save,
+            postgres_design::postgres_pg_types,
             // SQLite database workspace (experimental P0 provider)
             sqlite::sqlite_connect,
             sqlite::sqlite_disconnect,
