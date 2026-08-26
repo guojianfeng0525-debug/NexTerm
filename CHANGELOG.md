@@ -5,6 +5,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.10.0] - 2026-08-27
+
+**Minor — SQL 格式化 + DDL 预览面板 + PG 表设计器 + View Builder**。Step 2（⌘⇧F SQL 格式化 / DDL 预览面板 / ⌘↩ 执行选中）+ Step 3（B23 Table Designer：声明式列编辑器、PK 复选框、约束/索引/外键折叠区、DDL 预览 dry-run + 警告确认对话框 + 事务回滚 + View Builder）。
+
+### Added (Step 2 — SQL Formatting)
+
+- 🎨 **⌘⇧F SQL 格式化**：sql-formatter v15.8.2（PostgreSQL dialect, uppercase keywords），Navicat 风格基线；CodeMirror 编辑器内一键格式化。
+- 📋 **DDL 预览面板**：对象右键 → DDL Preview，独立面板展示 CREATE 语句。
+- ▶️ **⌘↩ 执行选中**：Query 编辑器内选中 SQL 后 ⌘↩ 仅执行选中部分。
+
+### Added (Step 3 — B23 Table Designer + View Builder)
+
+- 🏗️ **postgres_design.rs**：3 个 Tauri 命令（`postgres_table_design_load` / `postgres_table_design_apply` / `postgres_view_save`），服务端 DDL 生成 + 标识符引用 + 事务原子性回滚（D-B23-2..7）。
+- 📐 **table-design.ts**：前后端共享类型契约（1:1 镜像 Rust serde 结构体）；纯前端 `diffTableDesign` 函数（列/主键/约束/索引/外键/注释差异计算）；`dropDefault` / `dropComment` 精确 ALTER 列级操作。
+- 🖥️ **table-designer-tab.tsx**：声明式表单 — 列编辑网格、PK 复选框、约束/外键折叠区、防抖 DDL 预览（dry-run）、警告确认对话框、Save/Revert/Refresh 工具栏。
+- 🔗 **tool-postgres.tsx**：Designer 标签路由（table + view）、右键菜单（Design Table / Design View）、视图编辑器（CodeMirror + Save）。
+- 🎯 **command-registry.ts**：新增 DESIGNER scope（第 6 个 scope）+ 5 个设计器命令 ID。
+- 🌐 **i18n**：40+ 设计器键（en + zh-CN，2042 parity）。
+- 🧪 **测试**：22 个 diff 单元测试（属性测试 + 定向用例）、23 个命令注册表测试、Rust build_statements 单元测试。
+
+### Verified
+
+- tsc: 0 errors
+- vitest: 828/829 pass（1 pre-existing failure: command-history-record, unrelated）
+- cargo test: pass
+- cargo check: pass
+- eslint: 0 errors, 2 warnings (react-hooks/set-state-in-effect, acceptable)
+- i18n parity: 2042/2042
+
 ## [2.9.1] - 2026-08-26
 
 **Patch — UX 复评修复 + Lint 基线收敛**。基于 v2.9.0 视觉复评记录（`docs/database/v291-visual-review.md`）关闭 B-1 / B-2 / M-1 / M-2 / m-1 五项遗留，并合并 Step 1 单元测试与 Lint 基线清理。
