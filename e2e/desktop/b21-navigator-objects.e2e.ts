@@ -1,4 +1,5 @@
 import { expect } from '@wdio/globals';
+import { unlockApp, waitForVisible } from './helpers/webkit';
 
 /**
  * B21 navigator object coverage — native desktop E2E against the live PG
@@ -16,19 +17,9 @@ import { expect } from '@wdio/globals';
 
 async function connectPostgres() {
   const password = `E2E_${Date.now()}`;
-  const lock = await $('#app-lock-password');
-  await browser.waitUntil(
-    async () => (await lock.isExisting()) || (await $('[data-testid="postgres-disconnect"]').isExisting()),
-    { timeout: 30_000, timeoutMsg: 'app did not reach toolbox' },
-  );
-  if (await lock.isExisting()) {
-    await lock.waitForDisplayed({ timeout: 30_000 });
-    await lock.setValue(password);
-    await $('#app-lock-confirm').setValue(password);
-    await $('#app-lock-submit, button.w-full').click();
-  }
-  const postgres = await $('[data-testid="toolbox-nav-postgres"]');
-  await postgres.waitForDisplayed();
+  // unlockApp handles both fresh lock screen and already-unlocked restore.
+  await unlockApp(password, '[data-testid="postgres-disconnect"]');
+  const postgres = await waitForVisible('[data-testid="toolbox-nav-postgres"]');
   if (await $('[data-testid="postgres-disconnect"]').isExisting()) return;
   await postgres.click();
   await $('[data-testid="postgres-new-connection"]').click();

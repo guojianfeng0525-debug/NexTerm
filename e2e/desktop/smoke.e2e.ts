@@ -1,4 +1,5 @@
 import { expect } from '@wdio/globals';
+import { waitForVisible, unlockApp } from './helpers/webkit';
 
 describe('NexTerm native desktop smoke', () => {
   before(async () => {
@@ -10,13 +11,11 @@ describe('NexTerm native desktop smoke', () => {
   it('sets up an isolated lock profile and opens the vault workspace', async () => {
     const password = `E2E_${Date.now()}`;
 
-    await $('#app-lock-password').waitForDisplayed();
-    await $('#app-lock-password').setValue(password);
-    await $('#app-lock-confirm').setValue(password);
-    await $('#app-lock-submit, button.w-full').click();
+    // WebKit isDisplayed returns false for form controls (see helpers/webkit.ts);
+    // unlockApp verifies real visibility via getBoundingClientRect instead.
+    await unlockApp(password);
 
-    const vaultNavigation = await $('button[aria-label="Vault"], button[aria-label="记录本"]');
-    await vaultNavigation.waitForDisplayed();
+    const vaultNavigation = await waitForVisible('button[aria-label="Vault"], button[aria-label="记录本"]');
     await vaultNavigation.click();
     await expect(vaultNavigation).toHaveAttribute('aria-current', 'page');
 

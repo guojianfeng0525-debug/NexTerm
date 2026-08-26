@@ -1,4 +1,5 @@
 import { expect } from '@wdio/globals';
+import { unlockApp, waitForVisible } from './helpers/webkit';
 
 /**
  * B19 query commands + B20 keyboard scopes (native desktop E2E).
@@ -17,13 +18,9 @@ const WORKSPACE_SELECTOR = '[data-testid="postgres-workspace"]';
 
 async function connectPostgres() {
   const password = `E2E_${Date.now()}`;
-  await $('#app-lock-password').waitForDisplayed();
-  await $('#app-lock-password').setValue(password);
-  await $('#app-lock-confirm').setValue(password);
-  await $('#app-lock-submit, button.w-full').click();
+  await unlockApp(password);
 
-  const postgresNav = await $('[data-testid="toolbox-nav-postgres"]');
-  await postgresNav.waitForDisplayed();
+  const postgresNav = await waitForVisible('[data-testid="toolbox-nav-postgres"]');
   await postgresNav.click();
   await $('[data-testid="postgres-new-connection"]').click();
   const dialog = await $('[data-testid="postgres-connection-dialog"]');
@@ -97,7 +94,7 @@ describe('B19 query execution controls (native E2E, DEFERRED under R9)', () => {
     await setEditorSql('SELECT pg_sleep(30);');
     // Use the toolbar run button for the long query.
     await $('[data-testid="postgres-run"]').click();
-    await $('[data-testid="postgres-stop"]').waitForDisplayed({ timeout: 10000 });
+    await waitForVisible('[data-testid="postgres-stop"]', 10_000);
     await browser.keys(['Control', 't']);
     await browser.waitUntil(
       async () => !(await $('[data-testid="postgres-stop"]').isExisting()),

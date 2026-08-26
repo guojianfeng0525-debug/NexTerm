@@ -1,4 +1,5 @@
 import { expect } from '@wdio/globals';
+import { unlockApp, waitForVisible } from './helpers/webkit';
 
 /**
  * B18 Slice A filter loop (native desktop E2E):
@@ -25,13 +26,9 @@ async function rightClick(element: WebdriverIO.Element) {
 
 async function connectPostgres() {
   const password = `E2E_${Date.now()}`;
-  await $('#app-lock-password').waitForDisplayed();
-  await $('#app-lock-password').setValue(password);
-  await $('#app-lock-confirm').setValue(password);
-  await $('#app-lock-submit, button.w-full').click();
+  await unlockApp(password);
 
-  const postgresNav = await $('[data-testid="toolbox-nav-postgres"]');
-  await postgresNav.waitForDisplayed();
+  const postgresNav = await waitForVisible('[data-testid="toolbox-nav-postgres"]');
   await postgresNav.click();
   await $('[data-testid="postgres-new-connection"]').click();
   const dialog = await $('[data-testid="postgres-connection-dialog"]');
@@ -58,7 +55,7 @@ async function openUsersTable() {
   if (!(await $('button=users').isExisting())) {
     await tablesGroup.click();
   }
-  await $('button=users').waitForDisplayed({ timeout: 15000 });
+  await waitForVisible('button=users', 15_000);
   // B21: single-click selects, double-click opens the data grid. WebDriver/
   // WebKit does not synthesize a native dblclick, so dispatch it directly.
   await browser.execute((node: HTMLElement) => {

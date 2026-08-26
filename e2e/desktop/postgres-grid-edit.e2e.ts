@@ -1,4 +1,5 @@
 import { expect } from '@wdio/globals';
+import { unlockApp, waitForVisible } from './helpers/webkit';
 
 /**
  * B17 data-grid edit loop (native desktop E2E):
@@ -16,13 +17,9 @@ async function rightClick(element: WebdriverIO.Element) {
 
 async function connectPostgres() {
   const password = `E2E_${Date.now()}`;
-  await $('#app-lock-password').waitForDisplayed();
-  await $('#app-lock-password').setValue(password);
-  await $('#app-lock-confirm').setValue(password);
-  await $('#app-lock-submit, button.w-full').click();
+  await unlockApp(password);
 
-  const postgresNav = await $('[data-testid="toolbox-nav-postgres"]');
-  await postgresNav.waitForDisplayed();
+  const postgresNav = await waitForVisible('[data-testid="toolbox-nav-postgres"]');
   await postgresNav.click();
   await $('[data-testid="postgres-new-connection"]').click();
   const dialog = await $('[data-testid="postgres-connection-dialog"]');
@@ -49,7 +46,7 @@ async function openUsersTable() {
   if (!(await $('button=users').isExisting())) {
     await tablesGroup.click();
   }
-  await $('button=users').waitForDisplayed({ timeout: 15000 });
+  await waitForVisible('button=users', 15_000);
   // B21: single-click selects, double-click opens the data grid. WebDriver/
   // WebKit does not synthesize a native dblclick, so dispatch it directly.
   await browser.execute((node: HTMLElement) => {
@@ -112,7 +109,10 @@ async function editCellAndCommit(rowIndex: number, column: number, value: string
     el.dispatchEvent(new MouseEvent('dblclick', { bubbles: true, cancelable: true, detail: 2 }));
   }, cell);
   const input = await row.$(`td:nth-child(${column}) input`);
-  await input.waitForDisplayed({ timeout: 5000 });
+  // WKWebView isDisplayed returns false for inputs (helpers/webkit.ts); the
+  // input's presence in the freshly-dblclicked cell is the edit-session
+  // signal, and the commit assertion below keeps the verification strong.
+  await input.waitForExist({ timeout: 5000 });
   await input.setValue(value);
   await browser.keys('Enter');
   await browser.waitUntil(async () => {
@@ -151,7 +151,7 @@ describe('PostgreSQL grid edit loop (B17)', () => {
     await openUsersTable();
 
     // --- INSERT: add a row, edit only username, save -----------------------
-    await $('[data-testid="postgres-add-record"]').waitForDisplayed({ timeout: 10000 });
+    await waitForVisible('[data-testid="postgres-add-record"]', 10_000);
     await $('[data-testid="postgres-add-record"]').click();
     await browser.waitUntil(async () => (await findInsertRowIndex()) !== null, {
       timeout: 5000,

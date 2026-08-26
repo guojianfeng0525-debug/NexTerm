@@ -1,4 +1,5 @@
 import { expect } from '@wdio/globals';
+import { unlockApp, waitForVisible } from './helpers/webkit';
 
 async function rightClick(element: WebdriverIO.Element) {
   await element.click({ button: 'right' });
@@ -21,14 +22,10 @@ describe('PostgreSQL visual workspace', () => {
 
   it('captures an isolated PostgreSQL workspace with live catalog data', async () => {
     const password = `E2E_${Date.now()}`;
-    await $('#app-lock-password').waitForDisplayed();
-    await $('#app-lock-password').setValue(password);
-    await $('#app-lock-confirm').setValue(password);
-    await $('#app-lock-submit, button.w-full').click();
+    await unlockApp(password);
     await configureTheme('深色');
 
-    const postgres = await $('[data-testid="toolbox-nav-postgres"]');
-    await postgres.waitForDisplayed();
+    const postgres = await waitForVisible('[data-testid="toolbox-nav-postgres"]');
     await postgres.click();
     await expect($('[data-testid="postgres-new-query"]')).toBeDisabled();
     await $('[data-testid="postgres-new-connection"]').click();
@@ -70,7 +67,7 @@ describe('PostgreSQL visual workspace', () => {
     await expect($('[data-testid="postgres-explain"]')).toBeEnabled();
     await expect($('[data-testid="postgres-new-query"]')).toBeEnabled();
     await expect($('[data-testid="postgres-disconnect"]')).toBeEnabled();
-    await $('button=users').waitForDisplayed();
+    await waitForVisible('button=users');
     await browser.saveScreenshot('./test-results/postgres/02-database-tree.png');
     await browser.saveScreenshot('./test-results/postgres/03-object-list.png');
 
@@ -137,7 +134,7 @@ describe('PostgreSQL visual workspace', () => {
     await $('[data-testid="postgres-refresh"]').click();
     const viewsGroup = await $('[data-node-id*="/group:views"]');
     await viewsGroup.click();
-    await $('button=e2e_users_view').waitForDisplayed();
+    await waitForVisible('button=e2e_users_view');
     await browser.execute((node: HTMLElement) => {
       node.dispatchEvent(new MouseEvent('dblclick', { bubbles: true, cancelable: true }));
     }, await $('button=e2e_users_view'));

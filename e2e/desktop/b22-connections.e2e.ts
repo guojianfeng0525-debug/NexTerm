@@ -13,21 +13,18 @@
  * manager dialog, grouping, color dots and status badges.
  */
 import { expect } from '@wdio/globals';
+import { unlockApp, waitForVisible } from './helpers/webkit';
 
 const UNIQUE = `b22${Date.now()}`;
 const CONN_A = `B22 Prod ${UNIQUE}`;
 const CONN_B = `B22 Dev ${UNIQUE}`;
 
 async function unlock() {
-  const password = `E2E_${UNIQUE}`;
-  await $('#app-lock-password').waitForDisplayed();
-  await $('#app-lock-password').setValue(password);
-  await $('#app-lock-confirm').setValue(password);
-  await $('#app-lock-submit, button.w-full').click();
+  await unlockApp(`E2E_${UNIQUE}`);
 }
 
 async function openPostgres() {
-  await $('[data-testid="toolbox-nav-postgres"]').waitForDisplayed();
+  await waitForVisible('[data-testid="toolbox-nav-postgres"]');
   await $('[data-testid="toolbox-nav-postgres"]').click();
 }
 

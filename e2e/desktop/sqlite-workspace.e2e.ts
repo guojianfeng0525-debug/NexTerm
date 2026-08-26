@@ -1,4 +1,5 @@
 import { expect } from '@wdio/globals';
+import { unlockApp, waitForVisible } from './helpers/webkit';
 
 async function configureTheme(label: '深色' | '浅色') {
   await $('button:has(svg.lucide-settings)').click();
@@ -20,13 +21,10 @@ describe('SQLite native workspace', () => {
     if (!fixturePath) throw new Error('SQLite E2E fixture path is unavailable');
 
     const password = `E2E_${Date.now()}`;
-    await $('#app-lock-password').waitForDisplayed();
-    await $('#app-lock-password').setValue(password);
-    await $('#app-lock-confirm').setValue(password);
-    await $('#app-lock-submit, button.w-full').click();
+    await unlockApp(password);
     await configureTheme('深色');
 
-    await $('[data-testid="toolbox-nav-sqlite"]').waitForDisplayed();
+    await waitForVisible('[data-testid="toolbox-nav-sqlite"]');
     await $('[data-testid="toolbox-nav-sqlite"]').click();
     await $('[data-testid="sqlite-new-connection"]').click();
     const dialog = await $('[data-testid="sqlite-connection-dialog"]');
@@ -47,7 +45,7 @@ describe('SQLite native workspace', () => {
     await lightDialog.$('button=打开').click();
 
     await expect($('[data-testid="sqlite-disconnect"]')).toBeEnabled();
-    await $('button=users').waitForDisplayed();
+    await waitForVisible('button=users');
     const workspace = await $('[data-testid="sqlite-workspace"]');
     const editor = await workspace.$('.cm-content');
     await editor.click();

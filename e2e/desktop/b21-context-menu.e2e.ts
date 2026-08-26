@@ -8,20 +8,16 @@
  * - disconnected state disables Open Data on object nodes
  */
 import { expect } from '@wdio/globals';
+import { unlockApp, waitForVisible } from './helpers/webkit';
 
 const UNIQUE = `ctx${Date.now()}`;
 
 async function unlock() {
-  const password = `E2E_${UNIQUE}`;
-  await $('#app-lock-password').waitForDisplayed({ timeout: 30000 });
-  await $('#app-lock-password').setValue(password);
-  await $('#app-lock-confirm').waitForDisplayed({ timeout: 10000 });
-  await $('#app-lock-confirm').setValue(password);
-  await $('#app-lock-submit, button.w-full').click();
+  await unlockApp(`E2E_${UNIQUE}`);
 }
 
 async function connectPostgres() {
-  await $('[data-testid="toolbox-nav-postgres"]').waitForDisplayed();
+  await waitForVisible('[data-testid="toolbox-nav-postgres"]');
   await $('[data-testid="toolbox-nav-postgres"]').click();
   await $('[data-testid="postgres-new-connection"]').waitForEnabled();
   await $('[data-testid="postgres-new-connection"]').click();
@@ -78,7 +74,7 @@ describe('B21 navigator context menus and open semantics', () => {
     if (!(await $('button=users').isExisting())) {
       await tablesGroup.click();
     }
-    await $('button=users').waitForDisplayed();
+    await waitForVisible('button=users');
 
     // Single-click selects but must NOT open the data grid (B21 semantics).
     const workspace = await $('[data-testid="postgres-workspace"]');
