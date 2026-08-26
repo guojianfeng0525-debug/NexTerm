@@ -1397,6 +1397,7 @@ export function ToolJarDecompiler() {
   );
 
   // Keep navigateRef fresh so the editor click handler sees the latest fn.
+  // eslint-disable-next-line @typescript-eslint/no-misused-promises
   navigateRef.current = handleNavigate;
 
   // Keep the word→reference resolver fresh (JD-GUI resolvability check).
@@ -1699,16 +1700,20 @@ export function ToolJarDecompiler() {
         setOpenTypeResults([]);
         return;
       }
-      openTypeTimerRef.current = setTimeout(async () => {
-        setOpenTypeBusy(true);
-        try {
-          const results = await jarApi.openType(projectId, value.trim(), openTypeScope);
-          setOpenTypeResults(results);
-        } catch (e) {
-          toast.error(String(e));
-        } finally {
-          setOpenTypeBusy(false);
-        }
+      // Fire-and-forget: schedule the async type-lookup but don't return the
+      // Promise to setTimeout (which expects a Timer handle, not a Promise).
+      openTypeTimerRef.current = setTimeout(() => {
+        void (async () => {
+          setOpenTypeBusy(true);
+          try {
+            const results = await jarApi.openType(projectId, value.trim(), openTypeScope);
+            setOpenTypeResults(results);
+          } catch (e) {
+            toast.error(String(e));
+          } finally {
+            setOpenTypeBusy(false);
+          }
+        })();
       }, 120);
     },
     [project, openTypeScope],

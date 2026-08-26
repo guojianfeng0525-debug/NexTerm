@@ -72,6 +72,9 @@ export default tseslint.config(
       'react-hooks/set-state-in-effect': 'warn',
       'react-hooks/refs': 'warn',
       'react-hooks/purity': 'warn',
+      // immutability (v7) raises false positives on recursive useCallback
+      // self-references and forward-declared callbacks — too noisy to error on.
+      'react-hooks/immutability': 'warn',
     },
   },
 
