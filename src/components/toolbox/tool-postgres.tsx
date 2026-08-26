@@ -46,7 +46,10 @@ import { createPostgresQueryEditorContext } from "@/lib/database/postgresql-quer
 import type { PostgresCatalogLookup } from "@/lib/postgres-completion";
 import { resolveDatabaseCommand } from "@/lib/database/command-registry";
 import { postgresqlProvider } from "@/lib/database/provider-registry";
-import { DatabaseNavigator } from "@/components/toolbox/database-navigator";
+import {
+  DatabaseNavigator,
+  type DatabaseNavigatorLoadState,
+} from "@/components/toolbox/database-navigator";
 import { DatabaseResultPane } from "@/components/toolbox/database-result-pane";
 import { DatabaseWorkspaceShell } from "@/components/toolbox/database-workspace-shell";
 import { DatabaseProviderSelect } from "@/components/toolbox/database-provider-select";
@@ -60,6 +63,7 @@ import {
   createPostgresNavigatorConnectionNode,
   getPostgresRelationReference,
   loadPostgresNavigatorChildren,
+  type PostgresNavigatorGroupLabels,
   type PostgresRelationReference,
 } from "@/lib/database/postgresql-object-loader";
 import {
@@ -92,20 +96,42 @@ const pageSize = 100;
 type NavigatorChildren = Partial<
   Record<DatabaseObjectNodeId, readonly DatabaseObjectNode[]>
 >;
+type NavigatorLoadStates = Partial<
+  Record<DatabaseObjectNodeId, DatabaseNavigatorLoadState>
+>;
 
 async function loadNavigatorChildren(
   node: DatabaseObjectNode,
-  tablesLabel: string,
+  labels: PostgresNavigatorGroupLabels,
   setNavigatorChildren: Dispatch<SetStateAction<NavigatorChildren>>,
+  setNavigatorLoadStates: Dispatch<SetStateAction<NavigatorLoadStates>>,
 ) {
+  setNavigatorLoadStates((current) => ({ ...current, [node.id]: { state: "loading" } }));
   try {
-    const children = await loadPostgresNavigatorChildren(node, tablesLabel);
+    const children = await loadPostgresNavigatorChildren(node, labels);
     setNavigatorChildren((current) => ({ ...current, [node.id]: children }));
+    setNavigatorLoadStates((current) => {
+      const { [node.id]: _loaded, ...next } = current;
+      return next;
+    });
     return children;
   } catch {
-    setNavigatorChildren((current) => ({ ...current, [node.id]: [] }));
+    setNavigatorLoadStates((current) => ({ ...current, [node.id]: { state: "error" } }));
     return [];
   }
+}
+
+function quoteQualifiedPostgresName(reference: PostgresRelationReference): string {
+  const quote = (identifier: string) => `"${identifier.replace(/"/g, '""')}"`;
+  return `${quote(reference.schema)}.${quote(reference.relation)}`;
+}
+
+function postgresNavigatorLabels(t: TFunction): PostgresNavigatorGroupLabels {
+  return {
+    tables: t("toolbox.postgres.tables"),
+    views: t("toolbox.postgres.views"),
+    materializedViews: t("toolbox.postgres.materializedViews"),
+  };
 }
 
 function newConnection(): PostgreSQLConnectionProfile {
@@ -170,6 +196,8 @@ export function ToolPostgres() {
   >({});
   const [navigatorChildren, setNavigatorChildren] =
     useState<NavigatorChildren>({});
+  const [navigatorLoadStates, setNavigatorLoadStates] =
+    useState<NavigatorLoadStates>({});
   const [selectedNavigatorNodeId, setSelectedNavigatorNodeId] =
     useState<DatabaseObjectNodeId | null>(null);
   const [tabs, setTabs] = useState<WorkspaceTab[]>([newQuery()]);
@@ -267,29 +295,33 @@ export function ToolPostgres() {
       );
       const catalog = await loadNavigatorChildren(
         connection,
-        t("toolbox.postgres.tables"),
+        postgresNavigatorLabels(t),
         setNavigatorChildren,
+        setNavigatorLoadStates,
       );
       const firstCatalog = catalog[0];
       if (!firstCatalog) return;
       const schemas = await loadNavigatorChildren(
         firstCatalog,
-        t("toolbox.postgres.tables"),
+        postgresNavigatorLabels(t),
         setNavigatorChildren,
+        setNavigatorLoadStates,
       );
       const firstSchema = schemas[0];
       if (!firstSchema) return;
       const groups = await loadNavigatorChildren(
         firstSchema,
-        t("toolbox.postgres.tables"),
+        postgresNavigatorLabels(t),
         setNavigatorChildren,
+        setNavigatorLoadStates,
       );
       const firstGroup = groups[0];
       if (firstGroup)
         await loadNavigatorChildren(
           firstGroup,
-          t("toolbox.postgres.tables"),
+          postgresNavigatorLabels(t),
           setNavigatorChildren,
+          setNavigatorLoadStates,
         );
 
       setSchema(firstSchema.label);
@@ -496,8 +528,9 @@ export function ToolPostgres() {
     if (willExpand && !navigatorChildren[node.id]) {
       void loadNavigatorChildren(
         node,
-        t("toolbox.postgres.tables"),
+        postgresNavigatorLabels(t),
         setNavigatorChildren,
+        setNavigatorLoadStates,
       );
     }
   };
@@ -510,8 +543,9 @@ export function ToolPostgres() {
         node.id,
         await loadNavigatorChildren(
           node,
-          t("toolbox.postgres.tables"),
+          postgresNavigatorLabels(t),
           setNavigatorChildren,
+          setNavigatorLoadStates,
         ),
       ] as const),
     );
@@ -735,6 +769,10 @@ export function ToolPostgres() {
               expanded={expanded}
               selectedNodeId={selectedNavigatorNodeId}
               filter={filter}
+              loadStates={navigatorLoadStates}
+              loadingLabel={t("toolbox.postgres.navigatorLoading")}
+              emptyLabel={t("toolbox.postgres.navigatorEmpty")}
+              errorLabel={t("toolbox.postgres.navigatorLoadFailed")}
               onToggle={treeToggle}
               onSelect={(node) => {
                 setSelectedNavigatorNodeId(node.id);
@@ -790,7 +828,7 @@ export function ToolPostgres() {
                 return <>
                   {relation && <ContextMenuItem disabled={!enabled("database.object.open")} onSelect={() => void browse(relation)}>{t("toolbox.postgres.openDataAction")}</ContextMenuItem>}
                   <ContextMenuItem disabled={!connected} onSelect={() => void refreshNavigator()}>{t("toolbox.postgres.refresh")}</ContextMenuItem>
-                  <ContextMenuItem disabled={!connected} onSelect={() => void copyText(node.label)}>{t("toolbox.postgres.copyName")}</ContextMenuItem>
+                  <ContextMenuItem disabled={!connected} onSelect={() => void copyText(relation ? quoteQualifiedPostgresName(relation) : node.label)}>{t("toolbox.postgres.copyName")}</ContextMenuItem>
                   {!relation && <ContextMenuItem disabled={!connected} onSelect={createQuery}>{t("toolbox.postgres.newQuery")}</ContextMenuItem>}
                 </>;
               }}

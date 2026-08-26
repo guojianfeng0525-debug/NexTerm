@@ -19,7 +19,7 @@ export const postgresqlProvider: DatabaseProviderDescriptor = {
   },
   objectModel: {
     hierarchy: ["connection", "catalog", "schema", "group", "object"],
-    objectRoles: ["relation"],
+    objectRoles: ["table", "view", "materializedView"],
   },
 };
 

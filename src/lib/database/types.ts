@@ -15,14 +15,17 @@ export type DatabaseObjectNodeKind =
   | "group"
   | "object";
 
-export type DatabaseObjectRole = "relation";
+export type DatabaseObjectRole = "relation" | "table" | "view" | "materializedView";
 
 export type DatabaseObjectIconRole =
   | "connection"
   | "catalog"
   | "schema"
   | "group"
-  | "relation";
+  | "relation"
+  | "table"
+  | "view"
+  | "materializedView";
 
 export type DatabaseObjectNodeId = string & {
   readonly __databaseObjectNodeId: unique symbol;

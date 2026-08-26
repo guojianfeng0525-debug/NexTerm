@@ -68,7 +68,7 @@ describe("PostgreSQL object loader", () => {
     const invoke = vi.fn(async (command: string) => {
       if (command === "postgres_catalog_schemas") return ["public"];
       if (command === "postgres_catalog_search") {
-        return [{ kind: "relation", schema: "public", name: "users" }];
+        return [{ kind: "relation", schema: "public", name: "users", relationKind: "r" }];
       }
       return [];
     });
@@ -79,10 +79,11 @@ describe("PostgreSQL object loader", () => {
       name: "Primary",
       database: "db-a",
     });
-    const [catalog] = await loadPostgresNavigatorChildren(connection, "Tables");
-    const [schema] = await loadPostgresNavigatorChildren(catalog, "Tables");
-    const [group] = await loadPostgresNavigatorChildren(schema, "Tables");
-    const [relation] = await loadPostgresNavigatorChildren(group, "Tables");
+    const labels = { tables: "Tables", views: "Views", materializedViews: "Materialized Views" };
+    const [catalog] = await loadPostgresNavigatorChildren(connection, labels);
+    const [schema] = await loadPostgresNavigatorChildren(catalog, labels);
+    const [group] = await loadPostgresNavigatorChildren(schema, labels);
+    const [relation] = await loadPostgresNavigatorChildren(group, labels);
 
     expect(catalog.parentId).toBe(connection.id);
     expect(schema.parentId).toBe(catalog.id);
@@ -91,7 +92,7 @@ describe("PostgreSQL object loader", () => {
     expect(relation).toMatchObject({
       providerId: "postgresql",
       kind: "object",
-      objectRole: "relation",
+      objectRole: "table",
       expandable: false,
       openable: true,
     });
@@ -100,6 +101,36 @@ describe("PostgreSQL object loader", () => {
       database: "db-a",
       schema: "public",
       relation: "users",
+      objectRole: "table",
     });
+  });
+
+  it("separates table, view, and materialized-view identities within a schema", async () => {
+    const invoke = vi.fn(async (command: string) => {
+      if (command === "postgres_catalog_schemas") return ["public"];
+      if (command === "postgres_catalog_search") {
+        return [
+          { kind: "relation", schema: "public", name: "users", relationKind: "r" },
+          { kind: "relation", schema: "public", name: "active_users", relationKind: "v" },
+          { kind: "relation", schema: "public", name: "user_summary", relationKind: "m" },
+        ];
+      }
+      return [];
+    });
+    Object.assign(window, { __TAURI_INTERNALS__: { invoke } });
+    const labels = { tables: "Tables", views: "Views", materializedViews: "Materialized Views" };
+    const connection = createPostgresNavigatorConnectionNode({ id: "connection-a", name: "Primary", database: "db-a" });
+    const [catalog] = await loadPostgresNavigatorChildren(connection, labels);
+    const schema = (await loadPostgresNavigatorChildren(catalog, labels))[0]!;
+    const [tables, views, materializedViews] = await loadPostgresNavigatorChildren(schema, labels);
+    const [table] = await loadPostgresNavigatorChildren(tables!, labels);
+    const [view] = await loadPostgresNavigatorChildren(views!, labels);
+    const [materializedView] = await loadPostgresNavigatorChildren(materializedViews!, labels);
+
+    expect(table).toMatchObject({ label: "users", objectRole: "table", iconRole: "table" });
+    expect(view).toMatchObject({ label: "active_users", objectRole: "view", iconRole: "view" });
+    expect(materializedView).toMatchObject({ label: "user_summary", objectRole: "materializedView", iconRole: "materializedView" });
+    expect(table!.id).not.toBe(view!.id);
+    expect(view!.id).not.toBe(materializedView!.id);
   });
 });

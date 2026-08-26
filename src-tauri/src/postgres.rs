@@ -197,6 +197,7 @@ pub struct PostgresCatalogItem {
     pub relation: Option<String>,
     pub data_type: Option<String>,
     pub signature: Option<String>,
+    pub relation_kind: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -636,7 +637,8 @@ pub async fn postgres_catalog_search(
             kind: request.kind.clone(), schema: Some(schema), name,
             relation: if request.kind == "column" { request.relation.clone() } else { None },
             data_type: if request.kind == "column" || request.kind == "type" { Some(detail.clone()) } else { None },
-            signature: if request.kind == "function" { Some(detail) } else { None },
+            signature: if request.kind == "function" { Some(detail.clone()) } else { None },
+            relation_kind: if request.kind == "relation" { Some(detail) } else { None },
         })
     }).collect()
 }

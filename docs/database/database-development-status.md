@@ -189,6 +189,13 @@ Not migrated:
 - PostgreSQL nullable-column metadata now comes from `pg_attribute`; editable nullable cells can explicitly stage SQL `NULL`, independently from empty strings.
 - Native acceptance uses semantic enabled/row waits rather than fixed connection or browse delays. PostgreSQL completed three consecutive live-fixture passes, followed sequentially by SQLite and MySQL passes on the same debug binary.
 
+### Feature Batch 16 - PostgreSQL Navigator & Object Coverage - COMPLETE
+
+- Scope was derived from the Navigator's current data/query workflows, not a PostgreSQL catalog inventory. Tables, views, and already-browseable materialized views now have distinct PostgreSQL-correct groups and stable identities.
+- Functions, procedures, sequences, indexes, constraints, triggers, columns, and administration objects remain deferred because no current Navigator caller or workspace action consumes them.
+- The PostgreSQL catalog adapter preserves `relkind`; the shared Navigator renders explicit loading, empty, and error states. Relation copy-name now uses a quoted schema-qualified identity.
+- Native PostgreSQL E2E creates a view, refreshes the Navigator, verifies its Views group, and opens the view data. SQLite and MySQL native regressions pass sequentially.
+
 ## Last Known Verification
 
 These are the latest known results from Feature Batch 15 verification.
@@ -317,4 +324,4 @@ Every database batch that changes visible UI must include a real Tauri visual re
 - Known warnings: historical Rust warnings may remain; they were not Slice 2 build failures.
 - Generic command execution remains explicitly out of scope.
 
-Last updated: 2026-08-25
+Last updated: 2026-08-26

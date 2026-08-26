@@ -22,7 +22,7 @@ test.describe('PostgreSQL workspace', () => {
             }
             if (command === 'postgres_catalog_search') {
               window.__postgresRelationRequestCount = (window.__postgresRelationRequestCount ?? 0) + 1;
-              return Promise.resolve([{ kind: 'relation', schema: 'public', name: 'users' }]);
+              return Promise.resolve([{ kind: 'relation', schema: 'public', name: 'users', relationKind: 'r' }]);
             }
             if (command === 'postgres_table_data') {
               const offset = args?.request?.offset ?? 0;

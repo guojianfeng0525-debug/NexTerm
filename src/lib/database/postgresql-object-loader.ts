@@ -9,6 +9,7 @@ interface PostgresCatalogItem {
   readonly kind: string;
   readonly schema?: string;
   readonly name: string;
+  readonly relationKind?: "r" | "p" | "v" | "m";
 }
 
 export interface PostgresNavigatorConnection {
@@ -22,6 +23,13 @@ export interface PostgresRelationReference {
   readonly database: string;
   readonly schema: string;
   readonly relation: string;
+  readonly objectRole?: "table" | "view" | "materializedView";
+}
+
+export interface PostgresNavigatorGroupLabels {
+  readonly tables: string;
+  readonly views: string;
+  readonly materializedViews: string;
 }
 
 function createReference(path: readonly string[]): DatabaseObjectReference {
@@ -63,7 +71,7 @@ function postgresReference(node: DatabaseObjectNode): readonly string[] | null {
 /** Loads only the direct children for a PostgreSQL Navigator node. */
 export async function loadPostgresNavigatorChildren(
   node: DatabaseObjectNode,
-  tablesLabel: string,
+  labels: PostgresNavigatorGroupLabels,
 ): Promise<readonly DatabaseObjectNode[]> {
   const path = postgresReference(node);
   if (!path) return [];
@@ -131,28 +139,83 @@ export async function loadPostgresNavigatorChildren(
             { kind: "connection", value: connectionId },
             { kind: "catalog", value: database },
             { kind: "schema", value: schema },
-            { kind: "group", value: "relations" },
+            { kind: "group", value: "tables" },
           ],
         }),
         parentId: node.id,
         providerId: "postgresql",
         kind: "group",
-        label: tablesLabel,
+        label: labels.tables,
         iconRole: "group",
         expandable: true,
         selectable: true,
         openable: false,
-        reference: createReference([connectionId, database, schema, "relations"]),
+        reference: createReference([connectionId, database, schema, "tables"]),
+      },
+      {
+        id: createDatabaseObjectNodeId({
+          providerId: "postgresql",
+          connectionId,
+          path: [
+            { kind: "connection", value: connectionId },
+            { kind: "catalog", value: database },
+            { kind: "schema", value: schema },
+            { kind: "group", value: "views" },
+          ],
+        }),
+        parentId: node.id,
+        providerId: "postgresql",
+        kind: "group",
+        label: labels.views,
+        iconRole: "group",
+        expandable: true,
+        selectable: true,
+        openable: false,
+        reference: createReference([connectionId, database, schema, "views"]),
+      },
+      {
+        id: createDatabaseObjectNodeId({
+          providerId: "postgresql",
+          connectionId,
+          path: [
+            { kind: "connection", value: connectionId },
+            { kind: "catalog", value: database },
+            { kind: "schema", value: schema },
+            { kind: "group", value: "materializedViews" },
+          ],
+        }),
+        parentId: node.id,
+        providerId: "postgresql",
+        kind: "group",
+        label: labels.materializedViews,
+        iconRole: "group",
+        expandable: true,
+        selectable: true,
+        openable: false,
+        reference: createReference([connectionId, database, schema, "materializedViews"]),
       },
     ];
   }
 
-  if (node.kind === "group" && path.length === 4 && path[3] === "relations") {
+  if (node.kind === "group" && path.length === 4) {
     const [connectionId, database, schema] = path;
     const relations = await invoke<PostgresCatalogItem[]>("postgres_catalog_search", {
       request: { connectionId, kind: "relation", schema },
     });
-    return relations.map((relation) => ({
+    const group = path[3];
+    const relationRole = (relation: PostgresCatalogItem) => {
+      if (relation.relationKind === "v") return "view" as const;
+      if (relation.relationKind === "m") return "materializedView" as const;
+      return "table" as const;
+    };
+    return relations.filter((relation) => {
+      const role = relationRole(relation);
+      return (group === "tables" && role === "table") ||
+        (group === "views" && role === "view") ||
+        (group === "materializedViews" && role === "materializedView");
+    }).map((relation) => {
+      const objectRole = relationRole(relation);
+      return {
       id: createDatabaseObjectNodeId({
         providerId: "postgresql",
         connectionId,
@@ -160,21 +223,22 @@ export async function loadPostgresNavigatorChildren(
           { kind: "connection", value: connectionId },
           { kind: "catalog", value: database },
           { kind: "schema", value: schema },
-          { kind: "group", value: "relations" },
+          { kind: "group", value: group },
           { kind: "object", value: relation.name },
         ],
       }),
       parentId: node.id,
       providerId: "postgresql",
       kind: "object",
-      objectRole: "relation",
+      objectRole,
       label: relation.name,
-      iconRole: "relation",
+      iconRole: objectRole,
       expandable: false,
       selectable: true,
       openable: true,
-      reference: createReference([connectionId, database, schema, relation.name]),
-    }));
+      reference: createReference([connectionId, database, schema, relation.name, objectRole]),
+    };
+    });
   }
 
   return [];
@@ -187,12 +251,12 @@ export function getPostgresRelationReference(
   if (
     !path ||
     node.kind !== "object" ||
-    node.objectRole !== "relation" ||
-    path.length !== 4
+    (node.objectRole !== "table" && node.objectRole !== "view" && node.objectRole !== "materializedView") ||
+    path.length !== 5
   ) {
     return null;
   }
 
-  const [connectionId, database, schema, relation] = path;
-  return { connectionId, database, schema, relation };
+  const [connectionId, database, schema, relation, objectRole] = path;
+  return { connectionId, database, schema, relation, objectRole: objectRole as PostgresRelationReference["objectRole"] };
 }

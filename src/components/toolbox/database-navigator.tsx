@@ -3,7 +3,9 @@ import {
   ChevronDown,
   ChevronRight,
   Database,
+  Eye,
   ListTree,
+  Loader2,
   Table2,
 } from "lucide-react";
 import type {
@@ -28,7 +30,17 @@ function nodeIcon(node: DatabaseObjectNode): ReactNode {
       return <Table2 className="h-3.5 w-3.5 text-primary" />;
     case "relation":
       return <Table2 className="h-3.5 w-3.5 text-muted-foreground" />;
+    case "table":
+      return <Table2 className="h-3.5 w-3.5 text-muted-foreground" />;
+    case "view":
+      return <Eye className="h-3.5 w-3.5 text-muted-foreground" />;
+    case "materializedView":
+      return <Eye className="h-3.5 w-3.5 text-muted-foreground" />;
   }
+}
+
+export interface DatabaseNavigatorLoadState {
+  readonly state: "loading" | "error";
 }
 
 interface DatabaseNavigatorProps {
@@ -39,6 +51,12 @@ interface DatabaseNavigatorProps {
   readonly expanded: Readonly<Partial<Record<DatabaseObjectNodeId, boolean>>>;
   readonly selectedNodeId: DatabaseObjectNodeId | null;
   readonly filter: string;
+  readonly loadStates?: Readonly<
+    Partial<Record<DatabaseObjectNodeId, DatabaseNavigatorLoadState>>
+  >;
+  readonly loadingLabel?: string;
+  readonly emptyLabel?: string;
+  readonly errorLabel?: string;
   readonly onToggle: (node: DatabaseObjectNode) => void;
   readonly onSelect: (node: DatabaseObjectNode) => void;
   readonly onOpen: (node: DatabaseObjectNode) => void;
@@ -51,6 +69,10 @@ export function DatabaseNavigator({
   expanded,
   selectedNodeId,
   filter,
+  loadStates,
+  loadingLabel,
+  emptyLabel,
+  errorLabel,
   onToggle,
   onSelect,
   onOpen,
@@ -61,12 +83,12 @@ export function DatabaseNavigator({
     nodes.map((node) => {
       const isExpanded = expanded[node.id] ?? false;
       const children = childrenByParent[node.id] ?? [];
-      const isFilteredRelation =
-        node.objectRole === "relation" &&
+      const isFilteredObject =
+        node.kind === "object" &&
         normalizedFilter.length > 0 &&
         !node.label.toLowerCase().includes(normalizedFilter);
 
-      if (isFilteredRelation) return null;
+      if (isFilteredObject) return null;
 
       const selected = selectedNodeId === node.id;
       return (
@@ -106,7 +128,27 @@ export function DatabaseNavigator({
               </ContextMenuContent>
             )}
           </ContextMenu>
-          {node.expandable && isExpanded && renderNodes(children, depth + 1)}
+          {node.expandable && isExpanded && (
+            <>
+              {renderNodes(children, depth + 1)}
+              {loadStates?.[node.id]?.state === "loading" && (
+                <p className="flex h-6 items-center gap-1 px-2 text-[11px] text-muted-foreground" style={{ marginLeft: (depth + 1) * 14 }}>
+                  <Loader2 className="h-3 w-3 animate-spin" />
+                  {loadingLabel}
+                </p>
+              )}
+              {loadStates?.[node.id]?.state === "error" && (
+                <p className="h-6 px-2 text-[11px] leading-6 text-destructive" style={{ marginLeft: (depth + 1) * 14 }}>
+                  {errorLabel}
+                </p>
+              )}
+              {childrenByParent[node.id] && !children.length && !loadStates?.[node.id] && (
+                <p className="h-6 px-2 text-[11px] leading-6 text-muted-foreground" style={{ marginLeft: (depth + 1) * 14 }}>
+                  {emptyLabel}
+                </p>
+              )}
+            </>
+          )}
         </div>
       );
     });

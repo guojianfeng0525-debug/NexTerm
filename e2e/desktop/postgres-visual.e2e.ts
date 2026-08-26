@@ -104,7 +104,7 @@ describe('PostgreSQL visual workspace', () => {
     await browser.saveScreenshot('./test-results/database-visual/postgres-workspace-small-after.png');
     await browser.setWindowSize(2048, 1200);
 
-    const tablesGroup = await $('[data-node-id*="/group:relations"]');
+    const tablesGroup = await $('[data-node-id*="/group:tables"]');
     await tablesGroup.click();
     await expect($('button=users')).not.toBeExisting();
     await tablesGroup.click();
@@ -125,6 +125,20 @@ describe('PostgreSQL visual workspace', () => {
     await workspace.$('tbody tr').waitForDisplayed();
     await browser.saveScreenshot('./test-results/postgres/06-table-data.png');
     await expect($('button=users')).toBeDisplayed();
+
+    await workspace.$('button=Query').click();
+    const queryEditor = await workspace.$('.cm-content');
+    await queryEditor.click();
+    await queryEditor.clearValue();
+    await queryEditor.setValue('CREATE OR REPLACE VIEW public.e2e_users_view AS SELECT id, username FROM public.users;');
+    await $('[data-testid="postgres-run"]').click();
+    await $('[data-testid="postgres-refresh"]').click();
+    const viewsGroup = await $('[data-node-id*="/group:views"]');
+    await viewsGroup.click();
+    await $('button=e2e_users_view').waitForDisplayed();
+    await $('button=e2e_users_view').click();
+    await workspace.$('tbody tr').waitForDisplayed();
+    await browser.saveScreenshot('./test-results/postgres/06b-view-data.png');
 
     await $('[data-testid="postgres-disconnect"]').click();
     await expect($('[data-testid="postgres-connect"]')).toBeEnabled();
