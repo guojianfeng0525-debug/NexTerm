@@ -45,6 +45,8 @@ export interface FilterSortDialogLabels {
   readonly value: string;
   /** Hint shown in the value input when the `like` operator is selected. */
   readonly valueLikeHint: string;
+  /** Warning shown when a value-operator condition has an empty value. */
+  readonly valueEmptyWarning: string;
   readonly addCondition: string;
   readonly removeCondition: string;
   readonly logicAnd: string;
@@ -229,6 +231,16 @@ export function FilterSortDialog({
                 </div>
               ))}
             </div>
+            {conditions.some(
+              (condition) =>
+                condition.column &&
+                conditionNeedsValue(condition.operator) &&
+                condition.value === "",
+            ) && (
+              <p className="mt-1 text-[11px] text-amber-600">
+                {labels.valueEmptyWarning}
+              </p>
+            )}
             <div className="mt-1.5 flex items-center gap-2">
               <Button
                 type="button"

@@ -192,6 +192,9 @@ interface CodeEditorProps {
   className?: string;
   /** Provider-neutral database query context. */
   queryContext?: DatabaseQueryEditorContext;
+  /** Exposes the underlying CodeMirror EditorView (B19: statement select,
+   * comment toggling, selection access). */
+  editorRef?: (view: EditorView | null) => void;
 }
 
 export function CodeEditor({
@@ -203,9 +206,11 @@ export function CodeEditor({
   dark = true,
   className = "",
   queryContext,
+  editorRef,
 }: CodeEditorProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
+  const editorRefRef = useRef(editorRef);
   const onChangeRef = useRef(onChange);
   const queryContextRef = useRef<DatabaseQueryEditorContext>(queryContext ?? genericSqlQueryEditorContext);
   const { t } = useTranslation();
@@ -215,6 +220,14 @@ export function CodeEditor({
   const [searchText, setSearchText] = useState("");
   const [searchCount, setSearchCount] = useState(0);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
+
+  // Keep the editorRef callback fresh and call it on view create/destroy.
+  useEffect(() => {
+    editorRefRef.current = editorRef;
+  }, [editorRef]);
+  useEffect(() => {
+    editorRefRef.current?.(viewRef.current);
+  }, []);
 
   // Reload config whenever it changes in settings
   useEffect(() => {
@@ -351,10 +364,12 @@ export function CodeEditor({
     });
 
     viewRef.current = view;
+    editorRefRef.current?.(view);
 
     return () => {
       view.destroy();
       viewRef.current = null;
+      editorRefRef.current?.(null);
     };
     // Only recreate when language/readOnly/dark changes, not on every value change
     // eslint-disable-next-line react-hooks/exhaustive-deps

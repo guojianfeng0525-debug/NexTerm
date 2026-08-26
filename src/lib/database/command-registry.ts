@@ -26,6 +26,9 @@ export const DATABASE_COMMAND_IDS = [
   "database.object.copyName",
   "database.query.execute",
   "database.query.explain",
+  "database.query.toggleComment",
+  "database.query.openFile",
+  "database.query.stop",
   "database.tab.close",
   "database.tab.closeOthers",
   "database.result.copyCell",
@@ -65,6 +68,11 @@ export interface DatabaseCommandDescriptor {
   readonly scopes: readonly DatabaseCommandScope[];
   readonly requiredCapabilities: readonly DatabaseCommandCapabilityRequirement[];
   readonly connectionStates: readonly DatabaseConnectionState[];
+  /**
+   * Navicat default keyboard binding (B20), e.g. "Ctrl+Shift+R". The router
+   * reads this to build the active binding table; unset = no Navicat binding.
+   */
+  readonly defaultBinding?: string;
 }
 
 export type DatabaseCommandCapabilityRequirement =
@@ -143,6 +151,7 @@ const commands: readonly DatabaseCommandDescriptor[] = [
     scopes: ["DATABASE", "NAVIGATOR", "WORKSPACE"],
     requiredCapabilities: [],
     connectionStates: ["connected"],
+    defaultBinding: "Ctrl+N",
   },
   {
     id: "database.object.open",
@@ -173,6 +182,7 @@ const commands: readonly DatabaseCommandDescriptor[] = [
     scopes: ["QUERY_EDITOR"],
     requiredCapabilities: [],
     connectionStates: ["connected"],
+    defaultBinding: "Ctrl+Shift+R",
   },
   {
     id: "database.query.explain",
@@ -182,6 +192,31 @@ const commands: readonly DatabaseCommandDescriptor[] = [
       { kind: "explain", supportedModes: ["text", "visual"] },
     ],
     connectionStates: ["connected"],
+    defaultBinding: "Ctrl+Shift+E",
+  },
+  {
+    id: "database.query.toggleComment",
+    labelKey: "database.command.query.toggleComment",
+    scopes: ["QUERY_EDITOR"],
+    requiredCapabilities: [],
+    connectionStates: ["connected"],
+    defaultBinding: "Ctrl+/",
+  },
+  {
+    id: "database.query.openFile",
+    labelKey: "database.command.query.openFile",
+    scopes: ["QUERY_EDITOR"],
+    requiredCapabilities: [],
+    connectionStates: ["connected"],
+    defaultBinding: "Ctrl+O",
+  },
+  {
+    id: "database.query.stop",
+    labelKey: "database.command.query.stop",
+    scopes: ["QUERY_EDITOR"],
+    requiredCapabilities: [],
+    connectionStates: ["connected"],
+    defaultBinding: "Ctrl+T",
   },
   {
     id: "database.tab.close",
@@ -252,6 +287,7 @@ const commands: readonly DatabaseCommandDescriptor[] = [
     scopes: ["DATA_GRID"],
     requiredCapabilities: [{ kind: "boolean", capability: "supportsResultEditing" }],
     connectionStates: ["connected"],
+    defaultBinding: "Insert",
   },
   {
     id: "database.data.deleteRecord",
@@ -259,6 +295,7 @@ const commands: readonly DatabaseCommandDescriptor[] = [
     scopes: ["DATA_GRID"],
     requiredCapabilities: [{ kind: "boolean", capability: "supportsResultEditing" }],
     connectionStates: ["connected"],
+    defaultBinding: "Ctrl+Delete",
   },
   {
     id: "database.data.saveChanges",
@@ -266,6 +303,7 @@ const commands: readonly DatabaseCommandDescriptor[] = [
     scopes: ["DATA_GRID"],
     requiredCapabilities: [{ kind: "boolean", capability: "supportsResultEditing" }],
     connectionStates: ["connected"],
+    defaultBinding: "Ctrl+S",
   },
   {
     id: "database.data.revertChanges",
@@ -294,6 +332,7 @@ const commands: readonly DatabaseCommandDescriptor[] = [
     scopes: ["DATA_GRID"],
     requiredCapabilities: [],
     connectionStates: ["connected"],
+    defaultBinding: "Ctrl+R",
   },
   {
     id: "database.data.clearFilter",
@@ -301,6 +340,7 @@ const commands: readonly DatabaseCommandDescriptor[] = [
     scopes: ["DATA_GRID"],
     requiredCapabilities: [],
     connectionStates: ["connected"],
+    defaultBinding: "Escape",
   },
   {
     id: "database.layout.freezeColumn",
@@ -387,4 +427,17 @@ export function resolveDatabaseCommand(
   }
 
   return { state: "enabled", descriptor };
+}
+
+/** All commands that declare a Navicat default binding (B20). */
+export function commandsWithBindings(): Array<{
+  readonly commandId: DatabaseCommandId;
+  readonly combo: string;
+}> {
+  return commands
+    .filter((command) => typeof command.defaultBinding === "string")
+    .map((command) => ({
+      commandId: command.id,
+      combo: command.defaultBinding as string,
+    }));
 }

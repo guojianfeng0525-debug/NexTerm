@@ -129,7 +129,7 @@ export function BetterEditor({ kind, bytes, onSave, onError }: BetterEditorProps
     <Suspense fallback={fallback}>
       <div className="h-full">
         <DocxEditor
-          documentBuffer={bytes as unknown as ArrayBuffer}
+          documentBuffer={bytes}
           onSave={(b: ArrayBuffer) => onSave(new Uint8Array(b))}
           onError={onError}
           showFileOpen={false}

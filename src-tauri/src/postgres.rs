@@ -11,22 +11,51 @@ use russh::{
 use serde::{Deserialize, Serialize};
 use sha2_10::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::io::Cursor;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio_postgres::{tls::MakeTlsConnect, Client, NoTls, SimpleQueryMessage};
 use tokio_postgres_rustls::MakeRustlsConnect;
+use tokio_util::sync::CancellationToken;
 
 const MAX_QUERY_ROWS: usize = 1_000;
 const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+/// Grace period the cancel/timeout path waits for the in-flight query future
+/// to settle after a server-side `pg_cancel_backend` (security constraint
+/// §4.2.1). Past the grace the connection is torn down instead.
+const CANCEL_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+/// Maximum bound parameters accepted by `postgres_execute_parameterized`
+/// (security constraint §4.3.1).
+const MAX_PARAMETER_COUNT: usize = 256;
+/// Maximum size of a single bound parameter value (1 MiB).
+const MAX_PARAMETER_VALUE_LEN: usize = 1024 * 1024;
+/// Maximum SQL text length for the parameterized command (4 MiB).
+const MAX_PARAMETERIZED_SQL_LEN: usize = 4 * 1024 * 1024;
 
 #[derive(Default)]
 pub struct PostgresState {
     clients: RwLock<HashMap<String, Arc<Client>>>,
+    /// In-progress transaction markers per connection: `None`/absent = no
+    /// transaction, `Some("save")` = a `postgres_save_table_changes` run is in
+    /// progress, `Some("manual")` = an explicit `postgres_transaction` begin.
+    /// Short critical sections only; guards are never held across `.await`.
+    txn_modes: std::sync::RwLock<HashMap<String, String>>,
+    /// Backend pid per connection, fetched once at connect time with
+    /// `SELECT pg_backend_pid()` so the cancel path can target it.
+    backends: std::sync::RwLock<HashMap<String, i32>>,
+    /// Connection parameters kept in memory so cancellation can run
+    /// `pg_cancel_backend` over an independent connection. Never logged,
+    /// never persisted; cleared on disconnect with the client itself.
+    cancel_configs: RwLock<HashMap<String, Arc<PostgresConnectRequest>>>,
+    /// Cancellation tokens for running long queries, keyed by connection and
+    /// then by caller-provided run id. The cancel path only reads this map and
+    /// triggers tokens — it never takes any transaction lock.
+    running: std::sync::RwLock<HashMap<String, HashMap<u64, CancellationToken>>>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct PostgresConnectRequest {
     pub connection_id: String,
@@ -44,7 +73,7 @@ pub struct PostgresConnectRequest {
     pub ssh: Option<PostgresSshConfig>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct PostgresSshConfig {
     pub host: String,
@@ -63,6 +92,21 @@ pub struct PostgresSshConfig {
 pub struct PostgresExecuteRequest {
     pub connection_id: String,
     pub sql: String,
+    pub max_rows: Option<usize>,
+    /// Optional caller-supplied run id. When present, the query can be
+    /// cancelled through `postgres_cancel(connectionId, runId)`.
+    #[serde(default)]
+    pub run_id: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PostgresExecuteParameterizedRequest {
+    pub connection_id: String,
+    pub sql: String,
+    /// Bound via extended protocol; `None` = SQL NULL, `Some("")` = empty
+    /// string (security §4.3.1 — values are never spliced into the SQL).
+    pub params: Vec<Option<String>>,
     pub max_rows: Option<usize>,
 }
 
@@ -151,6 +195,47 @@ pub struct PostgresTableDeleteRequest {
     pub schema: String,
     pub table: String,
     pub key_values: HashMap<String, String>,
+}
+
+/// One step of a transactional table-data save (M2/M3/M4, security §1.5
+/// form B): the whole BEGIN..COMMIT runs inside a single command so no
+/// interleaving IPC window exists. The frontend sends every row change as a
+/// flat list; each step is validated against the table's live schema.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PostgresSaveStep {
+    /// "update" | "insert" | "delete".
+    pub kind: String,
+    /// For update/delete: primary-key values locating the target row.
+    #[serde(default)]
+    pub key_values: HashMap<String, String>,
+    /// For update: column -> new value (None = SQL NULL).
+    #[serde(default)]
+    pub changes: HashMap<String, Option<String>>,
+    /// For insert: column -> value (absent columns keep server DEFAULT).
+    #[serde(default)]
+    pub values: HashMap<String, Option<String>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PostgresSaveTableChangesRequest {
+    pub connection_id: String,
+    pub schema: String,
+    pub table: String,
+    /// Every update/insert/delete to run inside one transaction, in order.
+    pub steps: Vec<PostgresSaveStep>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PostgresSaveTableChangesResult {
+    /// Generated primary-key values per insert step (index-aligned; empty
+    /// map when the table has no primary key or the step is not an insert).
+    pub insert_primary_keys: Vec<HashMap<String, String>>,
+    /// Affected-row count for each update/delete step (1 expected; a 0 or
+    /// >1 fails the whole transaction — M3).
+    pub affected_rows: Vec<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -550,11 +635,30 @@ pub async fn postgres_connect(
         .map_err(|error| format!("Failed to read PostgreSQL server version: {error}"))?
         .try_get::<_, String>(0)
         .map_err(|error| format!("Failed to decode PostgreSQL server version: {error}"))?;
+    // Fetch the backend pid once so `postgres_cancel` can target it later
+    // without touching the running query's stream (security constraint
+    // §4.2.1: pid must be captured at connect time).
+    let pid = client
+        .query_one("SELECT pg_backend_pid()", &[])
+        .await
+        .map_err(|error| format!("Failed to read PostgreSQL backend pid: {error}"))?
+        .try_get::<_, i32>(0)
+        .map_err(|error| format!("Failed to decode PostgreSQL backend pid: {error}"))?;
+    {
+        let mut clients = state.clients.write().await;
+        clients.insert(request.connection_id.clone(), client);
+    }
     state
-        .clients
+        .cancel_configs
         .write()
         .await
-        .insert(request.connection_id.clone(), client);
+        .insert(request.connection_id.clone(), Arc::new(request.clone()));
+    if let Ok(mut backends) = state.backends.write() {
+        backends.insert(request.connection_id.clone(), pid);
+    }
+    if let Ok(mut modes) = state.txn_modes.write() {
+        modes.remove(&request.connection_id);
+    }
     Ok(PostgresConnectionStatus {
         connection_id: request.connection_id,
         connected: true,
@@ -569,7 +673,76 @@ pub async fn postgres_disconnect(
     state: tauri::State<'_, PostgresState>,
 ) -> Result<(), String> {
     state.clients.write().await.remove(&connection_id);
+    if let Ok(mut backends) = state.backends.write() {
+        backends.remove(&connection_id);
+    }
+    if let Ok(mut modes) = state.txn_modes.write() {
+        modes.remove(&connection_id);
+    }
+    if let Ok(mut running) = state.running.write() {
+        // Trigger tokens so any waiting execute future wakes up, then drop
+        // the registry entry (disconnect cleanup, security constraint §1.1).
+        if let Some(tokens) = running.remove(&connection_id) {
+            for (_, token) in tokens {
+                token.cancel();
+            }
+        }
+    }
+    state.cancel_configs.write().await.remove(&connection_id);
     Ok(())
+}
+
+/// Shared helper: cancels the backend over an independent connection and then
+/// waits for the query future to settle within `CANCEL_GRACE`. Returns `Ok(
+/// ())` when the future settled (cancelled or completed); returns `Err` when
+/// the backend did not respond to cancellation, in which case the caller must
+/// tear the connection down (security constraint §4.2.1).
+async fn cancel_and_settle(
+    connection_id: &str,
+    token: &CancellationToken,
+    future: impl std::future::Future<Output = ()>,
+) -> Result<(), String> {
+    token.cancel();
+    if settle_within_grace(future).await {
+        return Ok(());
+    }
+    Err(format!(
+        "PostgreSQL query on connection {connection_id} did not respond to cancellation within the grace period"
+    ))
+}
+
+/// Races the query-completion future against `CANCEL_GRACE`. `true` = the
+/// future settled (query finished or cancelled); `false` = grace expired and
+/// the connection must be torn down.
+async fn settle_within_grace(future: impl std::future::Future<Output = ()>) -> bool {
+    tokio::time::timeout(CANCEL_GRACE, future).await.is_ok()
+}
+
+/// Drops a client from the registry so the server sees a disconnect and
+/// aborts the in-flight query plus any open transaction (security constraint
+/// §3.1 item 3: teardown is the only reliable fallback). `reason` explains
+/// the reset in the returned error.
+async fn teardown_connection(
+    state: &PostgresState,
+    connection_id: &str,
+    reason: &str,
+) -> String {
+    state.clients.write().await.remove(connection_id);
+    if let Ok(mut backends) = state.backends.write() {
+        backends.remove(connection_id);
+    }
+    if let Ok(mut modes) = state.txn_modes.write() {
+        modes.remove(connection_id);
+    }
+    if let Ok(mut running) = state.running.write() {
+        if let Some(tokens) = running.remove(connection_id) {
+            for (_, token) in tokens {
+                token.cancel();
+            }
+        }
+    }
+    state.cancel_configs.write().await.remove(connection_id);
+    format!("{reason}; connection reset to clear a stuck query")
 }
 
 #[tauri::command]
@@ -591,10 +764,59 @@ pub async fn postgres_execute(
         .max_rows
         .unwrap_or(MAX_QUERY_ROWS)
         .clamp(1, MAX_QUERY_ROWS);
-    let messages = tokio::time::timeout(QUERY_TIMEOUT, client.simple_query(&request.sql))
-        .await
-        .map_err(|_| "PostgreSQL query timed out")?
-        .map_err(|error| format!("PostgreSQL query failed: {error}"))?;
+    let token = register_run(&state, &request.connection_id, request.run_id);
+    // The query future is raced against the cancellation token and the
+    // 30s timeout. On cancellation the backend gets pg_cancel_backend over
+    // an independent connection; if it still does not settle within the
+    // grace period the connection is torn down (security constraint §4.2).
+    let outcome = {
+        let cancel_future = token.clone().cancelled_owned();
+        let query_future = client.simple_query(&request.sql);
+        tokio::pin!(cancel_future);
+        tokio::pin!(query_future);
+        let query_task = std::future::poll_fn(|cx| {
+            if cancel_future.as_mut().poll(cx).is_ready() {
+                return std::task::Poll::Ready(Err(ExecAbort::Cancelled));
+            }
+            match query_future.as_mut().poll(cx) {
+                std::task::Poll::Ready(result) => std::task::Poll::Ready(Ok(result)),
+                std::task::Poll::Pending => std::task::Poll::Pending,
+            }
+        });
+        match tokio::time::timeout(QUERY_TIMEOUT, query_task).await {
+            Ok(Ok(result)) => Ok(result),
+            Ok(Err(_)) => Err(ExecAbort::Cancelled),
+            Err(_) => Err(ExecAbort::Timeout),
+        }
+    };
+    let messages = match outcome {
+        Ok(result) => result.map_err(|error| format!("PostgreSQL query failed: {error}"))?,
+        Err(ExecAbort::Cancelled) => {
+            let reason = "Query cancelled".to_string();
+            unregister_run(&state, &request.connection_id, request.run_id);
+            match cancel_and_settle(&request.connection_id, &token, std::future::pending()).await
+            {
+                Ok(()) => return Err(reason),
+                Err(reset) => return Err(format!("{reason}; {reset}")),
+            }
+        }
+        Err(ExecAbort::Timeout) => {
+            let reason = "PostgreSQL query timed out".to_string();
+            unregister_run(&state, &request.connection_id, request.run_id);
+            let settled = settle_within_grace(std::future::pending::<()>()).await;
+            if settled {
+                return Err(reason);
+            }
+            let reset = teardown_connection(
+                &state,
+                &request.connection_id,
+                "PostgreSQL query timed out and did not respond to cancellation",
+            )
+            .await;
+            return Err(format!("{reason}; {reset}"));
+        }
+    };
+    unregister_run(&state, &request.connection_id, request.run_id);
     let mut columns = Vec::new();
     let mut rows = Vec::new();
     let mut command_tags = Vec::new();
@@ -629,6 +851,46 @@ pub async fn postgres_execute(
         command_tags,
         truncated,
     })
+}
+
+enum ExecAbort {
+    Cancelled,
+    Timeout,
+}
+
+/// Registers a cancellation token for a run so `postgres_cancel` can trigger
+/// it. Returns the token (a fresh one when `run_id` is `None`, still returned
+/// so the caller can race on it uniformly).
+fn register_run(
+    state: &PostgresState,
+    connection_id: &str,
+    run_id: Option<u64>,
+) -> CancellationToken {
+    let token = CancellationToken::new();
+    if let Some(run_id) = run_id {
+        if let Ok(mut running) = state.running.write() {
+            running
+                .entry(connection_id.to_string())
+                .or_default()
+                .insert(run_id, token.clone());
+        }
+    }
+    token
+}
+
+/// Removes the run registration when the command finishes (success, error,
+/// cancel, or timeout). Never panics on a missing entry.
+fn unregister_run(state: &PostgresState, connection_id: &str, run_id: Option<u64>) {
+    if let Some(run_id) = run_id {
+        if let Ok(mut running) = state.running.write() {
+            if let Some(tokens) = running.get_mut(connection_id) {
+                tokens.remove(&run_id);
+                if tokens.is_empty() {
+                    running.remove(connection_id);
+                }
+            }
+        }
+    }
 }
 
 #[tauri::command]
@@ -988,6 +1250,7 @@ fn single_statement(sql: &str) -> Result<&str, String> {
     let mut quote = None;
     let mut line_comment = false;
     let mut block_depth = 0usize;
+    let mut dollar_tag: Option<&[u8]> = None;
     let bytes = sql.as_bytes();
 
     for (index, byte) in bytes.iter().enumerate() {
@@ -1007,6 +1270,17 @@ fn single_statement(sql: &str) -> Result<&str, String> {
             }
             continue;
         }
+        if let Some(tag) = dollar_tag {
+            // Closing sequence is `$tag$`: the current byte must be `$`,
+            // followed by the exact tag text, then another `$`.
+            if *byte == b'$'
+                && bytes[index + 1..].starts_with(tag)
+                && bytes.get(index + 1 + tag.len()) == Some(&b'$')
+            {
+                dollar_tag = None;
+            }
+            continue;
+        }
         if let Some(delimiter) = quote {
             if *byte == delimiter {
                 if delimiter == b'\'' && next == Some(b'\'') {
@@ -1020,6 +1294,20 @@ fn single_statement(sql: &str) -> Result<&str, String> {
             b'-' if next == Some(b'-') => line_comment = true,
             b'/' if next == Some(b'*') => block_depth = 1,
             b'\'' | b'"' => quote = Some(*byte),
+            b'$' => {
+                // Dollar-quoted string: $tag$ ... $tag$ (tag may be empty).
+                let tag_end = bytes[index + 1..]
+                    .iter()
+                    .position(|b| *b == b'$')
+                    .map(|pos| index + 1 + pos);
+                if let Some(tag_end) = tag_end {
+                    let tag = &bytes[index + 1..tag_end];
+                    if tag.iter().all(|b| b.is_ascii_alphanumeric() || *b == b'_') {
+                        dollar_tag = Some(tag);
+                        continue;
+                    }
+                }
+            }
             b';' if sql[index + 1..].trim().is_empty() => return Ok(sql[..index].trim()),
             b';' => return Err("EXPLAIN accepts exactly one SQL statement".into()),
             _ => {}
@@ -1031,6 +1319,167 @@ fn single_statement(sql: &str) -> Result<&str, String> {
     } else {
         Ok(statement)
     }
+}
+
+/// Returns the byte offset of the first non-noise character at/after `from`:
+/// skips whitespace, line comments, and nested block comments. Used to trim
+/// leading commentary off a statement range so `; SELECT` inside a leading
+/// comment never becomes part of the statement text.
+fn skip_leading_noise(sql: &str, from: usize) -> usize {
+    let bytes = sql.as_bytes();
+    let mut index = from;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        let next = bytes.get(index + 1).copied();
+        match (byte, next) {
+            (b' ', _) | (b'\t', _) | (b'\n', _) | (b'\r', _) => index += 1,
+            (b'-', Some(b'-')) => {
+                while index < bytes.len() && bytes[index] != b'\n' {
+                    index += 1;
+                }
+            }
+            (b'/', Some(b'*')) => {
+                let mut depth = 1usize;
+                index += 2;
+                while index < bytes.len() && depth > 0 {
+                    let b = bytes[index];
+                    let n = bytes.get(index + 1).copied();
+                    match (b, n) {
+                        (b'/', Some(b'*')) => {
+                            depth += 1;
+                            index += 2;
+                        }
+                        (b'*', Some(b'/')) => {
+                            depth -= 1;
+                            index += 2;
+                        }
+                        _ => index += 1,
+                    }
+                }
+            }
+            _ => break,
+        }
+    }
+    index
+}
+
+/// Splits SQL text into statement byte ranges, honouring string literals,
+/// single/double quotes, line comments, nested block comments, and
+/// dollar-quoted strings (`$tag$ ... $tag$`). Leading noise (whitespace /
+/// comments) and the trailing semicolon are excluded from each range. Returns
+/// byte offsets (not UTF-16), so callers that feed a text editor must convert
+/// (security §4.1: a semicolon inside a comment/string/dollar-quote must
+/// never split the text).
+fn split_sql_statements(sql: &str) -> Vec<(usize, usize)> {
+    let mut statements = Vec::new();
+    let mut cut = 0usize; // byte offset just after the previous `;`
+    let mut quote: Option<u8> = None;
+    let mut line_comment = false;
+    let mut block_depth = 0usize;
+    let mut dollar_tag: Option<&[u8]> = None;
+    let bytes = sql.as_bytes();
+    let mut index = 0usize;
+
+    while index < bytes.len() {
+        let byte = bytes[index];
+        let next = bytes.get(index + 1).copied();
+        if line_comment {
+            if byte == b'\n' {
+                line_comment = false;
+            }
+            index += 1;
+            continue;
+        }
+        if block_depth > 0 {
+            if byte == b'/' && next == Some(b'*') {
+                block_depth += 1;
+                index += 2;
+                continue;
+            }
+            if byte == b'*' && next == Some(b'/') {
+                block_depth -= 1;
+                index += 2;
+                continue;
+            }
+            index += 1;
+            continue;
+        }
+        if let Some(tag) = dollar_tag {
+            // Closing sequence is `$tag$`: current byte `$` + exact tag + `$`.
+            if byte == b'$'
+                && bytes[index + 1..].starts_with(tag)
+                && bytes.get(index + 1 + tag.len()) == Some(&b'$')
+            {
+                dollar_tag = None;
+                index += 1 + tag.len() + 1;
+                continue;
+            }
+            index += 1;
+            continue;
+        }
+        if let Some(delimiter) = quote {
+            if byte == delimiter {
+                if delimiter == b'\'' && next == Some(b'\'') {
+                    index += 2;
+                    continue;
+                }
+                quote = None;
+            }
+            index += 1;
+            continue;
+        }
+        match byte {
+            b'-' if next == Some(b'-') => {
+                line_comment = true;
+                index += 2;
+            }
+            b'/' if next == Some(b'*') => {
+                block_depth = 1;
+                index += 2;
+            }
+            b'\'' | b'"' => {
+                quote = Some(byte);
+                index += 1;
+            }
+            b'$' => {
+                let tag_end = bytes[index + 1..]
+                    .iter()
+                    .position(|b| *b == b'$')
+                    .map(|pos| index + 1 + pos);
+                if let Some(tag_end) = tag_end {
+                    let tag = &bytes[index + 1..tag_end];
+                    if tag.iter().all(|b| b.is_ascii_alphanumeric() || *b == b'_') {
+                        dollar_tag = Some(tag);
+                        index = tag_end + 1;
+                        continue;
+                    }
+                }
+                index += 1;
+            }
+            b';' => {
+                let start = skip_leading_noise(sql, cut);
+                let mut end = index;
+                while end > start && sql.as_bytes()[end - 1].is_ascii_whitespace() {
+                    end -= 1;
+                }
+                if start < end {
+                    statements.push((start, end));
+                }
+                cut = index + 1;
+                index += 1;
+            }
+            _ => index += 1,
+        }
+    }
+    let start = skip_leading_noise(sql, cut);
+    let mut end = sql.len();
+    while end > start && sql.as_bytes()[end - 1].is_ascii_whitespace() {
+        end -= 1;
+    }
+    if start < end {
+        statements.push((start, end));
+    }
+    statements
 }
 
 #[tauri::command]
@@ -1347,6 +1796,400 @@ pub async fn postgres_table_delete(
         .map_err(|error| format!("Failed to delete table row: {error}"))
 }
 
+/// M4: actively ROLLBACK after any save failure, and never swallow a failed
+/// ROLLBACK — a stuck transaction would hold locks forever (security §3).
+/// Returns the final error message to surface to the user.
+async fn rollback_save(client: &Client, root: String) -> String {
+    let rb = tokio::time::timeout(QUERY_TIMEOUT, client.batch_execute("ROLLBACK")).await;
+    match rb {
+        Ok(Ok(_)) => root,
+        Ok(Err(rb_err)) => format!(
+            "{root}; ROLLBACK also failed: {rb_err} (connection should be reset)"
+        ),
+        Err(_) => format!("{root}; ROLLBACK timed out (connection should be reset)"),
+    }
+}
+
+#[tauri::command]
+pub async fn postgres_save_table_changes(
+    request: PostgresSaveTableChangesRequest,
+    state: tauri::State<'_, PostgresState>,
+) -> Result<PostgresSaveTableChangesResult, String> {
+    if request.schema.trim().is_empty()
+        || request.table.trim().is_empty()
+        || request.steps.is_empty()
+    {
+        return Err("Schema, table, and at least one change are required".into());
+    }
+    let client = state
+        .clients
+        .read()
+        .await
+        .get(&request.connection_id)
+        .cloned()
+        .ok_or_else(|| "PostgreSQL connection is not active".to_string())?;
+    // Fail fast when a manual transaction is open: the save would silently
+    // join it instead of owning its own transaction (security §1.2 / §3).
+    // transaction_status: "I"=idle, "T"=in transaction, "E"=failed txn.
+    let status_row = tokio::time::timeout(
+        QUERY_TIMEOUT,
+        client.query("SELECT current_setting('transaction_status')", &[]),
+    )
+    .await
+    .map_err(|_| "PostgreSQL save timed out while checking transaction state")?
+    .map_err(|error| format!("Failed to check transaction state: {error}"))?;
+    let status: String = status_row
+        .first()
+        .and_then(|row| row.get(0))
+        .ok_or_else(|| "Failed to decode transaction state".to_string())?;
+    if status != "I" {
+        return Err(
+            "A transaction is already in progress on this connection; commit or roll it back before saving".into(),
+        );
+    }
+    // Load schema once; every step reuses these whitelists.
+    let column_types = load_column_types(&client, &request.schema, &request.table).await?;
+    let primary_keys = load_primary_keys(&client, &request.schema, &request.table).await?;
+    // M2: transaction markers and BEGIN..COMMIT stay inside this single
+    // command, so no other IPC can interleave into the save transaction.
+    let begin = tokio::time::timeout(QUERY_TIMEOUT, client.batch_execute("BEGIN"))
+        .await
+        .map_err(|_| "PostgreSQL save timed out while starting the transaction")?
+        .map_err(|error| format!("Failed to begin save transaction: {error}"))?;
+    drop(begin);
+    let mut insert_primary_keys = Vec::new();
+    let mut affected_rows = Vec::new();
+    for (index, step) in request.steps.iter().enumerate() {
+        let outcome = match step.kind.as_str() {
+            "update" => {
+                if step.changes.is_empty() {
+                    Err(format!("Save step {index}: update requires at least one changed value"))
+                } else if primary_keys.is_empty()
+                    || primary_keys
+                        .iter()
+                        .any(|(key, _)| !step.key_values.contains_key(key))
+                {
+                    Err(format!(
+                        "Save step {index}: this table has no usable primary key for a safe update"
+                    ))
+                } else {
+                    let mut values: Vec<Box<dyn tokio_postgres::types::ToSql + Send + Sync>> =
+                        Vec::new();
+                    let mut assignments = Vec::new();
+                    for (column, value) in &step.changes {
+                        let data_type = column_types
+                            .get(column)
+                            .ok_or_else(|| format!("Save step {index}: unknown column {column}"))?;
+                        values.push(match value {
+                            Some(text) => Box::new(text.clone()),
+                            None => Box::new(None::<String>),
+                        });
+                        assignments.push(format!(
+                            "{} = ${}::text::{}",
+                            quote_identifier(column),
+                            values.len(),
+                            data_type
+                        ));
+                    }
+                    for (key, data_type) in &primary_keys {
+                        let key_value = step.key_values.get(key).ok_or_else(|| {
+                            format!("Save step {index}: missing primary key value for {key}")
+                        })?;
+                        values.push(Box::new(key_value.clone()));
+                        assignments.push(format!(
+                            "{} = ${}::text::{}",
+                            quote_identifier(key),
+                            values.len(),
+                            data_type
+                        ));
+                    }
+                    let params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = values
+                        .iter()
+                        .map(|value| value.as_ref() as &(dyn tokio_postgres::types::ToSql + Sync))
+                        .collect();
+                    let mut predicates = Vec::new();
+                    for (pos, (key, data_type)) in primary_keys.iter().enumerate() {
+                        let param_index = assignments.len() + pos + 1;
+                        predicates.push(format!(
+                            "{} = ${}::text::{}",
+                            quote_identifier(key),
+                            param_index,
+                            data_type
+                        ));
+                    }
+                    let statement = format!(
+                        "UPDATE {}.{} SET {} WHERE {}",
+                        quote_identifier(&request.schema),
+                        quote_identifier(&request.table),
+                        assignments.join(", "),
+                        predicates.join(" AND ")
+                    );
+                    let row_count = tokio::time::timeout(
+                        QUERY_TIMEOUT,
+                        client.execute(&statement, &params),
+                    )
+                    .await
+                    .map_err(|_| "PostgreSQL save timed out on an UPDATE")?
+                    .map_err(|error| format!("Failed to update table row: {error}"))?;
+                    // M3: affected-row validation — a concurrent delete/change
+                    // must not silently lose this edit.
+                    if row_count != 1 {
+                        return Err(rollback_save(
+                            &client,
+                            format!(
+                                "Save step {index}: expected exactly 1 row to update but affected {row_count}"
+                            ),
+                        )
+                        .await);
+                    }
+                    Ok(row_count)
+                }
+            }
+            "insert" => {
+                if step.values.is_empty() {
+                    Err(format!("Save step {index}: insert requires at least one column value"))
+                } else {
+                    let (statement, params) = build_insert_statement(
+                        &request.schema,
+                        &request.table,
+                        &step.values,
+                        &column_types,
+                        &primary_keys,
+                    )
+                    .map_err(|error| format!("Save step {index}: {error}"))?;
+                    let param_refs: Vec<Option<&str>> =
+                        params.iter().map(|value| value.as_deref()).collect();
+                    let param_refs: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = param_refs
+                        .iter()
+                        .map(|value| value as &(dyn tokio_postgres::types::ToSql + Sync))
+                        .collect();
+                    if primary_keys.is_empty() {
+                        let row_count = tokio::time::timeout(
+                            QUERY_TIMEOUT,
+                            client.execute(&statement, &param_refs),
+                        )
+                        .await
+                        .map_err(|_| "PostgreSQL save timed out on an INSERT")?
+                        .map_err(|error| format!("Failed to insert table row: {error}"))?;
+                        insert_primary_keys.push(HashMap::new());
+                        Ok(row_count)
+                    } else {
+                        let row = tokio::time::timeout(
+                            QUERY_TIMEOUT,
+                            client.query_one(&statement, &param_refs),
+                        )
+                        .await
+                        .map_err(|_| "PostgreSQL save timed out on an INSERT")?
+                        .map_err(|error| format!("Failed to insert table row: {error}"))?;
+                        let mut pk_map = HashMap::new();
+                        for (key, _) in &primary_keys {
+                            if let Ok(value) = row.try_get::<_, String>(0) {
+                                pk_map.insert(key.clone(), value);
+                            }
+                        }
+                        insert_primary_keys.push(pk_map);
+                        Ok(1)
+                    }
+                }
+            }
+            "delete" => {
+                if primary_keys.is_empty()
+                    || primary_keys
+                        .iter()
+                        .any(|(key, _)| !step.key_values.contains_key(key))
+                {
+                    Err(format!(
+                        "Save step {index}: this table has no usable primary key for a safe delete"
+                    ))
+                } else {
+                    let (statement, params) = build_delete_statement(
+                        &request.schema,
+                        &request.table,
+                        &primary_keys,
+                        &step.key_values,
+                    )
+                    .map_err(|error| format!("Save step {index}: {error}"))?;
+                    let param_refs: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = params
+                        .iter()
+                        .map(|value| value as &(dyn tokio_postgres::types::ToSql + Sync))
+                        .collect();
+                    let row_count = tokio::time::timeout(
+                        QUERY_TIMEOUT,
+                        client.execute(&statement, &param_refs),
+                    )
+                    .await
+                    .map_err(|_| "PostgreSQL save timed out on a DELETE")?
+                    .map_err(|error| format!("Failed to delete table row: {error}"))?;
+                    if row_count != 1 {
+                        return Err(rollback_save(
+                            &client,
+                            format!(
+                                "Save step {index}: expected exactly 1 row to delete but affected {row_count}"
+                            ),
+                        )
+                        .await);
+                    }
+                    Ok(row_count)
+                }
+            }
+            other => Err(format!("Save step {index}: unknown operation {other}")),
+        };
+        match outcome {
+            Ok(row_count) => affected_rows.push(row_count),
+            Err(error) => return Err(rollback_save(&client, error).await),
+        }
+    }
+    let commit = tokio::time::timeout(QUERY_TIMEOUT, client.batch_execute("COMMIT"))
+        .await
+        .map_err(|_| "PostgreSQL save timed out while committing")?
+        .map_err(|error| format!("Failed to commit save transaction: {error}"))?;
+    drop(commit);
+    Ok(PostgresSaveTableChangesResult {
+        insert_primary_keys,
+        affected_rows,
+    })
+}
+
+#[tauri::command]
+pub async fn postgres_cancel(
+    connection_id: String,
+    state: tauri::State<'_, PostgresState>,
+) -> Result<(), String> {
+    // Idempotent: cancelling a connection with no running query is a no-op
+    // success (security §4.2.2). The cancel path never takes txn locks.
+    // The running command's own cancel branch settles the query future
+    // (cancel_and_settle -> teardown fallback); this command only triggers
+    // the token and best-effort server-side pg_cancel_backend.
+    let token = {
+        let running = match state.running.read() {
+            Ok(guard) => guard,
+            Err(_) => return Ok(()),
+        };
+        running
+            .get(&connection_id)
+            .and_then(|runs| runs.values().next())
+            .cloned()
+    };
+    let Some(token) = token else {
+        return Ok(());
+    };
+    token.cancel();
+    // cancel-first: send pg_cancel_backend over a short independent
+    // connection so the in-flight query is aborted server-side. Failure to
+    // open the cancel connection falls through — the running command's
+    // teardown fallback still guarantees the query cannot outlive the UI.
+    let pid = match state.backends.read() {
+        Ok(guard) => guard.get(&connection_id).copied(),
+        Err(_) => None,
+    };
+    let config = state
+        .cancel_configs
+        .read()
+        .await
+        .get(&connection_id)
+        .cloned();
+    if let (Some(pid), Some(config)) = (pid, config) {
+        if let Ok(cancel_client) = open_client(&config).await {
+            let _ = tokio::time::timeout(
+                QUERY_TIMEOUT,
+                cancel_client.execute("SELECT pg_cancel_backend($1)", &[&pid]),
+            )
+            .await;
+        }
+    }
+    Ok(())
+}
+
+/// Validates a parameterized-query request against the security bounds
+/// (security §4.3.1): SQL text <= 4 MiB, <= 256 bound parameters, each
+/// value <= 1 MiB. Pure function so the bounds are unit-testable without a
+/// live PostgreSQL client.
+fn validate_parameterized_request(
+    sql: &str,
+    params: &[Option<String>],
+) -> Result<(), String> {
+    if sql.trim().is_empty() {
+        return Err("SQL cannot be empty".into());
+    }
+    if sql.len() > MAX_PARAMETERIZED_SQL_LEN {
+        return Err("SQL text exceeds the maximum length".into());
+    }
+    if params.len() > MAX_PARAMETER_COUNT {
+        return Err(format!(
+            "Too many bound parameters (max {MAX_PARAMETER_COUNT})"
+        ));
+    }
+    for value in params {
+        if let Some(text) = value {
+            if text.len() > MAX_PARAMETER_VALUE_LEN {
+                return Err("A bound parameter exceeds the maximum length".into());
+            }
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn postgres_execute_parameterized(
+    request: PostgresExecuteParameterizedRequest,
+    state: tauri::State<'_, PostgresState>,
+) -> Result<PostgresQueryResult, String> {
+    validate_parameterized_request(&request.sql, &request.params)?;
+    let client = state
+        .clients
+        .read()
+        .await
+        .get(&request.connection_id)
+        .cloned()
+        .ok_or_else(|| "PostgreSQL connection is not active".to_string())?;
+    let limit = request
+        .max_rows
+        .unwrap_or(MAX_QUERY_ROWS)
+        .clamp(1, MAX_QUERY_ROWS);
+    // Extended protocol: every value is bound as a parameter with an
+    // UNKNOWN (inferred) type. None = SQL NULL; Some("") = empty string.
+    // Parameter values never appear in logs or error text.
+    let param_refs: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = request
+        .params
+        .iter()
+        .map(|value| value as &(dyn tokio_postgres::types::ToSql + Sync))
+        .collect();
+    let rows = tokio::time::timeout(QUERY_TIMEOUT, client.query(&request.sql, &param_refs))
+        .await
+        .map_err(|_| "PostgreSQL parameterized query timed out")?
+        .map_err(|error| format!("PostgreSQL query failed: {error}"))?;
+    let mut columns = Vec::new();
+    let mut data = Vec::new();
+    let mut truncated = false;
+    for (index, row) in rows.into_iter().enumerate() {
+        if columns.is_empty() {
+            columns = row
+                .columns()
+                .iter()
+                .map(|column| column.name().to_string())
+                .collect();
+        }
+        if data.len() < limit {
+            data.push(
+                (0..row.len())
+                    .map(|col| row.try_get::<_, Option<String>>(col).ok().flatten())
+                    .collect(),
+            );
+        } else {
+            truncated = true;
+        }
+        if index > limit {
+            break;
+        }
+    }
+    Ok(PostgresQueryResult {
+        columns,
+        rows: data,
+        command_tags: Vec::new(),
+        truncated,
+    })
+}
+
 #[tauri::command]
 pub async fn postgres_catalog_schemas(
     connection_id: String,
@@ -1501,7 +2344,8 @@ pub async fn postgres_ssh_fingerprint(
 mod tests {
     use super::{
         build_delete_statement, build_insert_statement, build_order_by_clause,
-        build_where_clause, fingerprint_matches, single_statement, PostgresFilterCondition,
+        build_where_clause, fingerprint_matches, single_statement, skip_leading_noise,
+        split_sql_statements, validate_parameterized_request, PostgresFilterCondition,
         PostgresSortClause, PostgresTableFilter,
     };
     use std::collections::{HashMap, HashSet};
@@ -1989,5 +2833,123 @@ mod tests {
             "DELETE FROM \"public\".\"users\" WHERE \"id\" = $1::text::integer"
         );
         assert_eq!(params, vec!["7".to_string()]);
+    }
+
+    // ---- B19: split_sql_statements (security §4.1) ----
+
+    #[test]
+    fn split_statements_honours_semicolons_in_strings_and_comments() {
+        // Semicolons inside a string literal, a line comment, and a block
+        // comment must never split the text (security §4.1).
+        let sql = "SELECT 'a;b' AS v; -- comment; with semicolon\nSELECT 2; /* block; comment */ SELECT 3";
+        let ranges = split_sql_statements(sql);
+        assert_eq!(ranges.len(), 3);
+        assert_eq!(&sql[ranges[0].0..ranges[0].1], "SELECT 'a;b' AS v");
+        assert_eq!(&sql[ranges[1].0..ranges[1].1], "SELECT 2");
+        assert_eq!(&sql[ranges[2].0..ranges[2].1], "SELECT 3");
+    }
+
+    #[test]
+    fn split_statements_handles_nested_block_comments() {
+        // Nested comments: only the outermost close ends the comment, so the
+        // semicolon after it is a real boundary. The trailing comment after
+        // `SELECT 1` is part of that statement's range (harmless to execute).
+        let sql = "SELECT 1 /* outer /* inner */ still outer */; SELECT 2";
+        let ranges = split_sql_statements(sql);
+        assert_eq!(ranges.len(), 2);
+        assert_eq!(&sql[ranges[0].0..ranges[0].1], "SELECT 1 /* outer /* inner */ still outer */");
+        assert_eq!(&sql[ranges[1].0..ranges[1].1], "SELECT 2");
+    }
+
+    #[test]
+    fn split_statements_handles_dollar_quoting() {
+        // Dollar-quoted bodies may contain semicolons and quotes that must be
+        // treated as literal text, not statement boundaries.
+        let sql = "CREATE FUNCTION f() RETURNS void AS $fn$ BEGIN; EXECUTE 'x;y'; END; $fn$ LANGUAGE plpgsql; SELECT 1";
+        let ranges = split_sql_statements(sql);
+        assert_eq!(ranges.len(), 2);
+        assert_eq!(&sql[ranges[0].0..ranges[0].1], "CREATE FUNCTION f() RETURNS void AS $fn$ BEGIN; EXECUTE 'x;y'; END; $fn$ LANGUAGE plpgsql");
+        assert_eq!(&sql[ranges[1].0..ranges[1].1], "SELECT 1");
+    }
+
+    #[test]
+    fn split_statements_tracks_byte_offsets_after_multibyte() {
+        // UTF-16 (editor) offsets differ from byte offsets after multi-byte
+        // characters; the splitter must report byte offsets (security §4.1
+        // conversion trap).
+        let sql = "SELECT '中文;分号' AS v; SELECT 2";
+        let ranges = split_sql_statements(sql);
+        assert_eq!(ranges.len(), 2);
+        assert_eq!(&sql[ranges[0].0..ranges[0].1], "SELECT '中文;分号' AS v");
+        assert_eq!(&sql[ranges[1].0..ranges[1].1], "SELECT 2");
+        // The second statement starts strictly after the first range end.
+        assert!(ranges[1].0 > ranges[0].1);
+    }
+
+    #[test]
+    fn split_statements_skips_trailing_whitespace_gaps() {
+        let sql = "SELECT 1   ;   \n\t SELECT 2";
+        let ranges = split_sql_statements(sql);
+        assert_eq!(ranges.len(), 2);
+        assert_eq!(&sql[ranges[0].0..ranges[0].1], "SELECT 1");
+        assert_eq!(&sql[ranges[1].0..ranges[1].1], "SELECT 2");
+    }
+
+    #[test]
+    fn split_statements_empty_and_comment_only() {
+        assert!(split_sql_statements("").is_empty());
+        assert!(split_sql_statements("  \n\t ").is_empty());
+        assert!(split_sql_statements("-- just a comment\n/* another */").is_empty());
+    }
+
+    // ---- B19: single_statement regression (bracket/quotes kept intact) ----
+
+    #[test]
+    fn single_statement_accepts_one_statement_with_dollar_quote() {
+        let sql = "CREATE FUNCTION f() RETURNS void AS $fn$ BEGIN; END; $fn$ LANGUAGE plpgsql";
+        let statement = single_statement(sql).unwrap();
+        assert_eq!(statement, sql.trim());
+    }
+
+    #[test]
+    fn single_statement_rejects_batch() {
+        assert!(single_statement("SELECT 1; SELECT 2").is_err());
+    }
+
+    // ---- B19: parameterized-request security bounds (security §4.3.1) ----
+
+    #[test]
+    fn parameterized_accepts_valid_request() {
+        assert!(validate_parameterized_request("SELECT $1", &[Some("x".into())]).is_ok());
+        assert!(validate_parameterized_request("SELECT $1", &[None]).is_ok());
+        assert!(validate_parameterized_request("SELECT 1", &[]).is_ok());
+    }
+
+    #[test]
+    fn parameterized_rejects_empty_sql() {
+        assert!(validate_parameterized_request("   ", &[]).is_err());
+        assert!(validate_parameterized_request("", &[]).is_err());
+    }
+
+    #[test]
+    fn parameterized_rejects_too_many_params() {
+        let params: Vec<Option<String>> = vec![Some("x".into()); 257];
+        assert!(validate_parameterized_request("SELECT $1", &params).is_err());
+    }
+
+    #[test]
+    fn parameterized_rejects_oversized_value_and_sql() {
+        let big: String = "x".repeat(1024 * 1024 + 1);
+        assert!(validate_parameterized_request("SELECT $1", &[Some(big)]).is_err());
+        let huge_sql: String = "x".repeat(4 * 1024 * 1024 + 1);
+        assert!(validate_parameterized_request(&huge_sql, &[]).is_err());
+    }
+
+    #[test]
+    fn parameterized_distinguishes_none_from_empty() {
+        // Both pass the validator; the semantic difference (NULL vs '') is
+        // enforced by the extended-protocol binding, not by this validator.
+        assert!(validate_parameterized_request("SELECT $1", &[None]).is_ok());
+        assert!(validate_parameterized_request("SELECT $1", &[Some("".into())]).is_ok());
     }
 }

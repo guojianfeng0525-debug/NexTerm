@@ -316,7 +316,7 @@ export function ServersView({
                 // Failed probe → back off; server keeps '—' this tick.
                 nextProbeRef.current[serverId] = Date.now() + PROBE_FAIL_BACKOFF_MS;
               } else if (value) {
-                map[serverId] = value as ServerStats;
+                map[serverId] = value;
               }
             }
           } catch {
@@ -370,14 +370,6 @@ export function ServersView({
   }, [allServers]);
 
   /* ── folder tree helpers ────────────────────────────────────────────────── */
-
-  const childFolders = useCallback(
-    (parentPath: string | undefined) =>
-      folders
-        .filter((f) => (f.parentPath ?? undefined) === (parentPath ?? undefined))
-        .sort((a, b) => a.name.localeCompare(b.name)),
-    [folders],
-  );
 
   // Full tree (folders + servers nested under them) for the left panel.
   const treeNodes = useMemo(

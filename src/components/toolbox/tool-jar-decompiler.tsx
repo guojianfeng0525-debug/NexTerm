@@ -13,17 +13,15 @@ import { Input } from '@/components/ui/input';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Badge } from '@/components/ui/badge';
 import { Progress } from '@/components/ui/progress';
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription } from '@/components/ui/dialog';
+import { Dialog, DialogContent } from '@/components/ui/dialog';
 import {
   Archive,
   FolderOpen,
   FileCode2,
-  RefreshCw,
   Search,
   Loader2,
   ChevronDown,
   ChevronRight,
-  X,
   Download,
   History,
   Info,
@@ -35,10 +33,10 @@ import {
   Filter,
   FileSearch,
 } from 'lucide-react';
-import { jarApi, type ClassView, type PackageNode, type ProjectSummary, type CompileDiagnostic, type ClassRef } from '@/lib/toolbox/jar-api';
+import { jarApi, type ClassView, type PackageNode, type ProjectSummary, type ClassRef } from '@/lib/toolbox/jar-api';
 import { getJarFindHistory, getJarPreferences, getJarRecentFiles, saveJarFindHistory, saveJarRecentFiles, setJarPreferences } from '@/lib/toolbox/jar-storage';
 import { useWebviewFileDrop } from '@/lib/use-webview-file-drop';
-import { EditorView, keymap, lineNumbers, highlightActiveLine, drawSelection, rectangularSelection, crosshairCursor, highlightSpecialChars, Decoration, type DecorationSet, type ViewUpdate } from '@codemirror/view';
+import { EditorView, keymap, lineNumbers, highlightActiveLine, drawSelection, rectangularSelection, crosshairCursor, highlightSpecialChars, Decoration } from '@codemirror/view';
 import { EditorState, StateField, StateEffect, type Extension } from '@codemirror/state';
 import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands';
 import { syntaxHighlighting, defaultHighlightStyle, bracketMatching, foldGutter, foldKeymap, indentOnInput } from '@codemirror/language';
@@ -460,16 +458,13 @@ export function ToolJarDecompiler() {
   const [editorText, setEditorText] = useState('');
   const [dirty, setDirty] = useState(false);
   const [modifiedSet, setModifiedSet] = useState<Set<string>>(new Set());
-  const [jdk, setJdk] = useState<{ label: string } | null>(null);
   const [busy, setBusy] = useState(false);
   const [busyLabel, setBusyLabel] = useState('');
   const [exportProgress, setExportProgress] = useState<ExportProgressEvent | null>(null);
   const [bottomTab, setBottomTab] = useState<BottomTab>('output');
-  const [diagnostics, setDiagnostics] = useState<CompileDiagnostic[]>([]);
   const [buildLog, setBuildLog] = useState<string[]>([]);
   const [query, setQuery] = useState('');
   const [searchResults, setSearchResults] = useState<unknown[]>([]);
-  const [originalSource, setOriginalSource] = useState<string | null>(null);
   /** Decompile error to show in the editor area instead of blank space. */
   const [decompileError, setDecompileError] = useState<string | null>(null);
   /** Image resource preview (data URL) when the selected entry is an image. */
@@ -705,7 +700,7 @@ export function ToolJarDecompiler() {
             if (w && w.word.includes('.')) {
               event.preventDefault();
               const kind = /^[A-Z]/.test(w.word) ? 'class' : 'method';
-              navigateRef.current(w.word, kind as 'class' | 'method');
+              navigateRef.current(w.word, kind);
             }
           }
         },
@@ -717,7 +712,7 @@ export function ToolJarDecompiler() {
           const from = cur?.from ?? -1;
           const to = cur?.to ?? -1;
           if (known) {
-            const r = ref!;
+            const r = ref;
             const f = r.offset ?? 0;
             const t = f + (r.len ?? 0);
             if (from !== f || to !== t) {
@@ -861,7 +856,6 @@ export function ToolJarDecompiler() {
         setView(null);
         setEditorText('');
         setDirty(false);
-        setDiagnostics([]);
         setBuildLog([`Opened ${p.name} (${p.classCount} classes)`]);
         // JD-GUI recursive container model: a plain (fat) jar may embed
         // dependency jars (BOOT-INF/lib, WEB-INF/lib, ...). Load them so the
@@ -1148,7 +1142,6 @@ export function ToolJarDecompiler() {
         });
         setView(cv);
         setEditorText(cv.source);
-        setOriginalSource(cv.originalSource ?? null);
         // JD-GUI links: position-bound references streamed by jd-core's
         // printer — every type/field/method reference carries its exact
         // source offset + full internal type name (+ descriptor). Sorted by
@@ -1198,7 +1191,6 @@ export function ToolJarDecompiler() {
             if (selectedEntryRef.current === realPath) {
               setView({ ...cv, source: src, originalSource: src });
               setEditorText(src);
-              setOriginalSource(src);
             }
           } catch {
             // JD-GUI MavenOrgSourceLoader: no bundled source — try to fetch
@@ -1211,7 +1203,6 @@ export function ToolJarDecompiler() {
                 if (selectedEntryRef.current === realPath) {
                   setView({ ...cv, source: src2.source, originalSource: src2.source });
                   setEditorText(src2.source);
-                  setOriginalSource(src2.source);
                 }
               } catch {
                 /* no sources available */
@@ -1229,7 +1220,6 @@ export function ToolJarDecompiler() {
               if (selectedEntryRef.current === realPath) {
                 setView({ ...cv, source: src2.source, originalSource: src2.source });
                 setEditorText(src2.source);
-                setOriginalSource(src2.source);
               }
             } catch {
               /* download failed or filtered — keep the decompiled view */
@@ -2192,14 +2182,6 @@ export function ToolJarDecompiler() {
   }, []);
 
   // ── JD-GUI Find panel (Ctrl+F): live highlight + Next/Prev + case. ──
-  const runFind = useCallback(
-    (query: string, caseSensitive: boolean) => {
-      setFindQuery(query);
-      setFindCaseSensitive(caseSensitive);
-      applyFind(query, caseSensitive);
-    },
-    [applyFind],
-  );
 
   const findStep = useCallback((dir: 1 | -1) => {
     const view = editorViewRef.current;
@@ -2367,7 +2349,6 @@ export function ToolJarDecompiler() {
     return () => window.removeEventListener('keydown', onKey);
   }, [project, handleNavBack, handleNavForward]);
 
-  const modifiedCount = modifiedSet.size;
   const normalizedTree = useMemo(() => {
     if (!tree) return null;
     return normalizeContainerTree(tree);
@@ -2652,7 +2633,7 @@ export function ToolJarDecompiler() {
                 </button>
                 {/* Subtypes tree */}
                 <SubTypeNodes
-                  nodes={(hierarchyData.subTypes as unknown) as SubTypeNode[]}
+                  nodes={hierarchyData.subTypes}
                   depth={hierarchyData.parents.length + 2}
                   selected={hierarchySel}
                   isJdk={isRootType}
@@ -3082,7 +3063,7 @@ export function ToolJarDecompiler() {
                     <div className="ml-2 border-l border-border/60 pl-1">
                       {(Object.values(normalizedTree)
                         .map((node) => filterTree(node, query.trim()))
-                        .filter((n): n is PackageNode => n !== null) as PackageNode[])
+                        .filter((n): n is PackageNode => n !== null))
                         .map((node) => (
                           <TreeNode
                             key={node.name}
@@ -3125,7 +3106,7 @@ export function ToolJarDecompiler() {
                           {libTree ? (
                             (Object.values(libTree)
                               .map((node) => filterTree(node, query.trim()))
-                              .filter((n): n is PackageNode => n !== null) as PackageNode[])
+                              .filter((n): n is PackageNode => n !== null))
                               .map((node) => (
                                 <TreeNode
                                   key={node.name}
@@ -3308,7 +3289,6 @@ export function ToolJarDecompiler() {
                     type="button"
                     className="w-full text-left px-2 py-1.5 rounded text-xs font-mono hover:bg-muted flex items-center gap-2"
                     onClick={() => {
-                      const cand = selectLoc;
                       setSelectLoc(null);
                       const c2 = c;
                       void (async () => {

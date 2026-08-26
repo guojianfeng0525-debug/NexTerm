@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### ⌨️ Query Commands & Keyboard Scopes (B19 + B20)
+
+Navicat-style query execution controls and a scoped keyboard system for the PostgreSQL toolbox.
+
+### Added (B19 — Query Commands)
+
+- 🚀 **Run current statement** (`Ctrl+Shift+R`) / **run selection** (`Ctrl+E`): a frontend SQL tokenizer (dollar-quoting, nested comments, string literals honoured) locates the statement under the caret; the editor selects it and the backend executes it.
+- ⏹️ **Stop query** (`Ctrl+T` or toolbar button while running): cancels the in-flight query via server-side `pg_cancel_backend` over an independent connection, with a teardown fallback when the backend does not settle.
+- 💬 **Toggle line comments** (`Ctrl+/`): adds/removes `--` on every line overlapping the selection, preserving indentation.
+- 🧮 **Parameterized execution**: `postgres_execute_parameterized` binds values via the extended protocol (UNKNOWN-type casts); `None` = SQL NULL, `Some("")` = empty string; bounds enforced (≤256 params, ≤1 MiB/value, ≤4 MiB SQL).
+- 🔐 **Transactional save hardening (M2/M3/M4)**: grid saves now run through a single `postgres_save_table_changes` command — BEGIN..COMMIT closes inside one call (no interleaving window), each update/delete validates `count == 1` (concurrent changes fail loudly instead of silently), and any failure actively ROLLBACKs server-side.
+- ✂️ **Statement splitter** (Rust + TS mirrored lexers) with dollar-quote and nested-block-comment support.
+
+### Added (B20 — Keyboard Scopes)
+
+- 🧭 **Scope router**: DIALOG > QUERY_EDITOR/DATA_GRID > NAVIGATOR > DATABASE_WORKSPACE > GLOBAL priority routing; xterm textareas are a hard no-intercept boundary; macOS Ctrl/Cmd equivalence preserved.
+- 🎯 **Navicat bindings**: 14 active groups (grid filter/save/insert/delete, query run/stop/comment, navigator open/refresh, workspace new-query/close-tab) declared on the command registry via `defaultBinding`; ER-diagram groups tracked hidden until B24.
+- 🔀 **Conflict matrix**: Ctrl+N/W/Tab/Z and F5 never reach GLOBAL; Ctrl+R resolves by scope (grid filter vs query run); the legacy hand-written `onDatabaseKeyDown` paths are preserved and layered under the router contract.
+
 ### 🔍 PostgreSQL Data Grid Filter & Sort (B18 Slice A)
 
 Navicat-style server-side filtering and sorting for PostgreSQL table data: build structured conditions in a dialog (or right-click a cell), and the grid re-queries with a fully parameterized WHERE clause. No SQL text is ever assembled on the frontend.

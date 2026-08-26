@@ -2,6 +2,7 @@ import {
   useEffect,
   useEffectEvent,
   useMemo,
+  useRef,
   useState,
   type Dispatch,
   type SetStateAction,
@@ -25,6 +26,7 @@ import {
   RefreshCw,
   Save,
   Search,
+  Square,
   Table2,
   Undo2,
   Unplug,
@@ -65,6 +67,11 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { CodeEditor } from "@/components/code-editor";
+import type { EditorView } from "@codemirror/view";
+import {
+  currentStatementAt,
+  toggleLineComment,
+} from "@/lib/database/sql-statement-tokenizer";
 import { generateId } from "@/lib/toolbox/toolbox-storage";
 import { ConnectionStorageManager } from "@/lib/connection-storage";
 import { PostgresConnectionsStorage } from "@/lib/toolbox/postgres-storage";
@@ -280,6 +287,11 @@ export function ToolPostgres() {
   const [resultHeight, setResultHeight] = useState(260);
   const [resultDragging, setResultDragging] = useState(false);
   const [running, setRunning] = useState(false);
+  /** Run id of the in-flight query, used by `postgres_cancel` (B19). */
+  const runIdRef = useRef(0);
+  const activeRunIdRef = useRef<number | null>(null);
+  /** CodeMirror view of the active query editor (B19 statement ops). */
+  const queryEditorViewRef = useRef<EditorView | null>(null);
   const [configOpen, setConfigOpen] = useState(false);
   const [dialogPage, setDialogPage] = useState<DialogPage>("general");
   const [transactionActive, setTransactionActive] = useState(false);
@@ -621,13 +633,23 @@ export function ToolPostgres() {
     });
   const execute = async (explain = false) => {
     if (!connected || !tab?.sql.trim()) return;
+    const runId = runIdRef.current + 1;
+    runIdRef.current = runId;
+    activeRunIdRef.current = runId;
     setRunning(true);
     try {
       patchTab(tab.id, {
         result: adaptPostgresQueryResult(
           await invoke<PostgresQueryRuntimeResult>(
             explain ? "postgres_explain" : "postgres_execute",
-            { request: { connectionId: draft.id, sql: tab.sql } },
+            {
+              request: {
+                connectionId: draft.id,
+                sql: tab.sql,
+                maxRows: 1_000,
+                runId,
+              },
+            },
           ),
         ),
       });
@@ -642,6 +664,88 @@ export function ToolPostgres() {
       );
     } finally {
       setRunning(false);
+      if (activeRunIdRef.current === runId) activeRunIdRef.current = null;
+    }
+  };
+  /** Stop the in-flight query (B19): triggers server-side pg_cancel_backend. */
+  const stopQuery = async () => {
+    if (!connected || !running || activeRunIdRef.current === null) return;
+    try {
+      await invoke("postgres_cancel", {
+        connectionId: draft.id,
+        runId: activeRunIdRef.current,
+      });
+    } catch (error) {
+      toast.error(t("toolbox.postgres.queryStopFailed"), {
+        description: String(error),
+      });
+    }
+  };
+  /** Executes the SQL statement under the caret (Ctrl+Shift+R, B19-A). */
+  const runCurrentStatement = () => {
+    const view = queryEditorViewRef.current;
+    if (!connected || !view) return;
+    const doc = view.state.doc.toString();
+    const range = currentStatementAt(doc, view.state.selection.main.head);
+    if (!range) return;
+    const sql = doc.slice(range.start, range.end).trim();
+    if (!sql) return;
+    void runSql(sql);
+  };
+  /** Executes only the selected text, or the current statement when no
+   * selection spans multiple lines (Ctrl+E, B19-A). */
+  const runSelectionOrStatement = () => {
+    const view = queryEditorViewRef.current;
+    if (!connected || !view) return;
+    const selection = view.state.selection.main;
+    const selected = view.state.doc.sliceString(selection.from, selection.to).trim();
+    const sql = selected || currentStatementSql();
+    if (sql) void runSql(sql);
+  };
+  const currentStatementSql = (): string => {
+    const view = queryEditorViewRef.current;
+    if (!view) return "";
+    const doc = view.state.doc.toString();
+    const range = currentStatementAt(doc, view.state.selection.main.head);
+    return range ? doc.slice(range.start, range.end).trim() : "";
+  };
+  /** Toggles -- line comments on the current selection (Ctrl+/, B19-B). */
+  const toggleSqlComment = () => {
+    const view = queryEditorViewRef.current;
+    if (!view) return;
+    const selection = view.state.selection.main;
+    const doc = view.state.doc.toString();
+    const next = toggleLineComment(doc, selection.from, selection.to);
+    if (next === doc) return;
+    view.dispatch({ changes: { from: 0, to: doc.length, insert: next } });
+  };
+  const runSql = async (sql: string) => {
+    if (!tab) return;
+    patchTab(tab.id, { sql });
+    const runId = runIdRef.current + 1;
+    runIdRef.current = runId;
+    activeRunIdRef.current = runId;
+    setRunning(true);
+    try {
+      patchTab(tab.id, {
+        result: adaptPostgresQueryResult(
+          await invoke<PostgresQueryRuntimeResult>("postgres_execute", {
+            request: {
+              connectionId: draft.id,
+              sql,
+              maxRows: 1_000,
+              runId,
+            },
+          }),
+        ),
+      });
+    } catch (error) {
+      toast.error(t("toolbox.postgres.queryFailed"), {
+        description: String(error),
+      });
+    } finally {
+      setRunning(false);
+      if (activeRunIdRef.current === runId) activeRunIdRef.current = null;
     }
   };
   const browse = async (
@@ -796,6 +900,7 @@ export function ToolPostgres() {
     operator: t("toolbox.postgres.filterOperator"),
     value: t("toolbox.postgres.filterValue"),
     valueLikeHint: t("toolbox.postgres.filterValueLikeHint"),
+    valueEmptyWarning: t("toolbox.postgres.filterValueEmptyWarning"),
     addCondition: t("toolbox.postgres.filterAddCondition"),
     removeCondition: t("toolbox.postgres.filterRemoveCondition"),
     logicAnd: t("toolbox.postgres.filterLogicAnd"),
@@ -1075,9 +1180,16 @@ export function ToolPostgres() {
     const keyNames = new Set(tab.result.editability.primaryKeyColumnKeys);
     const inserts = tab.pendingInserts ?? [];
     const deleteIndexes = tab.pendingDeleteRows ?? [];
-    const updates: Array<{
+    // B19 (M2 form B): assemble every row change as an ordered step list and
+    // commit them in ONE `postgres_save_table_changes` call. The backend
+    // owns BEGIN..COMMIT inside a single command, so no IPC interleaving can
+    // poison the transaction; it also validates affected-row counts (M3) and
+    // actively ROLLBACKs on any failure (M4).
+    const steps: Array<{
+      kind: "update" | "insert" | "delete";
       keyValues: Record<string, string>;
       changes: Record<string, string | null>;
+      values: Record<string, string | null>;
     }> = [];
     for (let rowIndex = 0; rowIndex < tab.result.rows.length; rowIndex += 1) {
       if (deleteIndexes.includes(rowIndex)) continue;
@@ -1099,78 +1211,63 @@ export function ToolPostgres() {
             : [],
         ),
       );
-      updates.push({ keyValues, changes });
+      steps.push({ kind: "update", keyValues, changes, values: {} });
     }
-    if (!updates.length && !inserts.length && !deleteIndexes.length) return;
+    for (const rowIndex of deleteIndexes) {
+      const row = tab.baseline.rows[rowIndex];
+      if (!row) continue;
+      const keyValues = Object.fromEntries(
+        columns.flatMap((column, index) =>
+          keyNames.has(column.key) && row[index] !== null
+            ? [[column.label, row[index]]]
+            : [],
+        ),
+      );
+      if (!Object.keys(keyValues).length) continue;
+      steps.push({ kind: "delete", keyValues, changes: {}, values: {} });
+    }
+    const committedInserts: DatabaseResultRow[] = [];
+    for (const insert of inserts) {
+      // Skip rows the user staged but never edited: submitting an empty
+      // column set would fail server-side and roll back the whole batch.
+      if (!insert.edited.length) continue;
+      const values = Object.fromEntries(
+        insert.edited.map((columnIndex) => [
+          columns[columnIndex].label,
+          insert.values[columnIndex],
+        ]),
+      );
+      steps.push({ kind: "insert", keyValues: {}, changes: {}, values });
+      committedInserts.push(
+        columns.map((column, columnIndex) =>
+          insert.edited.includes(columnIndex) ? insert.values[columnIndex] : null,
+        ),
+      );
+    }
+    if (!steps.length) return;
     setSaving(true);
     try {
-      await invoke("postgres_transaction", {
-        request: { connectionId: draft.id, action: "begin" },
+      const result = await invoke<{
+        insertPrimaryKeys: Array<Record<string, string>>;
+        affectedRows: number[];
+      }>("postgres_save_table_changes", {
+        request: {
+          connectionId: draft.id,
+          schema: tab.object.schema,
+          table: tab.object.name,
+          steps,
+        },
       });
-      for (const update of updates) {
-        await invoke("postgres_table_update", {
-          request: {
-            connectionId: draft.id,
-            schema: tab.object.schema,
-            table: tab.object.name,
-            ...update,
-          },
-        });
-      }
-      for (const rowIndex of deleteIndexes) {
-        const row = tab.baseline.rows[rowIndex];
-        if (!row) continue;
-        const keyValues = Object.fromEntries(
-          columns.flatMap((column, index) =>
-            keyNames.has(column.key) && row[index] !== null
-              ? [[column.label, row[index]]]
-              : [],
-          ),
+      // Back-fill generated primary keys into the committed insert rows.
+      // The backend returns them keyed by server column name (e.g. "id"),
+      // which is what `column.label` holds; `column.key` is the ordinal slot.
+      let insertIndex = 0;
+      const backfilled: DatabaseResultRow[] = committedInserts.map((row) => {
+        const pkMap = result.insertPrimaryKeys[insertIndex] ?? {};
+        insertIndex += 1;
+        return columns.map((column, columnIndex) =>
+          row[columnIndex] !== null ? row[columnIndex] : (pkMap[column.label] ?? null),
         );
-        if (!Object.keys(keyValues).length) continue;
-        await invoke("postgres_table_delete", {
-          request: {
-            connectionId: draft.id,
-            schema: tab.object.schema,
-            table: tab.object.name,
-            keyValues,
-          },
-        });
-      }
-      const committedInserts: DatabaseResultRow[] = [];
-      for (const insert of inserts) {
-        // Skip rows the user staged but never edited: submitting an empty
-        // column set would fail server-side and roll back the whole batch.
-        if (!insert.edited.length) continue;
-        const values = Object.fromEntries(
-          insert.edited.map((columnIndex) => [
-            columns[columnIndex].label,
-            insert.values[columnIndex],
-          ]),
-        );
-        const inserted = await invoke<{
-          primaryKeyValues: Record<string, string>;
-        }>("postgres_table_insert", {
-          request: {
-            connectionId: draft.id,
-            schema: tab.object.schema,
-            table: tab.object.name,
-            values,
-          },
-        });
-        committedInserts.push(
-          columns.map((column, columnIndex) =>
-            insert.edited.includes(columnIndex)
-              ? insert.values[columnIndex]
-              // Back-end back-fills primary-key values keyed by the server
-              // column name (e.g. "id"), which is what `column.label` holds;
-              // `column.key` is only the ordinal slot (`column:0`).
-              : (inserted.primaryKeyValues[column.label] ?? null),
-          ),
-        );
-      }
-      await invoke("postgres_transaction", {
-        request: { connectionId: draft.id, action: "commit" },
       });
       if (tab.activeFilter && tab.object) {
         // Filtered view: re-query so staged rows land inside/outside the
@@ -1184,7 +1281,7 @@ export function ToolPostgres() {
           ...tab.result.rows.filter(
             (_, rowIndex) => !deleteIndexes.includes(rowIndex),
           ),
-          ...committedInserts,
+          ...backfilled,
         ];
         const nextResult: DatabaseTabularResult = {
           ...tab.result,
@@ -1200,9 +1297,8 @@ export function ToolPostgres() {
         toast.success(t("toolbox.postgres.changesSaved"));
       }
     } catch (error) {
-      await invoke("postgres_transaction", {
-        request: { connectionId: draft.id, action: "rollback" },
-      }).catch(() => undefined);
+      // M4 is handled server-side (active ROLLBACK inside the command); the
+      // frontend must NOT swallow a failed rollback — the error is surfaced.
       toast.error(t("toolbox.postgres.saveChangesFailed"), {
         description: String(error),
       });
@@ -1278,6 +1374,32 @@ export function ToolPostgres() {
       if (event.key.toLowerCase() === "e" && event.shiftKey && tab?.type === "query" && !running) {
         event.preventDefault();
         void execute(true);
+      }
+      // B19 query commands (QUERY_EDITOR scope).
+      if (event.key.toLowerCase() === "t" && tab?.type === "query" && running) {
+        event.preventDefault();
+        void stopQuery();
+        return;
+      }
+      if (event.key === "/" && tab?.type === "query") {
+        event.preventDefault();
+        toggleSqlComment();
+        return;
+      }
+      if (
+        event.key.toLowerCase() === "r" &&
+        event.shiftKey &&
+        tab?.type === "query" &&
+        !running
+      ) {
+        event.preventDefault();
+        runCurrentStatement();
+        return;
+      }
+      if (event.key.toLowerCase() === "e" && !event.shiftKey && tab?.type === "query" && !running) {
+        event.preventDefault();
+        runSelectionOrStatement();
+        return;
       }
       if (event.key.toLowerCase() === "w") {
         event.preventDefault();
@@ -1552,6 +1674,14 @@ export function ToolPostgres() {
                   onClick={() => void execute()}
                   data-testid="postgres-run"
                 />
+                 {tab.type === "query" && running && (
+                  <ToolButton
+                    icon={<Square />}
+                    label={t("toolbox.postgres.stop")}
+                    onClick={() => void stopQuery()}
+                    data-testid="postgres-stop"
+                  />
+                 )}
                  {tab.type === "query" && (
                   <ToolButton
                     icon={<KeyRound />}
@@ -1595,6 +1725,9 @@ export function ToolPostgres() {
                           })
                         : undefined
                     }
+                    editorRef={(view) => {
+                      queryEditorViewRef.current = view;
+                    }}
                     className="h-full"
                   />
                 </div>
