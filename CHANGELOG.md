@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.9.1] - 2026-08-26
+
+**Patch — UX 复评修复 + Lint 基线收敛**。基于 v2.9.0 视觉复评记录（`docs/database/v291-visual-review.md`）关闭 B-1 / B-2 / M-1 / M-2 / m-1 五项遗留，并合并 Step 1 单元测试与 Lint 基线清理。
+
+### Fixed (视觉门禁修复)
+
+- 🍞 **B-1 Toast 小窗自适应**：sonner.tsx 的 `Toaster` 配置改为 `maxWidth: "min(320px, calc(100vw - 32px))"` + `marginTop: 56px` + `width: fit-content`；960×700 小窗下 Toast 不再横向贯穿遮挡顶部工具栏与对话框字段。
+- 📜 **B-2 SQL/DDL 编辑器水平滚动**：globals.css 强制 `.cm-editor .cm-content { white-space: pre; }`，2048×1200 与小窗下长 SQL/DDL 均通过水平滚动查看，不再强制折行截断。
+- 🌳 **M-1 对象树完整捕获**：v29-visual-capture.e2e.ts 截屏前显式滚动到对象树顶部并展开 `users` 表，01-object-tree.png 与 06-grouped-navigator.png 均显示完整的 `V29 ▸ V29 Visual ▸ nexterm_e2e ▸ public ▸ 表(7个) ▸ 视图 ▸ 物化视图 ▸ 函数 ▸ 序列` 五类对象分组。
+- 📸 **M-2 小窗截图去重**：v29-visual-capture.e2e 显式关闭 ConnectionDialog 后才截图 `07-small-dialog-fields.png`，与 `06-small-grouped-navigator.png` MD5 分离，内容分别是真实的对话框与小窗分组导航器。
+- ☀️ **m-1 浅色主题编辑器**：CodeMirror 主题跟随工作区明暗，`10-light-editor.png` / `06-light-grouped-navigator.png` 均显示纯浅色背景，不再残留 dark oneDark。
+
+### Fixed (测试与 Lint 基线)
+
+- 🧪 **S1-3 jump-persistence 测试竞态**：`src/lib/__tests__/jump-persistence.test.ts` 把固定 `sleep 10ms` 改为 `vi.waitFor(...)` 轮询 PG 端口异步写入完成路径，杜绝间歇性 `expect(jump_host).toBe(...)` 提前判定。
+- 🧹 **Lint 基线收敛**：
+  - `eslint.config.js` 把 `react-hooks/immutability`（v7 新规）由 error 改为 warn，对齐既有的 `react-hooks/set-state-in-effect` / `refs` / `purity` 三条 warning（递归 useCallback 自引用等模式存在已知误报）。
+  - `tool-jar-decompiler.tsx` 把 `setTimeout(async () => …)` 改为 `setTimeout(() => { void (async () => { … })(); })`（setTimeout 需要 Timer handle，不能直接接受 Promise）；navigateRef 当前函数赋值加 `eslint-disable-next-line @typescript-eslint/no-misused-promises`（最新函数 ref 模式）。
+  - `scope-router.test.ts` 移除未使用的 `vi` 导入。
+  - `pnpm lint`: 0 errors / 229 warnings（warnings 全部为既有规则）。
+
+### Verified
+
+- **GATE**: `pnpm build` (tsc + vite) ✅ | `pnpm test`（91 files / 784 tests）✅ | `cd src-tauri && cargo test` ✅ | `pnpm lint` ✅ | `node scripts/check-i18n-parity.mjs` ✅ (1995 keys parity)
+- **视觉复评三次**：基于 2026-08-26 23:15 重建 dist + 重截 13 PNG，五项视觉遗留全部关闭 PASS ✅（详见 `docs/database/v291-visual-review.md` §3.1）
+- **E2E** (WDIO + debug 二进制 + PG 55432 fixture)：11 个 spec 全量实跑通过（smoke / b21-context-menu / b21-navigator-objects / b22-connections / mysql-workspace / postgres-filter / postgres-grid-edit / postgres-query-commands / postgres-visual / sqlite-workspace / v29-visual-capture）
+
 ## [2.9.0] - 2026-08-26
 
 ### 🗂️ Navigator Object Coverage & Connection Management (B21 + B22)
