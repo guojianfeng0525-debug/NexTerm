@@ -10,12 +10,15 @@ import {
   FileCode2,
   FolderTree,
   KeyRound,
+  ListPlus,
   Loader2,
   Play,
   Plus,
   RefreshCw,
+  Save,
   Search,
   Table2,
+  Undo2,
   Unplug,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -42,6 +45,16 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { CodeEditor } from "@/components/code-editor";
 import { generateId } from "@/lib/toolbox/toolbox-storage";
 import { ConnectionStorageManager } from "@/lib/connection-storage";
@@ -81,13 +94,24 @@ import {
   type PostgresQueryRuntimeResult,
   type PostgresTableRuntimeResult,
 } from "@/lib/database/postgresql-result-adapter";
-import type { DatabaseResult, DatabaseTabularResult } from "@/lib/database/result-types";
+import type {
+  DatabaseResult,
+  DatabaseResultRow,
+  DatabaseTabularResult,
+} from "@/lib/database/result-types";
 import type {
   DatabaseObjectNode,
   DatabaseObjectNodeId,
 } from "@/lib/database/types";
 
 type TableObject = { schema: string; name: string };
+/** A row staged for INSERT. Only `edited` column indexes are submitted; the
+ * remaining columns keep their server-side DEFAULT. */
+type PendingInsertRow = {
+  id: string;
+  values: readonly (string | null)[];
+  edited: readonly number[];
+};
 type WorkspaceTab = {
   id: string;
   type: "query" | "table";
@@ -97,6 +121,8 @@ type WorkspaceTab = {
   result: DatabaseResult | null;
   baseline?: DatabaseTabularResult;
   dirty?: boolean;
+  pendingInserts?: readonly PendingInsertRow[];
+  pendingDeleteRows?: readonly number[];
 };
 type DialogPage = "general" | "ssh" | "tls";
 type PendingPostgresSshTrust = {
@@ -222,6 +248,11 @@ export function ToolPostgres() {
   const [dialogPage, setDialogPage] = useState<DialogPage>("general");
   const [transactionActive, setTransactionActive] = useState(false);
   const [pendingSshTrust, setPendingSshTrust] = useState<PendingPostgresSshTrust | null>(null);
+  const [saving, setSaving] = useState(false);
+  /** Row index (into committed result rows) awaiting delete confirmation. */
+  const [deleteTarget, setDeleteTarget] = useState<number | null>(null);
+  /** Tab id awaiting dirty-discard confirmation before closing. */
+  const [closeTarget, setCloseTarget] = useState<string | null>(null);
 
   const tab = tabs.find((item) => item.id === activeTab) ?? tabs[0];
   const patchTab = (id: string, patch: Partial<WorkspaceTab>) =>
@@ -267,6 +298,11 @@ export function ToolPostgres() {
       connectionState: connected ? "connected" : "disconnected",
     },
   );
+  const tableEditingEnabled =
+    tab?.type === "table" &&
+    !postgresConfig.readOnly &&
+    tab.result?.kind === "tabular" &&
+    tab.result.editability.editable;
   const catalogLookup: PostgresCatalogLookup | undefined = connected
     ? async (request) =>
         invoke("postgres_catalog_search", {
@@ -586,7 +622,17 @@ export function ToolPostgres() {
           }),
           { offset, limit: pageSize },
         );
-      patchTab(id, { result, baseline: result, dirty: false });
+      patchTab(id, {
+        result,
+        baseline: result,
+        dirty: false,
+        // Row indexes in pendingDeleteRows are invalidated by the reload:
+        // keeping them could delete a different row on the next save.
+        // Staged inserts are keyed by id, but clearing them too keeps the
+        // reload semantics predictable ("reload = fresh snapshot").
+        pendingInserts: [],
+        pendingDeleteRows: [],
+      });
     } catch (error) {
       toast.error(t("toolbox.postgres.queryFailed"), {
         description: String(error),
@@ -672,44 +718,259 @@ export function ToolPostgres() {
     );
     patchTab(tab.id, { result: { ...tab.result, rows }, dirty: true });
   };
-  const isTableCellModified = (rowIndex: number, columnIndex: number) =>
+  const addRecord = () => {
+    if (tab?.type !== "table" || tab.result?.kind !== "tabular") return;
+    const row: PendingInsertRow = {
+      id: generateId("pg-insert"),
+      values: tab.result.columns.map(() => null),
+      edited: [],
+    };
+    patchTab(tab.id, {
+      pendingInserts: [...(tab.pendingInserts ?? []), row],
+      dirty: true,
+    });
+  };
+  const editInsertCell = (insertIndex: number, columnIndex: number, value: string) => {
+    if (tab?.type !== "table") return;
+    const inserts = tab.pendingInserts ?? [];
+    const row = inserts[insertIndex];
+    if (!row) return;
+    const next: PendingInsertRow = {
+      ...row,
+      values: row.values.map((cell, index) =>
+        index === columnIndex ? value : cell,
+      ),
+      edited: row.edited.includes(columnIndex)
+        ? row.edited
+        : [...row.edited, columnIndex],
+    };
+    patchTab(tab.id, {
+      pendingInserts: inserts.map((item, index) =>
+        index === insertIndex ? next : item,
+      ),
+      dirty: true,
+    });
+  };
+  const isInsertCellModified = (insertIndex: number, columnIndex: number) =>
+    Boolean(tab?.pendingInserts?.[insertIndex]?.edited.includes(columnIndex));
+  const isPrimaryKeyColumn = (columnIndex: number) =>
+    Boolean(
+      tab?.result?.kind === "tabular" &&
+        tab.result.editability.primaryKeyColumnKeys.includes(
+          tab.result.columns[columnIndex]?.key ?? "",
+        ),
+    );
+  const canSetNull = (columnIndex: number) =>
+    !isPrimaryKeyColumn(columnIndex) &&
+    Boolean(
+      tab?.result?.kind === "tabular" &&
+        tab.result.editability.nullableColumnKeys?.includes(
+          tab.result.columns[columnIndex]?.key ?? "",
+        ),
+    );
+  const rowHasPrimaryKey = (row: readonly (string | null)[]) => {
+    if (tab?.result?.kind !== "tabular") return false;
+    const result = tab.result;
+    return result.editability.primaryKeyColumnKeys.every((key) => {
+      const index = result.columns.findIndex((column) => column.key === key);
+      return index >= 0 && row[index] !== null;
+    });
+  };
+  const requestDeleteRow = (rowIndex: number) => setDeleteTarget(rowIndex);
+  const stageDeleteRow = () => {
+    if (tab?.type !== "table" || deleteTarget === null) return;
+    const current = tab.pendingDeleteRows ?? [];
+    if (!current.includes(deleteTarget)) {
+      patchTab(tab.id, {
+        pendingDeleteRows: [...current, deleteTarget].sort((a, b) => a - b),
+        dirty: true,
+      });
+    }
+    setDeleteTarget(null);
+  };
+  const removeInsertRow = (insertIndex: number) => {
+    if (tab?.type !== "table") return;
+    patchTab(tab.id, {
+      pendingInserts: (tab.pendingInserts ?? []).filter(
+        (_, index) => index !== insertIndex,
+      ),
+      dirty: true,
+    });
+  };
+  const requestCloseTab = (id: string) => {
+    const target = tabs.find((item) => item.id === id);
+    if (target?.dirty) {
+      setCloseTarget(id);
+      return;
+    }
+    closeTab(id);
+  };
+  const isCellModified = (rowIndex: number, columnIndex: number) =>
     tab?.type === "table" &&
     tab.result?.kind === "tabular" &&
-    tab.baseline?.rows[rowIndex]?.[columnIndex] !== tab.result.rows[rowIndex]?.[columnIndex];
+    tab.baseline?.rows[rowIndex]?.[columnIndex] !==
+      tab.result.rows[rowIndex]?.[columnIndex];
   const saveTableChanges = async () => {
-    if (!tab?.object || tab.result?.kind !== "tabular" || !tab.baseline || !tab.dirty) return;
-    try {
-      const columns = tab.result.columns;
-      const keyNames = new Set(tab.result.editability.primaryKeyColumnKeys);
-      for (let rowIndex = 0; rowIndex < tab.result.rows.length; rowIndex += 1) {
-        const row = tab.result.rows[rowIndex];
-        const original = tab.baseline.rows[rowIndex];
-        if (!original || row.every((value, index) => value === original[index])) continue;
-        const changes = Object.fromEntries(columns.flatMap((column, index) =>
+    if (
+      !tab?.object ||
+      tab.result?.kind !== "tabular" ||
+      !tab.baseline ||
+      !tab.dirty
+    ) {
+      return;
+    }
+    const columns = tab.result.columns;
+    const keyNames = new Set(tab.result.editability.primaryKeyColumnKeys);
+    const inserts = tab.pendingInserts ?? [];
+    const deleteIndexes = tab.pendingDeleteRows ?? [];
+    const updates: Array<{
+      keyValues: Record<string, string>;
+      changes: Record<string, string | null>;
+    }> = [];
+    for (let rowIndex = 0; rowIndex < tab.result.rows.length; rowIndex += 1) {
+      if (deleteIndexes.includes(rowIndex)) continue;
+      const row = tab.result.rows[rowIndex];
+      const original = tab.baseline.rows[rowIndex];
+      if (!original || row.every((value, index) => value === original[index])) continue;
+      const changes = Object.fromEntries(
+        columns.flatMap((column, index) =>
           !keyNames.has(column.key) && row[index] !== original[index]
             ? [[column.label, row[index]]]
             : [],
-        ));
-        if (!Object.keys(changes).length) continue;
-        const keyValues = Object.fromEntries(columns.flatMap((column, index) =>
+        ),
+      );
+      if (!Object.keys(changes).length) continue;
+      const keyValues = Object.fromEntries(
+        columns.flatMap((column, index) =>
           keyNames.has(column.key) && original[index] !== null
             ? [[column.label, original[index]]]
             : [],
-        ));
+        ),
+      );
+      updates.push({ keyValues, changes });
+    }
+    if (!updates.length && !inserts.length && !deleteIndexes.length) return;
+    setSaving(true);
+    try {
+      await invoke("postgres_transaction", {
+        request: { connectionId: draft.id, action: "begin" },
+      });
+      for (const update of updates) {
         await invoke("postgres_table_update", {
-          request: { connectionId: draft.id, schema: tab.object.schema, table: tab.object.name, keyValues, changes },
+          request: {
+            connectionId: draft.id,
+            schema: tab.object.schema,
+            table: tab.object.name,
+            ...update,
+          },
         });
       }
-      patchTab(tab.id, { baseline: tab.result, dirty: false });
+      for (const rowIndex of deleteIndexes) {
+        const row = tab.baseline.rows[rowIndex];
+        if (!row) continue;
+        const keyValues = Object.fromEntries(
+          columns.flatMap((column, index) =>
+            keyNames.has(column.key) && row[index] !== null
+              ? [[column.label, row[index]]]
+              : [],
+          ),
+        );
+        if (!Object.keys(keyValues).length) continue;
+        await invoke("postgres_table_delete", {
+          request: {
+            connectionId: draft.id,
+            schema: tab.object.schema,
+            table: tab.object.name,
+            keyValues,
+          },
+        });
+      }
+      const committedInserts: DatabaseResultRow[] = [];
+      for (const insert of inserts) {
+        // Skip rows the user staged but never edited: submitting an empty
+        // column set would fail server-side and roll back the whole batch.
+        if (!insert.edited.length) continue;
+        const values = Object.fromEntries(
+          insert.edited.map((columnIndex) => [
+            columns[columnIndex].label,
+            insert.values[columnIndex],
+          ]),
+        );
+        const inserted = await invoke<{
+          primaryKeyValues: Record<string, string>;
+        }>("postgres_table_insert", {
+          request: {
+            connectionId: draft.id,
+            schema: tab.object.schema,
+            table: tab.object.name,
+            values,
+          },
+        });
+        committedInserts.push(
+          columns.map((column, columnIndex) =>
+            insert.edited.includes(columnIndex)
+              ? insert.values[columnIndex]
+              // Back-end back-fills primary-key values keyed by the server
+              // column name (e.g. "id"), which is what `column.label` holds;
+              // `column.key` is only the ordinal slot (`column:0`).
+              : (inserted.primaryKeyValues[column.label] ?? null),
+          ),
+        );
+      }
+      await invoke("postgres_transaction", {
+        request: { connectionId: draft.id, action: "commit" },
+      });
+      const nextRows = [
+        ...tab.result.rows.filter(
+          (_, rowIndex) => !deleteIndexes.includes(rowIndex),
+        ),
+        ...committedInserts,
+      ];
+      const nextResult: DatabaseTabularResult = {
+        ...tab.result,
+        rows: nextRows,
+      };
+      patchTab(tab.id, {
+        result: nextResult,
+        baseline: nextResult,
+        dirty: false,
+        pendingInserts: [],
+        pendingDeleteRows: [],
+      });
       toast.success(t("toolbox.postgres.changesSaved"));
     } catch (error) {
-      toast.error(t("toolbox.postgres.saveChangesFailed"), { description: String(error) });
+      await invoke("postgres_transaction", {
+        request: { connectionId: draft.id, action: "rollback" },
+      }).catch(() => undefined);
+      toast.error(t("toolbox.postgres.saveChangesFailed"), {
+        description: String(error),
+      });
+    } finally {
+      setSaving(false);
     }
   };
   const revertTableChanges = () => {
-    if (tab?.baseline) patchTab(tab.id, { result: tab.baseline, dirty: false });
+    if (tab?.baseline) {
+      patchTab(tab.id, {
+        result: tab.baseline,
+        dirty: false,
+        pendingInserts: [],
+        pendingDeleteRows: [],
+      });
+    }
   };
   const onDatabaseKeyDown = useEffectEvent((event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      const typingInField = Boolean(
+        target?.closest?.("input, textarea, [contenteditable='true']"),
+      );
+      if (event.key === "Insert" && !typingInField && tab?.type === "table" &&
+          !postgresConfig.readOnly && tab.result?.kind === "tabular" &&
+          tab.result.editability.editable) {
+        event.preventDefault();
+        addRecord();
+        return;
+      }
       if (!(event.metaKey || event.ctrlKey) || event.altKey) return;
       if (event.key.toLowerCase() === "n" && connected) {
         event.preventDefault();
@@ -725,7 +986,12 @@ export function ToolPostgres() {
       }
       if (event.key.toLowerCase() === "w") {
         event.preventDefault();
-        closeTab(activeTab);
+        requestCloseTab(activeTab);
+      }
+      if (event.key.toLowerCase() === "s" && !event.shiftKey && tab?.type === "table" &&
+          tab.dirty && !saving) {
+        event.preventDefault();
+        void saveTableChanges();
       }
       if (event.key.toLowerCase() === "r" && connected) {
         event.preventDefault();
@@ -768,6 +1034,31 @@ export function ToolPostgres() {
           data-testid="postgres-new-query"
         />
         <Separator />
+        {tableEditingEnabled && (
+          <>
+            <ToolButton
+              icon={<ListPlus />}
+              label={t("toolbox.postgres.addRecord")}
+              onClick={addRecord}
+              data-testid="postgres-add-record"
+            />
+            <ToolButton
+              icon={<Save />}
+              label={t("toolbox.postgres.saveChanges")}
+              disabled={!tab.dirty || saving}
+              onClick={() => void saveTableChanges()}
+              data-testid="postgres-save-changes"
+            />
+            <ToolButton
+              icon={<Undo2 />}
+              label={t("toolbox.postgres.revertChanges")}
+              disabled={!tab.dirty}
+              onClick={revertTableChanges}
+              data-testid="postgres-revert-changes"
+            />
+            <Separator />
+          </>
+        )}
           <ToolButton
             icon={<Table2 />}
             label={t("toolbox.postgres.tables")}
@@ -920,9 +1211,9 @@ export function ToolPostgres() {
        tabs={tabs}
       activeTabId={activeTab}
       onActivateTab={setActiveTab}
-       onCloseTab={closeTab}
+       onCloseTab={requestCloseTab}
        renderTabContextMenu={(item) => <>
-         <ContextMenuItem onSelect={() => closeTab(item.id)}>{t("common.close")}</ContextMenuItem>
+         <ContextMenuItem onSelect={() => requestCloseTab(item.id)}>{t("common.close")}</ContextMenuItem>
          <ContextMenuItem disabled={tabs.length < 2} onSelect={() => {
             setTabs((current) => current.filter((tab) => tab.id === item.id));
            setActiveTab(item.id);
@@ -959,7 +1250,7 @@ export function ToolPostgres() {
                    <>
                      <span className="ml-1 text-[11px] text-muted-foreground">{tab.object?.schema}.{tab.object?.name}</span>
                      <ToolButton icon={<RefreshCw />} label={t("toolbox.postgres.refresh")} disabled={running} onClick={() => tab.object && void browse({ connectionId: draft.id, database: postgresConfig.database, schema: tab.object.schema, relation: tab.object.name }, tableOffset)} />
-                     <ToolButton icon={<Database />} label={t("toolbox.postgres.saveChanges")} disabled={!tab.dirty || running || postgresConfig.readOnly} onClick={() => void saveTableChanges()} />
+                     <ToolButton icon={<Database />} label={t("toolbox.postgres.saveChanges")} disabled={!tab.dirty || saving || running || postgresConfig.readOnly} onClick={() => void saveTableChanges()} />
                      <ToolButton icon={<RefreshCw />} label={t("toolbox.postgres.revertChanges")} disabled={!tab.dirty || running} onClick={revertTableChanges} />
                    </>
                 )}
@@ -1031,19 +1322,50 @@ export function ToolPostgres() {
                    rowsRange: (from, to) =>
                     t("toolbox.postgres.rowsRange", { from, to }),
                  }}
-                  renderContextMenu={(cell, row, columnName, rowIndex, columnIndex) => <>
-                    <ContextMenuItem onSelect={() => void copyText(cell ?? "NULL")}>{t("toolbox.postgres.copyCell")}</ContextMenuItem>
-                    <ContextMenuItem onSelect={() => void copyText(row.map((value) => value ?? "NULL").join("\t"))}>{t("toolbox.postgres.copyRow")}</ContextMenuItem>
-                    <ContextMenuItem onSelect={() => void copyText(columnName)}>{t("toolbox.postgres.copyColumnName")}</ContextMenuItem>
-                    <ContextMenuSeparator />
-                    {tab.type === "table" && <ContextMenuItem
-                      disabled={postgresConfig.readOnly || tab.result?.kind !== "tabular" || !tab.result.editability.editable || !tab.result.editability.nullableColumnKeys?.includes(tab.result.columns[columnIndex]?.key ?? "")}
-                      onSelect={() => stageTableEdit(rowIndex, columnIndex, null)}
-                    >{t("toolbox.postgres.setNull")}</ContextMenuItem>}
+                  renderContextMenu={(cell, row, columnName, rowIndex, columnIndex, source = "row") => <>
+                    {source === "insert" ? (
+                      <>
+                        <ContextMenuItem onSelect={() => void copyText(cell ?? "NULL")}>{t("toolbox.postgres.copyCell")}</ContextMenuItem>
+                        <ContextMenuItem onSelect={() => void copyText(row.map((value) => value ?? "NULL").join("\t"))}>{t("toolbox.postgres.copyRow")}</ContextMenuItem>
+                        <ContextMenuSeparator />
+                        <ContextMenuItem onSelect={() => removeInsertRow(rowIndex)}>{t("toolbox.postgres.removeRecord")}</ContextMenuItem>
+                        <ContextMenuSeparator />
+                      </>
+                    ) : (
+                      <>
+                        <ContextMenuItem onSelect={() => void copyText(cell ?? "NULL")}>{t("toolbox.postgres.copyCell")}</ContextMenuItem>
+                        <ContextMenuItem onSelect={() => void copyText(row.map((value) => value ?? "NULL").join("\t"))}>{t("toolbox.postgres.copyRow")}</ContextMenuItem>
+                        <ContextMenuItem onSelect={() => void copyText(columnName)}>{t("toolbox.postgres.copyColumnName")}</ContextMenuItem>
+                        <ContextMenuSeparator />
+                        {tab.type === "table" && tableEditingEnabled && <>
+                          <ContextMenuItem
+                            disabled={!canSetNull(columnIndex)}
+                            onSelect={() => stageTableEdit(rowIndex, columnIndex, null)}
+                          >{t("toolbox.postgres.setNull")}</ContextMenuItem>
+                          <ContextMenuItem
+                            disabled={isPrimaryKeyColumn(columnIndex)}
+                            onSelect={() => stageTableEdit(rowIndex, columnIndex, "")}
+                          >{t("toolbox.postgres.setEmptyString")}</ContextMenuItem>
+                          <ContextMenuItem
+                            disabled={isPrimaryKeyColumn(columnIndex)}
+                            onSelect={() => stageTableEdit(rowIndex, columnIndex, crypto.randomUUID())}
+                          >{t("toolbox.postgres.generateUuid")}</ContextMenuItem>
+                          <ContextMenuSeparator />
+                          <ContextMenuItem
+                            disabled={!rowHasPrimaryKey(row)}
+                            onSelect={() => requestDeleteRow(rowIndex)}
+                          >{t("toolbox.postgres.deleteRecord")}</ContextMenuItem>
+                        </>}
+                      </>
+                    )}
                     <ContextMenuItem onSelect={() => void exportCsv()}>{t("toolbox.postgres.exportCsv")}</ContextMenuItem>
                   </>}
                   onEditCell={tab.type === "table" && !postgresConfig.readOnly ? stageTableEdit : undefined}
-                  isCellModified={isTableCellModified}
+                  isCellModified={isCellModified}
+                  pendingInsertRows={tab.type === "table" ? tab.pendingInserts?.map((insert) => ({ id: insert.id, values: insert.values })) : undefined}
+                  deletedRowIndexes={tab.type === "table" ? tab.pendingDeleteRows : undefined}
+                  onEditInsertCell={tableEditingEnabled ? editInsertCell : undefined}
+                  isInsertCellModified={isInsertCellModified}
               />
             </section>
           )}
@@ -1104,6 +1426,43 @@ export function ToolPostgres() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+      <AlertDialog open={deleteTarget !== null} onOpenChange={(open) => !open && setDeleteTarget(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t("toolbox.postgres.deleteRecordConfirmTitle")}</AlertDialogTitle>
+            <AlertDialogDescription>
+              {t("toolbox.postgres.deleteRecordConfirmDescription")}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>{t("common.cancel")}</AlertDialogCancel>
+            <AlertDialogAction onClick={stageDeleteRow}>
+              {t("toolbox.postgres.deleteRecord")}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+      <AlertDialog open={closeTarget !== null} onOpenChange={(open) => !open && setCloseTarget(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t("toolbox.postgres.discardConfirmTitle")}</AlertDialogTitle>
+            <AlertDialogDescription>
+              {t("toolbox.postgres.discardConfirmDescription")}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>{t("common.cancel")}</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                if (closeTarget) closeTab(closeTarget);
+                setCloseTarget(null);
+              }}
+            >
+              {t("toolbox.postgres.discardConfirmAction")}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </DatabaseWorkspaceShell>
   );
 }

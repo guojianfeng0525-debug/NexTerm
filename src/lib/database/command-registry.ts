@@ -35,6 +35,8 @@ export const DATABASE_COMMAND_IDS = [
   "database.data.refresh",
   "database.data.nextPage",
   "database.data.previousPage",
+  "database.data.addRecord",
+  "database.data.deleteRecord",
   "database.data.saveChanges",
   "database.data.revertChanges",
 ] as const;
@@ -231,6 +233,20 @@ const commands: readonly DatabaseCommandDescriptor[] = [
     labelKey: "database.command.data.previousPage",
     scopes: ["DATA_GRID"],
     requiredCapabilities: [{ kind: "boolean", capability: "supportsPagination" }],
+    connectionStates: ["connected"],
+  },
+  {
+    id: "database.data.addRecord",
+    labelKey: "database.command.data.addRecord",
+    scopes: ["DATA_GRID"],
+    requiredCapabilities: [{ kind: "boolean", capability: "supportsResultEditing" }],
+    connectionStates: ["connected"],
+  },
+  {
+    id: "database.data.deleteRecord",
+    labelKey: "database.command.data.deleteRecord",
+    scopes: ["DATA_GRID"],
+    requiredCapabilities: [{ kind: "boolean", capability: "supportsResultEditing" }],
     connectionStates: ["connected"],
   },
   {

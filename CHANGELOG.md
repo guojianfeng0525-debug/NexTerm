@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 🖥️ PostgreSQL Data Grid Edit Loop (B17)
+
+A transactional, Navicat-style edit loop for PostgreSQL table data: add records, edit cells, delete records with confirmation, and commit everything in a single transaction with full rollback on failure. New rows back-fill their generated primary keys so they stay editable.
+
+### Added
+
+- ➕ **Add Record**: toolbar button and `Insert` key stage a new row; only explicitly edited columns are submitted, so server defaults (e.g. `gen_random_uuid()`, `now()`) are preserved.
+- 🗑️ **Delete Record**: row context menu with an in-app confirmation dialog; the row is visually marked and removed from the database on save.
+- ✏️ **Set to Empty String / Generate UUID**: row context-menu commands alongside the existing Set NULL.
+- 💾 **Transactional Save**: `Save changes` (toolbar + `Ctrl+S`) commits updates, inserts, and deletes inside one `BEGIN/COMMIT/ROLLBACK`; any failure rolls back the whole batch.
+- 🧩 **New backend commands**: `postgres_table_insert` (returns generated PK values) and `postgres_table_delete` (PK-located), both with parameterized typed-cast SQL and no-PK safety guards.
+- 🧹 **Dirty-tab guard**: closing a tab with unsaved edits (close button, tab menu, `Ctrl+W`) asks before discarding.
+- 🧾 **Revert changes** toolbar action clears pending inserts/deletes and restores the baseline.
+
+### Notes
+
+- Read-only connections and tables without a usable primary key keep the existing write guards.
+- The shared `DatabaseResultPane` props are backward compatible; SQLite and MySQL behavior is unchanged.
+
 ### 🔒 PostgreSQL SSH Tunnel Host-Key Trust (TOFU) & SSH Compression Removal
 
 This batch hardens database tunnel security and removes a fragile SSH feature.

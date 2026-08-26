@@ -93,6 +93,34 @@ pub struct PostgresTableUpdateRequest {
     pub changes: HashMap<String, Option<String>>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PostgresTableInsertRequest {
+    pub connection_id: String,
+    pub schema: String,
+    pub table: String,
+    /// Only explicitly edited columns are sent; absent columns fall back to
+    /// the server-side DEFAULT instead of being forced to NULL.
+    pub values: HashMap<String, Option<String>>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PostgresTableInsertResult {
+    /// Generated primary-key values, populated only when the table has a
+    /// primary key and the statement uses `RETURNING`.
+    pub primary_key_values: HashMap<String, String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PostgresTableDeleteRequest {
+    pub connection_id: String,
+    pub schema: String,
+    pub table: String,
+    pub key_values: HashMap<String, String>,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PostgresTableDataResult {
@@ -633,6 +661,130 @@ fn quote_identifier(value: &str) -> String {
     format!("\"{}\"", value.replace('"', "\"\""))
 }
 
+/// Loads primary-key column names and their formatted server types in key order.
+async fn load_primary_keys(
+    client: &Client,
+    schema: &str,
+    table: &str,
+) -> Result<Vec<(String, String)>, String> {
+    let rows = client
+        .query(
+            "SELECT a.attname, pg_catalog.format_type(a.atttypid, a.atttypmod) FROM pg_index i JOIN pg_class c ON c.oid = i.indrelid JOIN pg_namespace n ON n.oid = c.relnamespace JOIN unnest(i.indkey) WITH ORDINALITY AS k(attnum, ord) ON true JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = k.attnum WHERE i.indisprimary AND n.nspname = $1 AND c.relname = $2 ORDER BY k.ord",
+            &[&schema, &table],
+        )
+        .await
+        .map_err(|error| format!("Failed to load table primary key: {error}"))?;
+    rows.into_iter()
+        .map(|row| {
+            Ok((
+                row.try_get(0)
+                    .map_err(|error| format!("Failed to decode primary key: {error}"))?,
+                row.try_get(1)
+                    .map_err(|error| format!("Failed to decode primary key type: {error}"))?,
+            ))
+        })
+        .collect()
+}
+
+/// Loads every live column name and its formatted server type.
+async fn load_column_types(
+    client: &Client,
+    schema: &str,
+    table: &str,
+) -> Result<HashMap<String, String>, String> {
+    let rows = client
+        .query(
+            "SELECT a.attname, pg_catalog.format_type(a.atttypid, a.atttypmod) FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = $1 AND c.relname = $2 AND a.attnum > 0 AND NOT a.attisdropped",
+            &[&schema, &table],
+        )
+        .await
+        .map_err(|error| format!("Failed to load table column types: {error}"))?;
+    rows.into_iter()
+        .map(|row| {
+            Ok((
+                row.try_get(0)
+                    .map_err(|error| format!("Failed to decode table column: {error}"))?,
+                row.try_get(1)
+                    .map_err(|error| format!("Failed to decode table column type: {error}"))?,
+            ))
+        })
+        .collect()
+}
+
+/// Builds a parameterized single-row INSERT. Only the provided columns are
+/// written; absent columns keep their server-side DEFAULT. Values are cast
+/// through `::text::<type>` so string transport cannot lose precision.
+fn build_insert_statement(
+    schema: &str,
+    table: &str,
+    values: &HashMap<String, Option<String>>,
+    column_types: &HashMap<String, String>,
+    primary_keys: &[(String, String)],
+) -> Result<(String, Vec<Option<String>>), String> {
+    let mut params: Vec<Option<String>> = Vec::new();
+    let mut columns = Vec::new();
+    let mut placeholders = Vec::new();
+    for (column, value) in values {
+        let data_type = column_types
+            .get(column)
+            .ok_or_else(|| format!("Unknown table column: {column}"))?;
+        params.push(value.clone());
+        columns.push(quote_identifier(column));
+        placeholders.push(format!("${}::text::{}", params.len(), data_type));
+    }
+    let returning = if primary_keys.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " RETURNING {}",
+            primary_keys
+                .iter()
+                .map(|(key, _)| quote_identifier(key))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
+    let statement = format!(
+        "INSERT INTO {}.{} ({}) VALUES ({}){}",
+        quote_identifier(schema),
+        quote_identifier(table),
+        columns.join(", "),
+        placeholders.join(", "),
+        returning
+    );
+    Ok((statement, params))
+}
+
+/// Builds a parameterized DELETE keyed by a complete primary-key value set.
+fn build_delete_statement(
+    schema: &str,
+    table: &str,
+    keys: &[(String, String)],
+    key_values: &HashMap<String, String>,
+) -> Result<(String, Vec<String>), String> {
+    if keys.is_empty() || keys.iter().any(|(key, _)| !key_values.contains_key(key)) {
+        return Err("This table has no usable primary key for a safe delete".into());
+    }
+    let mut params = Vec::new();
+    let mut predicates = Vec::new();
+    for (key, data_type) in keys {
+        params.push(key_values[key].clone());
+        predicates.push(format!(
+            "{} = ${}::text::{}",
+            quote_identifier(key),
+            params.len(),
+            data_type
+        ));
+    }
+    let statement = format!(
+        "DELETE FROM {}.{} WHERE {}",
+        quote_identifier(schema),
+        quote_identifier(table),
+        predicates.join(" AND ")
+    );
+    Ok((statement, params))
+}
+
 /// EXPLAIN must not turn a semicolon-separated batch into an execution path.
 /// Semicolons inside identifiers, string literals, or comments are preserved.
 fn single_statement(sql: &str) -> Result<&str, String> {
@@ -868,6 +1020,97 @@ pub async fn postgres_table_update(
 }
 
 #[tauri::command]
+pub async fn postgres_table_insert(
+    request: PostgresTableInsertRequest,
+    state: tauri::State<'_, PostgresState>,
+) -> Result<PostgresTableInsertResult, String> {
+    if request.schema.trim().is_empty()
+        || request.table.trim().is_empty()
+        || request.values.is_empty()
+    {
+        return Err("Schema, table, and at least one column value are required".into());
+    }
+    let client = state
+        .clients
+        .read()
+        .await
+        .get(&request.connection_id)
+        .cloned()
+        .ok_or_else(|| "PostgreSQL connection is not active".to_string())?;
+    let column_types = load_column_types(&client, &request.schema, &request.table).await?;
+    let primary_keys = load_primary_keys(&client, &request.schema, &request.table).await?;
+    let (statement, params) = build_insert_statement(
+        &request.schema,
+        &request.table,
+        &request.values,
+        &column_types,
+        &primary_keys,
+    )?;
+    let param_refs: Vec<Option<&str>> = params.iter().map(|value| value.as_deref()).collect();
+    let param_refs: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = param_refs
+        .iter()
+        .map(|value| value as &(dyn tokio_postgres::types::ToSql + Sync))
+        .collect();
+    if primary_keys.is_empty() {
+        client
+            .execute(&statement, &param_refs)
+            .await
+            .map_err(|error| format!("Failed to insert table row: {error}"))?;
+        return Ok(PostgresTableInsertResult {
+            primary_key_values: HashMap::new(),
+        });
+    }
+    let row = client
+        .query_one(&statement, &param_refs)
+        .await
+        .map_err(|error| format!("Failed to insert table row: {error}"))?;
+    let mut primary_key_values = HashMap::new();
+    for (index, (key, _)) in primary_keys.iter().enumerate() {
+        if let Ok(value) = row.try_get::<_, String>(index) {
+            primary_key_values.insert(key.clone(), value);
+        }
+    }
+    Ok(PostgresTableInsertResult {
+        primary_key_values,
+    })
+}
+
+#[tauri::command]
+pub async fn postgres_table_delete(
+    request: PostgresTableDeleteRequest,
+    state: tauri::State<'_, PostgresState>,
+) -> Result<u64, String> {
+    if request.schema.trim().is_empty()
+        || request.table.trim().is_empty()
+        || request.key_values.is_empty()
+    {
+        return Err("Schema, table, and key values are required".into());
+    }
+    let client = state
+        .clients
+        .read()
+        .await
+        .get(&request.connection_id)
+        .cloned()
+        .ok_or_else(|| "PostgreSQL connection is not active".to_string())?;
+    let primary_keys = load_primary_keys(&client, &request.schema, &request.table).await?;
+    let (statement, params) = build_delete_statement(
+        &request.schema,
+        &request.table,
+        &primary_keys,
+        &request.key_values,
+    )?;
+    let param_refs: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = params
+        .iter()
+        .map(|value| value as &(dyn tokio_postgres::types::ToSql + Sync))
+        .collect();
+    client
+        .execute(&statement, &param_refs)
+        .await
+        .map_err(|error| format!("Failed to delete table row: {error}"))
+}
+
+#[tauri::command]
 pub async fn postgres_catalog_schemas(
     connection_id: String,
     state: tauri::State<'_, PostgresState>,
@@ -1019,7 +1262,10 @@ pub async fn postgres_ssh_fingerprint(
 
 #[cfg(test)]
 mod tests {
-    use super::{fingerprint_matches, single_statement};
+    use super::{
+        build_delete_statement, build_insert_statement, fingerprint_matches, single_statement,
+    };
+    use std::collections::HashMap;
 
     #[test]
     fn explain_accepts_one_statement_with_a_trailing_semicolon() {
@@ -1040,5 +1286,116 @@ mod tests {
         assert!(fingerprint_matches(Some(fingerprint), fingerprint));
         assert!(!fingerprint_matches(Some("SHA256:other-key"), fingerprint));
         assert!(!fingerprint_matches(None, fingerprint));
+    }
+
+    #[test]
+    fn insert_statement_quotes_identifiers_and_casts_values() {
+        let mut values = HashMap::new();
+        values.insert("name".to_string(), Some("O'Brien".to_string()));
+        let mut types = HashMap::new();
+        types.insert("name".to_string(), "text".to_string());
+        types.insert("age".to_string(), "integer".to_string());
+        let (statement, params) = build_insert_statement(
+            "public",
+            "users",
+            &values,
+            &types,
+            &[("id".to_string(), "integer".to_string())],
+        )
+        .unwrap();
+        assert_eq!(
+            statement,
+            "INSERT INTO \"public\".\"users\" (\"name\") VALUES ($1::text::text) RETURNING \"id\""
+        );
+        assert_eq!(params, vec![Some("O'Brien".to_string())]);
+    }
+
+    #[test]
+    fn insert_statement_multi_column_uses_typed_casts_for_each_value() {
+        let mut values = HashMap::new();
+        values.insert("name".to_string(), Some("Ada".to_string()));
+        values.insert("age".to_string(), Some("36".to_string()));
+        let mut types = HashMap::new();
+        types.insert("name".to_string(), "text".to_string());
+        types.insert("age".to_string(), "integer".to_string());
+        let (statement, mut params) =
+            build_insert_statement("public", "users", &values, &types, &[]).unwrap();
+        assert!(statement.contains("\"name\""));
+        assert!(statement.contains("\"age\""));
+        assert_eq!(statement.matches("::text::text").count(), 1);
+        assert_eq!(statement.matches("::text::integer").count(), 1);
+        assert!(!statement.contains("RETURNING"));
+        params.sort();
+        assert_eq!(
+            params,
+            vec![Some("36".to_string()), Some("Ada".to_string())]
+        );
+    }
+
+    #[test]
+    fn insert_statement_rejects_unknown_column() {
+        let mut values = HashMap::new();
+        values.insert("missing".to_string(), Some("x".to_string()));
+        let result = build_insert_statement(
+            "public",
+            "users",
+            &values,
+            &HashMap::new(),
+            &[],
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn insert_statement_without_primary_key_omits_returning() {
+        let mut values = HashMap::new();
+        values.insert("name".to_string(), Some("Ada".to_string()));
+        let mut types = HashMap::new();
+        types.insert("name".to_string(), "text".to_string());
+        let (statement, _) = build_insert_statement("public", "log", &values, &types, &[]).unwrap();
+        assert!(!statement.contains("RETURNING"));
+    }
+
+    #[test]
+    fn insert_statement_encodes_null_value() {
+        let mut values = HashMap::new();
+        values.insert("deleted_at".to_string(), None);
+        let mut types = HashMap::new();
+        types.insert("deleted_at".to_string(), "timestamp".to_string());
+        let (statement, params) =
+            build_insert_statement("public", "users", &values, &types, &[]).unwrap();
+        assert!(statement.contains("$1::text::timestamp"));
+        assert_eq!(params, vec![None]);
+    }
+
+    #[test]
+    fn delete_statement_requires_full_primary_key() {
+        let mut keys = HashMap::new();
+        keys.insert("id".to_string(), "7".to_string());
+        assert!(build_delete_statement(
+            "public",
+            "users",
+            &[("id".to_string(), "integer".to_string()), ("tenant".to_string(), "integer".to_string())],
+            &keys,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn delete_statement_quotes_predicates_and_casts() {
+        let mut keys = HashMap::new();
+        keys.insert("id".to_string(), "7".to_string());
+        let (statement, params) = build_delete_statement(
+            "public",
+            "users",
+            &[("id".to_string(), "integer".to_string())],
+            &keys,
+        )
+        .unwrap();
+        assert_eq!(
+            statement,
+            "DELETE FROM \"public\".\"users\" WHERE \"id\" = $1::text::integer"
+        );
+        assert_eq!(params, vec!["7".to_string()]);
     }
 }

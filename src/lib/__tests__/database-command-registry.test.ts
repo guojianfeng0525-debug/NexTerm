@@ -192,4 +192,36 @@ describe("database command resolver", () => {
       scope: "DATA_GRID",
     })).toMatchObject({ state: "enabled" });
   });
+
+  it("exposes Add/Delete Record only in the data grid with result editing capability", () => {
+    const connectedGrid = {
+      scope: "DATA_GRID" as const,
+      provider: postgresqlProvider,
+      connectionState: "connected" as const,
+    };
+    expect(resolveDatabaseCommand("database.data.addRecord", connectedGrid)).toMatchObject({
+      state: "enabled",
+      descriptor: { id: "database.data.addRecord" },
+    });
+    expect(resolveDatabaseCommand("database.data.deleteRecord", connectedGrid)).toMatchObject({
+      state: "enabled",
+      descriptor: { id: "database.data.deleteRecord" },
+    });
+    // Wrong scope hides the command even when the capability exists.
+    expect(resolveDatabaseCommand("database.data.addRecord", {
+      ...connectedGrid,
+      scope: "QUERY_EDITOR",
+    })).toMatchObject({ state: "hidden", reason: "wrong-scope" });
+    // SQLite lacks result editing, so the commands are disabled.
+    expect(resolveDatabaseCommand("database.data.addRecord", {
+      scope: "DATA_GRID",
+      provider: sqliteProvider,
+      connectionState: "connected",
+    })).toMatchObject({ state: "disabled", reason: "missing-capability" });
+    expect(resolveDatabaseCommand("database.data.deleteRecord", {
+      scope: "DATA_GRID",
+      provider: sqliteProvider,
+      connectionState: "connected",
+    })).toMatchObject({ state: "disabled", reason: "missing-capability" });
+  });
 });

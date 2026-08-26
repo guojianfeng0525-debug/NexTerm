@@ -196,6 +196,15 @@ Not migrated:
 - The PostgreSQL catalog adapter preserves `relkind`; the shared Navigator renders explicit loading, empty, and error states. Relation copy-name now uses a quoted schema-qualified identity.
 - Native PostgreSQL E2E creates a view, refreshes the Navigator, verifies its Views group, and opens the view data. SQLite and MySQL native regressions pass sequentially.
 
+### Feature Batch 17 - PostgreSQL Data Grid Edit Loop - COMPLETE
+
+- Completed the transactional grid edit loop for PostgreSQL table tabs: INSERT (edited columns only, absent columns keep server defaults), UPDATE (existing PK-located path), and DELETE (context menu + alert confirmation), all committed inside one `BEGIN/COMMIT/ROLLBACK` transaction. INSERT returns generated primary-key values that are back-filled into the merged grid row, so new rows remain editable and deletable.
+- Added `postgres_table_insert` and `postgres_table_delete` commands with parameterized typed-cast SQL (`$n::text::type`), unknown-column rejection, no-PK safety guards for DELETE, and pure-function statement builders covered by Rust unit tests.
+- Grid additions: `Add Record` (toolbar + Insert key), `Save changes` (toolbar + Ctrl+S), `Revert changes` (toolbar + Ctrl+Z remains editor scope), row-level `Set to Empty String` / `Generate UUID` / `Delete Record` context items, staged-delete row styling, and pending-insert rows with a `+` gutter. A dirty-tab close guard asks before discarding unsaved edits (Ctrl+W and tab close buttons).
+- The shared `DatabaseResultPane` gained optional, backward-compatible props (`pendingInsertRows`, `deletedRowIndexes`, `onEditInsertCell`, menu `source`) used only by PostgreSQL; SQLite/MySQL behavior is unchanged.
+- Read-only connections, tables without a primary key, and primary-key columns keep the existing write guards (no PK -> `editable: false`).
+- Verified: `cargo test postgres` 10 passed (7 new), full Vitest 688 passed (4 new command-registry cases), `tsc --noEmit` clean, touched-file ESLint clean, i18n parity 1883 keys, and a native desktop E2E (`e2e/desktop/postgres-grid-edit.e2e.ts`) against the live PostgreSQL fixture covering insert/update/delete with PK back-fill.
+
 ## Last Known Verification
 
 These are the latest known results from Feature Batch 15 verification.

@@ -30,7 +30,7 @@ Source legend: `FM` is the official Enterprise Feature Matrix; `PP` is the offic
 | CO-01 | Collaboration | Projects and members | Yes | Navicat Collaboration service | FM | MISSING | No | No | No | No | P3 product decision |
 | CO-02 | Collaboration | Sync connections, queries, snippets, virtual groups | Yes | cloud/on-prem collaboration | FM/PP | MISSING | No | No | No | No | P3 |
 | CO-03 | Collaboration | Sync BI/model workspaces and aggregation pipelines | Yes | Enterprise | FM | MISSING | No | No | No | No | P3 |
-| DE-01 | Data editor | Grid view | Yes | RDBMS/document/key-value variants | FM/M17 | UI_ONLY | Yes | read query | No | No | selection/edit/navigation |
+| DE-01 | Data editor | Grid view | Yes | RDBMS/document/key-value variants | FM/M17 | PARTIAL | Yes | PG insert/update/delete | No | B17 edit loop | selection/edit/navigation, form view |
 | DE-02 | Data editor | Form view | Yes | listed separately | FM | MISSING | No | No | No | No | shared editor |
 | DE-03 | Data editor | Tree and JSON views | Yes | document/key-value relevant | FM | MISSING | No | No | No | No | document editor |
 | DE-04 | Data editor | Data profiling | Yes | visual interactive analysis | FM/PP | MISSING | No | No | No | No | analytics module |

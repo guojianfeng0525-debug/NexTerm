@@ -581,6 +581,8 @@ pub fn run() {
             postgres::postgres_transaction,
             postgres::postgres_table_data,
             postgres::postgres_table_update,
+            postgres::postgres_table_insert,
+            postgres::postgres_table_delete,
             postgres::postgres_catalog_schemas,
             postgres::postgres_catalog_search,
             postgres::postgres_ssh_fingerprint,
