@@ -1,7 +1,8 @@
 # B18「数据浏览增强」需求规格（Navicat Parity Batch 18）
 
-> 状态：PLANNING（待 team-lead / architect 评审后进入实现）
+> 状态：IMPLEMENTED（Slice A/B/C 核心实现完成，单元/集成测试绿；原生 E2E 与视觉门禁待跑）
 > 作者：pm（许清楚）｜2026-08-26
+> 实现：cto（齐活林）｜2026-08-26
 > 依据：`navicat-parity-master-plan.md` §6 B18 定义 + §7.4；`navicat-premium-interactions.md` IN-12/13/16/17；`navicat-premium-context-menus.md`；`navicat-premium-shortcuts.md`；现状代码 `database-result-pane.tsx` / `tool-postgres.tsx` / `postgresql-result-adapter.ts` / `result-types.ts` / `command-registry.ts`
 
 ## 0. 证据规则（Fact / UNVERIFIED / NexTerm 决策）

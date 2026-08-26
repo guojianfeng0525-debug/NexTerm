@@ -224,4 +224,36 @@ describe("database command resolver", () => {
       connectionState: "connected",
     })).toMatchObject({ state: "disabled", reason: "missing-capability" });
   });
+
+  it("enables filter commands as read operations without editing capability", () => {
+    const connectedGrid = {
+      scope: "DATA_GRID" as const,
+      provider: postgresqlProvider,
+      connectionState: "connected" as const,
+    };
+    expect(resolveDatabaseCommand("database.data.filterByFieldValue", connectedGrid)).toMatchObject({
+      state: "enabled",
+      descriptor: { id: "database.data.filterByFieldValue" },
+    });
+    expect(resolveDatabaseCommand("database.data.customFilter", connectedGrid)).toMatchObject({
+      state: "enabled",
+    });
+    expect(resolveDatabaseCommand("database.data.filterSort", connectedGrid)).toMatchObject({
+      state: "enabled",
+    });
+    expect(resolveDatabaseCommand("database.data.clearFilter", connectedGrid)).toMatchObject({
+      state: "enabled",
+    });
+    // Read-only providers (SQLite without result editing) still expose filtering.
+    expect(resolveDatabaseCommand("database.data.filterByFieldValue", {
+      scope: "DATA_GRID",
+      provider: sqliteProvider,
+      connectionState: "connected",
+    })).toMatchObject({ state: "enabled" });
+    // Wrong scope hides the filter commands.
+    expect(resolveDatabaseCommand("database.data.filterSort", {
+      ...connectedGrid,
+      scope: "QUERY_EDITOR",
+    })).toMatchObject({ state: "hidden", reason: "wrong-scope" });
+  });
 });

@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 🔍 PostgreSQL Data Grid Filter & Sort (B18 Slice A)
+
+Navicat-style server-side filtering and sorting for PostgreSQL table data: build structured conditions in a dialog (or right-click a cell), and the grid re-queries with a fully parameterized WHERE clause. No SQL text is ever assembled on the frontend.
+
+### Added
+
+- 🎯 **Filter by field value**: right-click a cell to filter that column by its exact value; NULL cells filter with `IS NULL`.
+- 🧰 **Custom Filter / Filter & Sort dialogs**: multi-condition AND/OR filters with the 9 supported operators (`=`, `≠`, `>`, `≥`, `<`, `≤`, `LIKE`, `IS NULL`, `IS NOT NULL`), plus multi-column ORDER BY with a primary-key tie-breaker for stable paging. Selecting `LIKE` hints at `%`/`_` wildcard support in the value placeholder.
+- ⌨️ **Ctrl+R**: replays the active filter from offset 0, or refreshes the current page when no filter is applied.
+- 🏷️ **Filter badge & clear**: the toolbar shows the active condition count and offers one-click clear (empty filter = clear, per A-12).
+- 🔒 **Hardened backend**: `postgres_table_data` accepts a structured `filter`/`orderBy`; values bind as `$n::text::<type>` extended-protocol parameters, columns/operators/directions are whitelisted against live catalog metadata, cast types pass an ASCII character guard, and limits are enforced (≤32 conditions, ≤8 sort columns, ≤64 KiB values, offset ≤1M, 30s query timeout). The legacy `simple_query` browse path was removed.
+- 📊 **Column metadata**: per-column formatted types and comments arrive alongside the result (`columnTypes`/`columnComments`) — groundwork for the column layout slice.
+- ✏️ **Editing still works while filtered**: saving edits under an active filter re-queries the filtered view; the B17 transactional edit loop is unchanged.
+
+### Notes
+
+- Filter commands are read operations — read-only connections keep full filtering.
+- Query-tab result grids expose no filter entry points.
+- Native E2E for the filter loop is written but deferred pending a stable desktop environment (tracked as risk R9).
+
 ### 🖥️ PostgreSQL Data Grid Edit Loop (B17)
 
 A transactional, Navicat-style edit loop for PostgreSQL table data: add records, edit cells, delete records with confirmation, and commit everything in a single transaction with full rollback on failure. New rows back-fill their generated primary keys so they stay editable.

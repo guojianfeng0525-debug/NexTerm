@@ -1,4 +1,11 @@
-import { useEffect, useEffectEvent, useState, type Dispatch, type SetStateAction } from "react";
+import {
+  useEffect,
+  useEffectEvent,
+  useMemo,
+  useState,
+  type Dispatch,
+  type SetStateAction,
+} from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { writeText as writeClipboardText } from "@tauri-apps/plugin-clipboard-manager";
 import { save as saveFile } from "@tauri-apps/plugin-dialog";
@@ -8,6 +15,7 @@ import type { TFunction } from "i18next";
 import {
   Database,
   FileCode2,
+  Filter,
   FolderTree,
   KeyRound,
   ListPlus,
@@ -20,6 +28,7 @@ import {
   Table2,
   Undo2,
   Unplug,
+  X,
 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -67,12 +76,32 @@ import type {
 import { createPostgresQueryEditorContext } from "@/lib/database/postgresql-query-editor";
 import type { PostgresCatalogLookup } from "@/lib/postgres-completion";
 import { resolveDatabaseCommand } from "@/lib/database/command-registry";
+import {
+  buildFieldValueFilter,
+  isEmptyFilter,
+  resolveFilterShortcut,
+} from "@/lib/database/table-filter";
+import {
+  DEFAULT_GRID_LAYOUT,
+  gridLayoutKey,
+  loadGridLayout,
+  saveGridLayout,
+} from "@/lib/database/grid-layout-storage";
+import {
+  findCellMatches,
+  nextFindIndex,
+  previousFindIndex,
+} from "@/lib/database/find-matches";
 import { postgresqlProvider } from "@/lib/database/provider-registry";
 import {
   DatabaseNavigator,
   type DatabaseNavigatorLoadState,
 } from "@/components/toolbox/database-navigator";
 import { DatabaseResultPane } from "@/components/toolbox/database-result-pane";
+import {
+  FilterSortDialog,
+  type FilterSortDialogLabels,
+} from "@/components/toolbox/filter-sort-dialog";
 import { DatabaseWorkspaceShell } from "@/components/toolbox/database-workspace-shell";
 import { DatabaseProviderSelect } from "@/components/toolbox/database-provider-select";
 import {
@@ -98,6 +127,8 @@ import type {
   DatabaseResult,
   DatabaseResultRow,
   DatabaseTabularResult,
+  GridLayoutState,
+  TableFilterState,
 } from "@/lib/database/result-types";
 import type {
   DatabaseObjectNode,
@@ -123,6 +154,11 @@ type WorkspaceTab = {
   dirty?: boolean;
   pendingInserts?: readonly PendingInsertRow[];
   pendingDeleteRows?: readonly number[];
+  /**
+   * Filter/order currently applied to the loaded page (B18). The dialog
+   * applies immediately, so there is no separate draft state.
+   */
+  activeFilter?: TableFilterState;
 };
 type DialogPage = "general" | "ssh" | "tls";
 type PendingPostgresSshTrust = {
@@ -253,6 +289,24 @@ export function ToolPostgres() {
   const [deleteTarget, setDeleteTarget] = useState<number | null>(null);
   /** Tab id awaiting dirty-discard confirmation before closing. */
   const [closeTarget, setCloseTarget] = useState<string | null>(null);
+  /** Filter & Sort / Custom Filter dialog mode for the active table tab. */
+  const [filterDialog, setFilterDialog] = useState<
+    { mode: "custom" | "filterSort" } | null
+  >(null);
+  /** Per-table grid layout (frozen columns, widths, row height, toggles). */
+  const [layoutByTable, setLayoutByTable] = useState<
+    Record<string, GridLayoutState>
+  >({});
+  /** Set Column Width / Set Row Height value dialog. */
+  const [layoutDialog, setLayoutDialog] = useState<
+    { kind: "columnWidth"; columnIndex: number } | { kind: "rowHeight" } | null
+  >(null);
+  /** Find bar state for the table grid (Slice B). */
+  const [findState, setFindState] = useState<{
+    open: boolean;
+    text: string;
+    current: number;
+  }>({ open: false, text: "", current: 0 });
 
   const tab = tabs.find((item) => item.id === activeTab) ?? tabs[0];
   const patchTab = (id: string, patch: Partial<WorkspaceTab>) =>
@@ -593,6 +647,8 @@ export function ToolPostgres() {
   const browse = async (
     reference: PostgresRelationReference,
     offset = 0,
+    /** undefined → keep the tab's applied filter; a state → apply it; null → clear. */
+    filterOverride?: TableFilterState | null,
   ) => {
     if (!connected) return;
     const object: TableObject = {
@@ -608,8 +664,28 @@ export function ToolPostgres() {
       sql: "",
       result: null,
     });
+    // Load any persisted layout for this table the first time it is opened.
+    const layoutKey = gridLayoutKey(
+      postgresqlProvider.id,
+      draft.id,
+      object.schema,
+      object.name,
+    );
+    setLayoutByTable((current) =>
+      current[layoutKey]
+        ? current
+        : { ...current, [layoutKey]: loadGridLayout(layoutKey) },
+    );
+    // Paging or re-querying clears the find state (B-5).
+    setFindState({ open: false, text: "", current: 0 });
     setRunning(true);
     try {
+      // Paging/reload reads the applied filter from the open tab; applying a
+      // new filter passes it explicitly because `tabs` has not re-rendered yet.
+      const filter =
+        filterOverride === undefined
+          ? tabs.find((item) => item.id === id)?.activeFilter
+          : (filterOverride ?? undefined);
       const result = adaptPostgresTableResult(
           await invoke<PostgresTableRuntimeResult>("postgres_table_data", {
             request: {
@@ -618,6 +694,22 @@ export function ToolPostgres() {
               table: object.name,
               limit: pageSize,
               offset,
+              ...(filter
+                ? {
+                    filter: {
+                      logic: filter.logic,
+                      conditions: filter.conditions.map((condition) => ({
+                        column: condition.column,
+                        operator: condition.operator,
+                        value: condition.value ?? null,
+                      })),
+                    },
+                    orderBy: filter.orderBy.map((sort) => ({
+                      column: sort.column,
+                      direction: sort.direction,
+                    })),
+                  }
+                : {}),
             },
           }),
           { offset, limit: pageSize },
@@ -641,6 +733,166 @@ export function ToolPostgres() {
       setRunning(false);
     }
   };
+  const tableReference = (): PostgresRelationReference | null =>
+    tab?.type === "table" && tab.object
+      ? {
+          connectionId: draft.id,
+          database: postgresConfig.database,
+          schema: tab.object.schema,
+          relation: tab.object.name,
+        }
+      : null;
+
+  const applyFilter = (next: TableFilterState) => {
+    if (!tab || tab.type !== "table") return;
+    // An empty filter (no conditions, no sort) equals clearing it (A-12).
+    if (isEmptyFilter(next)) {
+      clearFilter();
+      return;
+    }
+    patchTab(tab.id, { activeFilter: next });
+    const reference = tableReference();
+    if (reference) void browse(reference, 0, next);
+  };
+
+  const applyFilterByFieldValue = (
+    column: string,
+    value: string | null,
+  ) => {
+    if (!tab || tab.type !== "table") return;
+    applyFilter(buildFieldValueFilter(column, value));
+  };
+
+  const clearFilter = () => {
+    if (!tab || tab.type !== "table") return;
+    patchTab(tab.id, { activeFilter: undefined });
+    const reference = tableReference();
+    if (reference) void browse(reference, 0, null);
+  };
+
+  const tabularRows =
+    tab?.result?.kind === "tabular" ? tab.result.rows : [];
+  const findMatches = useMemo(
+    () => findCellMatches(tabularRows, findState.text),
+    [tabularRows, findState.text],
+  );
+  const findNext = () =>
+    setFindState((state) => ({
+      ...state,
+      current: nextFindIndex(state.current, findMatches.length),
+    }));
+  const findPrevious = () =>
+    setFindState((state) => ({
+      ...state,
+      current: previousFindIndex(state.current, findMatches.length),
+    }));
+  const closeFind = () =>
+    setFindState({ open: false, text: "", current: 0 });
+
+  const filterSortLabels = (): FilterSortDialogLabels => ({
+    title: t("toolbox.postgres.filterSortTitle"),
+    conditions: t("toolbox.postgres.filterConditions"),
+    column: t("toolbox.postgres.filterColumn"),
+    operator: t("toolbox.postgres.filterOperator"),
+    value: t("toolbox.postgres.filterValue"),
+    valueLikeHint: t("toolbox.postgres.filterValueLikeHint"),
+    addCondition: t("toolbox.postgres.filterAddCondition"),
+    removeCondition: t("toolbox.postgres.filterRemoveCondition"),
+    logicAnd: t("toolbox.postgres.filterLogicAnd"),
+    logicOr: t("toolbox.postgres.filterLogicOr"),
+    sort: t("toolbox.postgres.filterSortSection"),
+    addSort: t("toolbox.postgres.filterAddSort"),
+    sortAsc: t("toolbox.postgres.sortAsc"),
+    sortDesc: t("toolbox.postgres.sortDesc"),
+    apply: t("toolbox.postgres.filterApply"),
+    cancel: t("toolbox.postgres.filterCancel"),
+    clear: t("toolbox.postgres.filterClear"),
+    operatorNames: {
+      eq: t("toolbox.postgres.operatorEq"),
+      neq: t("toolbox.postgres.operatorNeq"),
+      gt: t("toolbox.postgres.operatorGt"),
+      gte: t("toolbox.postgres.operatorGte"),
+      lt: t("toolbox.postgres.operatorLt"),
+      lte: t("toolbox.postgres.operatorLte"),
+      like: t("toolbox.postgres.operatorLike"),
+      isNull: t("toolbox.postgres.operatorIsNull"),
+      isNotNull: t("toolbox.postgres.operatorIsNotNull"),
+    },
+  });
+
+  const currentLayoutKey = (): string | null => {
+    if (!tab?.object) return null;
+    return gridLayoutKey(
+      postgresqlProvider.id,
+      draft.id,
+      tab.object.schema,
+      tab.object.name,
+    );
+  };
+
+  const currentLayout = (): GridLayoutState => {
+    const key = currentLayoutKey();
+    return (key ? layoutByTable[key] : undefined) ?? DEFAULT_GRID_LAYOUT;
+  };
+
+  const patchLayout = (patch: Partial<GridLayoutState>) => {
+    const key = currentLayoutKey();
+    if (!key) return;
+    const next = { ...currentLayout(), ...patch };
+    setLayoutByTable((current) => ({ ...current, [key]: next }));
+    saveGridLayout(key, next);
+  };
+
+  const freezeColumn = (columnIndex: number) => {
+    if (tab?.result?.kind !== "tabular") return;
+    const columnKey = tab.result.columns[columnIndex]?.key;
+    if (!columnKey) return;
+    const widths = { ...currentLayout().widths };
+    // Frozen columns need a deterministic width so sticky offsets stay exact.
+    if (!widths[columnKey]) widths[columnKey] = 120;
+    patchLayout({ frozenCount: columnIndex + 1, widths });
+  };
+
+  const unfreezeAllColumns = () => patchLayout({ frozenCount: 0 });
+
+  const setColumnWidth = (columnIndex: number, width: number) => {
+    if (tab?.result?.kind !== "tabular") return;
+    const columnKey = tab.result.columns[columnIndex]?.key;
+    if (!columnKey) return;
+    patchLayout({
+      widths: {
+        ...currentLayout().widths,
+        [columnKey]: Math.max(60, Math.round(width)),
+      },
+    });
+  };
+
+  const bestFitColumn = (columnIndex: number) => {
+    if (tab?.result?.kind !== "tabular") return;
+    const column = tab.result.columns[columnIndex];
+    if (!column) return;
+    const canvas = document.createElement("canvas");
+    const context = canvas.getContext("2d");
+    if (!context) return;
+    context.font = "12px sans-serif";
+    let max = context.measureText(column.label).width;
+    for (const row of tab.result.rows) {
+      const value = row[columnIndex];
+      if (value) max = Math.max(max, context.measureText(value).width);
+    }
+    // Padding + border allowance.
+    setColumnWidth(columnIndex, Math.ceil(max + 24));
+  };
+
+  const setRowHeight = (rowHeight: number) =>
+    patchLayout({ rowHeight: Math.max(16, Math.round(rowHeight)) });
+
+  const toggleFieldType = () =>
+    patchLayout({ showFieldType: !currentLayout().showFieldType });
+
+  const toggleComment = () =>
+    patchLayout({ showComment: !currentLayout().showComment });
+
   const treeToggle = (node: DatabaseObjectNode) => {
     const willExpand = !(expanded[node.id] ?? false);
     setExpanded((current) => ({ ...current, [node.id]: !current[node.id] }));
@@ -920,24 +1172,33 @@ export function ToolPostgres() {
       await invoke("postgres_transaction", {
         request: { connectionId: draft.id, action: "commit" },
       });
-      const nextRows = [
-        ...tab.result.rows.filter(
-          (_, rowIndex) => !deleteIndexes.includes(rowIndex),
-        ),
-        ...committedInserts,
-      ];
-      const nextResult: DatabaseTabularResult = {
-        ...tab.result,
-        rows: nextRows,
-      };
-      patchTab(tab.id, {
-        result: nextResult,
-        baseline: nextResult,
-        dirty: false,
-        pendingInserts: [],
-        pendingDeleteRows: [],
-      });
-      toast.success(t("toolbox.postgres.changesSaved"));
+      if (tab.activeFilter && tab.object) {
+        // Filtered view: re-query so staged rows land inside/outside the
+        // filter set as the server sees them (§4.4.6). browse() resets
+        // baseline/dirty and clears pending rows on success.
+        const reference = tableReference();
+        if (reference) await browse(reference, tableOffset, tab.activeFilter);
+        toast.success(t("toolbox.postgres.changesSaved"));
+      } else {
+        const nextRows = [
+          ...tab.result.rows.filter(
+            (_, rowIndex) => !deleteIndexes.includes(rowIndex),
+          ),
+          ...committedInserts,
+        ];
+        const nextResult: DatabaseTabularResult = {
+          ...tab.result,
+          rows: nextRows,
+        };
+        patchTab(tab.id, {
+          result: nextResult,
+          baseline: nextResult,
+          dirty: false,
+          pendingInserts: [],
+          pendingDeleteRows: [],
+        });
+        toast.success(t("toolbox.postgres.changesSaved"));
+      }
     } catch (error) {
       await invoke("postgres_transaction", {
         request: { connectionId: draft.id, action: "rollback" },
@@ -962,7 +1223,7 @@ export function ToolPostgres() {
   const onDatabaseKeyDown = useEffectEvent((event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
       const typingInField = Boolean(
-        target?.closest?.("input, textarea, [contenteditable='true']"),
+        target?.closest?.("input, textarea, select, [contenteditable='true']"),
       );
       if (event.key === "Insert" && !typingInField && tab?.type === "table" &&
           !postgresConfig.readOnly && tab.result?.kind === "tabular" &&
@@ -971,7 +1232,41 @@ export function ToolPostgres() {
         addRecord();
         return;
       }
+      // Find navigation (B-2/B-4): respond while the find bar is open, from
+      // the find input or anywhere outside a cell editor.
+      const inFindInput = Boolean(
+        target?.closest?.('[data-testid="database-result-find-input"]'),
+      );
+      if (
+        event.key === "F3" &&
+        findState.open &&
+        tab?.type === "table" &&
+        (inFindInput || !typingInField)
+      ) {
+        event.preventDefault();
+        findNext();
+        return;
+      }
+      if (
+        event.key === "Escape" &&
+        findState.open &&
+        tab?.type === "table" &&
+        (inFindInput || !typingInField)
+      ) {
+        event.preventDefault();
+        closeFind();
+        return;
+      }
       if (!(event.metaKey || event.ctrlKey) || event.altKey) return;
+      // Focus guard (R-B18-2): while editing a cell or form field, let the
+      // browser keep Ctrl+F/Ctrl+R default behavior instead of finding or
+      // applying filters in the grid.
+      if (tab?.type === "table" && typingInField) return;
+      if (event.key.toLowerCase() === "f" && tab?.type === "table") {
+        event.preventDefault();
+        setFindState((state) => ({ ...state, open: true, current: 0 }));
+        return;
+      }
       if (event.key.toLowerCase() === "n" && connected) {
         event.preventDefault();
         createQuery();
@@ -996,12 +1291,20 @@ export function ToolPostgres() {
       if (event.key.toLowerCase() === "r" && connected) {
         event.preventDefault();
         if (tab?.type === "table" && tab.object) {
-          void browse({ connectionId: draft.id, database: postgresConfig.database, schema: tab.object.schema, relation: tab.object.name }, tableOffset);
+          const reference = tableReference();
+          if (!reference) return;
+          // B18: the dialog applies immediately, so Ctrl+R either replays
+          // the active filter from offset 0 or refreshes the current page.
+          const decision = resolveFilterShortcut(tab.activeFilter);
+          if (decision.kind === "replay") {
+            void browse(reference, 0, decision.filter);
+          } else {
+            void browse(reference, tableOffset);
+          }
         } else {
           void refreshNavigator();
         }
-      }
-    });
+      }    });
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => onDatabaseKeyDown(event);
     window.addEventListener("keydown", onKeyDown);
@@ -1033,6 +1336,25 @@ export function ToolPostgres() {
           }}
           data-testid="postgres-new-query"
         />
+        {tab?.type === "table" && tab.activeFilter && (
+          <>
+            <ToolButton
+              icon={<Filter />}
+              label={t("toolbox.postgres.filterActive", {
+                count: tab.activeFilter.conditions.length,
+              })}
+              onClick={() => setFilterDialog({ mode: "filterSort" })}
+              data-testid="postgres-filter-badge"
+            />
+            <ToolButton
+              icon={<X />}
+              label={t("toolbox.postgres.clearFilter")}
+              onClick={clearFilter}
+              data-testid="postgres-clear-filter"
+            />
+            <Separator />
+          </>
+        )}
         <Separator />
         {tableEditingEnabled && (
           <>
@@ -1337,6 +1659,11 @@ export function ToolPostgres() {
                         <ContextMenuItem onSelect={() => void copyText(row.map((value) => value ?? "NULL").join("\t"))}>{t("toolbox.postgres.copyRow")}</ContextMenuItem>
                         <ContextMenuItem onSelect={() => void copyText(columnName)}>{t("toolbox.postgres.copyColumnName")}</ContextMenuItem>
                         <ContextMenuSeparator />
+                        {tab.type === "table" && <>
+                          <ContextMenuItem onSelect={() => applyFilterByFieldValue(columnName, cell)}>{t("toolbox.postgres.filterByFieldValue")}</ContextMenuItem>
+                          <ContextMenuItem onSelect={() => setFilterDialog({ mode: "custom" })}>{t("toolbox.postgres.customFilter")}</ContextMenuItem>
+                          <ContextMenuSeparator />
+                        </>}
                         {tab.type === "table" && tableEditingEnabled && <>
                           <ContextMenuItem
                             disabled={!canSetNull(columnIndex)}
@@ -1360,6 +1687,47 @@ export function ToolPostgres() {
                     )}
                     <ContextMenuItem onSelect={() => void exportCsv()}>{t("toolbox.postgres.exportCsv")}</ContextMenuItem>
                   </>}
+                  renderColumnContextMenu={tab.type === "table" ? (columnName, columnIndex) => (
+                    <>
+                      <ContextMenuItem onSelect={() => {
+                        setFilterDialog({ mode: "filterSort" });
+                      }}>{t("toolbox.postgres.filterSort")}</ContextMenuItem>
+                      <ContextMenuSeparator />
+                      <ContextMenuItem onSelect={() => freezeColumn(columnIndex)}>{t("toolbox.postgres.freezeColumn")}</ContextMenuItem>
+                      <ContextMenuItem disabled={!currentLayout().frozenCount} onSelect={unfreezeAllColumns}>{t("toolbox.postgres.unfreezeAllColumns")}</ContextMenuItem>
+                      <ContextMenuItem onSelect={() => setLayoutDialog({ kind: "columnWidth", columnIndex })}>{t("toolbox.postgres.setColumnWidth")}</ContextMenuItem>
+                      <ContextMenuItem onSelect={() => bestFitColumn(columnIndex)}>{t("toolbox.postgres.bestFitColumn")}</ContextMenuItem>
+                      <ContextMenuSeparator />
+                      <ContextMenuItem onSelect={toggleFieldType}>
+                        {t("toolbox.postgres.showFieldType")}
+                        {currentLayout().showFieldType ? " ✓" : ""}
+                      </ContextMenuItem>
+                      <ContextMenuItem onSelect={toggleComment}>
+                        {t("toolbox.postgres.showComment")}
+                        {currentLayout().showComment ? " ✓" : ""}
+                      </ContextMenuItem>
+                    </>
+                  ) : undefined}
+                  renderRowHeaderContextMenu={tab.type === "table" ? () => (
+                    <ContextMenuItem onSelect={() => setLayoutDialog({ kind: "rowHeight" })}>{t("toolbox.postgres.setRowHeight")}</ContextMenuItem>
+                  ) : undefined}
+                  layout={tab.type === "table" ? currentLayout() : undefined}
+                  onColumnResize={tab.type === "table" ? setColumnWidth : undefined}
+                  onColumnBestFit={tab.type === "table" ? bestFitColumn : undefined}
+                  find={tab.type === "table" ? { ...findState, matches: findMatches } : undefined}
+                  findLabels={tab.type === "table" ? {
+                    placeholder: t("toolbox.postgres.findPlaceholder"),
+                    previous: t("toolbox.postgres.findPrevious"),
+                    next: t("toolbox.postgres.findNext"),
+                    close: t("toolbox.postgres.findClose"),
+                    count: (current, total) =>
+                      t("toolbox.postgres.findCount", { current, total }),
+                    noMatch: t("toolbox.postgres.findNoMatch"),
+                  } : undefined}
+                  onFindTextChange={tab.type === "table" ? (text) => setFindState({ open: true, text, current: 0 }) : undefined}
+                  onFindNext={tab.type === "table" ? findNext : undefined}
+                  onFindPrevious={tab.type === "table" ? findPrevious : undefined}
+                  onFindClose={tab.type === "table" ? closeFind : undefined}
                   onEditCell={tab.type === "table" && !postgresConfig.readOnly ? stageTableEdit : undefined}
                   isCellModified={isCellModified}
                   pendingInsertRows={tab.type === "table" ? tab.pendingInserts?.map((insert) => ({ id: insert.id, values: insert.values })) : undefined}
@@ -1463,6 +1831,41 @@ export function ToolPostgres() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+      {tab?.type === "table" && tab.result?.kind === "tabular" && (
+        <FilterSortDialog
+          open={filterDialog !== null}
+          onOpenChange={(open) => !open && setFilterDialog(null)}
+          columns={tab.result.columns}
+          initialFilter={tab.activeFilter}
+          includeSort={filterDialog?.mode === "filterSort"}
+          labels={filterSortLabels()}
+          onApply={applyFilter}
+          onClear={clearFilter}
+        />
+      )}
+      <LayoutValueDialog
+        open={layoutDialog !== null}
+        onOpenChange={(open) => !open && setLayoutDialog(null)}
+        title={
+          layoutDialog?.kind === "rowHeight"
+            ? t("toolbox.postgres.setRowHeight")
+            : t("toolbox.postgres.setColumnWidth")
+        }
+        defaultValue={
+          layoutDialog?.kind === "rowHeight"
+            ? currentLayout().rowHeight || 24
+            : (currentLayout().widths[
+                tab?.result?.kind === "tabular"
+                  ? (tab.result.columns[layoutDialog?.columnIndex ?? 0]?.key ??
+                    "")
+                  : ""
+              ] ?? 120)
+        }
+        onSubmit={(value) => {
+          if (layoutDialog?.kind === "rowHeight") setRowHeight(value);
+          else if (layoutDialog) setColumnWidth(layoutDialog.columnIndex, value);
+        }}
+      />
     </DatabaseWorkspaceShell>
   );
 }
@@ -1498,6 +1901,76 @@ function ToolButton({
 }
 function Separator() {
   return <span className="mx-1 h-4 w-px bg-border" />;
+}
+
+/** Shared value dialog for Set Column Width / Set Row Height (Slice C). */
+function LayoutValueDialog({
+  open,
+  title,
+  defaultValue,
+  onSubmit,
+  onOpenChange,
+}: {
+  open: boolean;
+  title: string;
+  defaultValue: number;
+  onSubmit: (value: number) => void;
+  onOpenChange: (open: boolean) => void;
+}) {
+  const [value, setValue] = useState(String(defaultValue));
+  const { t } = useTranslation();
+  useEffect(() => {
+    if (open) setValue(String(defaultValue));
+  }, [open, defaultValue]);
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-xs">
+        <DialogHeader>
+          <DialogTitle>{title}</DialogTitle>
+        </DialogHeader>
+        <div className="flex items-center gap-2 py-2">
+          <Input
+            type="number"
+            min={16}
+            value={value}
+            onChange={(event) => setValue(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                const numeric = Number(value);
+                if (Number.isFinite(numeric)) onSubmit(numeric);
+                onOpenChange(false);
+              }
+            }}
+            data-testid="postgres-layout-value-input"
+          />
+          <span className="text-[11px] text-muted-foreground">px</span>
+        </div>
+        <DialogFooter>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="h-7 rounded-sm px-3 text-[12px]"
+            onClick={() => onOpenChange(false)}
+          >
+            {t("toolbox.postgres.filterCancel")}
+          </Button>
+          <Button
+            type="button"
+            size="sm"
+            className="h-7 rounded-sm px-3 text-[12px]"
+            onClick={() => {
+              const numeric = Number(value);
+              if (Number.isFinite(numeric)) onSubmit(numeric);
+              onOpenChange(false);
+            }}
+          >
+            {t("toolbox.postgres.filterApply")}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
 }
 function ConnectionDialog({
   open,

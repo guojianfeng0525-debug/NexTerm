@@ -15,6 +15,10 @@ export interface PostgresQueryRuntimeResult {
 export interface PostgresTableRuntimeResult extends PostgresQueryRuntimeResult {
   readonly primaryKeyColumns?: readonly string[];
   readonly nullableColumns?: readonly string[];
+  /** Formatted server types aligned with `columns` (e.g. `int4`, `text`). */
+  readonly columnTypes?: readonly string[];
+  /** Column comments aligned with `columns`; empty string when absent. */
+  readonly columnComments?: readonly string[];
 }
 
 function columnsFor(names: readonly string[]): readonly DatabaseResultColumn[] {
@@ -53,7 +57,16 @@ export function adaptPostgresTableResult(
   result: PostgresTableRuntimeResult,
   pagination: { readonly offset: number; readonly limit: number },
 ): DatabaseTabularResult {
-  const columns = columnsFor(result.columns);
+  const columns = result.columns.map((label, ordinal) => ({
+    key: `column:${ordinal}`,
+    label,
+    ordinal,
+    // The table-data IPC now supplies server type metadata; the semantic
+    // type remains unknown for now (no cross-provider mapping yet).
+    semanticType: "unknown" as const,
+    providerType: result.columnTypes?.[ordinal],
+    providerComment: result.columnComments?.[ordinal],
+  }));
   const primaryKeyNames = new Set(result.primaryKeyColumns ?? []);
   const nullableColumnNames = new Set(result.nullableColumns ?? []);
   return {

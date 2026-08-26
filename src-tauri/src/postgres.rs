@@ -10,7 +10,7 @@ use russh::{
 };
 use serde::{Deserialize, Serialize};
 use sha2_10::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Cursor;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -75,12 +75,44 @@ pub struct PostgresTransactionRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct PostgresFilterCondition {
+    pub column: String,
+    /// One of: eq, neq, gt, gte, lt, lte, like, isNull, isNotNull.
+    pub operator: String,
+    /// Bound as text and cast to the column type by PostgreSQL. Ignored by
+    /// `isNull` / `isNotNull`.
+    pub value: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PostgresTableFilter {
+    /// "AND" or "OR" between all conditions (no nested groups).
+    pub logic: String,
+    pub conditions: Vec<PostgresFilterCondition>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PostgresSortClause {
+    pub column: String,
+    /// "asc" or "desc".
+    pub direction: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PostgresTableDataRequest {
     pub connection_id: String,
     pub schema: String,
     pub table: String,
     pub limit: Option<usize>,
     pub offset: Option<usize>,
+    /// Server-side filter applied to the paged query (table tab only).
+    pub filter: Option<PostgresTableFilter>,
+    /// Explicit ORDER BY clauses; a primary-key tie-breaker is appended
+    /// automatically for stable paging.
+    pub order_by: Option<Vec<PostgresSortClause>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -129,6 +161,10 @@ pub struct PostgresTableDataResult {
     pub primary_key_columns: Vec<String>,
     pub nullable_columns: Vec<String>,
     pub truncated: bool,
+    /// Formatted server types aligned with `columns` (e.g. `int4`, `text`).
+    pub column_types: Vec<String>,
+    /// Column comments aligned with `columns`; empty string when absent.
+    pub column_comments: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -711,6 +747,167 @@ async fn load_column_types(
         .collect()
 }
 
+/// Loads every live column (name, formatted type, comment) in definition
+/// order. A single catalog query avoids per-column round-trips.
+async fn load_column_metadata(
+    client: &Client,
+    schema: &str,
+    table: &str,
+) -> Result<Vec<(String, String, Option<String>)>, String> {
+    let rows = client
+        .query(
+            "SELECT a.attname, pg_catalog.format_type(a.atttypid, a.atttypmod), pg_catalog.col_description(c.oid, a.attnum) FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = $1 AND c.relname = $2 AND a.attnum > 0 AND NOT a.attisdropped ORDER BY a.attnum",
+            &[&schema, &table],
+        )
+        .await
+        .map_err(|error| format!("Failed to load table column metadata: {error}"))?;
+    rows.into_iter()
+        .map(|row| {
+            Ok((
+                row.try_get(0)
+                    .map_err(|error| format!("Failed to decode table column: {error}"))?,
+                row.try_get(1)
+                    .map_err(|error| format!("Failed to decode table column type: {error}"))?,
+                row.try_get(2)
+                    .map_err(|error| format!("Failed to decode table column comment: {error}"))?,
+            ))
+        })
+        .collect()
+}
+
+/// Maximum number of AND/OR conditions accepted by build_where_clause.
+const MAX_FILTER_CONDITIONS: usize = 32;
+/// Maximum length of a single bound filter value (64 KiB).
+const MAX_FILTER_VALUE_LEN: usize = 64 * 1024;
+/// Maximum number of explicit ORDER BY columns.
+const MAX_ORDER_BY_COLUMNS: usize = 8;
+
+/// `format_type` output is trusted server data, but it is interpolated into
+/// SQL text (`$n::text::<type>`), so only ASCII-safe type spellings are
+/// allowed. Comment markers, quotes, and backslashes never appear in legal
+/// type names; allowing them would open `--`, `/*`, and string escapes.
+fn validate_cast_type(data_type: &str) -> Result<(), String> {
+    if data_type.is_empty()
+        || !data_type.bytes().all(|b| {
+            b.is_ascii_alphanumeric() || b" _(),[]\".".contains(&b)
+        })
+    {
+        return Err("Unsafe column type name from catalog".into());
+    }
+    Ok(())
+}
+
+/// Builds a parameterized WHERE clause from whitelisted conditions. Every
+/// column must exist in the table's live column set; operators are restricted
+/// to the supported set; values are bound as text and cast to the column type
+/// by PostgreSQL. Returns `(clause, params)` where clause is empty for no
+/// conditions.
+///
+/// NULL semantics (security constraint §2.2/§5): value operators (`eq`,
+/// `neq`, `gt`, `gte`, `lt`, `lte`, `like`) require a concrete `Some` value —
+/// a `None` is rejected, never silently coerced to `""`. `None`/NULL in SQL is
+/// expressed only via `isNull` / `isNotNull`, which bind no parameter.
+fn build_where_clause(
+    filter: &PostgresTableFilter,
+    column_types: &HashMap<String, String>,
+) -> Result<(String, Vec<Option<String>>), String> {
+    if filter.conditions.is_empty() {
+        return Ok((String::new(), Vec::new()));
+    }
+    if filter.conditions.len() > MAX_FILTER_CONDITIONS {
+        return Err(format!(
+            "Too many filter conditions (max {MAX_FILTER_CONDITIONS})"
+        )
+        .into());
+    }
+    let logic = match filter.logic.as_str() {
+        "AND" => " AND ",
+        "OR" => " OR ",
+        _ => return Err("Filter logic must be AND or OR".into()),
+    };
+    let mut params: Vec<Option<String>> = Vec::new();
+    let mut predicates = Vec::new();
+    for condition in &filter.conditions {
+        let data_type = column_types
+            .get(&condition.column)
+            .ok_or_else(|| format!("Unknown filter column: {}", condition.column))?;
+        validate_cast_type(data_type)?;
+        let column = quote_identifier(&condition.column);
+        let predicate = match condition.operator.as_str() {
+            "eq" | "neq" | "gt" | "gte" | "lt" | "lte" | "like" => {
+                let value = condition.value.as_ref().ok_or_else(|| {
+                    format!(
+                        "Filter operator {} requires a value",
+                        condition.operator
+                    )
+                })?;
+                if value.len() > MAX_FILTER_VALUE_LEN {
+                    return Err("Filter value exceeds the maximum length".into());
+                }
+                params.push(Some(value.clone()));
+                let symbol = match condition.operator.as_str() {
+                    "eq" => "=",
+                    "neq" => "<>",
+                    "gt" => ">",
+                    "gte" => ">=",
+                    "lt" => "<",
+                    "lte" => "<=",
+                    // LIKE patterns bind as plain text without casting to the
+                    // column type (security constraint §2.1): `%`/`_` are
+                    // interpreted by PostgreSQL, never escaped.
+                    _ => "LIKE",
+                };
+                if condition.operator == "like" {
+                    format!("{column} {symbol} ${}::text", params.len())
+                } else {
+                    format!("{column} {symbol} ${}::text::{}", params.len(), data_type)
+                }
+            }
+            "isNull" => format!("{column} IS NULL"),
+            "isNotNull" => format!("{column} IS NOT NULL"),
+            _ => return Err(format!("Unsupported filter operator: {}", condition.operator)),
+        };
+        predicates.push(predicate);
+    }
+    Ok((format!(" WHERE {}", predicates.join(logic)), params))
+}
+
+/// Builds an ORDER BY clause from whitelisted columns/directions, appending a
+/// primary-key tie-breaker for stable paging. Returns empty when no explicit
+/// sort is requested and the table has no primary key.
+fn build_order_by_clause(
+    order_by: &[PostgresSortClause],
+    valid_columns: &HashSet<String>,
+    primary_key_columns: &[String],
+) -> Result<String, String> {
+    if order_by.len() > MAX_ORDER_BY_COLUMNS {
+        return Err(format!(
+            "Too many ORDER BY columns (max {MAX_ORDER_BY_COLUMNS})"
+        )
+        .into());
+    }
+    let mut clauses = Vec::new();
+    for clause in order_by {
+        if !valid_columns.contains(&clause.column) {
+            return Err(format!("Unknown order column: {}", clause.column));
+        }
+        let direction = match clause.direction.as_str() {
+            "asc" => "ASC",
+            "desc" => "DESC",
+            _ => return Err(format!("Unsupported sort direction: {}", clause.direction)),
+        };
+        clauses.push(format!("{} {}", quote_identifier(&clause.column), direction));
+    }
+    for key in primary_key_columns {
+        clauses.push(format!("{} ASC", quote_identifier(key)));
+    }
+    if clauses.is_empty() {
+        Ok(String::new())
+    } else {
+        Ok(format!(" ORDER BY {}", clauses.join(", ")))
+    }
+}
+
 /// Builds a parameterized single-row INSERT. Only the provided columns are
 /// written; absent columns keep their server-side DEFAULT. Values are cast
 /// through `::text::<type>` so string transport cannot lose precision.
@@ -852,7 +1049,9 @@ pub async fn postgres_table_data(
         .cloned()
         .ok_or_else(|| "PostgreSQL connection is not active".to_string())?;
     let limit = request.limit.unwrap_or(100).clamp(1, 1_000);
-    let offset = request.offset.unwrap_or(0);
+    // Offset is bounded to prevent unbounded deep scans over filtered result
+    // sets (security constraint §4).
+    let offset = request.offset.unwrap_or(0).min(1_000_000);
     let relation = format!(
         "{}.{}",
         quote_identifier(&request.schema),
@@ -874,52 +1073,90 @@ pub async fn postgres_table_data(
         .into_iter()
         .filter_map(|row| row.try_get::<_, String>(0).ok())
         .collect();
-    // A stable order is required for reliable paging. Tables without a primary
-    // key remain browseable but cannot promise stable page boundaries.
-    let order = if primary_key_columns.is_empty() {
-        String::new()
-    } else {
-        format!(
-            " ORDER BY {}",
-            primary_key_columns
-                .iter()
-                .map(|column| quote_identifier(column))
-                .collect::<Vec<_>>()
-                .join(", ")
-        )
-    };
-    // The identifiers are quoted locally and all numeric controls are bounded.
-    // This endpoint is intentionally limited to a single relation, not arbitrary SQL.
-    let messages = client
-        .simple_query(&format!(
-            "SELECT * FROM {relation}{order} LIMIT {limit} OFFSET {offset}"
-        ))
-        .await
-        .map_err(|error| format!("Failed to load table data: {error}"))?;
-    let mut columns = Vec::new();
-    let mut rows = Vec::new();
-    for message in messages {
-        if let SimpleQueryMessage::Row(row) = message {
-            if columns.is_empty() {
-                columns = row
-                    .columns()
-                    .iter()
-                    .map(|column| column.name().to_string())
-                    .collect();
-            }
-            rows.push(
-                (0..row.len())
-                    .map(|index| row.get(index).map(str::to_owned))
-                    .collect(),
-            );
-        }
+    // Column metadata drives the identifier whitelist, typed casts, and the
+    // Show Field Type / Show Comment columns. A single catalog query keeps
+    // this cheap even for wide tables. The metadata query is required: safe
+    // SQL construction (whitelist + cast targets) depends on it, so the old
+    // simple_query browse path is intentionally removed (security §6.1).
+    let metadata = load_column_metadata(&client, &request.schema, &request.table).await?;
+    let mut types: HashMap<String, String> = HashMap::new();
+    let mut comments: HashMap<String, Option<String>> = HashMap::new();
+    for (name, data_type, comment) in &metadata {
+        types.insert(name.clone(), data_type.clone());
+        comments.insert(name.clone(), comment.clone());
     }
+    let valid_columns: HashSet<String> = types.keys().cloned().collect();
+    // WHERE is fully parameterized; identifiers are whitelisted against the
+    // table's live column set, so no user text reaches the SQL.
+    let (where_sql, where_params) = match &request.filter {
+        Some(filter) => build_where_clause(filter, &types)?,
+        None => (String::new(), Vec::new()),
+    };
+    let order_sql = build_order_by_clause(
+        request.order_by.as_deref().unwrap_or(&[]),
+        &valid_columns,
+        &primary_key_columns,
+    )?;
+    let mut values: Vec<Box<dyn tokio_postgres::types::ToSql + Send + Sync>> = where_params
+        .into_iter()
+        .map(|value| Box::new(value) as Box<dyn tokio_postgres::types::ToSql + Send + Sync>)
+        .collect();
+    let params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = values
+        .iter()
+        .map(|value| value.as_ref() as &(dyn tokio_postgres::types::ToSql + Sync))
+        .collect();
+    // Values travel as text so the grid keeps its string transport for every
+    // column type. The cast happens on the server, and WHERE values are cast
+    // to the column type through the same text path used by postgres_table_update.
+    let select_columns = metadata
+        .iter()
+        .map(|(name, _, _)| format!("{}::text", quote_identifier(name)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    // Fetch limit+1 rows so `truncated` can distinguish "exactly a full page"
+    // from "more rows remain" even when WHERE/ORDER BY change the result set.
+    let statement = format!(
+        "SELECT {select_columns} FROM {relation}{where_sql}{order_sql} LIMIT {} OFFSET {}",
+        limit + 1,
+        offset
+    );
+    let fetched = tokio::time::timeout(
+        QUERY_TIMEOUT,
+        client.query(&statement, &params),
+    )
+    .await
+    .map_err(|_| "PostgreSQL table data query timed out")?
+    .map_err(|error| format!("Failed to load table data: {error}"))?;
+    let truncated = fetched.len() > limit;
+    let rows = fetched
+        .into_iter()
+        .take(limit)
+        .map(|row| {
+            (0..row.len())
+                .map(|index| row.try_get::<_, Option<String>>(index).ok().flatten())
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    let columns: Vec<String> = metadata
+        .iter()
+        .map(|(name, _, _)| name.clone())
+        .collect();
+    let column_types: Vec<String> = columns
+        .iter()
+        .map(|name| types.get(name).cloned().unwrap_or_default())
+        .collect();
+    let column_comments: Vec<String> = columns
+        .iter()
+        .map(|name| comments.get(name).cloned().flatten().unwrap_or_default())
+        .collect();
     Ok(PostgresTableDataResult {
         columns,
-        truncated: rows.len() == limit,
+        truncated,
         rows,
         primary_key_columns,
         nullable_columns,
+        column_types,
+        column_comments,
     })
 }
 
@@ -1263,9 +1500,364 @@ pub async fn postgres_ssh_fingerprint(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_delete_statement, build_insert_statement, fingerprint_matches, single_statement,
+        build_delete_statement, build_insert_statement, build_order_by_clause,
+        build_where_clause, fingerprint_matches, single_statement, PostgresFilterCondition,
+        PostgresSortClause, PostgresTableFilter,
     };
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
+
+    fn column_types() -> HashMap<String, String> {
+        HashMap::from([
+            ("id".to_string(), "integer".to_string()),
+            ("name".to_string(), "text".to_string()),
+            ("score".to_string(), "numeric".to_string()),
+            ("note".to_string(), "text".to_string()),
+        ])
+    }
+
+    #[test]
+    fn where_clause_binds_values_with_typed_casts() {
+        let filter = PostgresTableFilter {
+            logic: "AND".to_string(),
+            conditions: vec![PostgresFilterCondition {
+                column: "name".to_string(),
+                operator: "eq".to_string(),
+                value: Some("Alice".to_string()),
+            }],
+        };
+        let (clause, params) = build_where_clause(&filter, &column_types()).unwrap();
+        assert_eq!(clause, " WHERE \"name\" = $1::text::text");
+        assert_eq!(params, vec![Some("Alice".to_string())]);
+    }
+
+    #[test]
+    fn where_clause_or_logic_joins_predicates() {
+        let filter = PostgresTableFilter {
+            logic: "OR".to_string(),
+            conditions: vec![
+                PostgresFilterCondition {
+                    column: "category".to_string(),
+                    operator: "eq".to_string(),
+                    value: Some("a".to_string()),
+                },
+                PostgresFilterCondition {
+                    column: "category".to_string(),
+                    operator: "eq".to_string(),
+                    value: Some("b".to_string()),
+                },
+            ],
+        };
+        let mut types = column_types();
+        types.insert("category".to_string(), "text".to_string());
+        let (clause, params) = build_where_clause(&filter, &types).unwrap();
+        assert_eq!(
+            clause,
+            " WHERE \"category\" = $1::text::text OR \"category\" = $2::text::text"
+        );
+        assert_eq!(params, vec![Some("a".to_string()), Some("b".to_string())]);
+    }
+
+    #[test]
+    fn where_clause_supports_full_operator_set() {
+        let operators = [
+            ("eq", "="),
+            ("neq", "<>"),
+            ("gt", ">"),
+            ("gte", ">="),
+            ("lt", "<"),
+            ("lte", "<="),
+        ];
+        for (operator, symbol) in operators {
+            let filter = PostgresTableFilter {
+                logic: "AND".to_string(),
+                conditions: vec![PostgresFilterCondition {
+                    column: "score".to_string(),
+                    operator: operator.to_string(),
+                    value: Some("10".to_string()),
+                }],
+            };
+            let (clause, _) = build_where_clause(&filter, &column_types()).unwrap();
+            assert_eq!(
+                clause,
+                format!(" WHERE \"score\" {symbol} $1::text::numeric"),
+                "operator {operator}"
+            );
+        }
+    }
+
+    #[test]
+    fn where_clause_null_operators_bind_no_value() {
+        let filter = PostgresTableFilter {
+            logic: "AND".to_string(),
+            conditions: vec![
+                PostgresFilterCondition {
+                    column: "note".to_string(),
+                    operator: "isNull".to_string(),
+                    value: None,
+                },
+                PostgresFilterCondition {
+                    column: "name".to_string(),
+                    operator: "isNotNull".to_string(),
+                    value: None,
+                },
+            ],
+        };
+        let (clause, params) = build_where_clause(&filter, &column_types()).unwrap();
+        assert_eq!(
+            clause,
+            " WHERE \"note\" IS NULL AND \"name\" IS NOT NULL"
+        );
+        assert!(params.is_empty());
+    }
+
+    #[test]
+    fn where_clause_rejects_null_value_on_value_operators() {
+        // Security constraint §2.2/§5: a value operator with `value: null`
+        // must be rejected, never coerced to IS NULL or `""`.
+        for operator in ["eq", "neq", "gt", "gte", "lt", "lte", "like"] {
+            let filter = PostgresTableFilter {
+                logic: "AND".to_string(),
+                conditions: vec![PostgresFilterCondition {
+                    column: "name".to_string(),
+                    operator: operator.to_string(),
+                    value: None,
+                }],
+            };
+            assert!(
+                build_where_clause(&filter, &column_types()).is_err(),
+                "operator {operator} with value:null must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn where_clause_distinguishes_none_from_empty_string() {
+        let filter = PostgresTableFilter {
+            logic: "AND".to_string(),
+            conditions: vec![PostgresFilterCondition {
+                column: "name".to_string(),
+                operator: "eq".to_string(),
+                value: Some(String::new()),
+            }],
+        };
+        let (clause, params) = build_where_clause(&filter, &column_types()).unwrap();
+        assert_eq!(clause, " WHERE \"name\" = $1::text::text");
+        assert_eq!(params, vec![Some(String::new())]);
+    }
+
+    #[test]
+    fn where_clause_value_operators_require_a_value() {
+        for operator in ["eq", "neq", "gt", "gte", "lt", "lte", "like"] {
+            let filter = PostgresTableFilter {
+                logic: "AND".to_string(),
+                conditions: vec![PostgresFilterCondition {
+                    column: "score".to_string(),
+                    operator: operator.to_string(),
+                    value: None,
+                }],
+            };
+            assert!(
+                build_where_clause(&filter, &column_types()).is_err(),
+                "operator {operator} without a value must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn where_clause_like_binds_pattern_verbatim() {
+        let filter = PostgresTableFilter {
+            logic: "AND".to_string(),
+            conditions: vec![PostgresFilterCondition {
+                column: "name".to_string(),
+                operator: "like".to_string(),
+                value: Some("%O'Brien%".to_string()),
+            }],
+        };
+        let (clause, params) = build_where_clause(&filter, &column_types()).unwrap();
+        // LIKE values bind as text and are not cast to the column type
+        // (security constraint §2.1), so `%`/`_` stay pattern characters.
+        assert_eq!(clause, " WHERE \"name\" LIKE $1::text");
+        assert_eq!(params, vec![Some("%O'Brien%".to_string())]);
+    }
+
+    #[test]
+    fn where_clause_rejects_too_many_conditions() {
+        let conditions = (0..33)
+            .map(|index| PostgresFilterCondition {
+                column: "name".to_string(),
+                operator: "eq".to_string(),
+                value: Some(format!("v{index}")),
+            })
+            .collect();
+        let filter = PostgresTableFilter {
+            logic: "AND".to_string(),
+            conditions,
+        };
+        assert!(build_where_clause(&filter, &column_types()).is_err());
+    }
+
+    #[test]
+    fn where_clause_rejects_oversized_value() {
+        let filter = PostgresTableFilter {
+            logic: "AND".to_string(),
+            conditions: vec![PostgresFilterCondition {
+                column: "name".to_string(),
+                operator: "eq".to_string(),
+                value: Some("x".repeat(64 * 1024 + 1)),
+            }],
+        };
+        assert!(build_where_clause(&filter, &column_types()).is_err());
+    }
+
+    #[test]
+    fn where_clause_rejects_unsafe_cast_type_from_catalog() {
+        // The cast target is interpolated into SQL text; a polluted catalog
+        // name must be blocked by the character-set guard.
+        let mut types = column_types();
+        types.insert("name".to_string(), "text; DROP TABLE x --".to_string());
+        let filter = PostgresTableFilter {
+            logic: "AND".to_string(),
+            conditions: vec![PostgresFilterCondition {
+                column: "name".to_string(),
+                operator: "eq".to_string(),
+                value: Some("x".to_string()),
+            }],
+        };
+        assert!(build_where_clause(&filter, &types).is_err());
+    }
+
+    #[test]
+    fn where_clause_rejects_unknown_column() {
+        let filter = PostgresTableFilter {
+            logic: "AND".to_string(),
+            conditions: vec![PostgresFilterCondition {
+                column: "missing".to_string(),
+                operator: "eq".to_string(),
+                value: Some("x".to_string()),
+            }],
+        };
+        assert!(build_where_clause(&filter, &column_types()).is_err());
+    }
+
+    #[test]
+    fn where_clause_rejects_unknown_operator() {
+        let filter = PostgresTableFilter {
+            logic: "AND".to_string(),
+            conditions: vec![PostgresFilterCondition {
+                column: "name".to_string(),
+                operator: "regex".to_string(),
+                value: Some("x".to_string()),
+            }],
+        };
+        assert!(build_where_clause(&filter, &column_types()).is_err());
+    }
+
+    #[test]
+    fn where_clause_rejects_unknown_logic() {
+        let filter = PostgresTableFilter {
+            logic: "XOR".to_string(),
+            conditions: vec![PostgresFilterCondition {
+                column: "name".to_string(),
+                operator: "eq".to_string(),
+                value: Some("x".to_string()),
+            }],
+        };
+        assert!(build_where_clause(&filter, &column_types()).is_err());
+    }
+
+    #[test]
+    fn where_clause_empty_conditions_yields_no_clause() {
+        let filter = PostgresTableFilter {
+            logic: "AND".to_string(),
+            conditions: vec![],
+        };
+        let (clause, params) = build_where_clause(&filter, &column_types()).unwrap();
+        assert_eq!(clause, "");
+        assert!(params.is_empty());
+    }
+
+    #[test]
+    fn where_clause_treats_injection_value_as_literal_parameter() {
+        let filter = PostgresTableFilter {
+            logic: "AND".to_string(),
+            conditions: vec![PostgresFilterCondition {
+                column: "name".to_string(),
+                operator: "eq".to_string(),
+                value: Some("x' OR '1'='1".to_string()),
+            }],
+        };
+        let (clause, params) = build_where_clause(&filter, &column_types()).unwrap();
+        assert_eq!(clause, " WHERE \"name\" = $1::text::text");
+        assert_eq!(params, vec![Some("x' OR '1'='1".to_string())]);
+    }
+
+    #[test]
+    fn order_by_whitelists_columns_and_directions() {
+        let valid: HashSet<String> =
+            HashSet::from(["name".to_string(), "score".to_string()]);
+        let clauses = vec![
+            PostgresSortClause {
+                column: "score".to_string(),
+                direction: "desc".to_string(),
+            },
+            PostgresSortClause {
+                column: "name".to_string(),
+                direction: "asc".to_string(),
+            },
+        ];
+        let sql = build_order_by_clause(&clauses, &valid, &[]).unwrap();
+        assert_eq!(sql, " ORDER BY \"score\" DESC, \"name\" ASC");
+    }
+
+    #[test]
+    fn order_by_appends_primary_key_tie_breaker() {
+        let valid: HashSet<String> = HashSet::from(["score".to_string()]);
+        let clauses = vec![PostgresSortClause {
+            column: "score".to_string(),
+            direction: "asc".to_string(),
+        }];
+        let sql = build_order_by_clause(&clauses, &valid, &["id".to_string()]).unwrap();
+        assert_eq!(sql, " ORDER BY \"score\" ASC, \"id\" ASC");
+    }
+
+    #[test]
+    fn order_by_empty_without_primary_key_yields_no_clause() {
+        let sql = build_order_by_clause(&[], &HashSet::new(), &[]).unwrap();
+        assert_eq!(sql, "");
+    }
+
+    #[test]
+    fn order_by_rejects_unknown_column() {
+        let clauses = vec![PostgresSortClause {
+            column: "missing".to_string(),
+            direction: "asc".to_string(),
+        }];
+        assert!(build_order_by_clause(&clauses, &HashSet::new(), &[]).is_err());
+    }
+
+    #[test]
+    fn order_by_rejects_unknown_direction() {
+        let valid: HashSet<String> = HashSet::from(["name".to_string()]);
+        let clauses = vec![PostgresSortClause {
+            column: "name".to_string(),
+            direction: "sideways".to_string(),
+        }];
+        assert!(build_order_by_clause(&clauses, &valid, &[]).is_err());
+    }
+
+    #[test]
+    fn order_by_rejects_too_many_columns() {
+        let valid: HashSet<String> = (0..10)
+            .map(|index| format!("col{index}"))
+            .collect();
+        let clauses: Vec<PostgresSortClause> = (0..9)
+            .map(|index| PostgresSortClause {
+                column: format!("col{index}"),
+                direction: "asc".to_string(),
+            })
+            .collect();
+        assert!(build_order_by_clause(&clauses, &valid, &[]).is_err());
+    }
 
     #[test]
     fn explain_accepts_one_statement_with_a_trailing_semicolon() {

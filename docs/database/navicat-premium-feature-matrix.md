@@ -36,7 +36,7 @@ Source legend: `FM` is the official Enterprise Feature Matrix; `PP` is the offic
 | DE-04 | Data editor | Data profiling | Yes | visual interactive analysis | FM/PP | MISSING | No | No | No | No | analytics module |
 | DE-05 | Data editor | Text, hex, image, web, BFile viewer/editor | Yes | provider/type dependent | FM | MISSING | No | No | No | No | value viewers |
 | DE-06 | Data editor | Foreign-key data selection | Yes | relational | FM | MISSING | No | No | No | No | editor adapter |
-| DE-07 | Data editor | Filter, sort, find/replace | Yes | all data viewers | FM/M17 | MISSING | No | No | No | No | grid platform |
+| DE-07 | Data editor | Filter, sort, find/replace | Yes | all data viewers | FM/M17 | PARTIAL | Yes | PG table tab filter (field value/custom/& sort), find bar, sort | No | B18 filter/find implemented; query-tab & cross-page find deferred | grid platform |
 | DE-08 | Data editor | Table profile and datatype colors | Yes | relational | FM/PP | MISSING | No | No | No | No | persistence/theming |
 | QY-01 | Query | Syntax-highlighted editor | Yes | dialect dependent | FM | PARTIAL | Yes | Yes | No | Partial | generic dialect host |
 | QY-02 | Query | Code completion and snippets | Yes | provider metadata | FM/M17 | PARTIAL | completion only | catalog query | No | Partial | snippets, provider abstraction |
