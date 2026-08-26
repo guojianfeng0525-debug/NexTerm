@@ -52,6 +52,23 @@ export const config: Options.Testrunner = {
     ui: 'bdd',
     timeout: 90_000,
   },
+  // The app window can restore to an off-screen position (multi-monitor /
+  // session restore), which makes every element "exists but not displayed"
+  // and breaks waitForDisplayed-based specs (S1-6 dist saga root cause).
+  // Force the window to a known on-screen size at the start of every session.
+  before: async () => {
+    try {
+      await browser.tauri.switchWindow('main');
+      // Keep the window within the primary screen (1728x1010 logical here).
+      // Requesting a window larger than the screen (e.g. 2048x1200) pushes it
+      // off-screen and WebDriver isDisplayed() then returns false for every
+      // element — the S1-6 dist-saga root cause. Use a screen-fitting size.
+      await browser.setWindowRect({ x: 0, y: 0, width: 1600, height: 1000 });
+      await browser.setWindowSize(1600, 1000);
+    } catch {
+      /* window not ready yet; individual specs retry their own setup */
+    }
+  },
   afterTest: async (_test, _context, { error }) => {
     if (error) {
       await browser.saveScreenshot('./test-results/wdio/failures/screenshot.png');

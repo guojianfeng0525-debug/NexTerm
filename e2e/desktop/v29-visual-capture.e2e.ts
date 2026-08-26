@@ -42,9 +42,19 @@ async function unlock() {
     { timeout: 30_000, timeoutMsg: 'app did not reach toolbox' },
   );
   if (await lock.isExisting()) {
-    await lock.waitForDisplayed({ timeout: 30_000 });
+    // WebKit isDisplayed returns false for input elements; bypass waitForDisplayed
+    // and interact directly (verified in diag.e2e.ts).
+    await browser.execute(() => {
+      const el = document.querySelector('#app-lock-password') as HTMLElement | null;
+      if (el) el.focus();
+    });
     await lock.setValue(password);
-    await $('#app-lock-confirm').setValue(password);
+    const confirm = await $('#app-lock-confirm');
+    await browser.execute(() => {
+      const el = document.querySelector('#app-lock-confirm') as HTMLElement | null;
+      if (el) el.focus();
+    });
+    await confirm.setValue(password);
     await $('#app-lock-submit, button.w-full').click();
   }
 }
@@ -162,6 +172,18 @@ async function editorText(): Promise<string> {
   return editors[editors.length - 1].getText().catch(() => '');
 }
 
+/** Sets the active CodeMirror editor content via execCommand (S1-1 style). */
+async function setEditorSql(sql: string) {
+  await browser.execute((value: string) => {
+    const content = document.querySelector('.cm-content') as HTMLElement | null;
+    if (!content) return;
+    content.focus();
+    document.execCommand('selectAll');
+    document.execCommand('insertText', false, value);
+  }, sql);
+  await browser.pause(300);
+}
+
 describe('v2.9.0 (M2) visual capture', () => {
   before(async () => {
     await browser.tauri.switchWindow('main');
@@ -188,6 +210,12 @@ describe('v2.9.0 (M2) visual capture', () => {
     await navigatorNode(['e2e_add_numbers']);
     await navigatorNode(['e2e_order_seq']);
     await browser.pause(600);
+    // M-1 (visual review): the tree can be scrolled past the table sub-groups
+    // by the earlier expansion clicks. Scroll the users table node into the
+    // center so its four lazy-loaded sub-groups (columns/indexes/constraints/
+    // triggers) are visible in the capture.
+    await (await navigatorNode(['/object:users'])).scrollIntoView({ block: 'center' });
+    await browser.pause(400);
     await browser.saveScreenshot(`${SHOT}/01-object-tree.png`);
 
     // Function context menu.
@@ -272,7 +300,53 @@ describe('v2.9.0 (M2) visual capture', () => {
     await browser.setWindowSize(960, 700);
     await browser.pause(500);
     await browser.saveScreenshot(`${SHOT}/06-small-grouped-navigator.png`);
+
+    // M-2 (visual review): previously re-used the 06-small screenshot — the
+    // small-window ConnectionDialog was never actually captured. Open the
+    // dialog in the small window, then capture.
+    await $('[data-testid="postgres-new-connection"]').click();
+    const smallDialog = await $('[data-testid="postgres-connection-dialog"]');
+    await smallDialog.waitForDisplayed({ timeout: 10_000 });
+    await browser.pause(500);
     await browser.saveScreenshot(`${SHOT}/07-small-dialog-fields.png`);
+    await browser.keys('Escape');
+    await smallDialog.waitForExist({ reverse: true });
     await browser.setWindowSize(2048, 1200);
+  });
+
+  it('09: long SQL horizontal scroll + small-window toast (B-1/B-2 evidence)', async () => {
+    // Dark theme, large window: a very long single-line SELECT must NOT wrap
+    // (B-2 fix: wordWrap off for SQL/DDL editors) — horizontal scroll instead.
+    await configureTheme('深色');
+    await browser.setWindowSize(2048, 1200);
+    await $('[data-testid="postgres-new-query"]').click();
+    // Long single-line SELECT over real fixture columns (users + orders) so
+    // the query succeeds — a query referencing non-existent columns would
+    // render an error toast instead of the success state (v2.9.1 review note).
+    await setEditorSql(
+      'SELECT u.id, u.username, u.email, u.age, u.active, u.credit, u.created_at, u.last_login, o.total, o.status FROM public.users u LEFT JOIN public.orders o ON o.user_id = u.id WHERE u.active = true AND (u.age IS NULL OR u.age > 18) AND (u.email LIKE \'%@%\' OR u.credit > 0) ORDER BY u.created_at DESC, u.username ASC, u.email NULLS LAST LIMIT 100;',
+    );
+    await browser.pause(600);
+    await browser.saveScreenshot(`${SHOT}/08-long-sql.png`);
+
+    // Small window + run the query: the success toast must stay within the
+    // viewport and not cover the top toolbar / dialog fields (B-1 fix).
+    await browser.setWindowSize(960, 700);
+    await $('[data-testid="postgres-run"]').click();
+    await browser.pause(1200);
+    await browser.saveScreenshot(`${SHOT}/09-small-toast.png`);
+    await browser.setWindowSize(2048, 1200);
+  });
+
+  it('10: light theme query editor (m-1 evidence)', async () => {
+    // Light theme: the CodeMirror editor must follow the light UI (not stay
+    // oneDark) — visual review m-1.
+    await configureTheme('浅色');
+    await $('[data-testid="postgres-new-query"]').click();
+    await setEditorSql(
+      'SELECT id, username, email, credit FROM public.users ORDER BY username LIMIT 5;',
+    );
+    await browser.pause(600);
+    await browser.saveScreenshot(`${SHOT}/10-light-editor.png`);
   });
 });

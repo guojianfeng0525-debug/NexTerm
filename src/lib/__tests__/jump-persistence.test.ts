@@ -44,8 +44,12 @@ describe('jump host + default directory persistence', () => {
       defaultDirectory: '/srv/data',
     });
 
-    // Let the async persistAll settle into the SQLite stand-in.
-    await new Promise(r => setTimeout(r, 10));
+    // Let the async persistAll settle into the SQLite stand-in. Poll for the
+    // actual row instead of a fixed sleep: the encrypted write is queued, so a
+    // hardcoded 10ms window is a race (flaky in full-suite runs).
+    await vi.waitFor(() => {
+      expect(ipc.DB.connections?.[0]?.jump_host).toBe('bastion.example.com');
+    });
 
     // Inspect the raw stored row: jump_password must be ciphertext, not the plaintext.
     const raw = ipc.DB.connections?.[0];
@@ -89,7 +93,9 @@ describe('jump host + default directory persistence', () => {
       defaultDirectory: '/home/j',
     });
 
-    await new Promise(r => setTimeout(r, 10));
+    await vi.waitFor(() => {
+      expect(ipc.DB.connections?.[0]?.jump_host).toBe('jump.local');
+    });
     resetConnectionsCache();
     await hydrateConnectionsStorage();
 

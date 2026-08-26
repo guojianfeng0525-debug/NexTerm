@@ -340,6 +340,23 @@ pub fn run() {
                     }
                 }
 
+                // E2E (WDIO) runs with NEXTERM_DATA_DIR set: force the window
+                // onto the primary screen. macOS ignores tauri.conf x/y (the
+                // system places the window), and a restored off-screen
+                // position makes WebDriver isDisplayed() return false for
+                // every element — the S1-6 dist-saga root cause.
+                if std::env::var_os("NEXTERM_DATA_DIR").is_some() {
+                    if let Some(window) = app.get_webview_window("main") {
+                        match window.center() {
+                            Ok(_) => {
+                                let _ = window.set_size(tauri::LogicalSize::new(1600.0, 1000.0));
+                                tracing::info!("[e2e] window centered for WDIO");
+                            }
+                            Err(e) => tracing::warn!("[e2e] window center failed: {e}"),
+                        }
+                    }
+                }
+
                 // Open the SQLite key-value store next to the executable
                 // (portable mode — the DB travels with the exe). Falls back to
                 // the OS app-data directory when the exe directory cannot be

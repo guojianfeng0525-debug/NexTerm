@@ -45,12 +45,18 @@ async function connectPostgres() {
 
 /** Types SQL into the CodeMirror editor via the DOM (no clipboard dep). */
 async function setEditorSql(sql: string) {
-  // CodeMirror exposes its contenteditable; drive the value through the
-  // editor's internal API is not possible from WDIO, so we type via
-  // keyboard into the focused editor (select-all then type).
-  await $('.cm-editor').click();
-  await browser.keys(['Control', 'a']);
-  await browser.keys(sql.split(''));
+  // Drive the CodeMirror value through its contenteditable DOM directly.
+  // Keyboard-typing newlines is unreliable in WebKit: the "\n" key can fire
+  // the query-run Enter handler mid-typing (S1-1 fix). execCommand('insertText')
+  // is observed by CodeMirror 6's beforeinput/input pipeline.
+  await browser.execute((value: string) => {
+    const content = document.querySelector('.cm-content') as HTMLElement | null;
+    if (!content) return;
+    content.focus();
+    document.execCommand('selectAll');
+    document.execCommand('insertText', false, value);
+  }, sql);
+  await browser.pause(300);
 }
 
 describe('B19 query execution controls (native E2E, DEFERRED under R9)', () => {
@@ -86,9 +92,10 @@ describe('B19 query execution controls (native E2E, DEFERRED under R9)', () => {
 
   it('stops a long-running query with Ctrl+T', async function () {
     this.timeout(150000);
+    // Fresh query tab so no previous result grid lingers.
+    await $('[data-testid="postgres-new-query"]').click();
     await setEditorSql('SELECT pg_sleep(30);');
-    await browser.keys(['Control', 'r']); // plain Ctrl+R is the app refresh path? No — scope router handles it.
-    // Use the toolbar run button instead for the long query.
+    // Use the toolbar run button for the long query.
     await $('[data-testid="postgres-run"]').click();
     await $('[data-testid="postgres-stop"]').waitForDisplayed({ timeout: 10000 });
     await browser.keys(['Control', 't']);
@@ -109,7 +116,9 @@ describe('B19 query execution controls (native E2E, DEFERRED under R9)', () => {
 describe('B20 keyboard scope routing (native E2E, DEFERRED under R9)', () => {
   it('Ctrl+R applies filter in DATA_GRID and is not hijacked in query editor', async function () {
     this.timeout(150000);
-    // In the query editor, Ctrl+Shift+R runs; plain Ctrl+R must NOT run.
+    // Fresh query tab so no result grid from the earlier cases lingers —
+    // otherwise the "no grid" assertion below would false-positive.
+    await $('[data-testid="postgres-new-query"]').click();
     await setEditorSql('SELECT 1;');
     await browser.keys(['Control', 'r']);
     // No result grid should appear (plain Ctrl+R is unbound in QUERY_EDITOR).

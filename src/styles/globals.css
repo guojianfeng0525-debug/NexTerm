@@ -411,6 +411,13 @@ html {
   overflow: auto;
 }
 
+/* SQL/DDL editors never wrap long lines (visual review B-2): the extension
+   already omits lineWrapping for SQL, this pins the CSS so no theme or
+   global rule can re-enable soft-wrapping. */
+.cm-editor .cm-content {
+  white-space: pre;
+}
+
 /* ── TipTap rich-text editor (documents module) ─────────────────────────── */
 .ProseMirror {
   min-height: 60vh;
