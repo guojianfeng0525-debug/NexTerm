@@ -153,6 +153,9 @@ export function ConnectionDialog({
   const [hostKeyPrompt, setHostKeyPrompt] = useState<string | null>(null);
   const hostKeyPromptResolverRef = useRef<((accepted: boolean) => void) | null>(null);
   const hostKeyPromptTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** Fingerprint freshly re-confirmed via the retrust flow (M1). Consumed by
+   *  the next handleConnect attempt to override the stale stored fingerprint. */
+  const retrustFingerprintRef = useRef<string | null>(null);
 
   const clearHostKeyPromptTimeout = useCallback(() => {
     if (hostKeyPromptTimeoutRef.current) {
@@ -423,6 +426,14 @@ export function ConnectionDialog({
       }
     }
 
+    // Retrust override (M1): after "host key fingerprint changed" the user has
+    // re-confirmed the server's current fingerprint; use it instead of the
+    // stale stored one on this attempt.
+    if ((config.protocol === 'SSH' || config.protocol === 'SFTP') && retrustFingerprintRef.current) {
+      connectionConfig = { ...connectionConfig, hostKeyFingerprint: retrustFingerprintRef.current };
+      retrustFingerprintRef.current = null;
+    }
+
 
     // For SFTP/FTP/RDP/VNC protocols, delegate connection to App.tsx (via onConnect)
     // which calls the appropriate Tauri commands.
@@ -623,10 +634,24 @@ export function ConnectionDialog({
         if (cancelRequestedRef.current && result.error?.toLowerCase().includes('cancelled')) {
           toast.info(t('connectionDialog.toast.connectionCancelled'));
         } else {
-          toast.error(t('connectionDialog.toast.connectionFailed'), {
-            description: result.error || t('connectionDialog.toast.connectionFailedDesc'),
-            duration: 5000,
-          });
+          const isHostKeyMismatch = result.error?.toLowerCase().includes('host key fingerprint changed');
+          toast.error(
+            isHostKeyMismatch
+              ? t('connectionDialog.toast.hostKeyMismatch')
+              : t('connectionDialog.toast.connectionFailed'),
+            {
+              description: result.error || t('connectionDialog.toast.connectionFailedDesc'),
+              duration: 5000,
+              ...(isHostKeyMismatch
+                ? {
+                    action: {
+                      label: t('connectionDialog.toast.retrustHostKey'),
+                      onClick: () => void retrustHostKey(),
+                    },
+                  }
+                : {}),
+            },
+          );
         }
       }
     } catch (error) {
@@ -649,6 +674,34 @@ export function ConnectionDialog({
     }
 
   }
+
+  /** M1: re-probe the SSH host key after a "host key fingerprint changed"
+   *  rejection, let the user confirm the new fingerprint, persist it and retry.
+   *  Reuses the same confirmHostKey dialog used by the initial TOFU flow. */
+  const retrustHostKey = async () => {
+    const host = config.host;
+    const port = config.port || 22;
+    if (!host) return;
+    try {
+      const { fingerprint } = await invoke<{ fingerprint: string }>('ssh_host_key_fingerprint', {
+        request: { host, port },
+      });
+      const accepted = await confirmHostKey(
+        t('connectionDialog.hostKey.confirm', { host, port, fingerprint }),
+      );
+      if (!accepted) return;
+      retrustFingerprintRef.current = fingerprint;
+      setConfig((current) => ({ ...current, hostKeyFingerprint: fingerprint }));
+      if (editingConnection?.id) {
+        ConnectionStorageManager.updateConnection(editingConnection.id, {
+          hostKeyFingerprint: fingerprint,
+        });
+      }
+      void handleConnect();
+    } catch (error) {
+      toast.error(t('connectionDialog.hostKey.probeFailed'), { description: String(error) });
+    }
+  };
 
 const handleCancelConnectionAttempt = async () => {
     if (!isConnecting) {
@@ -1537,7 +1590,7 @@ const handleCancelConnectionAttempt = async () => {
       </DialogContent>
     </Dialog>
     <Dialog open={hostKeyPrompt !== null} onOpenChange={(isOpen) => !isOpen && resolveHostKeyPrompt(false)}>
-      <DialogContent className="!inset-0 !m-auto !translate-x-0 !translate-y-0 w-[520px] max-w-[90vw] max-h-[85vh] overflow-y-auto">
+      <DialogContent className="top-[50%] left-[50%] -translate-x-1/2 -translate-y-1/2 w-[520px] max-w-[90vw] max-h-[85vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2"><Shield className="h-5 w-5 text-amber-500" />{t('common.confirm')}</DialogTitle>
           <DialogDescription className="whitespace-pre-line break-words font-mono text-xs leading-5">{hostKeyPrompt}</DialogDescription>

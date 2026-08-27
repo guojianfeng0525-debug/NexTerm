@@ -46,7 +46,7 @@ export function DatabaseConnectionDialogShell({
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
-        className="!inset-0 !m-auto flex max-h-[min(560px,calc(100vh-32px))] !w-[720px] !max-w-[calc(100vw-32px)] !translate-x-0 !translate-y-0 flex-col gap-0 overflow-hidden rounded-md p-0"
+        className="top-[50%] left-[50%] -translate-x-1/2 -translate-y-1/2 flex max-h-[min(560px,calc(100vh-32px))] w-[720px] !max-w-[calc(100vw-32px)] flex-col gap-0 overflow-hidden rounded-md p-0"
         data-testid={testId}
       >
         <DialogHeader className="h-12 shrink-0 justify-center border-b px-4 py-0">

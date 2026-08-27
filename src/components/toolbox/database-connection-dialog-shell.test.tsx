@@ -33,7 +33,8 @@ describe("DatabaseConnectionDialogShell", () => {
       </DatabaseConnectionDialogShell>,
     );
 
-    expect(screen.getByTestId("connection-dialog").className).toContain("!w-[720px]");
+    expect(screen.getByTestId("connection-dialog").className).toContain("w-[720px]");
+    expect(screen.getByTestId("connection-dialog").className).toContain("top-[50%] left-[50%] -translate-x-1/2 -translate-y-1/2");
     fireEvent.click(screen.getByRole("button", { name: "SSH" }));
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
     fireEvent.click(screen.getByRole("button", { name: "Connect" }));
