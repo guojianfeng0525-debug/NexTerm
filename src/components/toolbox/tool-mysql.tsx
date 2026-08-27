@@ -1,9 +1,18 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import {
+  writeText as writeClipboardText,
+  readText as readClipboardText,
+} from "@tauri-apps/plugin-clipboard-manager";
+import { save as saveFile } from "@tauri-apps/plugin-dialog";
+import { writeTextFile, writeFile as writeBinaryFile } from "@tauri-apps/plugin-fs";
 import { useTranslation } from "react-i18next";
+import { undo, redo, selectAll } from "@codemirror/commands";
+import type { EditorView } from "@codemirror/view";
 import {
   Database,
   FolderTree,
+  History,
   Loader2,
   Play,
   Plus,
@@ -20,11 +29,27 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuTrigger,
+} from "@/components/ui/context-menu";
 import { CodeEditor } from "@/components/code-editor";
 import { DatabaseNavigator } from "@/components/toolbox/database-navigator";
 import { DatabaseProviderSelect } from "@/components/toolbox/database-provider-select";
 import { DatabaseResultPane } from "@/components/toolbox/database-result-pane";
+import { DatabaseResultErrorPane } from "@/components/toolbox/database-result-error";
 import { DatabaseWorkspaceShell } from "@/components/toolbox/database-workspace-shell";
+import {
+  NavigatorRelationMenu,
+  QueryEditorMenu,
+  ResultCellMenu,
+  type NavigatorRelationMenuLabels,
+  type QueryEditorMenuLabels,
+  type ResultCellMenuLabels,
+} from "@/components/toolbox/db-context-menus";
+import { QueryHistoryView } from "@/components/toolbox/query-history-view";
 import {
   DatabaseConnectionDialogShell,
   DatabaseConnectionField,
@@ -37,6 +62,7 @@ import {
   createMySQLNavigatorConnectionNode,
   getMySQLRelationReference,
   loadMySQLNavigatorChildren,
+  type MySQLRelationReference,
 } from "@/lib/database/mysql-object-loader";
 import { createMySQLQueryEditorContext } from "@/lib/database/mysql-query-editor";
 import {
@@ -52,6 +78,15 @@ import type {
   DatabaseObjectNodeId,
 } from "@/lib/database/types";
 import type { DatabaseResult } from "@/lib/database/result-types";
+import { databaseErrorResult, parseProviderError } from "@/lib/database/database-error";
+import { generateSelectSql } from "@/lib/database/sql-generation";
+import { addQueryHistory } from "@/lib/database/query-history";
+import {
+  currentStatementAt,
+  toggleLineComment,
+} from "@/lib/database/sql-statement-tokenizer";
+import { formatSql } from "@/lib/database/sql-formatter";
+import { useDatabaseKeyboardShortcuts } from "@/lib/keyboard/use-database-keyboard-shortcuts";
 import { MySQLConnectionsStorage } from "@/lib/toolbox/mysql-storage";
 
 type Tab = { id: string; sql: string; result: DatabaseResult | null };
@@ -79,6 +114,10 @@ const newTab = (): Tab => ({
   result: null,
 });
 
+/** MySQL identifier quoting: double inner backticks (`` ` `` → `` `` ``). */
+const quoteMySqlIdentifier = (id: string): string =>
+  `\`${id.replace(/`/g, "``")}\``;
+
 export function ToolMySql() {
   const { t } = useTranslation();
   const [connections, setConnections] = useState(() =>
@@ -94,6 +133,7 @@ export function ToolMySql() {
   const [connected, setConnected] = useState(false);
   const [connecting, setConnecting] = useState(false);
   const [dialogOpen, setDialogOpen] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] =
     useState<MySQLConnectionProfile | null>(null);
   const [tabs, setTabs] = useState<Tab[]>([newTab()]);
@@ -108,17 +148,7 @@ export function ToolMySql() {
   >({});
   const [selected, setSelected] = useState<DatabaseObjectNodeId | null>(null);
   const tab = tabs.find((item) => item.id === activeTab) ?? tabs[0];
-  useEffect(() => {
-    const pasteSqlNote = (event: Event) => {
-      const detail = (event as CustomEvent<{ content?: string; handled?: boolean; provider?: string }>).detail;
-      if (detail?.provider !== undefined && detail.provider !== "mysql") return;
-      if (!detail?.content || !tab) return;
-      setTabs((current) => current.map((item) => item.id === tab.id ? { ...item, sql: detail.content! } : item));
-      detail.handled = true;
-    };
-    window.addEventListener('nexterm:paste-sql-note', pasteSqlNote);
-    return () => window.removeEventListener('nexterm:paste-sql-note', pasteSqlNote);
-  }, [tab]);
+  const queryEditorViewRef = useRef<EditorView | null>(null);
   const executeCommand = resolveDatabaseCommand("database.query.execute", {
     scope: "QUERY_EDITOR",
     provider: mysqlProvider,
@@ -132,6 +162,75 @@ export function ToolMySql() {
       connectionState: connected ? "connected" : "disconnected",
     },
   );
+
+  const navigatorMenuLabels: NavigatorRelationMenuLabels = {
+    openData: t("toolbox.mysql.openData"),
+    copyName: t("toolbox.mysql.copyName"),
+    generateSql: t("toolbox.mysql.generateSql"),
+    generateSqlSelect: t("toolbox.mysql.generateSqlSelect"),
+    generateSqlInsert: t("toolbox.mysql.generateSqlInsert"),
+    generateSqlUpdate: t("toolbox.mysql.generateSqlUpdate"),
+    generateSqlDelete: t("toolbox.mysql.generateSqlDelete"),
+    refresh: t("toolbox.mysql.refresh"),
+    newQuery: t("toolbox.mysql.newQuery"),
+  };
+  const editorMenuLabels: QueryEditorMenuLabels = {
+    undo: t("common.undo"),
+    redo: t("common.redo"),
+    cut: t("common.cut"),
+    copy: t("common.copy"),
+    paste: t("common.paste"),
+    selectAll: t("common.selectAll"),
+    run: t("toolbox.mysql.run"),
+    runSelection: t("toolbox.mysql.runSelection"),
+    formatSql: t("toolbox.mysql.formatSql"),
+    toggleComment: t("toolbox.mysql.toggleComment"),
+  };
+  const resultMenuLabels: ResultCellMenuLabels = {
+    copyCell: t("toolbox.mysql.copyCell"),
+    copyRow: t("toolbox.mysql.copyRow"),
+    copyColumnName: t("toolbox.mysql.copyColumnName"),
+    exportCsv: t("toolbox.mysql.exportCsv"),
+    exportExcel: t("toolbox.mysql.exportExcel"),
+    removeRecord: t("toolbox.mysql.removeRecord"),
+  };
+
+  useEffect(() => {
+    const pasteSqlNote = (event: Event) => {
+      const detail = (event as CustomEvent<{ content?: string; handled?: boolean; provider?: string }>).detail;
+      if (detail?.provider !== undefined && detail.provider !== "mysql") return;
+      if (!detail?.content || !tab) return;
+      setTabs((current) => current.map((item) => item.id === tab.id ? { ...item, sql: detail.content! } : item));
+      detail.handled = true;
+    };
+    window.addEventListener('nexterm:paste-sql-note', pasteSqlNote);
+    return () => window.removeEventListener('nexterm:paste-sql-note', pasteSqlNote);
+  }, [tab]);
+
+  // Query-history round-trip: "run again" re-executes, "insert" appends to the editor.
+  useEffect(() => {
+    const onExecuteHistory = (event: Event) => {
+      const detail = (event as CustomEvent<{ providerId?: string; sql?: string; connectionId?: string }>).detail;
+      if (!detail?.sql || detail.providerId !== "mysql") return;
+      if (detail.connectionId && detail.connectionId !== draft.id) return;
+      if (!tab) return;
+      patchTab(tab.id, { sql: detail.sql });
+      void execute(detail.sql);
+    };
+    const onInsertHistory = (event: Event) => {
+      const detail = (event as CustomEvent<{ providerId?: string; sql?: string }>).detail;
+      if (!detail?.sql || detail.providerId !== "mysql") return;
+      insertGeneratedSql(detail.sql);
+    };
+    window.addEventListener("nexterm:db-query-history-execute", onExecuteHistory);
+    window.addEventListener("nexterm:db-query-history-insert", onInsertHistory);
+    return () => {
+      window.removeEventListener("nexterm:db-query-history-execute", onExecuteHistory);
+      window.removeEventListener("nexterm:db-query-history-insert", onInsertHistory);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- execute/insertGeneratedSql close over the render-scoped tab
+  }, [tab, draft.id]);
+
   useEffect(() => {
     const update = () => setConnections(MySQLConnectionsStorage.load());
     window.addEventListener("nexterm:toolbox-changed", update);
@@ -200,13 +299,14 @@ export function ToolMySql() {
       setConnecting(false);
     }
   };
-  const execute = async () => {
-    if (!tab || !tab.sql.trim()) return;
+  const execute = async (sqlOverride?: string) => {
+    const sql = sqlOverride ?? tab?.sql ?? "";
+    if (!sql.trim()) return;
     setRunning(true);
     try {
       const result = adaptMySQLQueryResult(
         await invoke<MySQLQueryRuntimeResult>("mysql_execute", {
-          request: { connectionId: draft.id, sql: tab.sql },
+          request: { connectionId: draft.id, sql },
         }),
       );
       setTabs((current) =>
@@ -214,9 +314,25 @@ export function ToolMySql() {
           item.id === tab.id ? { ...item, result } : item,
         ),
       );
+      addQueryHistory({
+        sql,
+        connectionId: draft.id,
+        connectionName: draft.name,
+        providerId: "mysql",
+        success: true,
+      });
     } catch (error) {
+      const parsed = parseProviderError("mysql", String(error));
+      patchTab(tab.id, { result: databaseErrorResult(parsed) });
       toast.error(t("toolbox.mysql.queryFailed"), {
-        description: String(error),
+        description: parsed.message,
+      });
+      addQueryHistory({
+        sql,
+        connectionId: draft.id,
+        connectionName: draft.name,
+        providerId: "mysql",
+        success: false,
       });
     } finally {
       setRunning(false);
@@ -230,6 +346,218 @@ export function ToolMySql() {
     const next = newTab();
     setTabs((current) => [...current, next]);
     setActiveTab(next.id);
+  };
+  useDatabaseKeyboardShortcuts({
+    testId: "mysql-workspace",
+    dialogOpen,
+    handlers: {
+      "database.query.execute": () => void execute(),
+      "database.workspace.newQuery": addQuery,
+    },
+  });
+  const closeTab = (id: string) => {
+    setTabs((current) => current.filter((item) => item.id !== id));
+    if (id === activeTab)
+      setActiveTab(tabs.find((item) => item.id !== id)?.id ?? "");
+  };
+  const copyText = async (value: string) => {
+    try {
+      await writeClipboardText(value);
+    } catch {
+      /* clipboard unavailable */
+    }
+  };
+  const qualifiedMySqlName = (relation: MySQLRelationReference): string =>
+    relation.database
+      ? `${quoteMySqlIdentifier(relation.database)}.${quoteMySqlIdentifier(relation.relation)}`
+      : quoteMySqlIdentifier(relation.relation);
+  const selectSqlFor = (relation: MySQLRelationReference): string =>
+    generateSelectSql(relation.database, relation.relation, null, {
+      quoteIdentifier: quoteMySqlIdentifier,
+    });
+  /** Opens a new query tab pre-filled with a `SELECT *` browse statement. */
+  const openRelationData = (node: DatabaseObjectNode) => {
+    const relation = getMySQLRelationReference(node);
+    if (!relation) return;
+    const next = newTab();
+    next.sql = selectSqlFor(relation);
+    setTabs((current) => [...current, next]);
+    setActiveTab(next.id);
+  };
+  /** Appends generated SQL to the current editor (or a new query tab when the
+   *  editor is not mounted) and selects the inserted text (feature-design §4.2). */
+  const insertGeneratedSql = (sql: string) => {
+    const view = queryEditorViewRef.current;
+    if (!view) {
+      const next = newTab();
+      next.sql = sql;
+      setTabs((current) => [...current, next]);
+      setActiveTab(next.id);
+      return;
+    }
+    const doc = view.state.doc;
+    const insertAt = doc.length;
+    const needsLeadingNewline =
+      insertAt > 0 && doc.sliceString(insertAt - 1, insertAt) !== "\n";
+    const insertText = (needsLeadingNewline ? "\n" : "") + sql + "\n";
+    view.dispatch({
+      changes: { from: insertAt, to: insertAt, insert: insertText },
+    });
+    view.dispatch({
+      selection: { anchor: insertAt, head: insertAt + insertText.length },
+    });
+    view.focus();
+  };
+  const runCmCommand = (cmd: (view: EditorView) => boolean) => {
+    const view = queryEditorViewRef.current;
+    if (!view) return;
+    view.focus();
+    cmd(view);
+  };
+  const cutEditorSelection = async () => {
+    const view = queryEditorViewRef.current;
+    if (!view) return;
+    view.focus();
+    const selection = view.state.selection.main;
+    if (selection.to <= selection.from) return;
+    try {
+      await writeClipboardText(
+        view.state.doc.sliceString(selection.from, selection.to),
+      );
+      view.dispatch({
+        changes: { from: selection.from, to: selection.to, insert: "" },
+      });
+    } catch {
+      /* clipboard unavailable */
+    }
+  };
+  const pasteIntoEditor = async () => {
+    const view = queryEditorViewRef.current;
+    if (!view) return;
+    view.focus();
+    try {
+      const text = await readClipboardText();
+      const selection = view.state.selection.main;
+      view.dispatch({
+        changes: { from: selection.from, to: selection.to, insert: text },
+        selection: { anchor: selection.from + text.length },
+      });
+    } catch {
+      /* clipboard unavailable */
+    }
+  };
+  /** Text captured by the editor "Copy" item: selection → current statement → document. */
+  const editorCopyValue = (): string => {
+    const view = queryEditorViewRef.current;
+    if (!view) return tab?.sql ?? "";
+    const selection = view.state.selection.main;
+    if (selection.to > selection.from) {
+      return view.state.doc.sliceString(selection.from, selection.to);
+    }
+    return currentStatementSql() || tab?.sql || "";
+  };
+  const currentStatementSql = (): string => {
+    const view = queryEditorViewRef.current;
+    if (!view) return "";
+    const doc = view.state.doc.toString();
+    const range = currentStatementAt(doc, view.state.selection.main.head);
+    return range ? doc.slice(range.start, range.end).trim() : "";
+  };
+  /** Runs the selected text, or the current statement when nothing is selected. */
+  const runSelectionOrStatement = () => {
+    const view = queryEditorViewRef.current;
+    const selected = view
+      ? view.state.doc
+          .sliceString(
+            view.state.selection.main.from,
+            view.state.selection.main.to,
+          )
+          .trim()
+      : "";
+    const sql = selected || currentStatementSql() || (tab?.sql ?? "");
+    if (sql.trim()) void execute(sql);
+  };
+  /** Toggles `--` line comments on the current selection (Ctrl+/, B19-B). */
+  const toggleSqlComment = () => {
+    const view = queryEditorViewRef.current;
+    if (!view) return;
+    const selection = view.state.selection.main;
+    const doc = view.state.doc.toString();
+    const next = toggleLineComment(doc, selection.from, selection.to);
+    if (next === doc) return;
+    view.dispatch({ changes: { from: 0, to: doc.length, insert: next } });
+  };
+  /** Formats the selection, or the whole document when nothing is selected. */
+  const formatSqlInEditor = () => {
+    const view = queryEditorViewRef.current;
+    if (!view) return;
+    const selection = view.state.selection.main;
+    if (selection.to > selection.from) {
+      const selected = view.state.doc.sliceString(selection.from, selection.to);
+      const formatted = formatSql(selected);
+      if (formatted === selected) return;
+      view.dispatch({
+        changes: { from: selection.from, to: selection.to, insert: formatted },
+        selection: {
+          anchor: selection.from,
+          head: selection.from + formatted.length,
+        },
+      });
+    } else {
+      const doc = view.state.doc.toString();
+      const formatted = formatSql(doc);
+      if (formatted === doc) return;
+      view.dispatch({ changes: { from: 0, to: doc.length, insert: formatted } });
+    }
+  };
+  const exportCsv = async () => {
+    if (tab?.result?.kind !== "tabular") return;
+    const quote = (value: string | null) =>
+      value === null ? "NULL" : `"${value.replace(/"/g, '""')}"`;
+    const csv = [
+      tab.result.columns.map((column) => quote(column.label)).join(","),
+      ...tab.result.rows.map((row) => row.map(quote).join(",")),
+    ].join("\n");
+    try {
+      const path = await saveFile({
+        defaultPath: `mysql-result.csv`,
+        filters: [{ name: "CSV", extensions: ["csv"] }],
+      });
+      if (!path) return;
+      await writeTextFile(path, csv);
+      toast.success(t("toolbox.mysql.exported"));
+    } catch (error) {
+      toast.error(t("toolbox.mysql.exportFailed"), {
+        description: String(error),
+      });
+    }
+  };
+  const exportExcel = async () => {
+    if (tab?.result?.kind !== "tabular") return;
+    try {
+      const XLSX = await import("xlsx");
+      const header = tab.result.columns.map((column) => column.label);
+      const rows = tab.result.rows.map((row) => row.map((cell) => cell ?? null));
+      const sheet = XLSX.utils.aoa_to_sheet([header, ...rows]);
+      const workbook = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(workbook, sheet, "MySQL Result");
+      const path = await saveFile({
+        defaultPath: `mysql-result.xlsx`,
+        filters: [{ name: "Excel", extensions: ["xlsx"] }],
+      });
+      if (!path) return;
+      await writeBinaryFile(
+        path,
+        new Uint8Array(
+          XLSX.write(workbook, { type: "array", bookType: "xlsx" }) as ArrayBuffer,
+        ),
+      );
+      toast.success(t("toolbox.mysql.exportedExcel"));
+    } catch (error) {
+      toast.error(t("toolbox.mysql.exportFailedExcel"), {
+        description: String(error),
+      });
+    }
   };
   const save = async () => {
     const port = Number(portInput);
@@ -303,6 +631,12 @@ export function ToolMySql() {
             testId="mysql-new-query"
           />
           <ToolButton
+            icon={<History />}
+            label={t("toolbox.mysql.history")}
+            onClick={() => setHistoryOpen((open) => !open)}
+            testId="mysql-history"
+          />
+          <ToolButton
             icon={<RefreshCw />}
             label={t("toolbox.mysql.refresh")}
             disabled={!connected}
@@ -356,14 +690,44 @@ export function ToolMySql() {
                 if (next && !children[node.id]) void load(node);
               }}
               onSelect={(node) => setSelected(node.id)}
-              onOpen={(node) => {
+              onOpen={(node) => openRelationData(node)}
+              renderContextMenu={(node) => {
                 const relation = getMySQLRelationReference(node);
-                if (relation) {
-                  const next = newTab();
-                  next.sql = `SELECT * FROM \`${relation.relation.replace(/`/g, "``")}\` LIMIT 100;`;
-                  setTabs((current) => [...current, next]);
-                  setActiveTab(next.id);
+                if (!relation) {
+                  return (
+                    <>
+                      <ContextMenuItem
+                        disabled={!connected}
+                        onSelect={() => void load(node)}
+                        data-testid="navigator-menu-refresh"
+                      >
+                        <RefreshCw className="h-3.5 w-3.5" />
+                        {t("toolbox.mysql.refresh")}
+                      </ContextMenuItem>
+                      <ContextMenuItem
+                        disabled={!connected}
+                        onSelect={addQuery}
+                        data-testid="navigator-menu-new-query"
+                      >
+                        <Plus className="h-3.5 w-3.5" />
+                        {t("toolbox.mysql.newQuery")}
+                      </ContextMenuItem>
+                    </>
+                  );
                 }
+                return (
+                  <NavigatorRelationMenu
+                    actions={{
+                      openData: () => openRelationData(node),
+                      copyName: () => void copyText(qualifiedMySqlName(relation)),
+                      generateSelect: () => insertGeneratedSql(selectSqlFor(relation)),
+                      refresh: () => void load(node),
+                      newQuery: addQuery,
+                      disabled: !connected,
+                    }}
+                    labels={navigatorMenuLabels}
+                  />
+                );
               }}
             />
           </div>
@@ -375,11 +739,24 @@ export function ToolMySql() {
       }))}
       activeTabId={activeTab}
       onActivateTab={setActiveTab}
-      onCloseTab={(id) => {
-        setTabs((current) => current.filter((item) => item.id !== id));
-        if (id === activeTab)
-          setActiveTab(tabs.find((item) => item.id !== id)?.id ?? "");
-      }}
+      onCloseTab={closeTab}
+      renderTabContextMenu={(item) => (
+        <>
+          <ContextMenuItem onSelect={() => closeTab(item.id)}>
+            <X className="h-3.5 w-3.5" />
+            {t("common.close")}
+          </ContextMenuItem>
+          <ContextMenuItem
+            disabled={tabs.length < 2}
+            onSelect={() => {
+              setTabs((current) => current.filter((candidate) => candidate.id === item.id));
+              setActiveTab(item.id);
+            }}
+          >
+            {t("toolbox.mysql.closeOtherTabs")}
+          </ContextMenuItem>
+        </>
+      )}
       tabClassName={(_, active) =>
         `group flex h-8 min-w-28 items-center gap-1 border-r px-2 text-[12px] outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring ${active ? "bg-background font-medium text-foreground" : "text-muted-foreground hover:bg-muted/50"}`
       }
@@ -397,45 +774,136 @@ export function ToolMySql() {
               {running && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
             </div>
             <div className="min-h-0 flex-1">
-              <CodeEditor
-                value={tab.sql}
-                onChange={(sql) => patchTab(tab.id, { sql })}
-                language="sql"
-                queryContext={
-                  connected
-                    ? createMySQLQueryEditorContext({
-                        connectionId: draft.id,
-                        database: draft.providerConfig.database,
-                        lookup: async () =>
-                          (
-                            await invoke<readonly { readonly name: string }[]>(
-                              "mysql_catalog_objects",
-                              { connectionId: draft.id },
-                            )
-                          ).map((item) => item.name),
-                      })
-                    : undefined
-                }
-                className="h-full"
-              />
+              <ContextMenu>
+                <ContextMenuTrigger asChild>
+                  <div className="h-full">
+                    <CodeEditor
+                      value={tab.sql}
+                      onChange={(sql) => patchTab(tab.id, { sql })}
+                      language="sql"
+                      queryContext={
+                        connected
+                          ? createMySQLQueryEditorContext({
+                              connectionId: draft.id,
+                              database: draft.providerConfig.database,
+                              lookup: async () =>
+                                (
+                                  await invoke<readonly { readonly name: string }[]>(
+                                    "mysql_catalog_objects",
+                                    { connectionId: draft.id },
+                                  )
+                                ).map((item) => item.name),
+                            })
+                          : undefined
+                      }
+                      editorRef={(view) => {
+                        queryEditorViewRef.current = view;
+                      }}
+                      className="h-full"
+                    />
+                  </div>
+                </ContextMenuTrigger>
+                <ContextMenuContent>
+                  <QueryEditorMenu
+                    actions={{
+                      undo: () => runCmCommand(undo),
+                      redo: () => runCmCommand(redo),
+                      cut: () => void cutEditorSelection(),
+                      copy: () => void copyText(editorCopyValue()),
+                      paste: () => void pasteIntoEditor(),
+                      selectAll: () => runCmCommand(selectAll),
+                      execute: () => void execute(),
+                      runSelection: runSelectionOrStatement,
+                      formatSql: formatSqlInEditor,
+                      toggleComment: toggleSqlComment,
+                      disabledExecute: !connected || !tab.sql.trim(),
+                    }}
+                    labels={editorMenuLabels}
+                  />
+                </ContextMenuContent>
+              </ContextMenu>
             </div>
-            <DatabaseResultPane
-              result={tab.result}
-              height={260}
-              paged={false}
-              onPrevious={() => undefined}
-              onNext={() => undefined}
-              labels={{
-                result: t("toolbox.mysql.result"),
-                message: t("toolbox.mysql.message"),
-                ready: t("toolbox.mysql.ready"),
-                null: t("toolbox.mysql.null"),
-                previous: t("toolbox.mysql.previous"),
-                next: t("toolbox.mysql.next"),
-                rowsRange: (from, to) =>
-                  t("toolbox.mysql.rowsRange", { from, to }),
-              }}
-            />
+            <div className="h-[260px] shrink-0" data-testid="mysql-result-area">
+              {historyOpen ? (
+                <QueryHistoryView
+                  open={historyOpen}
+                  onOpenChange={setHistoryOpen}
+                  providerId="mysql"
+                  connectionId={draft.id}
+                  labels={{
+                    history: t("toolbox.mysql.history"),
+                    empty: t("toolbox.mysql.historyEmpty"),
+                    run: t("toolbox.mysql.historyRun"),
+                    insertToEditor: t("toolbox.mysql.historyInsertToEditor"),
+                    copy: t("toolbox.mysql.historyCopy"),
+                    remove: t("toolbox.mysql.historyRemove"),
+                    clear: t("toolbox.mysql.historyClear"),
+                    time: t("toolbox.mysql.historyTime"),
+                    clearConfirmTitle: t("toolbox.mysql.historyClearConfirmTitle"),
+                    clearConfirmDescription: t(
+                      "toolbox.mysql.historyClearConfirmDescription",
+                    ),
+                    cancel: t("common.cancel"),
+                  }}
+                />
+              ) : (
+                <DatabaseResultPane
+                  result={tab.result}
+                  height={260}
+                  paged={false}
+                  onPrevious={() => undefined}
+                  onNext={() => undefined}
+                  labels={{
+                    result: t("toolbox.mysql.result"),
+                    message: t("toolbox.mysql.message"),
+                    ready: t("toolbox.mysql.ready"),
+                    null: t("toolbox.mysql.null"),
+                    previous: t("toolbox.mysql.previous"),
+                    next: t("toolbox.mysql.next"),
+                    rowsRange: (from, to) =>
+                      t("toolbox.mysql.rowsRange", { from, to }),
+                  }}
+                  renderContextMenu={(
+                    cell,
+                    row,
+                    columnName,
+                    _rowIndex,
+                    _columnIndex,
+                    source = "row",
+                  ) => (
+                    <ResultCellMenu
+                      source={source}
+                      actions={{
+                        copyCell: () => void copyText(cell ?? "NULL"),
+                        copyRow: () =>
+                          void copyText(
+                            row.map((value) => value ?? "NULL").join("\t"),
+                          ),
+                        copyColumnName: () => void copyText(columnName),
+                        exportCsv: () => void exportCsv(),
+                        exportExcel: () => void exportExcel(),
+                      }}
+                      labels={resultMenuLabels}
+                    />
+                  )}
+                  renderError={(error) => (
+                    <DatabaseResultErrorPane
+                      error={error}
+                      labels={{
+                        error: t("toolbox.mysql.queryFailed"),
+                        retry: t("toolbox.mysql.errorRetry"),
+                        copy: t("toolbox.mysql.errorCopy"),
+                        jumpToLine: t("toolbox.mysql.errorJumpToLine"),
+                        line: (n) => t("toolbox.mysql.errorLine", { n }),
+                        details: t("toolbox.mysql.errorDetails"),
+                      }}
+                      onRetry={() => void execute()}
+                      onCopy={() => void copyText(error.fullText)}
+                    />
+                  )}
+                />
+              )}
+            </div>
           </section>
         )
       }
