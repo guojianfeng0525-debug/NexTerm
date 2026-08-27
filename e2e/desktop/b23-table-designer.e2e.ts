@@ -85,10 +85,27 @@ describe('B23 Table Designer + View Builder', () => {
     await browser.saveScreenshot(`${screenshotDir}/05-designer-loaded.png`);
 
     // ── 4. Designer should show the orders columns ──────────────────────────
-    // Column names render as editable Input values (not text nodes), and the
-    // orders fixture has id/user_id/total/status/created_at.
-    expect(await designerRoot.$('input[value="id"]').isExisting()).toBe(true);
-    expect(await designerRoot.$('input[value="user_id"]').isExisting()).toBe(true);
+    // Columns load async (postgres_design_load); wait until the name inputs
+    // appear, then assert via input.value (React keeps controlled values as
+    // DOM properties, not always as value attributes).
+    await browser.waitUntil(
+      async () =>
+        (await browser.execute(
+          () =>
+            Array.from(
+              document.querySelectorAll('[data-testid="table-designer-root"] input'),
+            ).map((i) => (i as HTMLInputElement).value),
+        )).includes('id'),
+      { timeout: 15000, timeoutMsg: 'designer columns did not load' },
+    );
+    const designerInputs = (await browser.execute(
+      () =>
+        Array.from(
+          document.querySelectorAll('[data-testid="table-designer-root"] input'),
+        ).map((i) => (i as HTMLInputElement).value),
+    )) as string[];
+    expect(designerInputs).toContain('id');
+    expect(designerInputs).toContain('user_id');
 
     // ── 5. Toggle to the constraints tab ────────────────────────────────────
     await designerRoot.$('button=约束').click();

@@ -371,6 +371,14 @@ describe('Step 2: SQL formatting + DDL preview + run selection', () => {
         if (!editors.length) return false;
         return (await editors[editors.length - 1].getText().catch(() => '')).includes('CREATE TABLE');
       },
+      { timeout: 15000, timeoutMsg: 'table DDL did not land' },
+    );
+    await browser.waitUntil(
+      async () => {
+        const editors = await $(WORKSPACE_SELECTOR).$$('.cm-content');
+        if (!editors.length) return false;
+        return (await editors[editors.length - 1].getText().catch(() => '')).includes('CREATE TABLE');
+      },
       { timeout: 15000, timeoutMsg: 'generated DDL did not appear in the query editor' },
     );
     const text = await browser.execute(() => {
@@ -403,6 +411,43 @@ describe('Step 2: SQL formatting + DDL preview + run selection', () => {
     });
     expect(text).toContain('CREATE TABLE');
     expect(text).not.toContain('e2e_fmt_orders_score_check');
+  });
+
+  it('generated DDL for a VIEW is formatted too (raw pg_get_viewdef is single-line)', async function () {
+    this.timeout(150_000);
+    await runSqlAndWait(
+      'CREATE OR REPLACE VIEW e2e_fmt_orders_view AS ' +
+        'SELECT id, customer_id, name, score FROM e2e_fmt_orders WHERE score > 0 ORDER BY id;' +
+        '\nSELECT 1;',
+    );
+    await $('[data-testid="postgres-refresh"]').click();
+    await browser.pause(800);
+    await expandGroup(['/group:views']);
+    await contextMenuAction('e2e_fmt_orders_view', '生成 DDL');
+    // The DDL tab becomes active and its editor may sit anywhere in the DOM
+    // (all tab editors stay mounted), so scan every editor for the view DDL.
+    await browser.waitUntil(
+      async () =>
+        await browser.execute(() =>
+          Array.from(document.querySelectorAll('.cm-content')).some(
+            (e) =>
+              (e as HTMLElement).innerText.includes('CREATE OR REPLACE VIEW') &&
+              (e as HTMLElement).innerText.split('\n').length > 3,
+          ),
+        ),
+      { timeout: 15000, timeoutMsg: 'view DDL did not land formatted in the query tab' },
+    );
+    const text = await browser.execute(() => {
+      const content = Array.from(document.querySelectorAll('.cm-content')).find((e) =>
+        (e as HTMLElement).innerText.includes('CREATE OR REPLACE VIEW'),
+      ) as HTMLElement | undefined;
+      return content ? content.innerText : '';
+    });
+    expect(text).toContain('CREATE OR REPLACE VIEW');
+    expect(text).toContain('SELECT');
+    // formatSql output is multi-line, not the single-line pg_get_viewdef text.
+    expect(text.split('\n').length).toBeGreaterThan(3);
+    await browser.saveScreenshot('./test-results/v210/view-generated-ddl.png');
   });
 
   it('generated DDL lands in an editable query tab (AC §6.2-4)', async function () {

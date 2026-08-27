@@ -975,7 +975,9 @@ export function ToolPostgres() {
         id: `ddl:${reference.schema}.${reference.name}.${reference.objectKind}`,
         type: "query",
         title: `${reference.name}.ddl`,
-        sql: response.ddl,
+        // Same formatting as the single-click DDL preview panel (Step 2);
+        // raw catalog DDL (e.g. pg_get_viewdef) is otherwise single-line.
+        sql: formatSql(response.ddl),
         result: null,
         dirty: false,
       });
