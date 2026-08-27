@@ -1974,16 +1974,9 @@ export function ToolPostgres() {
                 if (node.kind === "schema") setSchema(node.label);
                 const relation = getPostgresRelationReference(node);
                 if (relation) setSchema(relation.schema);
-                // Step 2: DDL preview on single-click of table/view/materializedView.
-                // NOTE: relation.objectRole is the source of truth for the
-                // kind — getPostgresObjectReference only resolves the six
-                // non-relation kinds and returns null for tables/views.
-                if (connected && relation) {
-                  const kind = relation.objectRole ?? "table";
-                  if (kind === "table" || kind === "view" || kind === "materializedView") {
-                    scheduleDdlPreview(relation.schema, relation.relation, kind);
-                  }
-                } else if (!relation) {
+                // DDL preview now opens on DOUBLE-click (onOpen → browse),
+                // rendered in the right-hand panel — not on single-click.
+                if (!relation) {
                   setDdlPreview(null);
                 }
               }}
@@ -2004,6 +1997,12 @@ export function ToolPostgres() {
                 const relation = getPostgresRelationReference(node);
                 if (relation) {
                   void browse(relation);
+                  // Double-click on a table/view/materializedView opens the
+                  // data grid AND shows its formatted DDL in the right panel.
+                  if (connected) {
+                    const kind = relation.objectRole ?? "table";
+                    scheduleDdlPreview(relation.schema, relation.relation, kind);
+                  }
                   return;
                 }
                 const objectReference = getPostgresObjectReference(node);
@@ -2140,7 +2139,8 @@ export function ToolPostgres() {
        </>}
       tabClassName={(_, active) => `group flex h-8 min-w-28 items-center gap-1 border-r px-2 text-[12px] outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring ${active ? "bg-background font-medium text-foreground" : "text-muted-foreground hover:bg-muted/50"}`}
       workspace={tab && (
-            <section className="flex min-h-0 flex-1 flex-col">
+            <section className="flex min-h-0 flex-1">
+              <div className="flex min-w-0 flex-1 flex-col">
               <div className="flex h-8 shrink-0 items-center gap-1 border-b bg-muted/10 px-2">
                 {tab.type === "query" && (
                 <ToolButton
@@ -2195,65 +2195,6 @@ export function ToolPostgres() {
                 <div className="flex-1" />
                 {running && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
               </div>
-              {ddlPreview && tab.type === "query" && (
-                <div className="flex h-64 shrink-0 flex-col border-b" data-testid="ddl-preview-panel">
-                  <div className="flex h-7 items-center gap-1 border-b bg-muted/10 px-2">
-                    <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-                      DDL: {ddlPreview.schema}.{ddlPreview.name}
-                    </span>
-                    <div className="flex-1" />
-                    {ddlPreview.loading && <Loader2 className="h-3 w-3 animate-spin" />}
-                    {!ddlPreview.loading && !ddlPreview.error && (
-                      <>
-                        <ToolButton
-                          icon={<Copy />}
-                          label={t("common.copy")}
-                          onClick={() => void writeClipboardText(ddlPreview.ddl)}
-                        />
-                        <ToolButton
-                          icon={<RefreshCw />}
-                          label={t("toolbox.postgres.refresh")}
-                          onClick={() => void loadDdlPreview(ddlPreview.schema, ddlPreview.name, ddlPreview.objectType)}
-                        />
-                        <ToolButton
-                          icon={<FileCode2 />}
-                          label={t("toolbox.postgres.openInEditor")}
-                          onClick={() => {
-                            openTab({
-                              id: `ddl:${ddlPreview.schema}.${ddlPreview.name}.${ddlPreview.objectType}`,
-                              type: "query",
-                              title: `${ddlPreview.name}.ddl`,
-                              sql: ddlPreview.ddl,
-                              result: null,
-                              dirty: false,
-                            });
-                          }}
-                        />
-                      </>
-                    )}
-                    <ToolButton
-                      icon={<X />}
-                      label={t("common.close")}
-                      onClick={() => setDdlPreview(null)}
-                    />
-                  </div>
-                  <div className="min-h-0 flex-1 overflow-auto">
-                    {ddlPreview.error ? (
-                      <div className="flex h-full items-center justify-center text-[12px] text-destructive">
-                        {ddlPreview.error}
-                      </div>
-                    ) : ddlPreview.loading ? (
-                      <div className="flex h-full items-center justify-center">
-                        <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
-                      </div>
-                    ) : (
-                      <pre className="sql-editor-container h-full overflow-auto bg-muted/5 p-2 text-[12px] leading-relaxed">
-                        <code className="font-mono">{ddlPreview.ddl}</code>
-                      </pre>
-                    )}
-                  </div>
-                </div>
-              )}
               {tab.type === "query" && (
                 <div className="min-h-0 flex-1">
                   <CodeEditor
@@ -2275,9 +2216,6 @@ export function ToolPostgres() {
                     className="h-full"
                   />
                 </div>
-              )}
-              {tab.type === "table" && (
-                <div className="min-h-0 flex-1 bg-background" />
               )}
               {tab.type === "object" && tab.objectReference && (
                 <ObjectViewerTab
@@ -2358,13 +2296,16 @@ export function ToolPostgres() {
                 </div>
               )}
               {tab.type !== "object" && tab.type !== "designer" && <>
+              {tab.type === "query" && (
               <div
                 className="h-1 shrink-0 cursor-row-resize border-y bg-muted/50"
                 onPointerDown={() => setResultDragging(true)}
               />
+              )}
               <DatabaseResultPane
                 result={tab.result}
                 height={resultHeight}
+                fillHeight={tab.type === "table"}
                 paged={tab.type === "table"}
                 onPrevious={() =>
                   tab.object &&
@@ -2492,6 +2433,69 @@ export function ToolPostgres() {
                   isInsertCellModified={isInsertCellModified}
               />
               </>}
+              </div>
+              {ddlPreview && (
+                <aside
+                  className="flex w-72 shrink-0 flex-col border-l bg-muted/5"
+                  data-testid="ddl-preview-panel"
+                >
+                  <div className="flex h-7 items-center gap-1 border-b bg-muted/10 px-2">
+                    <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                      DDL: {ddlPreview.schema}.{ddlPreview.name}
+                    </span>
+                    <div className="flex-1" />
+                    {ddlPreview.loading && <Loader2 className="h-3 w-3 animate-spin" />}
+                    {!ddlPreview.loading && !ddlPreview.error && (
+                      <>
+                        <ToolButton
+                          icon={<Copy />}
+                          label={t("common.copy")}
+                          onClick={() => void writeClipboardText(ddlPreview.ddl)}
+                        />
+                        <ToolButton
+                          icon={<RefreshCw />}
+                          label={t("toolbox.postgres.refresh")}
+                          onClick={() => void loadDdlPreview(ddlPreview.schema, ddlPreview.name, ddlPreview.objectType)}
+                        />
+                        <ToolButton
+                          icon={<FileCode2 />}
+                          label={t("toolbox.postgres.openInEditor")}
+                          onClick={() => {
+                            openTab({
+                              id: `ddl:${ddlPreview.schema}.${ddlPreview.name}.${ddlPreview.objectType}`,
+                              type: "query",
+                              title: `${ddlPreview.name}.ddl`,
+                              sql: ddlPreview.ddl,
+                              result: null,
+                              dirty: false,
+                            });
+                          }}
+                        />
+                      </>
+                    )}
+                    <ToolButton
+                      icon={<X />}
+                      label={t("common.close")}
+                      onClick={() => setDdlPreview(null)}
+                    />
+                  </div>
+                  <div className="min-h-0 flex-1 overflow-auto">
+                    {ddlPreview.error ? (
+                      <div className="flex h-full items-center justify-center text-[12px] text-destructive">
+                        {ddlPreview.error}
+                      </div>
+                    ) : ddlPreview.loading ? (
+                      <div className="flex h-full items-center justify-center">
+                        <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+                      </div>
+                    ) : (
+                      <pre className="sql-editor-container h-full overflow-auto bg-muted/5 p-2 text-[12px] leading-relaxed">
+                        <code className="font-mono">{ddlPreview.ddl}</code>
+                      </pre>
+                    )}
+                  </div>
+                </aside>
+              )}
             </section>
           )}
       status={<footer className="flex h-6 shrink-0 items-center border-t bg-muted/25 px-2 text-[11px] text-muted-foreground">

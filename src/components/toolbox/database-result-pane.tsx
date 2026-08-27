@@ -40,6 +40,9 @@ export type DatabaseResultMenuSource = "row" | "insert";
 interface DatabaseResultPaneProps {
   readonly result: DatabaseResult | null;
   readonly height: number;
+  /** When true the pane fills its parent (table browse tab = full-screen grid)
+   * instead of using the fixed `height`. */
+  readonly fillHeight?: boolean;
   readonly paged: boolean;
   readonly onPrevious: () => void;
   readonly onNext: () => void;
@@ -103,6 +106,7 @@ interface DatabaseResultPaneProps {
 export function DatabaseResultPane({
   result,
   height,
+  fillHeight = false,
   paged,
   onPrevious,
   onNext,
@@ -208,7 +212,14 @@ export function DatabaseResultPane({
   }, [find?.open, currentFindKey]);
 
   return (
-    <section className="shrink-0 overflow-auto border-t" style={{ height }}>
+    <section
+      className={
+        fillHeight
+          ? "min-h-0 flex-1 overflow-auto border-t"
+          : "shrink-0 overflow-auto border-t"
+      }
+      style={fillHeight ? undefined : { height }}
+    >
       <div className="flex h-7 items-center border-b bg-muted/20 px-2 text-[11px]">
         <span className="border-r pr-3 font-medium">
           {tabularResult ? labels.result : labels.message}

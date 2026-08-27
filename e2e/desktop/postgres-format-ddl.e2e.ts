@@ -494,4 +494,34 @@ describe('Step 2: SQL formatting + DDL preview + run selection', () => {
     const grid = await workspace.$('table');
     await grid.waitForExist({ timeout: 20000 });
   });
+
+  it('double-click shows formatted DDL in the RIGHT panel + full-screen grid (layout v2.10.1)', async function () {
+    this.timeout(150_000);
+    await browser.execute((id: string) => {
+      const nodes = Array.from(
+        document.querySelectorAll('[data-testid="database-navigator-node"]'),
+      );
+      const target = nodes.find((n) => (n.getAttribute('data-node-id') || '').includes(id));
+      target?.dispatchEvent(
+        new MouseEvent('dblclick', { bubbles: true, cancelable: true, detail: 2 }),
+      );
+    }, '/group:tables/object:e2e_fmt_orders');
+    // The right-hand DDL panel appears with formatted multi-line CREATE TABLE.
+    await browser.waitUntil(
+      async () => (await ddlPreviewText()).includes('CREATE TABLE'),
+      { timeout: 15000, timeoutMsg: 'right-panel DDL preview did not appear' },
+    );
+    const text = await ddlPreviewText();
+    expect(text).toContain('e2e_fmt_orders');
+    expect(text.split('\n').length).toBeGreaterThan(3);
+    // Table browse tab is a full-screen grid: the formatted DDL is NOT in a
+    // query editor (no SQL editor holds it), it lives in the right panel.
+    const ddlInEditor = await browser.execute(() =>
+      Array.from(
+        document.querySelectorAll('[data-testid="postgres-workspace"] .cm-content'),
+      ).some((e) => (e as HTMLElement).innerText.includes('CREATE TABLE')),
+    );
+    expect(ddlInEditor).toBe(false);
+    await browser.saveScreenshot('./test-results/v210/ddl-right-panel.png');
+  });
 });
