@@ -15,6 +15,8 @@ export interface TableDesignColumn {
   readonly default: string | null;
   readonly comment: string | null;
   readonly ordinal: number;
+  /** Mirrors Rust PostgresDesignColumn.primaryKey (column is in the PK). */
+  readonly primaryKey: boolean;
 }
 
 export interface TableDesignPrimaryKey {
@@ -27,20 +29,19 @@ export interface TableDesignConstraint {
   readonly type: "p" | "f" | "u" | "c" | "x";
   readonly definition: string;
   readonly columns: readonly string[];
-  readonly deferrable: boolean;
 }
 
-export interface TableDesignIndexColumn {
-  readonly name: string;
-  readonly desc: boolean;
-  readonly nullsFirst: boolean;
-}
-
+/**
+ * Index column list. The Rust load command (`postgres_table_design_load`)
+ * returns plain column names (`array_agg(a.attname)`); sort direction
+ * (desc/nullsFirst) is not yet decoded from pg_index.indoption, so diff
+ * round-trips desc:false (known limitation, B23 v1).
+ */
 export interface TableDesignIndex {
   readonly name: string;
   readonly unique: boolean;
   readonly method: string;
-  readonly columns: readonly TableDesignIndexColumn[];
+  readonly columns: readonly string[];
   readonly definition: string;
 }
 
@@ -54,7 +55,6 @@ export interface TableDesignForeignKey {
   };
   readonly onDelete: string | null;
   readonly onUpdate: string | null;
-  readonly deferrable: boolean;
 }
 
 export interface TableDesign {
@@ -352,7 +352,8 @@ export function draftFromDesign(design: TableDesign): TableDesignDraft {
       name: i.name,
       unique: i.unique,
       method: i.method,
-      columns: i.columns.map((c) => ({ name: c.name, desc: c.desc })),
+      // Rust returns plain column names; desc defaults to false (B23 v1).
+      columns: i.columns.map((name) => ({ name, desc: false })),
     })),
     foreignKeys: design.foreignKeys.map((f) => ({
       name: f.name,

@@ -1973,10 +1973,13 @@ export function ToolPostgres() {
                 const relation = getPostgresRelationReference(node);
                 if (relation) setSchema(relation.schema);
                 // Step 2: DDL preview on single-click of table/view/materializedView.
+                // NOTE: relation.objectRole is the source of truth for the
+                // kind — getPostgresObjectReference only resolves the six
+                // non-relation kinds and returns null for tables/views.
                 if (connected && relation) {
-                  const objRef = getPostgresObjectReference(node);
-                  if (objRef && (objRef.objectKind === "table" || objRef.objectKind === "view" || objRef.objectKind === "materializedView")) {
-                    scheduleDdlPreview(relation.schema, relation.relation, objRef.objectKind);
+                  const kind = relation.objectRole ?? "table";
+                  if (kind === "table" || kind === "view" || kind === "materializedView") {
+                    scheduleDdlPreview(relation.schema, relation.relation, kind);
                   }
                 } else if (!relation) {
                   setDdlPreview(null);
