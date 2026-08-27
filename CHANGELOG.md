@@ -12,7 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - **数据库对象列表截断**：对象导航器表/视图组复用 SQL 补全命令（LIMIT 100）导致 schema 超 100 张表只显示前 100 张。导航器显式传 limit 10_000（Rust clamp 放宽，补全默认 100 不变）。回归 spec：150 表 fixture 全量显示。
 - **全局右键弹出浏览器默认菜单**：window 冒泡阶段 `contextmenu preventDefault`（捕获阶段会致 Radix 自定义菜单短路——已实证并规避）。空白区无原生菜单、导航器/网格自定义菜单正常。
-- **Excel 编辑器横向滚动条不可见**：macOS WKWebView 网页层不渲染滚动条（像素级验证）、CSS `::-webkit-scrollbar` 被忽略（平台行为）。产品决策：保留系统层 overlay + 保守提示文案（内容超出可视区域 · 悬停右缘或双指滑动可横向滚动），不引入自定义滚动条组件。
+- **Excel 编辑器横向滚动条不可见**：macOS WKWebView 网页层不渲染滚动条（像素级验证）、CSS `::-webkit-scrollbar` 被忽略（平台行为）。**跨平台方案（兼容 Windows 台式机）**：Windows/Linux（WebView2/Chromium）原生滚动条常驻可见（`::-webkit-scrollbar` 生效）→ 不显示提示；macOS 仅显示保守提示文案「内容超出可视区域 · 悬停右缘或 Shift+滚轮可横向滚动」（鼠标可用，不依赖触控板）。不引入自定义滚动条组件。
 
 ### Verified
 - tsc 干净 / vitest 829（93 文件）/ grid-edit、filter、b21 回归全绿
