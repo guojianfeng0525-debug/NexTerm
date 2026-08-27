@@ -117,43 +117,6 @@ export function ToolNotes() {
   notesRef.current = notes;
 
   useEffect(() => {
-    const appendSql = (event: Event) => {
-      const detail = (event as CustomEvent<{ content?: string; handled?: boolean }>).detail;
-      const content = detail?.content?.trim();
-      if (!content) return;
-      const now = Date.now();
-      setNotes((current) => {
-        const selectedNote = selectedId
-          ? current.find((note) => note.id === selectedId)
-          : undefined;
-        if (selectedNote) {
-          return current.map((note) => note.id === selectedNote.id
-            ? {
-                ...note,
-                language: "sql",
-                content: note.content.trim() ? `${note.content.trimEnd()}\n${content}` : content,
-                updatedAt: now,
-              }
-            : note);
-        }
-        const note: NoteItem = {
-          id: generateId("note"),
-          title: content.split("\n")[0]?.slice(0, 80) || t("toolbox.notes.untitled"),
-          language: "sql",
-          content,
-          createdAt: now,
-          updatedAt: now,
-        };
-        setSelectedId(note.id);
-        return [note, ...current];
-      });
-      detail.handled = true;
-    };
-    window.addEventListener("nexterm:append-sql-note", appendSql);
-    return () => window.removeEventListener("nexterm:append-sql-note", appendSql);
-  }, [selectedId, t]);
-
-  useEffect(() => {
     const flush = () => NotesStorage.save(notesRef.current);
     return () => flush();
   }, []);

@@ -403,6 +403,9 @@ export function ToolPostgres() {
   const [closeTarget, setCloseTarget] = useState<string | null>(null);
   const [disconnectTarget, setDisconnectTarget] = useState<string | null>(null);
   const [noteTitle, setNoteTitle] = useState<string | null>(null);
+  /** SQL snapshot taken when the save-to-notes dialog opens, so confirming
+   *  after switching tabs still writes the intended statement. */
+  const noteContentRef = useRef<string>("");
   /** Filter & Sort / Custom Filter dialog mode for the active table tab. */
   const [filterDialog, setFilterDialog] = useState<
     { mode: "custom" | "filterSort" } | null
@@ -959,11 +962,12 @@ export function ToolPostgres() {
     if (!tab || tab.type !== "query") return;
     const content = currentStatementSql() || tab.sql;
     if (!content.trim()) return;
+    noteContentRef.current = content;
     setNoteTitle(tab.title);
   };
   const confirmAppendSqlToNotes = () => {
-    if (!tab || tab.type !== "query" || noteTitle === null) return;
-    const content = currentStatementSql() || tab.sql;
+    if (noteTitle === null) return;
+    const content = noteContentRef.current;
     const title = noteTitle.trim().replace(/[\r\n]+/g, " ");
     if (!title || !content.trim()) return;
     const now = Date.now();
@@ -972,7 +976,12 @@ export function ToolPostgres() {
     const selected = selectedId ? notes.find((note) => note.id === selectedId) : undefined;
     const next = selected
       ? notes.map((note) => note.id === selected.id
-        ? { ...note, language: "sql" as const, content: `${note.content.trimEnd()}\n-- ${title}\n${content}`, updatedAt: now }
+        ? {
+            ...note,
+            language: "sql" as const,
+            content: note.content.trim() ? `${note.content.trimEnd()}\n-- ${title}\n${content}` : `-- ${title}\n${content}`,
+            updatedAt: now,
+          }
         : note)
       : [{ id: generateId("note"), title, language: "sql" as const, content: `-- ${title}\n${content}`, createdAt: now, updatedAt: now }, ...notes];
     NotesStorage.save(next);

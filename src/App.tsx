@@ -1931,6 +1931,34 @@ function AppContent() {
 const SystemMonitor = lazy(() => import('./components/system-monitor').then((m) => ({ default: m.SystemMonitor })));
 
 export default function App() {
+  // Prefetch code-split tool views during idle time so switching to any tool
+  // is instant — no "click then load" flash. Desktop assets are local, so the
+  // background fetch is cheap and the lazy() load() promises resolve before
+  // the user opens a tool, keeping the main entry small while UX stays snappy.
+  useEffect(() => {
+    const prefetch = () => {
+      void import('./components/toolbox/servers-view');
+      void import('./components/toolbox/tool-apps');
+      void import('./components/toolbox/tool-vault');
+      void import('./components/toolbox/tool-tunnels');
+      void import('./components/toolbox/tool-services');
+      void import('./components/toolbox/tool-notes');
+      void import('./components/toolbox/tool-command-history');
+      void import('./components/toolbox/tool-documents');
+      void import('./components/toolbox/tool-api-debug');
+      void import('./components/toolbox/tool-postgres');
+      void import('./components/toolbox/tool-sqlite');
+      void import('./components/toolbox/tool-mysql');
+      void import('./components/toolbox/tool-jar-decompiler');
+    };
+    if (typeof window.requestIdleCallback === 'function') {
+      const handle = window.requestIdleCallback(prefetch, { timeout: 1500 });
+      return () => window.cancelIdleCallback(handle);
+    }
+    const timer = window.setTimeout(prefetch, 1200);
+    return () => window.clearTimeout(timer);
+  }, []);
+
   return (
     <ErrorBoundary label="NexTerm">
       <LayoutProvider>
