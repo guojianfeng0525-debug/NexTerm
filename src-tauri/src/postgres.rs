@@ -20,6 +20,11 @@ use tokio_postgres_rustls::MakeRustlsConnect;
 use tokio_util::sync::CancellationToken;
 
 const MAX_QUERY_ROWS: usize = 1_000;
+/// Upper bound for `postgres_catalog_search` limits. The SQL-completion
+/// default stays at 100; the object navigator passes this cap so full object
+/// listings (tables/views/materialized views) are not truncated. Kept in
+/// sync with `postgres_catalog::CATALOG_GROUP_LIMIT`.
+const CATALOG_SEARCH_LIMIT_MAX: usize = 10_000;
 const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 pub(crate) const QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 /// Grace period the cancel/timeout path waits for the in-flight query future
@@ -2291,7 +2296,9 @@ pub async fn postgres_catalog_search(
         .get(&request.connection_id)
         .cloned()
         .ok_or_else(|| "PostgreSQL connection is not active".to_string())?;
-    let limit = request.limit.unwrap_or(100).clamp(1, 100) as i64;
+    // Completion defaults to 100 matches; the navigator passes a larger
+    // explicit limit so full object listings are never truncated.
+    let limit = request.limit.unwrap_or(100).clamp(1, CATALOG_SEARCH_LIMIT_MAX) as i64;
     let prefix = format!("{}%", request.prefix.unwrap_or_default());
     let rows = match request.kind.as_str() {
         "relation" => client.query(

@@ -1994,7 +1994,8 @@
       "downloaded": "Downloaded",
       "downloadFailed": "Download failed",
       "dropHint": "Drag & drop files here to import, or click import",
-      "dropActive": "Release to import files"
+      "dropActive": "Release to import files",
+      "hScrollHint": "Content exceeds visible area · hover right edge or swipe to scroll horizontally"
     },
     "jar": {
       "title": "JAR Decompiler",

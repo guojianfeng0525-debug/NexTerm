@@ -1994,7 +1994,8 @@
       "downloaded": "已下载",
       "downloadFailed": "下载失败",
       "dropHint": "将文件拖拽到此处导入，或点击导入",
-      "dropActive": "松开以导入文件"
+      "dropActive": "松开以导入文件",
+      "hScrollHint": "内容超出可视区域 · 悬停右缘或双指滑动可横向滚动"
     },
     "jar": {
       "title": "JAR 反编译",

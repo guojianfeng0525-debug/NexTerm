@@ -100,7 +100,7 @@ function deepMerge<T>(base: T, over: unknown): T {
 }
 
 export function BetterEditor({ kind, bytes, onSave, onError }: BetterEditorProps) {
-  const { i18n } = useTranslation();
+  const { i18n, t } = useTranslation();
   const wantZh = i18n.language.startsWith('zh');
   const locale = useEditorLocale(kind, wantZh);
 
@@ -114,13 +114,22 @@ export function BetterEditor({ kind, bytes, onSave, onError }: BetterEditorProps
   if (kind === 'xlsx') {
     return (
       <Suspense fallback={fallback}>
-        <div className="h-full">
+        <div className="relative h-full">
           <XlsxEditor
             file={bytes}
             onSave={(b: Uint8Array) => onSave(b)}
             className="h-full"
             i18n={locale as XlsxTranslations | undefined}
           />
+          {/* macOS WKWebView scrollbars are overlay style (hidden until the
+              pointer hovers the grid). A discreet hint tells users the native
+              bar exists and how to scroll horizontally. */}
+          <p
+            className="pointer-events-none absolute bottom-1.5 right-3 z-10 select-none text-[10px] leading-none text-muted-foreground/70"
+            data-testid="xlsx-hscroll-hint"
+          >
+            {t('toolbox.documents.hScrollHint')}
+          </p>
         </div>
       </Suspense>
     );

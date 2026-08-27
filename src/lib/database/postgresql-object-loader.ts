@@ -341,7 +341,15 @@ export async function loadPostgresNavigatorChildren(
     const relations = await invoke<PostgresCatalogItem[]>(
       "postgres_catalog_search",
       {
-        request: { connectionId, kind: "relation", schema },
+        request: {
+          connectionId,
+          kind: "relation",
+          schema,
+          // `postgres_catalog_search` is a completion endpoint by default
+          // (LIMIT 100); the navigator needs the full relation list so it
+          // passes the same cap used by the other navigator group listings.
+          limit: 10_000,
+        },
       },
     );
     const relationRole = (relation: PostgresCatalogItem) => {
