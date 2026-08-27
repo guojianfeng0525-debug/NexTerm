@@ -1834,22 +1834,28 @@ export function ToolPostgres() {
           }}
           data-testid="postgres-new-query"
         />
-        {tab?.type === "table" && tab.activeFilter && (
+        {tab?.type === "table" && (
           <>
             <ToolButton
               icon={<Filter />}
-              label={t("toolbox.postgres.filterActive", {
-                count: tab.activeFilter.conditions.length,
-              })}
+              label={
+                tab.activeFilter
+                  ? t("toolbox.postgres.filterActive", {
+                      count: tab.activeFilter.conditions.length,
+                    })
+                  : t("toolbox.postgres.filterSort")
+              }
               onClick={() => setFilterDialog({ mode: "filterSort" })}
-              data-testid="postgres-filter-badge"
+              data-testid="postgres-filter"
             />
-            <ToolButton
-              icon={<X />}
-              label={t("toolbox.postgres.clearFilter")}
-              onClick={clearFilter}
-              data-testid="postgres-clear-filter"
-            />
+            {tab.activeFilter && (
+              <ToolButton
+                icon={<X />}
+                label={t("toolbox.postgres.clearFilter")}
+                onClick={clearFilter}
+                data-testid="postgres-clear-filter"
+              />
+            )}
             <Separator />
           </>
         )}

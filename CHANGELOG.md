@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed (UI layout)
 - **DDL 预览移到界面右侧面板**：双击导航器表/视图/物化视图时，右侧竖栏显示格式化 DDL（不再单击触发、不再占查询页顶部）。
 - **双击打开表 = 数据网格全屏**：table 浏览 tab 不再有空白占位/分隔条，结果网格占满整个 tab；SQL 执行面板仅查询（query）页保留。
+- **数据网格筛选入口常驻**：table 工具条「筛选 (Filter & Sort)」按钮始终可见（此前仅已有过滤条件时显示），点击打开多条件筛选对话框（列/运算符/值 + AND/OR + 排序），支持增删条件。右键字段值过滤保留。
 
 ### Fixed
 - **数据库对象列表截断**：对象导航器表/视图组复用 SQL 补全命令（LIMIT 100）导致 schema 超 100 张表只显示前 100 张。导航器显式传 limit 10_000（Rust clamp 放宽，补全默认 100 不变）。回归 spec：150 表 fixture 全量显示。

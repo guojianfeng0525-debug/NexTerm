@@ -191,4 +191,29 @@ describe('PostgreSQL field-value filter (B18 Slice A)', () => {
       timeoutMsg: 'clear filter did not restore the full row set',
     });
   });
+
+  it('adds filter conditions via the always-visible toolbar Filter button (Filter & Sort dialog)', async function () {
+    this.timeout(150_000);
+    await openUsersTable();
+    const totalBefore = await rowCount();
+    expect(totalBefore).toBeGreaterThan(0);
+    // The Filter button is ALWAYS visible on the table toolbar (not only when
+    // a filter is already active).
+    const filterBtn = await $('[data-testid="postgres-filter"]');
+    await filterBtn.waitForDisplayed({ timeout: 10_000 });
+    // Filter on the first data column (= id, unique) using the first row value.
+    const firstColValue = await firstRowCellText(2);
+    expect(firstColValue.length).toBeGreaterThan(0);
+    await filterBtn.click();
+    const dialog = await $('[role="dialog"]');
+    await dialog.waitForDisplayed({ timeout: 10_000 });
+    const valueInput = await dialog.$('[data-testid="filter-value-input-0"]');
+    await valueInput.setValue(firstColValue);
+    await dialog.$('[data-testid="filter-apply"]').click();
+    await browser.pause(1500);
+    // id is unique → filtered grid has fewer rows than before.
+    const after = await rowCount();
+    expect(after).toBeLessThan(totalBefore);
+    await browser.saveScreenshot('./test-results/filter-dialog-applied.png');
+  });
 });

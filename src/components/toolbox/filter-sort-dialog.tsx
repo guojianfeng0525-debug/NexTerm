@@ -210,6 +210,7 @@ export function FilterSortDialog({
                     ? labels.valueLikeHint
                     : labels.value
                 }
+                data-testid={`filter-value-input-${index}`}
                 onChange={(event) =>
                   patchCondition(index, { value: event.target.value })
                 }
@@ -385,6 +386,7 @@ export function FilterSortDialog({
             size="sm"
             className="h-7 rounded-sm px-3 text-[12px]"
             onClick={clear}
+            data-testid="filter-clear"
           >
             {labels.clear}
           </Button>
@@ -402,6 +404,7 @@ export function FilterSortDialog({
             size="sm"
             className="h-7 rounded-sm px-3 text-[12px]"
             onClick={apply}
+            data-testid="filter-apply"
           >
             {labels.apply}
           </Button>
