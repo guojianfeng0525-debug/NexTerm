@@ -44,6 +44,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
   ContextMenu,
+  ContextMenuCheckboxItem,
   ContextMenuContent,
   ContextMenuItem,
   ContextMenuSeparator,
@@ -3167,6 +3168,7 @@ export function ToolPostgres() {
                       remove: t("toolbox.postgres.history.remove"),
                       clear: t("toolbox.postgres.history.clear"),
                       time: t("toolbox.postgres.history.time"),
+                      error: t("toolbox.postgres.history.error"),
                       clearConfirmTitle: t("toolbox.postgres.history.clearConfirmTitle"),
                       clearConfirmDescription: t("toolbox.postgres.history.clearConfirmDescription"),
                       cancel: t("common.cancel"),
@@ -3268,14 +3270,18 @@ export function ToolPostgres() {
                       <ContextMenuItem onSelect={() => setLayoutDialog({ kind: "columnWidth", columnIndex })}>{t("toolbox.postgres.setColumnWidth")}</ContextMenuItem>
                       <ContextMenuItem onSelect={() => bestFitColumn(columnIndex)}>{t("toolbox.postgres.bestFitColumn")}</ContextMenuItem>
                       <ContextMenuSeparator />
-                      <ContextMenuItem onSelect={toggleFieldType}>
+                      <ContextMenuCheckboxItem
+                        checked={currentLayout().showFieldType}
+                        onSelect={toggleFieldType}
+                      >
                         {t("toolbox.postgres.showFieldType")}
-                        {currentLayout().showFieldType ? " ✓" : ""}
-                      </ContextMenuItem>
-                      <ContextMenuItem onSelect={toggleComment}>
+                      </ContextMenuCheckboxItem>
+                      <ContextMenuCheckboxItem
+                        checked={currentLayout().showComment}
+                        onSelect={toggleComment}
+                      >
                         {t("toolbox.postgres.showComment")}
-                        {currentLayout().showComment ? " ✓" : ""}
-                      </ContextMenuItem>
+                      </ContextMenuCheckboxItem>
                     </>
                   ) : undefined}
                   renderRowHeaderContextMenu={tab.type === "table" ? () => (

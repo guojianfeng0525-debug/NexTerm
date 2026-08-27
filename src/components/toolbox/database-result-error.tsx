@@ -132,7 +132,7 @@ export function DatabaseResultErrorPane({
 
       {/* Static common-error hint (only when the code is known) */}
       {suggestion && (
-        <div className="mt-1 flex items-start gap-1 text-[11px] text-warning">
+        <div className="mt-1 flex items-start gap-1 text-[11px] text-muted-foreground">
           <Lightbulb className="mt-0.5 size-3.5 shrink-0 text-warning" />
           <span>{suggestion}</span>
         </div>

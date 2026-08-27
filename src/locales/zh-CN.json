@@ -1369,6 +1369,7 @@
         "remove": "删除",
         "clear": "清空",
         "time": "执行时间",
+        "error": "执行失败",
         "clearConfirmTitle": "清空查询历史？",
         "clearConfirmDescription": "这将删除此连接的所有查询历史，且无法撤销。"
       },
@@ -1572,6 +1573,7 @@
       "historyRemove": "删除本条",
       "historyClear": "清空历史",
       "historyTime": "执行时间",
+      "historyError": "执行失败",
       "historyClearConfirmTitle": "清空历史？",
       "historyClearConfirmDescription": "将删除当前连接的全部历史记录。",
       "errorRetry": "重试",
@@ -1647,6 +1649,7 @@
       "historyRemove": "删除本条",
       "historyClear": "清空历史",
       "historyTime": "执行时间",
+      "historyError": "执行失败",
       "historyClearConfirmTitle": "清空历史？",
       "historyClearConfirmDescription": "将删除当前连接的全部历史记录。",
       "errorRetry": "重试",

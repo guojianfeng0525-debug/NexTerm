@@ -50,6 +50,8 @@ export interface QueryHistoryViewLabels {
   readonly clear: string;
   /** Tooltip label for the full execution timestamp. */
   readonly time: string;
+  /** Tooltip label for a failed history entry (ux-spec §4.5: "执行失败"). */
+  readonly error?: string;
   readonly clearConfirmTitle: string;
   readonly clearConfirmDescription: string;
   readonly cancel?: string;
@@ -248,7 +250,7 @@ export function QueryHistoryView({
                       className={`size-2 shrink-0 rounded-full ${
                         entry.success ? "bg-emerald-500" : "bg-red-500"
                       }`}
-                      title={entry.success ? undefined : labels.run}
+                      title={entry.success ? undefined : (labels.error ?? labels.run)}
                     />
                     <span
                       className="w-16 shrink-0 text-right text-[10px] text-muted-foreground tabular-nums"

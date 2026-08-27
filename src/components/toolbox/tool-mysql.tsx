@@ -839,6 +839,7 @@ export function ToolMySql() {
                     remove: t("toolbox.mysql.historyRemove"),
                     clear: t("toolbox.mysql.historyClear"),
                     time: t("toolbox.mysql.historyTime"),
+                    error: t("toolbox.mysql.historyError"),
                     clearConfirmTitle: t("toolbox.mysql.historyClearConfirmTitle"),
                     clearConfirmDescription: t(
                       "toolbox.mysql.historyClearConfirmDescription",
