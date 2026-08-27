@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.11.0] - 2026-08-27
+
+**Minor — SQL ↔ 记事本双向流转 + 弹窗定位修复（真实应用 E2E 验证）**。本版同时落地 v2.10.1 已预告的「SQL 记事本归档」「PostgreSQL 会话加固」「多连接会话隔离」三项能力。
+
+### Added (Toolbox)
+
+- **SQL 保存到记事本**：PostgreSQL 查询页可将当前语句（或全文）一键保存到记事本——已在记事本选中记录时以 `-- 标题` + SQL 换行追加，否则新建 SQL 记录；保存后记事本面板自动刷新（`nexterm:toolbox-changed`）。
+- **记事本 SQL 右键「粘贴到查询页」**：SQL 笔记右键菜单可一键将内容粘贴到所选 PostgreSQL 连接对应的查询页；若该连接尚未建立，先自动建立连接再打开查询页，仅粘贴不自动执行。
+- **桌面 E2E 覆盖**：新增 `postgres-save-to-notes` 场景（真实应用可见模式验证通过）。
+
+### Fixed
+
+- **指纹确认框 / 保存到记事本对话框定位偏移**：`!inset-0 !m-auto` 覆盖 shadcn `DialogContent` 默认 `top-50%/left-50%` 时未抵消默认 `translate-x/y-[-50%]`，导致弹窗被二次平移偏出中心；已为三处弹窗（SSH 首连指纹框、Postgres 隧道指纹框、保存到记事本框）补齐 `!translate-x-0 !translate-y-0`，指纹框另加 `max-h-[85vh] overflow-y-auto` 防止长指纹溢出。全局复核 30+ 弹窗无同类问题。
+- **PostgreSQL 数据安全与工作区生命周期**（v2.10.1 预告落地）：原始 SQL 执行禁止未跟踪的事务控制；只读连接在后端拒绝非读取 SQL；断开连接会关闭其全部工作区标签；存在未保存内容时可保存 SQL 后关闭或明确丢弃，已保存的 SQL 在再次连接时自动恢复。
+- **PostgreSQL 多连接会话隔离**（v2.10.1 预告落地）：查询、表格、对象、DDL 与设计器标签永久绑定其 `connectionId`，执行/取消/保存/刷新均使用标签自己的连接，避免切换到其他连接后误操作。
+
+### Verified
+
+- tsc 0 错误 / vitest 829（93 文件）/ cargo test / i18n parity 2058 keys / lint 无新增
+- 真实应用 E2E：postgres-save-to-notes（1/1 passing）
+
 ## [2.10.1] - 2026-08-27
 
 **Patch — 用户反馈三 bug 修复 + UI 布局调整（真实应用 E2E 验证）**。
