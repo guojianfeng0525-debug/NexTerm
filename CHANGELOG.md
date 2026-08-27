@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.11.1] - 2026-08-27
+
+**Patch — 构建体积优化 + 代码分割体验保障（真实应用 E2E 验证）**。
+
+### Changed (Build / Perf)
+
+- **构建体积大幅缩减**：主包 index 由 3.3 MB（gzip 999 KB）降至 585 KB（gzip 161 KB，约 -84%）。11 个工具箱视图（服务器 / 应用 / 保险库 / 隧道 / 服务 / 记事本 / 命令历史 / API 调试 / PostgreSQL / SQLite / MySQL）改为代码分割按需加载；codemirror、sql-formatter、xlsx、recharts、xterm、react 等重依赖拆分为独立 vendor chunk（稳定可缓存）。system-monitor 由 433 KB 降至 31 KB。
+- **代码分割不牺牲体验**：应用挂载后在空闲时段后台预取全部工具视图，切换菜单即时显示，无「点击后才加载」的等待。
+
+### Fixed
+
+- 清理已废弃的 `nexterm:append-sql-note` 事件监听（SQL 保存到记事本已改经标题对话框，无派发方，避免误触发）。
+- SQL 保存到记事本：对话框打开期间切换查询页不再写错对象（打开时快照语句内容）；追加到空笔记不再产生前导空行。
+
+### Verified
+
+- tsc 0 错误 / vitest 829（93 文件）/ lint 无新增 / chunk 体积保持 585 KB
+- 真实应用 E2E：postgres-save-to-notes（1/1 passing，代码分割 + 预取下工具面板加载正常）
+
 ## [2.11.0] - 2026-08-27
 
 **Minor — SQL ↔ 记事本双向流转 + 弹窗定位修复（真实应用 E2E 验证）**。本版同时落地 v2.10.1 已预告的「SQL 记事本归档」「PostgreSQL 会话加固」「多连接会话隔离」三项能力。
