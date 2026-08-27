@@ -88,6 +88,24 @@ describe("per-provider isolation", () => {
     localStorage.setItem("nexterm.dbQueryHistory.mysql", "not json");
     expect(loadQueryHistory("mysql")).toEqual([]);
   });
+
+  it("filters out malformed entries while keeping valid ones", () => {
+    localStorage.setItem(
+      "nexterm.dbQueryHistory.postgresql",
+      JSON.stringify([
+        { ...BASE, id: "ok-1", executedAt: 1 },
+        { id: "missing-sql", connectionId: "c", connectionName: "n", providerId: "postgresql", executedAt: 1, success: true },
+        { ...BASE, id: "ok-2", executedAt: 2, success: false },
+        { id: 42, sql: "SELECT 1;", connectionId: "c", connectionName: "n", providerId: "postgresql", executedAt: 1, success: true },
+        { ...BASE, id: "bad-provider", providerId: "oracle" },
+        null,
+        "nope",
+      ]),
+    );
+    const entries = loadQueryHistory("postgresql");
+    expect(entries).toHaveLength(2);
+    expect(entries.map((entry) => entry.id)).toEqual(["ok-1", "ok-2"]);
+  });
 });
 
 describe("removeQueryHistory", () => {
@@ -103,6 +121,17 @@ describe("removeQueryHistory", () => {
     const entries = loadQueryHistory("postgresql");
     expect(entries).toHaveLength(1);
     expect(entries[0].sql).toBe("SELECT 1;");
+    expect(listener).toHaveBeenCalledTimes(1);
+    window.removeEventListener(QUERY_HISTORY_CHANGED_EVENT, listener);
+  });
+
+  it("is a no-op (list unchanged) for an unknown id but still notifies", () => {
+    addQueryHistory(BASE);
+    const listener = vi.fn();
+    window.addEventListener(QUERY_HISTORY_CHANGED_EVENT, listener);
+    removeQueryHistory("postgresql", "does-not-exist");
+
+    expect(loadQueryHistory("postgresql")).toHaveLength(1);
     expect(listener).toHaveBeenCalledTimes(1);
     window.removeEventListener(QUERY_HISTORY_CHANGED_EVENT, listener);
   });

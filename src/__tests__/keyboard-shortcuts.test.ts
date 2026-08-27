@@ -276,6 +276,105 @@ describe('useKeyboardShortcuts', () => {
   });
 });
 
+describe('useKeyboardShortcuts — DB workspace release points (boundary 5)', () => {
+  afterEach(() => {
+    cleanup();
+  });
+
+  function ShortcutHarness({ shortcuts }: { shortcuts: KeyboardShortcut[] }) {
+    useKeyboardShortcuts(shortcuts);
+    return null;
+  }
+
+  function dispatchOn(element: Element, key: string, init: KeyboardEventInit): KeyboardEvent {
+    const event = new KeyboardEvent('keydown', {
+      key,
+      bubbles: true,
+      cancelable: true,
+      ...init,
+    });
+    element.dispatchEvent(event);
+    return event;
+  }
+
+  it.each(['postgres-workspace', 'mysql-workspace', 'sqlite-workspace'])(
+    'suppresses app-level Ctrl+B layout shortcut while focus is inside %s',
+    (testId) => {
+      const actions = {
+        toggleLeftSidebar: vi.fn(),
+        toggleRightSidebar: vi.fn(),
+        toggleBottomPanel: vi.fn(),
+        toggleZenMode: vi.fn(),
+      };
+      const shortcuts = createLayoutShortcuts(actions);
+      render(React.createElement(ShortcutHarness, { shortcuts }));
+
+      const workspace = document.createElement('div');
+      workspace.setAttribute('data-testid', testId);
+      const button = document.createElement('button');
+      workspace.appendChild(button);
+      document.body.appendChild(workspace);
+      button.focus();
+
+      const event = dispatchOn(button, 'b', { ctrlKey: true });
+
+      expect(actions.toggleLeftSidebar).not.toHaveBeenCalled();
+      // Not prevented → the DB hook (which owns this workspace) may still route it.
+      expect(event.defaultPrevented).toBe(false);
+    },
+  );
+
+  it('suppresses app-level Ctrl+W (close tab) inside a DB workspace', () => {
+    const actions = createMockActions();
+    const shortcuts = createSplitViewShortcuts(actions);
+    render(React.createElement(ShortcutHarness, { shortcuts }));
+
+    const workspace = document.createElement('div');
+    workspace.setAttribute('data-testid', 'postgres-workspace');
+    const button = document.createElement('button');
+    workspace.appendChild(button);
+    document.body.appendChild(workspace);
+    button.focus();
+
+    const event = dispatchOn(button, 'w', { ctrlKey: true });
+
+    expect(actions.closeTab).not.toHaveBeenCalled();
+    expect(event.defaultPrevented).toBe(false);
+  });
+
+  it('still fires app-level shortcuts outside a DB workspace (terminal unaffected)', () => {
+    const actions = createMockActions();
+    const shortcuts = createSplitViewShortcuts(actions);
+    render(React.createElement(ShortcutHarness, { shortcuts }));
+
+    // A terminal session that is NOT inside a DB workspace must keep Ctrl+N/Ctrl+W.
+    const xterm = document.createElement('div');
+    xterm.className = 'xterm';
+    const textarea = document.createElement('textarea');
+    xterm.appendChild(textarea);
+    document.body.appendChild(xterm);
+
+    const event = dispatchOn(textarea, 'w', { ctrlKey: true });
+
+    expect(actions.closeTab).toHaveBeenCalledOnce();
+    expect(event.defaultPrevented).toBe(true);
+  });
+
+  it('keeps firing app-level shortcuts on an ordinary (non-DB) focused button', () => {
+    const actions = createMockActions();
+    const shortcuts = createSplitViewShortcuts(actions);
+    render(React.createElement(ShortcutHarness, { shortcuts }));
+
+    const button = document.createElement('button');
+    document.body.appendChild(button);
+
+    const event = dispatchOn(button, 'w', { ctrlKey: true });
+
+    expect(actions.closeTab).toHaveBeenCalledOnce();
+    expect(event.defaultPrevented).toBe(true);
+  });
+});
+
 describe('keyboard shortcut settings', () => {
   beforeEach(async () => {
     for (const k of Object.keys(ipc.DB)) delete ipc.DB[k];

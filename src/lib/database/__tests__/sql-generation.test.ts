@@ -60,6 +60,25 @@ describe("generateSelectSql", () => {
       'SELECT "a" FROM "public"."weird""table" LIMIT 100;',
     );
   });
+
+  it("escapes embedded double quotes in column names (PG)", () => {
+    expect(generateSelectSql("public", "users", [{ name: 'col"umn' }], pg)).toBe(
+      'SELECT "col""umn" FROM "public"."users" LIMIT 100;',
+    );
+  });
+
+  it("escapes embedded backticks in identifiers (MySQL)", () => {
+    expect(generateSelectSql("app", "we`ird", [{ name: "a`b" }], mysql)).toBe(
+      "SELECT `a``b` FROM `app`.`we``ird` LIMIT 100;",
+    );
+  });
+
+  it("honours a zero select limit", () => {
+    const options: SqlGenerationOptions = { ...pg, selectLimit: 0 };
+    expect(generateSelectSql("public", "users", usersColumns, options)).toBe(
+      'SELECT "id", "name", "email" FROM "public"."users" LIMIT 0;',
+    );
+  });
 });
 
 describe("generateInsertSql", () => {
@@ -72,6 +91,19 @@ describe("generateInsertSql", () => {
   it("handles an empty column list", () => {
     expect(generateInsertSql("public", "users", [], pg)).toBe(
       'INSERT INTO "public"."users" () VALUES ();',
+    );
+  });
+
+  it("preserves the given column order in names and placeholders", () => {
+    const columns = [{ name: "z_last" }, { name: "a_first" }, { name: "m_middle" }];
+    expect(generateInsertSql("public", "t", columns, pg)).toBe(
+      'INSERT INTO "public"."t" ("z_last", "a_first", "m_middle") VALUES (\'\', \'\', \'\');',
+    );
+  });
+
+  it("quotes INSERT identifiers with the MySQL dialect", () => {
+    expect(generateInsertSql("app", "users", [{ name: "id" }, { name: "name" }], mysql)).toBe(
+      "INSERT INTO `app`.`users` (`id`, `name`) VALUES ('', '');",
     );
   });
 });
@@ -99,5 +131,11 @@ describe("generateUpdateSql", () => {
     expect(
       generateUpdateSql("public", "users", [{ name: "name" }], [], pg),
     ).toBe('UPDATE "public"."users" SET "name" = \'\';');
+  });
+
+  it("quotes the primary key in the WHERE clause with the dialect", () => {
+    expect(
+      generateUpdateSql("app", "users", [{ name: "name" }], ["id"], mysql),
+    ).toBe("UPDATE `app`.`users` SET `name` = '' WHERE `id` = <id>;");
   });
 });

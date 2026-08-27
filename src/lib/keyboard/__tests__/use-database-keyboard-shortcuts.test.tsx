@@ -105,6 +105,17 @@ describe("shouldConsumeShortcut rule table (feature-design §1.2 boundary 3)", (
     expect(shouldConsumeShortcut(ev("Escape"), "DATA_GRID", true)).toBe(false);
   });
 
+  it("QUERY_EDITOR: Alt/Shift-modified combos also consume while typing", () => {
+    expect(shouldConsumeShortcut(ev("F5", { shiftKey: true }), "QUERY_EDITOR", true)).toBe(true);
+    expect(shouldConsumeShortcut(ev("F5", { altKey: true }), "QUERY_EDITOR", true)).toBe(true);
+    expect(shouldConsumeShortcut(ev("Enter", { shiftKey: true, ctrlKey: true }), "QUERY_EDITOR", true)).toBe(true);
+  });
+
+  it("NAVIGATOR: plain combos consume even while typing (tree keeps F5)", () => {
+    expect(shouldConsumeShortcut(ev("F5"), "NAVIGATOR", true)).toBe(true);
+    expect(shouldConsumeShortcut(ev("Enter"), "NAVIGATOR", true)).toBe(true);
+  });
+
   it("NAVIGATOR / DATABASE_WORKSPACE: everything is consumed", () => {
     expect(shouldConsumeShortcut(ev("F5"), "NAVIGATOR", true)).toBe(true);
     expect(shouldConsumeShortcut(ev("Escape"), "NAVIGATOR", true)).toBe(true);
@@ -213,6 +224,29 @@ describe("scope routing via the hook", () => {
     editor.focus();
     const event = dispatchKey(editor, "Enter", { ctrlKey: true });
     expect(event.defaultPrevented).toBe(true);
+  });
+
+  it("stops propagation on a matched combo", () => {
+    const execute = handlerMock();
+    render(
+      <Harness
+        testId="postgres-workspace"
+        handlers={{ "database.query.execute": () => void execute.called++ }}
+      />,
+    );
+    const editor = document.querySelector(".cm-editor") as HTMLElement;
+    editor.focus();
+    // dispatchEvent returns false when stopPropagation was called.
+    const dispatched = editor.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "Enter",
+        ctrlKey: true,
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    expect(execute.called).toBe(1);
+    expect(dispatched).toBe(false);
   });
 });
 
@@ -350,6 +384,16 @@ describe("DESIGNER domain (feature-design §1.3)", () => {
     apply.focus();
     const event = dispatchKey(apply, "n", { ctrlKey: true });
     expect(newQuery.called).toBe(0);
+    expect(event.defaultPrevented).toBe(false);
+  });
+
+  it("lets TableDesignerTab keep the keyboard when no design handler is registered", () => {
+    render(<Harness testId="postgres-workspace" handlers={{}} />);
+    const apply = document.querySelector('[data-testid="designer-apply"]') as HTMLElement;
+    apply.focus();
+    // No design handler on this tool (e.g. MySQL/SQLite without a designer):
+    // Ctrl+S must be left untouched so TableDesignerTab's own hook can act.
+    const event = dispatchKey(apply, "s", { ctrlKey: true });
     expect(event.defaultPrevented).toBe(false);
   });
 });

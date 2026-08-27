@@ -109,6 +109,20 @@ describe("NavigatorRelationMenu", () => {
     fireEvent.click(insert);
     expect(actions.generateInsert).toHaveBeenCalledTimes(1);
   });
+
+  it("marks DELETE as destructive", async () => {
+    const actions = navigatorActions({ generateDelete: vi.fn() });
+    renderMenu(<NavigatorRelationMenu actions={actions} labels={navigatorLabels} />);
+    fireEvent.click(screen.getByText("生成 SQL"));
+    const del = await screen.findByTestId("navigator-menu-generate-delete");
+    expect(del.getAttribute("data-variant")).toBe("destructive");
+  });
+
+  it("annotates refresh (F5) and new query (Ctrl+N) shortcuts", () => {
+    renderMenu(<NavigatorRelationMenu actions={navigatorActions()} labels={navigatorLabels} />);
+    expect(screen.getByTestId("navigator-menu-refresh").textContent).toContain("F5");
+    expect(screen.getByTestId("navigator-menu-new-query").textContent).toContain("Ctrl+N");
+  });
 });
 
 const resultLabels: ResultCellMenuLabels = {

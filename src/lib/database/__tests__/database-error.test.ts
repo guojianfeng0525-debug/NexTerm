@@ -59,6 +59,45 @@ describe("parsePostgresError", () => {
     expect(parsed.message).toBe("connection refused");
     expect(parsed.code).toBeUndefined();
   });
+
+  it("reports position 1 when the caret sits in the first column", () => {
+    const parsed = parsePostgresError(
+      [
+        'PostgreSQL query failed: db error: ERROR: syntax error at or near "SELEC"',
+        "LINE 1: SELEC * FROM users",
+        "^",
+      ].join("\n"),
+    );
+    expect(parsed.position).toBe(1);
+  });
+
+  it("keeps parsing when the error block carries extra server lines (CONTEXT/HINT)", () => {
+    const parsed = parsePostgresError(
+      [
+        'PostgreSQL query failed: db error: ERROR: 23505: duplicate key value violates unique constraint "users_pkey"',
+        "DETAIL: Key (email)=(a@b.c) already exists.",
+        "LINE 1: INSERT INTO users (email) VALUES ('a@b.c')",
+        "                                          ^",
+        'HINT: Use a different email address.',
+      ].join("\n"),
+    );
+    expect(parsed.code).toBe("23505");
+    expect(parsed.lineNumber).toBe(1);
+    expect(parsed.lineText).toContain("INSERT INTO users");
+    expect(parsed.message).toContain("duplicate key value");
+  });
+
+  it("parses a LINE beyond 9 and strips leading whitespace from the line text", () => {
+    const parsed = parsePostgresError(
+      [
+        "ERROR: invalid input syntax for type integer",
+        'LINE 10: SELECT * FROM users WHERE id = \'abc\'',
+        "                                  ^",
+      ].join("\n"),
+    );
+    expect(parsed.lineNumber).toBe(10);
+    expect(parsed.lineText).toBe("SELECT * FROM users WHERE id = 'abc'");
+  });
 });
 
 describe("parseMySQLError", () => {
@@ -93,6 +132,28 @@ describe("parseMySQLError", () => {
     );
     expect(parsed.lineNumber).toBeUndefined();
   });
+
+  it("extracts the code when the SQLSTATE group carries non-digit characters", () => {
+    const parsed = parseMySQLError(
+      "MySQL query failed: Error 2003 (HY000): Can't connect to MySQL server on '127.0.0.1'",
+    );
+    expect(parsed.code).toBe("2003");
+    expect(parsed.message).toContain("Can't connect to MySQL server");
+  });
+
+  it("keeps the code when the message itself contains parentheses and colons", () => {
+    const parsed = parseMySQLError(
+      "MySQL query failed: Error 1366 (HY000): Incorrect integer value: 'x' for column 'id' at row 1",
+    );
+    expect(parsed.code).toBe("1366");
+    expect(parsed.message).toContain("Incorrect integer value");
+  });
+
+  it("falls back for an 'Error:' (no numeric code) style message", () => {
+    const parsed = parseMySQLError("MySQL query failed: Error: Unknown storage engine 'InnoDB'");
+    expect(parsed.code).toBeUndefined();
+    expect(parsed.message).toBe("Error: Unknown storage engine 'InnoDB'");
+  });
 });
 
 describe("parseSQLiteError", () => {
@@ -109,6 +170,16 @@ describe("parseSQLiteError", () => {
   it("keeps text untouched when no known prefix is present", () => {
     const parsed = parseSQLiteError("database is locked");
     expect(parsed.message).toBe("database is locked");
+  });
+
+  it("strips the rusqlite prefix even without the Rust wrapper", () => {
+    const parsed = parseSQLiteError("error returned from database: table users already exists");
+    expect(parsed.message).toBe("table users already exists");
+  });
+
+  it("strips only the Rust wrapper when the inner prefix is absent", () => {
+    const parsed = parseSQLiteError("SQLite query failed: no such table: users");
+    expect(parsed.message).toBe("no such table: users");
   });
 });
 

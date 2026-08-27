@@ -79,6 +79,34 @@ describe("DatabaseResultErrorPane", () => {
     expect(screen.queryByText(/check the table\/schema name/i)).toBeNull();
   });
 
+  it("suggests by message keyword for SQLite (no error codes)", () => {
+    const { rerender } = render(
+      <DatabaseResultErrorPane
+        error={makeError({ code: undefined, source: "sqlite", message: "no such table: users" })}
+        labels={labels}
+      />,
+    );
+    expect(screen.getByText(/Table does not exist/i)).not.toBeNull();
+
+    rerender(
+      <DatabaseResultErrorPane
+        error={makeError({ code: undefined, source: "sqlite", message: "near \"SELEC\": syntax error" })}
+        labels={labels}
+      />,
+    );
+    expect(screen.getByText(/SQL syntax error/i)).not.toBeNull();
+
+    // Unmatched keyword → no suggestion.
+    rerender(
+      <DatabaseResultErrorPane
+        error={makeError({ code: undefined, source: "sqlite", message: "database is locked" })}
+        labels={labels}
+      />,
+    );
+    expect(screen.queryByText(/Table does not exist/i)).toBeNull();
+    expect(screen.queryByText(/SQL syntax error/i)).toBeNull();
+  });
+
   it("hides the LINE badge when no line number is present", () => {
     render(
       <DatabaseResultErrorPane
@@ -151,5 +179,42 @@ describe("DatabaseResultErrorPane", () => {
     const details = screen.getByTestId("database-result-error-details");
     expect(details.textContent).toContain('ERROR: relation "users" does not exist');
     expect(details.textContent).toContain("LINE 3: FROM users;");
+  });
+
+  it("falls back to the line text when fullText is empty", () => {
+    render(
+      <DatabaseResultErrorPane
+        error={makeError({ fullText: "   ", lineText: "FROM users;" })}
+        labels={labels}
+      />,
+    );
+    fireEvent.click(screen.getByTestId("database-result-error-details-trigger"));
+    expect(screen.getByTestId("database-result-error-details").textContent).toContain(
+      "FROM users;",
+    );
+  });
+
+  it("uses the default English detail trigger label when labels.details is omitted", () => {
+    const labelsWithoutDetails = { ...labels };
+    delete labelsWithoutDetails.details;
+    render(
+      <DatabaseResultErrorPane
+        error={makeError()}
+        labels={labelsWithoutDetails}
+        onRetry={() => undefined}
+        onCopy={() => undefined}
+      />,
+    );
+    expect(screen.getByText("Server detail")).not.toBeNull();
+  });
+
+  it("omits the collapsible entirely when there is no detail text", () => {
+    render(
+      <DatabaseResultErrorPane
+        error={makeError({ fullText: "", lineText: "" })}
+        labels={labels}
+      />,
+    );
+    expect(screen.queryByTestId("database-result-error-details-trigger")).toBeNull();
   });
 });

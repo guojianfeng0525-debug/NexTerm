@@ -166,4 +166,61 @@ describe("QueryHistoryView", () => {
     fireEvent.click(screen.getByTestId("query-history-clear-confirm"));
     expect(mocks.clearQueryHistory).toHaveBeenCalledWith("postgresql");
   });
+
+  it("disables the clear button when the filtered list is empty", () => {
+    mocks.loadQueryHistory.mockReturnValue([]);
+    renderView();
+    const clear = screen.getByTestId("query-history-clear");
+    if (!(clear instanceof HTMLButtonElement)) throw new Error("expected button");
+    expect(clear.disabled).toBe(true);
+  });
+
+  it("closes the panel on Escape", () => {
+    const onOpenChange = vi.fn();
+    renderView({ onOpenChange });
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+
+  it("summarizes a long SQL statement to the first non-empty line with an ellipsis", () => {
+    const longSql = `${"SELECT * FROM users WHERE id IN (".padEnd(200, "1")}) LIMIT 10;`;
+    mocks.loadQueryHistory.mockReturnValue([
+      {
+        id: "long",
+        sql: `\n\n${longSql}`,
+        connectionId: "conn-a",
+        connectionName: "A",
+        providerId: "postgresql",
+        executedAt: 1,
+        success: true,
+      },
+    ]);
+    renderView();
+    const item = screen.getByTestId("query-history-item-0");
+    // Leading empty lines are skipped; the SELECT line is truncated to 96 chars + "…".
+    expect(item.textContent).toContain("SELECT * FROM users");
+    expect(item.textContent).toContain("…");
+    expect(item.textContent).not.toContain("LIMIT 10;");
+  });
+
+  it("formats timestamps across days as MM-DD HH:mm", () => {
+    const yesterday = new Date();
+    yesterday.setDate(yesterday.getDate() - 1);
+    mocks.loadQueryHistory.mockReturnValue([
+      {
+        id: "old",
+        sql: "SELECT 1;",
+        connectionId: "conn-a",
+        connectionName: "A",
+        providerId: "postgresql",
+        executedAt: yesterday.getTime(),
+        success: true,
+      },
+    ]);
+    renderView();
+    const item = screen.getByTestId("query-history-item-0");
+    const pad = (x: number) => String(x).padStart(2, "0");
+    const expected = `${pad(yesterday.getMonth() + 1)}-${pad(yesterday.getDate())} ${pad(yesterday.getHours())}:${pad(yesterday.getMinutes())}`;
+    expect(item.textContent).toContain(expected);
+  });
 });
