@@ -82,8 +82,16 @@ import { undo, redo, selectAll } from "@codemirror/commands";
 import {
   currentStatementAt,
   toggleLineComment,
+  type SqlStatementRange,
 } from "@/lib/database/sql-statement-tokenizer";
 import { formatSql, formatSqlSelection } from "@/lib/database/sql-formatter";
+import {
+  databaseErrorResult,
+  parseProviderError,
+  type ParsedDatabaseError,
+} from "@/lib/database/database-error";
+import { revealEditorLine } from "@/lib/database/editor-error-reveal";
+import { useDatabaseKeyboardShortcuts } from "@/lib/keyboard/use-database-keyboard-shortcuts";
 import { generateId, NotesStorage } from "@/lib/toolbox/toolbox-storage";
 import type { NoteItem } from "@/lib/toolbox/toolbox-types";
 import { ConnectionStorageManager } from "@/lib/connection-storage";
@@ -117,6 +125,7 @@ import {
   type DatabaseNavigatorLoadState,
 } from "@/components/toolbox/database-navigator";
 import { DatabaseResultPane } from "@/components/toolbox/database-result-pane";
+import { DatabaseResultErrorPane } from "@/components/toolbox/database-result-error";
 import {
   ObjectViewerTab,
   type ObjectViewerTabState,
@@ -388,6 +397,10 @@ export function ToolPostgres() {
   const activeRunIdRef = useRef<number | null>(null);
   /** CodeMirror view of the active query editor (B19 statement ops). */
   const queryEditorViewRef = useRef<EditorView | null>(null);
+  /** Statement range of the last failed execution, so the error pane's
+   *  "jump to line" can map the server `LINE n` back into the editor
+   *  (feature-design §2.5). Null = the whole document was sent. */
+  const lastErrorRangeRef = useRef<SqlStatementRange | null>(null);
   const [configOpen, setConfigOpen] = useState(false);
   const [managerOpen, setManagerOpen] = useState(false);
   const [dialogPage, setDialogPage] = useState<DialogPage>("general");
@@ -965,30 +978,37 @@ export function ToolPostgres() {
     activeRunIdRef.current = runId;
     setRunning(true);
     try {
-      patchTab(tab.id, {
-        result: adaptPostgresQueryResult(
-          await invoke<PostgresQueryRuntimeResult>(
-            explain ? "postgres_explain" : "postgres_execute",
-            {
-              request: {
-                connectionId: tab.connectionId,
-                sql: tab.sql,
-                maxRows: 1_000,
-                runId,
-              },
+      const result = adaptPostgresQueryResult(
+        await invoke<PostgresQueryRuntimeResult>(
+          explain ? "postgres_explain" : "postgres_execute",
+          {
+            request: {
+              connectionId: tab.connectionId,
+              sql: tab.sql,
+              maxRows: 1_000,
+              runId,
             },
-          ),
+          },
         ),
-      });
+      );
+      patchTab(tab.id, { result });
     } catch (error) {
+      const parsed = showQueryError(tab.id, error);
+      // Whole-document execution: the server LINE n is relative to the first
+      // editor line, so the statement range is null (feature-design §2.5).
+      lastErrorRangeRef.current = null;
       toast.error(
         t(
           explain
             ? "toolbox.postgres.explainFailed"
             : "toolbox.postgres.queryFailed",
         ),
-        { description: String(error) },
+        { description: parsed.message },
       );
+      if (parsed.lineNumber != null && tab.type === "query") {
+        const view = queryEditorViewRef.current;
+        if (view) revealEditorLine(view, null, parsed.lineNumber);
+      }
     } finally {
       setRunning(false);
       if (activeRunIdRef.current === runId) activeRunIdRef.current = null;
@@ -1173,26 +1193,23 @@ export function ToolPostgres() {
       });
     }
   };
-  /** Executes the SQL statement under the caret (Ctrl+Shift+R, B19-A). */
-  const runCurrentStatement = () => {
-    const view = queryEditorViewRef.current;
-    if (!connected || !view) return;
-    const doc = view.state.doc.toString();
-    const range = currentStatementAt(doc, view.state.selection.main.head);
-    if (!range) return;
-    const sql = doc.slice(range.start, range.end).trim();
-    if (!sql) return;
-    void runSql(sql);
-  };
   /** Executes only the selected text, or the current statement when no
-   * selection spans multiple lines (Ctrl+E, B19-A). */
+   * selection spans multiple lines (Ctrl+E / Ctrl+Enter, B19-A). The sent
+   * range is captured so a failure can reveal the exact editor line. */
   const runSelectionOrStatement = () => {
     const view = queryEditorViewRef.current;
     if (!connected || !view) return;
     const selection = view.state.selection.main;
     const selected = view.state.doc.sliceString(selection.from, selection.to).trim();
-    const sql = selected || currentStatementSql();
-    if (sql) void runSql(sql);
+    if (selected) {
+      void runSql(selected, { start: selection.from, end: selection.to });
+      return;
+    }
+    const doc = view.state.doc.toString();
+    const range = currentStatementAt(doc, selection.head);
+    if (!range) return;
+    const sql = doc.slice(range.start, range.end).trim();
+    if (sql) void runSql(sql, range);
   };
   const currentStatementSql = (): string => {
     const view = queryEditorViewRef.current;
@@ -1234,7 +1251,13 @@ export function ToolPostgres() {
       patchTab(tab.id, { sql: formatted });
     }
   };
-  const runSql = async (sql: string) => {
+  const runSql = async (
+    sql: string,
+    /** Range of the sent statement in the editor; null = whole document sent.
+     *  Used to map a server `LINE n` back to an editor line (feature-design
+     *  §2.5). */
+    sentRange?: SqlStatementRange | null,
+  ) => {
     if (!tab) return;
     patchTab(tab.id, { sql });
     const runId = runIdRef.current + 1;
@@ -1242,26 +1265,38 @@ export function ToolPostgres() {
     activeRunIdRef.current = runId;
     setRunning(true);
     try {
-      patchTab(tab.id, {
-        result: adaptPostgresQueryResult(
-          await invoke<PostgresQueryRuntimeResult>("postgres_execute", {
-            request: {
-              connectionId: tab.connectionId,
-              sql,
-              maxRows: 1_000,
-              runId,
-            },
-          }),
-        ),
-      });
+      const result = adaptPostgresQueryResult(
+        await invoke<PostgresQueryRuntimeResult>("postgres_execute", {
+          request: {
+            connectionId: tab.connectionId,
+            sql,
+            maxRows: 1_000,
+            runId,
+          },
+        }),
+      );
+      patchTab(tab.id, { result });
     } catch (error) {
+      const parsed = showQueryError(tab.id, error);
+      lastErrorRangeRef.current = sentRange ?? null;
       toast.error(t("toolbox.postgres.queryFailed"), {
-        description: String(error),
+        description: parsed.message,
       });
+      if (parsed.lineNumber != null) {
+        const view = queryEditorViewRef.current;
+        if (view) revealEditorLine(view, sentRange ?? null, parsed.lineNumber);
+      }
     } finally {
       setRunning(false);
       if (activeRunIdRef.current === runId) activeRunIdRef.current = null;
     }
+  };
+  /** Normalizes a failed invocation into the tab's persistent error result and
+   *  returns the parsed error (feature-design §2.4). */
+  const showQueryError = (targetTabId: string, raw: unknown): ParsedDatabaseError => {
+    const parsed = parseProviderError("postgres", String(raw));
+    patchTab(targetTabId, { result: databaseErrorResult(parsed) });
+    return parsed;
   };
   /** B21: open the read-only object viewer tab for a navigator object. */
   const openObjectViewer = (reference: PostgresObjectReference) => {
@@ -1521,8 +1556,12 @@ export function ToolPostgres() {
         pendingDeleteRows: [],
       });
     } catch (error) {
+      // Table browsing has no editor statement to reveal — the error still
+      // persists in the table tab's result pane for copy/retry.
+      const parsed = showQueryError(id, error);
+      lastErrorRangeRef.current = null;
       toast.error(t("toolbox.postgres.queryFailed"), {
-        description: String(error),
+        description: parsed.message,
       });
     } finally {
       setRunning(false);
@@ -2084,125 +2123,146 @@ export function ToolPostgres() {
       });
     }
   };
-  const onDatabaseKeyDown = useEffectEvent((event: KeyboardEvent) => {
-      const target = event.target as HTMLElement | null;
-      const typingInField = Boolean(
-        target?.closest?.("input, textarea, select, [contenteditable='true']"),
-      );
-      if (event.key === "Insert" && !typingInField && tab?.type === "table" &&
-          !postgresConfig.readOnly && tab.result?.kind === "tabular" &&
-          tab.result.editability.editable) {
-        event.preventDefault();
-        addRecord();
-        return;
-      }
-      // Find navigation (B-2/B-4): respond while the find bar is open, from
-      // the find input or anywhere outside a cell editor.
-      const inFindInput = Boolean(
-        target?.closest?.('[data-testid="database-result-find-input"]'),
-      );
-      if (
-        event.key === "F3" &&
-        findState.open &&
-        tab?.type === "table" &&
-        (inFindInput || !typingInField)
-      ) {
-        event.preventDefault();
-        findNext();
-        return;
-      }
-      if (
-        event.key === "Escape" &&
-        findState.open &&
-        tab?.type === "table" &&
-        (inFindInput || !typingInField)
-      ) {
-        event.preventDefault();
-        closeFind();
-        return;
-      }
-      if (!(event.metaKey || event.ctrlKey) || event.altKey) return;
-      // Focus guard (R-B18-2): while editing a cell or form field, let the
-      // browser keep Ctrl+F/Ctrl+R default behavior instead of finding or
-      // applying filters in the grid.
-      if (tab?.type === "table" && typingInField) return;
-      if (event.key.toLowerCase() === "f" && tab?.type === "table") {
-        event.preventDefault();
-        setFindState((state) => ({ ...state, open: true, current: 0 }));
-        return;
-      }
-      if (event.key.toLowerCase() === "n" && connected) {
-        event.preventDefault();
-        createQuery();
-      }
-      if (event.key === "Enter" && tab?.type === "query" && !running) {
-        event.preventDefault();
-        void runSelectionOrStatement();
-      }
-      if (event.key.toLowerCase() === "e" && event.shiftKey && tab?.type === "query" && !running) {
-        event.preventDefault();
-        void execute(true);
-      }
-      // B19 query commands (QUERY_EDITOR scope).
-      if (event.key.toLowerCase() === "t" && tab?.type === "query" && running) {
-        event.preventDefault();
-        void stopQuery();
-        return;
-      }
-      if (event.key === "/" && tab?.type === "query") {
-        event.preventDefault();
-        toggleSqlComment();
-        return;
-      }
-      // Step 2: SQL format (Ctrl+Shift+F / ⌘⇧F).
-      if (event.key.toLowerCase() === "f" && event.shiftKey && tab?.type === "query") {
-        event.preventDefault();
-        formatSqlInEditor();
-        return;
-      }
-      if (
-        event.key.toLowerCase() === "r" &&
-        event.shiftKey &&
-        tab?.type === "query" &&
-        !running
-      ) {
-        event.preventDefault();
-        runCurrentStatement();
-        return;
-      }
-      if (event.key.toLowerCase() === "e" && !event.shiftKey && tab?.type === "query" && !running) {
-        event.preventDefault();
-        runSelectionOrStatement();
-        return;
-      }
-      if (event.key.toLowerCase() === "w") {
-        event.preventDefault();
+  // ── Keyboard: database shortcut hook (feature-design §1.2) ────────────────
+  // Modal dialogs short-circuit all DB commands (the dialog keeps the keyboard).
+  const dialogOpen =
+    configOpen ||
+    managerOpen ||
+    pendingSshTrust !== null ||
+    filterDialog !== null ||
+    layoutDialog !== null ||
+    noteDialog !== null ||
+    closeTarget !== null ||
+    disconnectTarget !== null ||
+    deleteTarget !== null ||
+    objectDropTarget !== null;
+  useDatabaseKeyboardShortcuts({
+    testId: "postgres-workspace",
+    dialogOpen,
+    handlers: {
+      "database.query.execute": () => {
+        // Ctrl+Enter / Ctrl+E / Ctrl+Shift+R all land here (the router
+        // matches by command id, so the combo itself is not distinguishable).
+        // Ctrl+Enter/Ctrl+E previously ran the selection-or-statement; that
+        // superset also covers the old Ctrl+Shift+R "current statement" case
+        // (a caret with no selection behaves identically).
+        if (tab?.type === "query" && !running) runSelectionOrStatement();
+      },
+      "database.query.runSelection": () => {
+        if (tab?.type === "query" && !running) runSelectionOrStatement();
+      },
+      "database.query.explain": () => {
+        if (tab?.type === "query" && !running) void execute(true);
+      },
+      "database.query.toggleComment": () => {
+        if (tab?.type === "query") toggleSqlComment();
+      },
+      "database.query.stop": () => {
+        // Preserve the old running-only condition (:2147-2151).
+        if (running) void stopQuery();
+      },
+      "database.query.format": () => {
+        if (tab?.type === "query") formatSqlInEditor();
+      },
+      "database.workspace.newQuery": () => {
+        if (connected) createQuery();
+      },
+      "database.tab.close": () => {
         requestCloseTab(activeTab);
-      }
-      if (event.key.toLowerCase() === "s" && !event.shiftKey && tab?.type === "table" &&
-          tab.dirty && !saving) {
-        event.preventDefault();
-        void saveTableChanges();
-      }
-      if (event.key.toLowerCase() === "r" && connected) {
-        event.preventDefault();
+      },
+      "database.object.refresh": () => {
+        void refreshNavigator();
+      },
+      "database.connection.refresh": () => {
+        void refreshNavigator();
+      },
+      "database.data.filterSort": () => {
+        // Ctrl+R: on a table grid it opens Filter & Sort; on a query tab it
+        // keeps the previous refresh-navigator behaviour (old :2187-2202).
+        if (tab?.type === "table") setFilterDialog({ mode: "filterSort" });
+        else if (connected) void refreshNavigator();
+      },
+      "database.data.refresh": () => {
+        if (!connected) return;
         if (tab?.type === "table" && tab.object) {
           const reference = tableReference();
           if (!reference) return;
-          // B18: the dialog applies immediately, so Ctrl+R either replays
-          // the active filter from offset 0 or refreshes the current page.
           const decision = resolveFilterShortcut(tab.activeFilter);
-          if (decision.kind === "replay") {
-            void browse(reference, 0, decision.filter);
-          } else {
-            void browse(reference, tableOffset);
-          }
+          if (decision.kind === "replay") void browse(reference, 0, decision.filter);
+          else void browse(reference, tableOffset);
         } else {
           void refreshNavigator();
         }
-      }    });
+      },
+      "database.data.addRecord": () => {
+        if (
+          tab?.type === "table" &&
+          !postgresConfig.readOnly &&
+          tab.result?.kind === "tabular" &&
+          tab.result.editability.editable
+        ) {
+          addRecord();
+        }
+      },
+      "database.data.saveChanges": () => {
+        if (tab?.type === "table" && tab.dirty && !saving) void saveTableChanges();
+      },
+      "database.data.clearFilter": () => {
+        // Two-in-one (feature-design §1.2): close find when open, else clear
+        // the active filter. The router consumes Escape inside the grid even
+        // when no filter exists — a no-op here keeps other behaviour intact.
+        if (tab?.type !== "table") return;
+        if (findState.open) closeFind();
+        else if (tab.activeFilter) clearFilter();
+      },
+    },
+  });
+  // Find-bar domain (F3 / Ctrl+F / Escape-close) is NOT a command-registry
+  // command, so the hook leaves it alone (feature-design §1.2 note). It stays
+  // as a local listener next to the hook.
+  const onFindKeyDown = useEffectEvent((event: KeyboardEvent) => {
+    const target = event.target as HTMLElement | null;
+    const typingInField = Boolean(
+      target?.closest?.("input, textarea, select, [contenteditable='true']"),
+    );
+    const inFindInput = Boolean(
+      target?.closest?.('[data-testid="database-result-find-input"]'),
+    );
+    if (
+      event.key === "F3" &&
+      findState.open &&
+      tab?.type === "table" &&
+      (inFindInput || !typingInField)
+    ) {
+      event.preventDefault();
+      findNext();
+      return;
+    }
+    // Escape while find is open (the hook only consumes Escape in the grid
+    // body; from the find input or other focus it reaches this listener).
+    if (
+      event.key === "Escape" &&
+      findState.open &&
+      tab?.type === "table" &&
+      (inFindInput || !typingInField)
+    ) {
+      event.preventDefault();
+      closeFind();
+      return;
+    }
+    if (
+      (event.metaKey || event.ctrlKey) &&
+      !event.altKey &&
+      event.key.toLowerCase() === "f" &&
+      tab?.type === "table" &&
+      !typingInField
+    ) {
+      event.preventDefault();
+      setFindState((state) => ({ ...state, open: true, current: 0 }));
+    }
+  });
   useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => onDatabaseKeyDown(event);
+    const onKeyDown = (event: KeyboardEvent) => onFindKeyDown(event);
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, []);
@@ -2986,6 +3046,41 @@ export function ToolPostgres() {
                   deletedRowIndexes={tab.type === "table" ? tab.pendingDeleteRows : undefined}
                   onEditInsertCell={tableEditingEnabled ? editInsertCell : undefined}
                   isInsertCellModified={isInsertCellModified}
+                  renderError={(error) => (
+                    <DatabaseResultErrorPane
+                      error={error}
+                      labels={{
+                        error: t("toolbox.postgres.errorPane.error"),
+                        copy: t("toolbox.postgres.errorPane.copy"),
+                        retry: t("toolbox.postgres.errorPane.retry"),
+                        jumpToLine: t("toolbox.postgres.errorPane.jumpToLine"),
+                        line: (n) => t("toolbox.postgres.errorPane.line", { n }),
+                        details: t("toolbox.postgres.errorPane.details"),
+                      }}
+                      onRetry={
+                        tab.type === "table"
+                          ? () => {
+                              const reference = tableReference();
+                              if (reference) void browse(reference, tableOffset);
+                            }
+                          : () => void runSql(tab.sql)
+                      }
+                      onCopy={() => void copyText(error.fullText)}
+                      onGoToLine={
+                        error.lineNumber != null && tab.type === "query"
+                          ? () => {
+                              const view = queryEditorViewRef.current;
+                              if (!view) return;
+                              revealEditorLine(
+                                view,
+                                lastErrorRangeRef.current,
+                                error.lineNumber!,
+                              );
+                            }
+                          : undefined
+                      }
+                    />
+                  )}
               />
               </>}
               </div>

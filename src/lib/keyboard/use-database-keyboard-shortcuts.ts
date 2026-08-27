@@ -176,13 +176,16 @@ export function useDatabaseKeyboardShortcuts(
         event.target instanceof Element &&
         Boolean(event.target.closest("input, textarea, [contenteditable='true']"));
 
-      // DESIGNER domain: route only design.save / design.revert.
+      // DESIGNER domain: route only design.save / design.revert. When the tool
+      // does not register a design handler (e.g. MySQL/SQLite without a table
+      // designer), the event is left untouched so TableDesignerTab's own
+      // useDesignerShortcuts keeps working (feature-design §1.3).
       if (resolveDesignerScope(activeElement)) {
         const command = matchDesignerCommand(event, typingInField);
-        if (command) {
+        if (command && opts.handlers[command]) {
           event.preventDefault();
           event.stopPropagation();
-          opts.handlers[command]?.();
+          opts.handlers[command]();
         }
         return;
       }
