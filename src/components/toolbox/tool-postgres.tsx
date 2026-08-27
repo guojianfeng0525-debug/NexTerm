@@ -84,7 +84,6 @@ import type {
   PostgreSQLSslMode,
 } from "@/lib/database/postgresql-profile-adapter";
 import { createPostgresQueryEditorContext } from "@/lib/database/postgresql-query-editor";
-import type { PostgresCatalogLookup } from "@/lib/postgres-completion";
 import { resolveDatabaseCommand } from "@/lib/database/command-registry";
 import {
   buildFieldValueFilter,
@@ -173,6 +172,12 @@ type PendingInsertRow = {
 };
 type WorkspaceTab = {
   id: string;
+  /**
+   * The immutable backend session this tab belongs to.  Never infer this
+   * from the navigator's currently selected connection: users can keep
+   * development and production sessions open at the same time.
+   */
+  connectionId: string;
   type: "query" | "table" | "object" | "designer";
   title: string;
   object?: TableObject;
@@ -274,9 +279,10 @@ function newConnection(): PostgreSQLConnectionProfile {
   };
 }
 
-function newQuery(): WorkspaceTab {
+function newQuery(connectionId: string): WorkspaceTab {
   return {
     id: generateId("pg-query"),
+    connectionId,
     type: "query",
     title: "Query",
     sql: "SELECT current_database(), current_user;",
@@ -330,7 +336,7 @@ export function ToolPostgres() {
     useState<NavigatorLoadStates>({});
   const [selectedNavigatorNodeId, setSelectedNavigatorNodeId] =
     useState<DatabaseObjectNodeId | null>(null);
-  const [tabs, setTabs] = useState<WorkspaceTab[]>([newQuery()]);
+  const [tabs, setTabs] = useState<WorkspaceTab[]>([newQuery(draft.id)]);
   const [activeTab, setActiveTab] = useState<string>(() => tabs[0]?.id ?? "");
   const [resultHeight, setResultHeight] = useState(260);
   const [resultDragging, setResultDragging] = useState(false);
@@ -425,21 +431,20 @@ export function ToolPostgres() {
       connectionState: connected ? "connected" : "disconnected",
     },
   );
+  const tabConnection = tab
+    ? connections.find((connection) => connection.id === tab.connectionId) ??
+      (draft.id === tab.connectionId ? draft : undefined)
+    : undefined;
+  const tabPostgresConfig = tabConnection?.providerConfig;
   const tableEditingEnabled =
     tab?.type === "table" &&
     // Views and materialized views are read-only: never show edit controls
     // (visual review M2, v2.8.0).
     tab.objectRole !== "view" &&
     tab.objectRole !== "materializedView" &&
-    !postgresConfig.readOnly &&
+    !tabPostgresConfig?.readOnly &&
     tab.result?.kind === "tabular" &&
     tab.result.editability.editable;
-  const catalogLookup: PostgresCatalogLookup | undefined = connected
-    ? async (request) =>
-        invoke("postgres_catalog_search", {
-          request: { connectionId: draft.id, ...request },
-        })
-    : undefined;
   const navigatorConnections = connections.length
     ? connections
     : connected
@@ -767,7 +772,10 @@ export function ToolPostgres() {
   };
   const openDesigner = (schema: string, table: string, createMode = false) => {
     openTab({
-      id: createMode ? `designer:new:${schema}:${crypto.randomUUID()}` : `designer:${schema}.${table}`,
+      id: createMode
+        ? `designer:new:${draft.id}:${schema}:${crypto.randomUUID()}`
+        : `designer:${draft.id}:${schema}.${table}`,
+      connectionId: draft.id,
       type: "designer",
       title: createMode
         ? t("toolbox.postgres.newTable")
@@ -790,7 +798,8 @@ export function ToolPostgres() {
         },
       });
       openTab({
-        id: `designer:${schema}.${view}`,
+        id: `designer:${draft.id}:${schema}.${view}`,
+        connectionId: draft.id,
         type: "designer",
         title: `${view} (View)`,
         object: { schema, name: view },
@@ -808,7 +817,7 @@ export function ToolPostgres() {
     setTabs((current) => {
       const next = current.filter((item) => item.id !== id);
       setActiveTab(next.at(-1)?.id ?? "");
-      return next.length ? next : [newQuery()];
+      return next.length ? next : [newQuery(draft.id)];
     });
   const execute = async (explain = false) => {
     if (!connected || !tab?.sql.trim()) return;
@@ -823,7 +832,7 @@ export function ToolPostgres() {
             explain ? "postgres_explain" : "postgres_execute",
             {
               request: {
-                connectionId: draft.id,
+                connectionId: tab.connectionId,
                 sql: tab.sql,
                 maxRows: 1_000,
                 runId,
@@ -851,7 +860,7 @@ export function ToolPostgres() {
     if (!connected || !running || activeRunIdRef.current === null) return;
     try {
       await invoke("postgres_cancel", {
-        connectionId: draft.id,
+        connectionId: tab.connectionId,
         runId: activeRunIdRef.current,
       });
     } catch (error) {
@@ -933,7 +942,7 @@ export function ToolPostgres() {
         result: adaptPostgresQueryResult(
           await invoke<PostgresQueryRuntimeResult>("postgres_execute", {
             request: {
-              connectionId: draft.id,
+              connectionId: tab.connectionId,
               sql,
               maxRows: 1_000,
               runId,
@@ -953,7 +962,8 @@ export function ToolPostgres() {
   /** B21: open the read-only object viewer tab for a navigator object. */
   const openObjectViewer = (reference: PostgresObjectReference) => {
     const tab: WorkspaceTab = {
-      id: `object:${reference.schema}.${reference.name}.${reference.objectKind}`,
+      id: `object:${reference.connectionId}:${reference.schema}.${reference.name}.${reference.objectKind}`,
+      connectionId: reference.connectionId,
       type: "object",
       title: reference.name,
       objectReference: reference,
@@ -968,7 +978,7 @@ export function ToolPostgres() {
     try {
       const response = await invoke<{ ddl: string }>("postgres_object_ddl", {
         request: {
-          connectionId: draft.id,
+          connectionId: reference.connectionId,
           objectType: reference.objectKind,
           schema: reference.schema,
           name: reference.name,
@@ -977,7 +987,8 @@ export function ToolPostgres() {
         },
       });
       openTab({
-        id: `ddl:${reference.schema}.${reference.name}.${reference.objectKind}`,
+        id: `ddl:${reference.connectionId}:${reference.schema}.${reference.name}.${reference.objectKind}`,
+        connectionId: reference.connectionId,
         type: "query",
         title: `${reference.name}.ddl`,
         // Same formatting as the single-click DDL preview panel (Step 2);
@@ -1054,7 +1065,7 @@ export function ToolPostgres() {
         sampleDependents: string[];
       }>("postgres_drop_object", {
         request: {
-          connectionId: draft.id,
+          connectionId: reference.connectionId,
           kind: reference.objectKind,
           schema: reference.schema,
           name: reference.name,
@@ -1084,9 +1095,9 @@ export function ToolPostgres() {
     setObjectDropTarget(null);
     setObjectDropPreview(null);
     try {
-      await invoke("postgres_drop_object", {
-        request: {
-          connectionId: draft.id,
+    await invoke("postgres_drop_object", {
+      request: {
+          connectionId: target.reference.connectionId,
           kind: target.reference.objectKind,
           schema: target.reference.schema,
           name: target.reference.name,
@@ -1133,9 +1144,10 @@ export function ToolPostgres() {
       schema: reference.schema,
       name: reference.relation,
     };
-    const id = `table:${object.schema}.${object.name}`;
+    const id = `table:${reference.connectionId}:${object.schema}.${object.name}`;
     openTab({
       id,
+      connectionId: reference.connectionId,
       type: "table",
       title: object.name,
       object,
@@ -1215,8 +1227,8 @@ export function ToolPostgres() {
   const tableReference = (): PostgresRelationReference | null =>
     tab?.type === "table" && tab.object
       ? {
-          connectionId: draft.id,
-          database: postgresConfig.database,
+          connectionId: tab.connectionId,
+          database: tabPostgresConfig?.database ?? "",
           schema: tab.object.schema,
           relation: tab.object.name,
         }
@@ -1407,7 +1419,7 @@ export function ToolPostgres() {
     setConnected(false);
     setTransactionActive(false);
   };
-  const createQuery = () => openTab(newQuery());
+  const createQuery = () => openTab(newQuery(draft.id));
   const copyText = async (value: string) => {
     try {
       await writeClipboardText(value);
@@ -1436,8 +1448,11 @@ export function ToolPostgres() {
     }
   };
   const transaction = async (action: "begin" | "commit" | "rollback") => {
+    if (!tab) return;
     try {
-      await invoke("postgres_transaction", { request: { connectionId: draft.id, action } });
+      await invoke("postgres_transaction", {
+        request: { connectionId: tab.connectionId, action },
+      });
       setTransactionActive(action === "begin");
     } catch (error) {
       toast.error(t("toolbox.postgres.transaction.failed"), { description: String(error) });
@@ -1627,7 +1642,7 @@ export function ToolPostgres() {
         affectedRows: number[];
       }>("postgres_save_table_changes", {
         request: {
-          connectionId: draft.id,
+          connectionId: tab.connectionId,
           schema: tab.object.schema,
           table: tab.object.name,
           steps,
@@ -2021,8 +2036,8 @@ export function ToolPostgres() {
                   // Column double-click opens its owning table (D-B21-2).
                   if (objectReference.objectKind === "column") {
                     void browse({
-                      connectionId: draft.id,
-                      database: postgresConfig.database,
+                      connectionId: objectReference.connectionId,
+                      database: objectReference.database,
                       schema: objectReference.schema,
                       relation: objectReference.table ?? "",
                     });
@@ -2071,8 +2086,8 @@ export function ToolPostgres() {
                 // object commands for DDL/drop; open/browse stays the grid.
                 const relationAsObject: PostgresObjectReference | null = relation
                   ? {
-                      connectionId: draft.id,
-                      database: postgresConfig.database,
+                      connectionId: relation.connectionId,
+                      database: relation.database,
                       schema: relation.schema,
                       objectKind: relation.objectRole ?? "table",
                       name: relation.relation,
@@ -2163,6 +2178,13 @@ export function ToolPostgres() {
             <section className="flex min-h-0 flex-1">
               <div className="flex min-w-0 flex-1 flex-col">
               <div className="flex h-8 shrink-0 items-center gap-1 border-b bg-muted/10 px-2">
+                <span
+                  className="max-w-48 truncate rounded bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground"
+                  data-testid="postgres-tab-connection"
+                  title={tabConnection?.name ?? tab.connectionId}
+                >
+                  {tabConnection?.name ?? tab.connectionId}
+                </span>
                 {tab.type === "query" && (
                 <ToolButton
                   icon={<Play />}
@@ -2208,8 +2230,8 @@ export function ToolPostgres() {
                  {tab.type === "table" && (
                    <>
                      <span className="ml-1 text-[11px] text-muted-foreground">{tab.object?.schema}.{tab.object?.name}</span>
-                     <ToolButton icon={<RefreshCw />} label={t("toolbox.postgres.refresh")} disabled={running} onClick={() => tab.object && void browse({ connectionId: draft.id, database: postgresConfig.database, schema: tab.object.schema, relation: tab.object.name }, tableOffset)} />
-                     <ToolButton icon={<Database />} label={t("toolbox.postgres.saveChanges")} disabled={!tab.dirty || saving || running || postgresConfig.readOnly} onClick={() => void saveTableChanges()} />
+                     <ToolButton icon={<RefreshCw />} label={t("toolbox.postgres.refresh")} disabled={running} onClick={() => tab.object && void browse({ connectionId: tab.connectionId, database: tabPostgresConfig?.database ?? "", schema: tab.object.schema, relation: tab.object.name }, tableOffset)} />
+                     <ToolButton icon={<Database />} label={t("toolbox.postgres.saveChanges")} disabled={!tab.dirty || saving || running || tabPostgresConfig?.readOnly} onClick={() => void saveTableChanges()} />
                      <ToolButton icon={<RefreshCw />} label={t("toolbox.postgres.revertChanges")} disabled={!tab.dirty || running} onClick={revertTableChanges} />
                    </>
                 )}
@@ -2223,12 +2245,15 @@ export function ToolPostgres() {
                     onChange={(sql) => patchTab(tab.id, { sql, dirty: true })}
                     language="sql"
                     queryContext={
-                      catalogLookup
+                      tabConnection
                         ? createPostgresQueryEditorContext({
-                            connectionId: draft.id,
-                            catalog: postgresConfig.database,
+                            connectionId: tab.connectionId,
+                            catalog: tabPostgresConfig?.database ?? "",
                             schema: schema ?? undefined,
-                            lookup: catalogLookup,
+                            lookup: async (request) =>
+                              invoke("postgres_catalog_search", {
+                                request: { connectionId: tab.connectionId, ...request },
+                              }),
                           })
                         : undefined
                     }                    editorRef={(view) => {
@@ -2246,7 +2271,7 @@ export function ToolPostgres() {
                       type: "object",
                       title: tab.title,
                       object: tab.objectReference,
-                      connectionId: draft.id,
+                      connectionId: tab.connectionId,
                     } satisfies ObjectViewerTabState
                   }
                 />
@@ -2254,7 +2279,7 @@ export function ToolPostgres() {
               {tab.type === "designer" && tab.objectRole === "table" && tab.object && (
                 <div className="min-h-0 flex-1" data-scope="designer" data-testid="table-designer-root">
                   <TableDesignerTab
-                    connectionId={draft.id}
+                    connectionId={tab.connectionId}
                     schema={tab.object.schema}
                     table={tab.object.name}
                     createMode={tab.createMode}
@@ -2284,7 +2309,7 @@ export function ToolPostgres() {
                       );
                     }}
                     onRefresh={() => void refreshNavigator()}
-                    readOnly={postgresConfig.readOnly}
+                    readOnly={tabPostgresConfig?.readOnly ?? true}
                   />
                 </div>
               )}
@@ -2304,7 +2329,7 @@ export function ToolPostgres() {
                         try {
                           await invoke("postgres_view_save", {
                             request: {
-                              connectionId: draft.id,
+                              connectionId: tab.connectionId,
                               schema: tab.object.schema,
                               name: tab.object.name,
                               definition: tab.sql,
@@ -2347,8 +2372,8 @@ export function ToolPostgres() {
                   tab.object &&
                   void browse(
                     {
-                      connectionId: draft.id,
-                      database: postgresConfig.database,
+                      connectionId: tab.connectionId,
+                      database: tabPostgresConfig?.database ?? "",
                       schema: tab.object.schema,
                       relation: tab.object.name,
                     },
@@ -2359,8 +2384,8 @@ export function ToolPostgres() {
                   tab.object &&
                   void browse(
                     {
-                      connectionId: draft.id,
-                      database: postgresConfig.database,
+                      connectionId: tab.connectionId,
+                      database: tabPostgresConfig?.database ?? "",
                       schema: tab.object.schema,
                       relation: tab.object.name,
                     },
@@ -2498,7 +2523,8 @@ export function ToolPostgres() {
                           label={t("toolbox.postgres.openInEditor")}
                           onClick={() => {
                             openTab({
-                              id: `ddl:${ddlPreview.schema}.${ddlPreview.name}.${ddlPreview.objectType}`,
+                              id: `ddl:${draft.id}:${ddlPreview.schema}.${ddlPreview.name}.${ddlPreview.objectType}`,
+                              connectionId: draft.id,
                               type: "query",
                               title: `${ddlPreview.name}.ddl`,
                               sql: ddlPreview.ddl,

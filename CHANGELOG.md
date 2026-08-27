@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **数据网格筛选入口常驻**：table 工具条「筛选 (Filter & Sort)」按钮始终可见（此前仅已有过滤条件时显示），点击打开多条件筛选对话框（列/运算符/值 + AND/OR + 排序），支持增删条件。右键字段值过滤保留。
 
 ### Fixed
+- **PostgreSQL 多连接会话隔离**：查询、表格、对象、DDL 和设计器标签现在在创建时永久绑定其 `connectionId`；执行 SQL、取消查询、保存表格变更、保存视图、删除对象、刷新与分页均使用标签/对象自己的连接，而不是侧栏当前选中的连接。并在工作区工具栏显示该标签的连接名称，避免测试标签页在切换到生产连接后误向生产执行。
 - **数据库对象列表截断**：对象导航器表/视图组复用 SQL 补全命令（LIMIT 100）导致 schema 超 100 张表只显示前 100 张。导航器显式传 limit 10_000（Rust clamp 放宽，补全默认 100 不变）。回归 spec：150 表 fixture 全量显示。
 - **全局右键弹出浏览器默认菜单**：window 冒泡阶段 `contextmenu preventDefault`（捕获阶段会致 Radix 自定义菜单短路——已实证并规避）。空白区无原生菜单、导航器/网格自定义菜单正常。
 - **右键「生成 DDL」未格式化**：`generateObjectDdl` 直接写入 catalog 原始 DDL（表/视图等单行），未走 `formatSql`（与单击 DDL 预览面板不一致）。修复：统一格式化。新增 E2E：视图「生成 DDL」→ tab 内多行格式化 CREATE OR REPLACE VIEW。
