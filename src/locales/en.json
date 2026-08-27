@@ -1230,6 +1230,14 @@
       "retrustHostKey": "Retrust SSH host key",
       "connect": "Connect",
       "disconnect": "Disconnect",
+      "saveSql": "Save SQL",
+      "saveToNotes": "Save to notes",
+      "quickQuery": "Quick Query",
+      "sqlSaved": "SQL saved for this connection",
+      "disconnectUnsavedTitle": "Close connection with unsaved changes?",
+      "disconnectUnsavedDescription": "All tabs for this connection will close. Save SQL first, or discard unsaved SQL and table changes.",
+      "saveSqlAndDisconnect": "Save SQL and disconnect",
+      "discardAndDisconnect": "Discard and disconnect",
       "connected": "Connected to PostgreSQL {{version}}",
       "connectFailed": "Connection failed",
       "saved": "Connection saved",
@@ -1776,6 +1784,7 @@
       "batchFailed": "{count} failed"
     },
     "notes": {
+      "quickExecute": "Quick execute",
       "title": "Notes",
       "description": "Snippets with syntax highlighting for SQL, shell, cmd & more.",
       "new": "New note",

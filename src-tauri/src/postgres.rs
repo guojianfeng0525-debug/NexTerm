@@ -784,6 +784,10 @@ pub async fn postgres_execute(
     if request.sql.trim().is_empty() {
         return Err("SQL cannot be empty".into());
     }
+    reject_untracked_transaction_control(&request.sql)?;
+    if state.is_read_only(&request.connection_id).await? {
+        validate_read_only_sql(&request.sql)?;
+    }
     let client = state
         .clients
         .read()
@@ -1376,6 +1380,50 @@ pub(crate) fn single_statement(sql: &str) -> Result<&str, String> {
     }
 }
 
+/// Transaction control must go through `postgres_transaction`, which owns the
+/// per-connection transaction marker. Allowing it in the generic SQL runner
+/// means a later grid/design save can unknowingly commit the user's open
+/// transaction.
+fn reject_untracked_transaction_control(sql: &str) -> Result<(), String> {
+    for (start, end) in split_sql_statements(sql) {
+        let statement = &sql[start..end];
+        let keyword = statement
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .trim_matches(|c: char| !c.is_ascii_alphabetic())
+            .to_ascii_uppercase();
+        if matches!(
+            keyword.as_str(),
+            "BEGIN" | "START" | "COMMIT" | "ROLLBACK" | "SAVEPOINT" | "RELEASE"
+        ) {
+            return Err(
+                "Transaction control must use the PostgreSQL transaction toolbar".into(),
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Application read-only mode is defense in depth, not a replacement for a
+/// database read-only role. Keep raw SQL to plainly read-only statement forms
+/// so it cannot turn the session GUC back off and then mutate data.
+fn validate_read_only_sql(sql: &str) -> Result<(), String> {
+    for (start, end) in split_sql_statements(sql) {
+        let statement = &sql[start..end];
+        let keyword = statement
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .trim_matches(|c: char| !c.is_ascii_alphabetic())
+            .to_ascii_uppercase();
+        if !matches!(keyword.as_str(), "SELECT" | "SHOW" | "VALUES" | "EXPLAIN") {
+            return Err("This PostgreSQL connection is read-only".into());
+        }
+    }
+    Ok(())
+}
+
 /// Returns the byte offset of the first non-noise character at/after `from`:
 /// skips whitespace, line comments, and nested block comments. Used to trim
 /// leading commentary off a statement range so `; SELECT` inside a leading
@@ -1669,6 +1717,9 @@ pub async fn postgres_table_update(
     request: PostgresTableUpdateRequest,
     state: tauri::State<'_, PostgresState>,
 ) -> Result<u64, String> {
+    if state.is_read_only(&request.connection_id).await? {
+        return Err("This PostgreSQL connection is read-only".into());
+    }
     if request.schema.trim().is_empty()
         || request.table.trim().is_empty()
         || request.changes.is_empty()
@@ -1765,6 +1816,9 @@ pub async fn postgres_table_insert(
     request: PostgresTableInsertRequest,
     state: tauri::State<'_, PostgresState>,
 ) -> Result<PostgresTableInsertResult, String> {
+    if state.is_read_only(&request.connection_id).await? {
+        return Err("This PostgreSQL connection is read-only".into());
+    }
     if request.schema.trim().is_empty()
         || request.table.trim().is_empty()
         || request.values.is_empty()
@@ -1821,6 +1875,9 @@ pub async fn postgres_table_delete(
     request: PostgresTableDeleteRequest,
     state: tauri::State<'_, PostgresState>,
 ) -> Result<u64, String> {
+    if state.is_read_only(&request.connection_id).await? {
+        return Err("This PostgreSQL connection is read-only".into());
+    }
     if request.schema.trim().is_empty()
         || request.table.trim().is_empty()
         || request.key_values.is_empty()
@@ -2207,6 +2264,11 @@ pub async fn postgres_execute_parameterized(
     state: tauri::State<'_, PostgresState>,
 ) -> Result<PostgresQueryResult, String> {
     validate_parameterized_request(&request.sql, &request.params)?;
+    let sql = single_statement(&request.sql)?;
+    reject_untracked_transaction_control(sql)?;
+    if state.is_read_only(&request.connection_id).await? {
+        validate_read_only_sql(sql)?;
+    }
     let client = state
         .clients
         .read()
@@ -2226,7 +2288,7 @@ pub async fn postgres_execute_parameterized(
         .iter()
         .map(|value| value as &(dyn tokio_postgres::types::ToSql + Sync))
         .collect();
-    let rows = tokio::time::timeout(QUERY_TIMEOUT, client.query(&request.sql, &param_refs))
+    let rows = tokio::time::timeout(QUERY_TIMEOUT, client.query(sql, &param_refs))
         .await
         .map_err(|_| "PostgreSQL parameterized query timed out")?
         .map_err(|error| format!("PostgreSQL query failed: {error}"))?;

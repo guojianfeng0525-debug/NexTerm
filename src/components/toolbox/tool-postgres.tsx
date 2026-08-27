@@ -202,6 +202,38 @@ type WorkspaceTab = {
    */
   activeFilter?: TableFilterState;
 };
+type SavedQueryTab = Pick<WorkspaceTab, "id" | "title" | "sql">;
+
+function savedQueryStorageKey(connectionId: string): string {
+  return `nexterm.postgres.savedQueries.${connectionId}`;
+}
+
+function loadSavedQueryTabs(connectionId: string): readonly SavedQueryTab[] {
+  try {
+    const value: unknown = JSON.parse(localStorage.getItem(savedQueryStorageKey(connectionId)) ?? "[]");
+    if (!Array.isArray(value)) return [];
+    return value.flatMap((item) => {
+      if (!item || typeof item !== "object") return [];
+      const row = item as Record<string, unknown>;
+      return typeof row.id === "string" && typeof row.title === "string" && typeof row.sql === "string"
+        ? [{ id: row.id, title: row.title, sql: row.sql }]
+        : [];
+    });
+  } catch {
+    return [];
+  }
+}
+
+function persistQueryTab(tab: WorkspaceTab): void {
+  if (tab.type !== "query" || !tab.connectionId || !tab.sql.trim()) return;
+  const saved = loadSavedQueryTabs(tab.connectionId);
+  const next = [...saved.filter((item) => item.id !== tab.id), {
+    id: tab.id,
+    title: tab.title,
+    sql: tab.sql,
+  }];
+  localStorage.setItem(savedQueryStorageKey(tab.connectionId), JSON.stringify(next));
+}
 type DialogPage = "general" | "ssh" | "tls";
 type PendingPostgresSshTrust = {
   profile: PostgreSQLConnectionProfile;
@@ -368,6 +400,7 @@ export function ToolPostgres() {
   } | null>(null);
   /** Tab id awaiting dirty-discard confirmation before closing. */
   const [closeTarget, setCloseTarget] = useState<string | null>(null);
+  const [disconnectTarget, setDisconnectTarget] = useState<string | null>(null);
   /** Filter & Sort / Custom Filter dialog mode for the active table tab. */
   const [filterDialog, setFilterDialog] = useState<
     { mode: "custom" | "filterSort" } | null
@@ -667,6 +700,22 @@ export function ToolPostgres() {
         [`connection:${saved.id}`]: true,
       }));
       setConnected(true);
+      const savedQueries = loadSavedQueryTabs(saved.id);
+      if (savedQueries.length) {
+        setTabs((current) => [
+          ...current,
+          ...savedQueries
+            .filter((savedTab) => !current.some((tab) => tab.id === savedTab.id))
+            .map((savedTab): WorkspaceTab => ({
+              ...savedTab,
+              connectionId: saved.id,
+              type: "query",
+              result: null,
+              dirty: false,
+            })),
+        ]);
+        setActiveTab(savedQueries[0]!.id);
+      }
       setConfigOpen(false);
       toast.success(
         t("toolbox.postgres.connected", { version: status.serverVersion }),
@@ -701,6 +750,29 @@ export function ToolPostgres() {
     }
     await probeSshFingerprint();
   };
+  useEffect(() => {
+    const quickExecute = (event: Event) => {
+      const detail = (event as CustomEvent<{ content?: string; connectionId?: string }>).detail;
+      const sql = detail?.content?.trim();
+      const connection = connections.find((item) => item.id === detail?.connectionId);
+      if (!sql || !connection) return;
+      void (async () => {
+        if (!connected || draft.id !== connection.id) await connectEstablished(connection);
+        const quickTab = { ...newQuery(connection.id), title: t("toolbox.postgres.quickQuery"), sql };
+        openTab(quickTab);
+        try {
+          const result = await invoke<PostgresQueryRuntimeResult>("postgres_execute", {
+            request: { connectionId: connection.id, sql, maxRows: 1_000 },
+          });
+          patchTab(quickTab.id, { result: adaptPostgresQueryResult(result), dirty: false });
+        } catch (error) {
+          toast.error(t("toolbox.postgres.queryFailed"), { description: String(error) });
+        }
+      })();
+    };
+    window.addEventListener("nexterm:quick-execute-postgres", quickExecute);
+    return () => window.removeEventListener("nexterm:quick-execute-postgres", quickExecute);
+  }, [connected, connections, draft.id, t]);
   const trustAndConnect = async () => {
     if (!pendingSshTrust) return;
     const trusted = {
@@ -854,6 +926,20 @@ export function ToolPostgres() {
       setRunning(false);
       if (activeRunIdRef.current === runId) activeRunIdRef.current = null;
     }
+  };
+  const saveCurrentSql = () => {
+    if (!tab || tab.type !== "query") return;
+    persistQueryTab(tab);
+    patchTab(tab.id, { dirty: false });
+    toast.success(t("toolbox.postgres.sqlSaved"));
+  };
+  const appendSqlToNotes = () => {
+    if (!tab || tab.type !== "query") return;
+    const content = currentStatementSql() || tab.sql;
+    if (!content.trim()) return;
+    const detail: { content: string; handled?: boolean } = { content };
+    window.dispatchEvent(new CustomEvent("nexterm:append-sql-note", { detail }));
+    if (!detail.handled) toast.error(t("toolbox.notes.noActiveSqlEditor"));
   };
   /** Stop the in-flight query (B19): triggers server-side pg_cancel_backend. */
   const stopQuery = async () => {
@@ -1414,10 +1500,23 @@ export function ToolPostgres() {
     );
     setNavigatorChildren((current) => ({ ...current, ...Object.fromEntries(refreshed) }));
   };
-  const disconnect = async () => {
-    await invoke("postgres_disconnect", { connectionId: draft.id });
+  const completeDisconnect = async (connectionId: string) => {
+    await invoke("postgres_disconnect", { connectionId });
+    setTabs((current) => {
+      const next = current.filter((item) => item.connectionId !== connectionId);
+      setActiveTab(next.at(-1)?.id ?? "");
+      return next.length ? next : [newQuery("")];
+    });
     setConnected(false);
     setTransactionActive(false);
+  };
+  const disconnect = () => {
+    const dirtyTabs = tabs.filter((item) => item.connectionId === draft.id && item.dirty);
+    if (dirtyTabs.length) {
+      setDisconnectTarget(draft.id);
+      return;
+    }
+    void completeDisconnect(draft.id);
   };
   const createQuery = () => openTab(newQuery(draft.id));
   const copyText = async (value: string) => {
@@ -2194,6 +2293,24 @@ export function ToolPostgres() {
                   data-testid="postgres-run"
                 />
                 )}
+                {tab.type === "query" && (
+                  <ToolButton
+                    icon={<Save />}
+                    label={t("toolbox.postgres.saveSql")}
+                    disabled={!tab.sql.trim()}
+                    onClick={saveCurrentSql}
+                    data-testid="postgres-save-sql"
+                  />
+                )}
+                {tab.type === "query" && (
+                  <ToolButton
+                    icon={<FileCode2 />}
+                    label={t("toolbox.postgres.saveToNotes")}
+                    disabled={!tab.sql.trim()}
+                    onClick={appendSqlToNotes}
+                    data-testid="postgres-save-to-notes"
+                  />
+                )}
                  {tab.type === "query" && running && (
                   <ToolButton
                     icon={<Square />}
@@ -2712,6 +2829,34 @@ export function ToolPostgres() {
             >
               {t("toolbox.postgres.discardConfirmAction")}
             </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+      <AlertDialog open={disconnectTarget !== null} onOpenChange={(open) => !open && setDisconnectTarget(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t("toolbox.postgres.disconnectUnsavedTitle")}</AlertDialogTitle>
+            <AlertDialogDescription>{t("toolbox.postgres.disconnectUnsavedDescription")}</AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>{t("common.cancel")}</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                const connectionId = disconnectTarget;
+                if (!connectionId) return;
+                tabs.filter((item) => item.connectionId === connectionId).forEach(persistQueryTab);
+                setDisconnectTarget(null);
+                void completeDisconnect(connectionId);
+              }}
+            >{t("toolbox.postgres.saveSqlAndDisconnect")}</AlertDialogAction>
+            <AlertDialogAction
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              onClick={() => {
+                const connectionId = disconnectTarget;
+                setDisconnectTarget(null);
+                if (connectionId) void completeDisconnect(connectionId);
+              }}
+            >{t("toolbox.postgres.discardAndDisconnect")}</AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>

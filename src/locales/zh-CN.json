@@ -1230,6 +1230,14 @@
       "retrustHostKey": "重新信任",
       "connect": "连接",
       "disconnect": "断开连接",
+      "saveSql": "保存 SQL",
+      "saveToNotes": "保存到记事本",
+      "quickQuery": "快速查询",
+      "sqlSaved": "SQL 已保存到此连接",
+      "disconnectUnsavedTitle": "关闭含有未保存内容的连接？",
+      "disconnectUnsavedDescription": "此连接下的所有标签页将关闭。可先保存 SQL，或丢弃未保存的 SQL 与表格变更。",
+      "saveSqlAndDisconnect": "保存 SQL 并断开",
+      "discardAndDisconnect": "丢弃并断开",
       "connected": "已连接 PostgreSQL {{version}}",
       "connectFailed": "连接失败",
       "saved": "连接已保存",
@@ -1776,6 +1784,7 @@
       "batchFailed": "{count} 个失败"
     },
     "notes": {
+      "quickExecute": "快速执行",
       "title": "记事本",
       "description": "支持 SQL、Shell、Cmd 等语法高亮的文本记录。",
       "new": "新建笔记",

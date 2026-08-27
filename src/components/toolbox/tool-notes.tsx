@@ -26,8 +26,9 @@ import {
 } from '@/components/ui/alert-dialog';
 const CodeEditor = lazy(() => import('@/components/code-editor').then((m) => ({ default: m.CodeEditor })));
 import { NotesStorage, generateId } from '@/lib/toolbox/toolbox-storage';
+import { PostgresConnectionsStorage } from '@/lib/toolbox/postgres-storage';
 import type { NoteItem, NoteLanguage } from '@/lib/toolbox/toolbox-types';
-import { StickyNote, Plus, Search, Trash2, Copy, Pin, PinOff, FileCode2, Send } from 'lucide-react';
+import { StickyNote, Plus, Search, Trash2, Copy, Pin, PinOff, FileCode2, Send, Play } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 type NoteLangLabelKey =
@@ -88,6 +89,8 @@ export function ToolNotes() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [search, setSearch] = useState('');
   const [deleteTarget, setDeleteTarget] = useState<NoteItem | null>(null);
+  const [quickConnectionId, setQuickConnectionId] = useState('');
+  const postgresConnections = useMemo(() => PostgresConnectionsStorage.load(), []);
   const selectedRef = useRef<NoteItem | null>(null);
   selectedRef.current = notes.find((n) => n.id === selectedId) ?? null;
 
@@ -104,6 +107,43 @@ export function ToolNotes() {
 
   const notesRef = useRef<NoteItem[]>(notes);
   notesRef.current = notes;
+
+  useEffect(() => {
+    const appendSql = (event: Event) => {
+      const detail = (event as CustomEvent<{ content?: string; handled?: boolean }>).detail;
+      const content = detail?.content?.trim();
+      if (!content) return;
+      const now = Date.now();
+      setNotes((current) => {
+        const selectedNote = selectedId
+          ? current.find((note) => note.id === selectedId)
+          : undefined;
+        if (selectedNote) {
+          return current.map((note) => note.id === selectedNote.id
+            ? {
+                ...note,
+                language: "sql",
+                content: note.content.trim() ? `${note.content.trimEnd()}\n${content}` : content,
+                updatedAt: now,
+              }
+            : note);
+        }
+        const note: NoteItem = {
+          id: generateId("note"),
+          title: content.split("\n")[0]?.slice(0, 80) || t("toolbox.notes.untitled"),
+          language: "sql",
+          content,
+          createdAt: now,
+          updatedAt: now,
+        };
+        setSelectedId(note.id);
+        return [note, ...current];
+      });
+      detail.handled = true;
+    };
+    window.addEventListener("nexterm:append-sql-note", appendSql);
+    return () => window.removeEventListener("nexterm:append-sql-note", appendSql);
+  }, [selectedId, t]);
 
   useEffect(() => {
     const flush = () => NotesStorage.save(notesRef.current);
@@ -177,6 +217,12 @@ export function ToolNotes() {
     window.dispatchEvent(new CustomEvent('nexterm:paste-sql-note', { detail }));
     if (!detail.handled) toast.error(t('toolbox.notes.noActiveSqlEditor'));
   }, [selected, t]);
+  const quickExecuteSql = useCallback(() => {
+    if (!selected?.content.trim() || !quickConnectionId) return;
+    window.dispatchEvent(new CustomEvent('nexterm:quick-execute-postgres', {
+      detail: { content: selected.content, connectionId: quickConnectionId },
+    }));
+  }, [quickConnectionId, selected]);
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -304,6 +350,17 @@ export function ToolNotes() {
                   <Button size="icon" variant="ghost" className="h-8 w-8 shrink-0" onClick={pasteSqlContent} title={t('toolbox.notes.pasteToSqlEditor')}>
                     <Send className="h-4 w-4" />
                   </Button>
+                )}
+                {selected.language === 'sql' && postgresConnections.length > 0 && (
+                  <>
+                    <Select value={quickConnectionId} onValueChange={setQuickConnectionId}>
+                      <SelectTrigger className="h-8 w-36 text-xs"><SelectValue placeholder="PostgreSQL" /></SelectTrigger>
+                      <SelectContent>{postgresConnections.map((connection) => <SelectItem key={connection.id} value={connection.id}>{connection.name}</SelectItem>)}</SelectContent>
+                    </Select>
+                    <Button size="icon" variant="ghost" className="h-8 w-8 shrink-0" disabled={!quickConnectionId} onClick={quickExecuteSql} title={t('toolbox.notes.quickExecute')}>
+                      <Play className="h-4 w-4" />
+                    </Button>
+                  </>
                 )}
                 <Button size="icon" variant="ghost" className="h-8 w-8 shrink-0 text-destructive hover:text-destructive" onClick={() => setDeleteTarget(selected)} title={t('common.delete')}>
                   <Trash2 className="h-4 w-4" />

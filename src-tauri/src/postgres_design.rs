@@ -1111,10 +1111,11 @@ async fn db_level_checks(
         }
     }
     // Primary-key removal with inbound FKs on those columns is rejected.
-    if change
-        .set_primary_key
-        .iter()
-        .all(|pk| pk.columns.is_empty())
+    if !change.set_primary_key.is_empty()
+        && change
+            .set_primary_key
+            .iter()
+            .all(|pk| pk.columns.is_empty())
     {
         let pk = current_primary_key(client, &change.schema, &change.table).await?;
         if let Some((_, pk_columns)) = pk {
