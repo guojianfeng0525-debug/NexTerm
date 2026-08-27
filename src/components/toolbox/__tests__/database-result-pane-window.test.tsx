@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { render, cleanup } from "@testing-library/react";
+import { render, cleanup, screen } from "@testing-library/react";
 import { DatabaseResultPane } from "@/components/toolbox/database-result-pane";
 import type { DatabaseTabularResult, GridLayoutState } from "@/lib/database/result-types";
 
@@ -109,5 +109,48 @@ describe("DatabaseResultPane windowing", () => {
     // covered by the unit-level clamping; here we assert the pane still renders
     // when no editing state exists (regression: no crash on large grid).
     expect(container.querySelectorAll("tbody tr").length).toBeGreaterThan(0);
+  });
+
+  it("renders an error result through renderError with the shared header", () => {
+    const error = {
+      kind: "error" as const,
+      error: { message: 'relation "users" does not exist', fullText: "", source: "postgres" as const },
+    };
+    render(
+      <DatabaseResultPane
+        result={error}
+        height={480}
+        paged={false}
+        onPrevious={() => undefined}
+        onNext={() => undefined}
+        labels={baseLabels}
+        renderError={(parsed) => (
+          <div data-testid="custom-error">{parsed.message}</div>
+        )}
+      />,
+    );
+    expect(screen.getByTestId("custom-error").textContent).toBe(
+      'relation "users" does not exist',
+    );
+    // Header keeps the "message" label for non-tabular results.
+    expect(screen.getByText("消息")).not.toBeNull();
+  });
+
+  it("degrades to the ready message area when renderError is absent", () => {
+    const error = {
+      kind: "error" as const,
+      error: { message: "boom", fullText: "", source: "postgres" as const },
+    };
+    render(
+      <DatabaseResultPane
+        result={error}
+        height={480}
+        paged={false}
+        onPrevious={() => undefined}
+        onNext={() => undefined}
+        labels={baseLabels}
+      />,
+    );
+    expect(screen.getByText("就绪")).not.toBeNull();
   });
 });
