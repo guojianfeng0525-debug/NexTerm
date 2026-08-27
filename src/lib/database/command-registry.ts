@@ -37,6 +37,7 @@ export const DATABASE_COMMAND_IDS = [
   "database.toolbar.bigIcons",
   "database.toolbar.showCaption",
   "database.query.execute",
+  "database.query.runSelection",
   "database.query.explain",
   "database.query.toggleComment",
   "database.query.openFile",
@@ -278,6 +279,16 @@ const commands: readonly DatabaseCommandDescriptor[] = [
     requiredCapabilities: [],
     connectionStates: ["connected"],
     defaultBinding: "Ctrl+Shift+R",
+  },
+  {
+    // UX spec §3.1: run-selection primary combo (Ctrl+Shift+Enter). Ctrl+E /
+    // Ctrl+Shift+R remain registered in NAVICAT_BINDINGS as compatibility aliases.
+    id: "database.query.runSelection",
+    labelKey: "database.command.query.runSelection",
+    scopes: ["QUERY_EDITOR"],
+    requiredCapabilities: [],
+    connectionStates: ["connected"],
+    defaultBinding: "Ctrl+Shift+Enter",
   },
   {
     id: "database.query.explain",
