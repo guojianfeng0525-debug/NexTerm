@@ -120,6 +120,29 @@ describe("DatabaseResultPane row windowing", () => {
     expect(bottom!.style.height).toBe(`${(500 - 27) * 36}px`);
   });
 
+  it("treats a stored rowHeight of 0 as the default 24px (windowed)", () => {
+    // DEFAULT_GRID_LAYOUT stores rowHeight = 0 meaning "unset"; windowing must
+    // still engage and the spacer math must use the 24px base.
+    const layout: GridLayoutState = {
+      frozenCount: 0,
+      widths: {},
+      rowHeight: 0,
+      showFieldType: false,
+      showComment: false,
+    };
+    const { container } = renderPane(buildResult(200), layout);
+    const tbody = container.querySelector("tbody");
+    const dataRows = tbody!.querySelectorAll('tr:not([aria-hidden="true"])');
+    expect(dataRows.length).toBe(35);
+    dataRows.forEach((tr) => {
+      expect((tr as HTMLElement).style.height).toBe("24px");
+    });
+    const bottom = container.querySelector(
+      '[data-testid="database-result-window-spacer-bottom"] td',
+    ) as HTMLElement | null;
+    expect(bottom!.style.height).toBe(`${(200 - 35) * 24}px`);
+  });
+
   it("keeps small result sets fully rendered without spacers", () => {
     const { container } = renderPane(buildResult(10));
     const tbody = container.querySelector("tbody");
