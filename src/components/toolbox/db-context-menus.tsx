@@ -48,7 +48,7 @@ import {
 } from "@/components/ui/context-menu";
 
 /** macOS symbol shortcuts (⌘⇧⌥) vs Ctrl+Shift+Alt text on other platforms. */
-function formatShortcut(combo: string): string {
+export function formatShortcut(combo: string): string {
   if (
     typeof navigator !== "undefined" &&
     navigator.platform.toUpperCase().includes("MAC")

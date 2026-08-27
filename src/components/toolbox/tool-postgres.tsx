@@ -14,26 +14,50 @@ import { writeTextFile, writeFile as writeBinaryFile } from "@tauri-apps/plugin-
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 import {
+  Braces,
   ClipboardPaste,
   Copy,
+  CopyCheck,
+  CopyMinus,
   Database,
+  Eraser,
+  Eye,
+  FileCode,
   FileCode2,
+  FileDown,
+  FilePlus2,
+  FileSpreadsheet,
   Filter,
+  Fingerprint,
   FolderTree,
+  Hash,
   History,
   KeyRound,
+  LineChart,
   ListChecks,
+  ListFilter,
   ListPlus,
   Loader2,
+  MoveHorizontal,
+  Pencil,
+  PencilRuler,
+  Pin,
+  PinOff,
   Play,
   Plus,
   Redo2,
   RefreshCw,
+  RemoveFormatting,
+  RotateCcw,
+  Rows3,
   Save,
   Scissors,
   Search,
+  Server,
+  Shrink,
   Square,
   Table2,
+  Trash2,
   Undo2,
   Unplug,
   Wand2,
@@ -48,6 +72,7 @@ import {
   ContextMenuContent,
   ContextMenuItem,
   ContextMenuSeparator,
+  ContextMenuShortcut,
   ContextMenuSub,
   ContextMenuSubContent,
   ContextMenuSubTrigger,
@@ -140,6 +165,7 @@ import {
 import { DatabaseResultPane } from "@/components/toolbox/database-result-pane";
 import { DatabaseResultErrorPane } from "@/components/toolbox/database-result-error";
 import { QueryHistoryView } from "@/components/toolbox/query-history-view";
+import { formatShortcut } from "@/components/toolbox/db-context-menus";
 import {
   ObjectViewerTab,
   type ObjectViewerTabState,
@@ -430,6 +456,9 @@ export function ToolPostgres() {
    *  (feature-design §2.5). Null = the whole document was sent. */
   const lastErrorRangeRef = useRef<SqlStatementRange | null>(null);
   const [configOpen, setConfigOpen] = useState(false);
+  /** Connection id staged for the delete-confirmation AlertDialog
+   *  (ux-spec §1.2.1: 删除连接 needs AlertDialog, not window.confirm). */
+  const [deleteConnectionTarget, setDeleteConnectionTarget] = useState<string | null>(null);
   const [managerOpen, setManagerOpen] = useState(false);
   const [dialogPage, setDialogPage] = useState<DialogPage>("general");
   const [transactionActive, setTransactionActive] = useState(false);
@@ -2314,6 +2343,7 @@ export function ToolPostgres() {
     closeTarget !== null ||
     disconnectTarget !== null ||
     deleteTarget !== null ||
+    deleteConnectionTarget !== null ||
     objectDropTarget !== null;
   useDatabaseKeyboardShortcuts({
     testId: "postgres-workspace",
@@ -2680,22 +2710,23 @@ export function ToolPostgres() {
                     void connectEstablished(connection);
                   };
                   return <>
-                    {connected ? <ContextMenuItem disabled={!enabled("database.connection.disconnect")} onSelect={() => void disconnect()}>{t("toolbox.postgres.disconnect")}</ContextMenuItem> : <ContextMenuItem onSelect={reconnect}>{t("common.reconnect")}</ContextMenuItem>}
-                    <ContextMenuItem disabled={!connected} onSelect={createQuery}>{t("toolbox.postgres.newQuery")}</ContextMenuItem>
-                    <ContextMenuItem disabled={!connected} onSelect={() => void refreshNavigator()}>{t("toolbox.postgres.refresh")}</ContextMenuItem>
+                    {connected ? <ContextMenuItem disabled={!enabled("database.connection.disconnect")} onSelect={() => void disconnect()}><Unplug className="h-3.5 w-3.5" />{t("toolbox.postgres.disconnect")}</ContextMenuItem> : <ContextMenuItem onSelect={reconnect}><RefreshCw className="h-3.5 w-3.5" />{t("common.reconnect")}</ContextMenuItem>}
+                    <ContextMenuItem disabled={!connected} onSelect={createQuery}><FilePlus2 className="h-3.5 w-3.5" />{t("toolbox.postgres.newQuery")}<ContextMenuShortcut>{formatShortcut("Ctrl+N")}</ContextMenuShortcut></ContextMenuItem>
+                    <ContextMenuItem disabled={!connected} onSelect={() => void refreshNavigator()}><RefreshCw className="h-3.5 w-3.5" />{t("toolbox.postgres.refresh")}<ContextMenuShortcut>{formatShortcut("F5")}</ContextMenuShortcut></ContextMenuItem>
                     <ContextMenuSeparator />
-                    <ContextMenuItem onSelect={() => setManagerOpen(true)}>{t("toolbox.postgres.connectionManager.menuItem")}</ContextMenuItem>
+                    <ContextMenuItem onSelect={() => setManagerOpen(true)}><Server className="h-3.5 w-3.5" />{t("toolbox.postgres.connectionManager.menuItem")}</ContextMenuItem>
                     <ContextMenuItem onSelect={() => {
                       if (connection) setDraft(connection);
                       setConfigOpen(true);
-                    }}>{t("common.edit")}</ContextMenuItem>
-                    <ContextMenuItem onSelect={() => {
-                      if (window.confirm(t("toolbox.postgres.deleteConfirm", { name: node.label }))) {
-                        void PostgresConnectionsStorage.remove(connectionId);
-                        setConnections((current) => current.filter((connection) => connection.id !== connectionId));
-                        if (connectionId === draft.id) setConnected(false);
-                      }
-                    }}>{t("common.delete")}</ContextMenuItem>
+                    }}><Pencil className="h-3.5 w-3.5" />{t("common.edit")}</ContextMenuItem>
+                    <ContextMenuSeparator />
+                    <ContextMenuItem
+                      variant="destructive"
+                      onSelect={() => setDeleteConnectionTarget(connectionId)}
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                      {t("common.delete")}
+                    </ContextMenuItem>
                   </>;
                 }
                 const objectReference = getPostgresObjectReference(node);
@@ -2731,16 +2762,17 @@ export function ToolPostgres() {
                 };
                 const canDrop = connected && !postgresConfig.readOnly;
                 return <>
-                  {relation && <ContextMenuItem disabled={!enabled("database.object.open")} onSelect={() => void browse(relation)}>{t("toolbox.postgres.openDataAction")}</ContextMenuItem>}
-                  {relation && relation.objectRole === "table" && <ContextMenuItem disabled={!connected} onSelect={() => openDesigner(relation.schema, relation.relation)}>{t("toolbox.postgres.designTable")}</ContextMenuItem>}
-                  {relation && relation.objectRole === "view" && <ContextMenuItem disabled={!connected} onSelect={() => void openViewDesigner(relation.schema, relation.relation)}>{t("toolbox.postgres.designView")}</ContextMenuItem>}
-                  {relation && relation.objectRole === "materializedView" && <ContextMenuItem disabled title={t("toolbox.postgres.materializedViewReadonly")}>{t("toolbox.postgres.designView")}</ContextMenuItem>}
+                  {relation && <ContextMenuItem disabled={!enabled("database.object.open")} onSelect={() => void browse(relation)}><Table2 className="h-3.5 w-3.5" />{t("toolbox.postgres.openDataAction")}<ContextMenuShortcut>{formatShortcut("Enter")}</ContextMenuShortcut></ContextMenuItem>}
+                  {relation && relation.objectRole === "table" && <ContextMenuItem disabled={!connected} onSelect={() => openDesigner(relation.schema, relation.relation)}><PencilRuler className="h-3.5 w-3.5" />{t("toolbox.postgres.designTable")}</ContextMenuItem>}
+                  {relation && relation.objectRole === "view" && <ContextMenuItem disabled={!connected} onSelect={() => void openViewDesigner(relation.schema, relation.relation)}><PencilRuler className="h-3.5 w-3.5" />{t("toolbox.postgres.designView")}</ContextMenuItem>}
+                  {relation && relation.objectRole === "materializedView" && <ContextMenuItem disabled title={t("toolbox.postgres.materializedViewReadonly")}><PencilRuler className="h-3.5 w-3.5" />{t("toolbox.postgres.designView")}</ContextMenuItem>}
                   {relation && (
                     <ContextMenuSub>
                       <ContextMenuSubTrigger
                         data-testid="navigator-generate-sql"
                         disabled={!connected}
                       >
+                        <Braces className="h-3.5 w-3.5" />
                         {t("toolbox.postgres.generateSql")}
                       </ContextMenuSubTrigger>
                       <ContextMenuSubContent>
@@ -2774,22 +2806,25 @@ export function ToolPostgres() {
                           }
                           data-testid="navigator-generate-delete"
                         >
+                          <Trash2 className="h-3.5 w-3.5" />
                           {t("toolbox.postgres.generateDelete")}
                         </ContextMenuItem>
                       </ContextMenuSubContent>
                     </ContextMenuSub>
                   )}
-                  {objectReference?.objectKind === "function" && <ContextMenuItem disabled={!connected} onSelect={() => openObjectViewer(objectReference)}>{t("toolbox.postgres.openFunction")}</ContextMenuItem>}
+                  {objectReference?.objectKind === "function" && <ContextMenuItem disabled={!connected} onSelect={() => openObjectViewer(objectReference)}><Eye className="h-3.5 w-3.5" />{t("toolbox.postgres.openFunction")}</ContextMenuItem>}
                   {(objectReference?.objectKind === "sequence" ||
                     objectReference?.objectKind === "index" ||
                     objectReference?.objectKind === "constraint" ||
-                    objectReference?.objectKind === "trigger") && <ContextMenuItem disabled={!connected} onSelect={() => objectReference && openObjectViewer(objectReference)}>{t("toolbox.postgres.openObject")}</ContextMenuItem>}
-                  <ContextMenuItem disabled={!connected} onSelect={() => void copyText(copyValue())}>{objectReference?.objectKind === "column" ? t("toolbox.postgres.copyColumnName") : t("toolbox.postgres.copyName")}</ContextMenuItem>
+                    objectReference?.objectKind === "trigger") && <ContextMenuItem disabled={!connected} onSelect={() => objectReference && openObjectViewer(objectReference)}><Eye className="h-3.5 w-3.5" />{t("toolbox.postgres.openObject")}</ContextMenuItem>}
+                  <ContextMenuSeparator />
+                  <ContextMenuItem disabled={!connected} onSelect={() => void copyText(copyValue())}><Copy className="h-3.5 w-3.5" />{objectReference?.objectKind === "column" ? t("toolbox.postgres.copyColumnName") : t("toolbox.postgres.copyName")}</ContextMenuItem>
                   {activeReference && activeReference.objectKind !== "constraint" && (
-                    <ContextMenuItem disabled={!connected} onSelect={() => activeReference && void generateObjectDdl(activeReference)}>{t("toolbox.postgres.generateDdl")}</ContextMenuItem>
+                    <ContextMenuItem disabled={!connected} onSelect={() => activeReference && void generateObjectDdl(activeReference)}><FileCode className="h-3.5 w-3.5" />{t("toolbox.postgres.generateDdl")}</ContextMenuItem>
                   )}
-                  <ContextMenuItem disabled={!connected} onSelect={() => void refreshNavigator()}>{t("toolbox.postgres.refresh")}</ContextMenuItem>
-                  {!activeReference && <ContextMenuItem disabled={!connected} onSelect={createQuery}>{t("toolbox.postgres.newQuery")}</ContextMenuItem>}
+                  <ContextMenuSeparator />
+                  <ContextMenuItem disabled={!connected} onSelect={() => void refreshNavigator()}><RefreshCw className="h-3.5 w-3.5" />{t("toolbox.postgres.refresh")}<ContextMenuShortcut>{formatShortcut("F5")}</ContextMenuShortcut></ContextMenuItem>
+                  {!activeReference && <ContextMenuItem disabled={!connected} onSelect={createQuery}><FilePlus2 className="h-3.5 w-3.5" />{t("toolbox.postgres.newQuery")}<ContextMenuShortcut>{formatShortcut("Ctrl+N")}</ContextMenuShortcut></ContextMenuItem>}
                   {node.kind === "group" && node.reference.path.at(-1) === "tables" && (
                       <ContextMenuItem
                         disabled={!connected}
@@ -2798,15 +2833,16 @@ export function ToolPostgres() {
                           openDesigner(schemaName, "", true);
                         }}
                         data-testid="navigator-new-table"
-                      >{t("toolbox.postgres.newTable")}</ContextMenuItem>
+                      ><Table2 className="h-3.5 w-3.5" />{t("toolbox.postgres.newTable")}</ContextMenuItem>
                     )}
                   {activeReference && activeReference.objectKind !== "column" && (
                     <>
                       <ContextMenuSeparator />
                       <ContextMenuItem
+                        variant="destructive"
                         disabled={!canDrop}
                         onSelect={() => activeReference && void requestObjectDrop(activeReference)}
-                      >{dropLabel(activeReference)}</ContextMenuItem>
+                      ><Trash2 className="h-3.5 w-3.5" />{dropLabel(activeReference)}</ContextMenuItem>
                     </>
                   )}
                 </>;
@@ -2965,12 +3001,14 @@ export function ToolPostgres() {
                       >
                         <Undo2 className="h-3.5 w-3.5" />
                         {t("common.undo")}
+                        <ContextMenuShortcut>{formatShortcut("Ctrl+Z")}</ContextMenuShortcut>
                       </ContextMenuItem>
                       <ContextMenuItem
                         onSelect={() => runCmCommand(redo)}
                       >
                         <Redo2 className="h-3.5 w-3.5" />
                         {t("common.redo")}
+                        <ContextMenuShortcut>{formatShortcut("Ctrl+Shift+Z")}</ContextMenuShortcut>
                       </ContextMenuItem>
                       <ContextMenuSeparator />
                       <ContextMenuItem
@@ -2978,18 +3016,28 @@ export function ToolPostgres() {
                       >
                         <Scissors className="h-3.5 w-3.5" />
                         {t("common.cut")}
+                        <ContextMenuShortcut>{formatShortcut("Ctrl+X")}</ContextMenuShortcut>
+                      </ContextMenuItem>
+                      <ContextMenuItem
+                        onSelect={() => void copyText(editorCopyValue())}
+                      >
+                        <Copy className="h-3.5 w-3.5" />
+                        {t("common.copy")}
+                        <ContextMenuShortcut>{formatShortcut("Ctrl+C")}</ContextMenuShortcut>
                       </ContextMenuItem>
                       <ContextMenuItem
                         onSelect={() => void pasteIntoEditor()}
                       >
                         <ClipboardPaste className="h-3.5 w-3.5" />
                         {t("common.paste")}
+                        <ContextMenuShortcut>{formatShortcut("Ctrl+V")}</ContextMenuShortcut>
                       </ContextMenuItem>
                       <ContextMenuItem
                         onSelect={() => runCmCommand(selectAll)}
                       >
                         <ListChecks className="h-3.5 w-3.5" />
                         {t("common.selectAll")}
+                        <ContextMenuShortcut>{formatShortcut("Ctrl+A")}</ContextMenuShortcut>
                       </ContextMenuItem>
                       <ContextMenuSeparator />
                       {/* SQL group */}
@@ -3000,6 +3048,7 @@ export function ToolPostgres() {
                       >
                         <Play className="h-3.5 w-3.5" />
                         {t("toolbox.postgres.run")}
+                        <ContextMenuShortcut>{formatShortcut("Ctrl+Enter")}</ContextMenuShortcut>
                       </ContextMenuItem>
                       <ContextMenuItem
                         data-testid="postgres-editor-run-selection"
@@ -3008,6 +3057,16 @@ export function ToolPostgres() {
                       >
                         <ListPlus className="h-3.5 w-3.5" />
                         {t("toolbox.postgres.runSelection")}
+                        <ContextMenuShortcut>{formatShortcut("Ctrl+Shift+Enter")}</ContextMenuShortcut>
+                      </ContextMenuItem>
+                      <ContextMenuItem
+                        data-testid="postgres-editor-explain"
+                        disabled={!connected || !tab.sql.trim()}
+                        onSelect={() => void execute(true)}
+                      >
+                        <LineChart className="h-3.5 w-3.5" />
+                        {t("toolbox.postgres.explain")}
+                        <ContextMenuShortcut>{formatShortcut("Ctrl+Shift+E")}</ContextMenuShortcut>
                       </ContextMenuItem>
                       <ContextMenuItem
                         data-testid="postgres-editor-format-sql"
@@ -3016,8 +3075,19 @@ export function ToolPostgres() {
                       >
                         <Wand2 className="h-3.5 w-3.5" />
                         {t("toolbox.postgres.formatSql")}
+                        <ContextMenuShortcut>{formatShortcut("Ctrl+Shift+F")}</ContextMenuShortcut>
+                      </ContextMenuItem>
+                      <ContextMenuItem
+                        data-testid="postgres-editor-toggle-comment"
+                        disabled={!connected}
+                        onSelect={toggleSqlComment}
+                      >
+                        <Hash className="h-3.5 w-3.5" />
+                        {t("toolbox.postgres.toggleComment")}
+                        <ContextMenuShortcut>{formatShortcut("Ctrl+/")}</ContextMenuShortcut>
                       </ContextMenuItem>
                       <ContextMenuSeparator />
+                      {/* Save group */}
                       <ContextMenuItem
                         data-testid="postgres-editor-save-to-notes"
                         disabled={!tab.sql.trim()}
@@ -3037,12 +3107,14 @@ export function ToolPostgres() {
                           </span>
                         </span>
                       </ContextMenuItem>
-                      <ContextMenuSeparator />
                       <ContextMenuItem
-                        onSelect={() => void copyText(editorCopyValue())}
+                        data-testid="postgres-editor-save-sql"
+                        disabled={!tab.sql.trim()}
+                        onSelect={saveCurrentSql}
                       >
-                        <Copy className="h-3.5 w-3.5" />
-                        {t("common.copy")}
+                        <Save className="h-3.5 w-3.5" />
+                        {t("toolbox.postgres.saveSql")}
+                        <ContextMenuShortcut>{formatShortcut("Ctrl+S")}</ContextMenuShortcut>
                       </ContextMenuItem>
                     </ContextMenuContent>
                   </ContextMenu>
@@ -3218,57 +3290,72 @@ export function ToolPostgres() {
                   renderContextMenu={(cell, row, columnName, rowIndex, columnIndex, source = "row") => <>
                     {source === "insert" ? (
                       <>
-                        <ContextMenuItem onSelect={() => void copyText(cell ?? "NULL")}>{t("toolbox.postgres.copyCell")}</ContextMenuItem>
-                        <ContextMenuItem onSelect={() => void copyText(row.map((value) => value ?? "NULL").join("\t"))}>{t("toolbox.postgres.copyRow")}</ContextMenuItem>
+                        <ContextMenuItem onSelect={() => void copyText(cell ?? "NULL")}><Copy className="h-3.5 w-3.5" />{t("toolbox.postgres.copyCell")}</ContextMenuItem>
+                        <ContextMenuItem onSelect={() => void copyText(row.map((value) => value ?? "NULL").join("\t"))}><CopyCheck className="h-3.5 w-3.5" />{t("toolbox.postgres.copyRow")}</ContextMenuItem>
                         <ContextMenuSeparator />
-                        <ContextMenuItem onSelect={() => removeInsertRow(rowIndex)}>{t("toolbox.postgres.removeRecord")}</ContextMenuItem>
-                        <ContextMenuSeparator />
+                        <ContextMenuItem
+                          variant="destructive"
+                          onSelect={() => removeInsertRow(rowIndex)}
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                          {t("toolbox.postgres.removeRecord")}
+                        </ContextMenuItem>
                       </>
                     ) : (
                       <>
-                        <ContextMenuItem onSelect={() => void copyText(cell ?? "NULL")}>{t("toolbox.postgres.copyCell")}</ContextMenuItem>
-                        <ContextMenuItem onSelect={() => void copyText(row.map((value) => value ?? "NULL").join("\t"))}>{t("toolbox.postgres.copyRow")}</ContextMenuItem>
-                        <ContextMenuItem onSelect={() => void copyText(columnName)}>{t("toolbox.postgres.copyColumnName")}</ContextMenuItem>
+                        <ContextMenuItem onSelect={() => void copyText(cell ?? "NULL")}><Copy className="h-3.5 w-3.5" />{t("toolbox.postgres.copyCell")}</ContextMenuItem>
+                        <ContextMenuItem onSelect={() => void copyText(row.map((value) => value ?? "NULL").join("\t"))}><CopyCheck className="h-3.5 w-3.5" />{t("toolbox.postgres.copyRow")}</ContextMenuItem>
+                        <ContextMenuItem onSelect={() => void copyText(columnName)}><CopyMinus className="h-3.5 w-3.5" />{t("toolbox.postgres.copyColumnName")}</ContextMenuItem>
                         <ContextMenuSeparator />
                         {tab.type === "table" && <>
-                          <ContextMenuItem onSelect={() => applyFilterByFieldValue(columnName, cell)}>{t("toolbox.postgres.filterByFieldValue")}</ContextMenuItem>
-                          <ContextMenuItem onSelect={() => setFilterDialog({ mode: "custom" })}>{t("toolbox.postgres.customFilter")}</ContextMenuItem>
+                          <ContextMenuItem onSelect={() => applyFilterByFieldValue(columnName, cell)}><ListFilter className="h-3.5 w-3.5" />{t("toolbox.postgres.filterByFieldValue")}</ContextMenuItem>
+                          <ContextMenuItem onSelect={() => setFilterDialog({ mode: "custom" })}><Filter className="h-3.5 w-3.5" />{t("toolbox.postgres.customFilter")}</ContextMenuItem>
                           <ContextMenuSeparator />
                         </>}
                         {tab.type === "table" && tableEditingEnabled && <>
                           <ContextMenuItem
                             disabled={!canSetNull(columnIndex)}
                             onSelect={() => stageTableEdit(rowIndex, columnIndex, null)}
-                          >{t("toolbox.postgres.setNull")}</ContextMenuItem>
+                          ><Eraser className="h-3.5 w-3.5" />{t("toolbox.postgres.setNull")}</ContextMenuItem>
+                          <ContextMenuItem
+                            disabled={isPrimaryKeyColumn(columnIndex)}
+                            onSelect={() => stageTableEdit(rowIndex, columnIndex, "DEFAULT")}
+                          ><RotateCcw className="h-3.5 w-3.5" />{t("toolbox.postgres.setDefault")}</ContextMenuItem>
                           <ContextMenuItem
                             disabled={isPrimaryKeyColumn(columnIndex)}
                             onSelect={() => stageTableEdit(rowIndex, columnIndex, "")}
-                          >{t("toolbox.postgres.setEmptyString")}</ContextMenuItem>
+                          ><RemoveFormatting className="h-3.5 w-3.5" />{t("toolbox.postgres.setEmptyString")}</ContextMenuItem>
                           <ContextMenuItem
                             disabled={isPrimaryKeyColumn(columnIndex)}
                             onSelect={() => stageTableEdit(rowIndex, columnIndex, crypto.randomUUID())}
-                          >{t("toolbox.postgres.generateUuid")}</ContextMenuItem>
+                          ><Fingerprint className="h-3.5 w-3.5" />{t("toolbox.postgres.generateUuid")}</ContextMenuItem>
                           <ContextMenuSeparator />
                           <ContextMenuItem
+                            variant="destructive"
                             disabled={!rowHasPrimaryKey(row)}
                             onSelect={() => requestDeleteRow(rowIndex)}
-                          >{t("toolbox.postgres.deleteRecord")}</ContextMenuItem>
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                            {t("toolbox.postgres.deleteRecord")}
+                            <ContextMenuShortcut>{formatShortcut("Ctrl+Delete")}</ContextMenuShortcut>
+                          </ContextMenuItem>
                         </>}
+                        <ContextMenuSeparator />
+                        <ContextMenuItem onSelect={() => void exportCsv()}><FileDown className="h-3.5 w-3.5" />{t("toolbox.postgres.exportCsv")}</ContextMenuItem>
+                        <ContextMenuItem onSelect={() => void exportExcel()}><FileSpreadsheet className="h-3.5 w-3.5" />{t("toolbox.postgres.exportExcel")}</ContextMenuItem>
                       </>
                     )}
-                    <ContextMenuItem onSelect={() => void exportCsv()}>{t("toolbox.postgres.exportCsv")}</ContextMenuItem>
-                    <ContextMenuItem onSelect={() => void exportExcel()}>{t("toolbox.postgres.exportExcel")}</ContextMenuItem>
                   </>}
                   renderColumnContextMenu={tab.type === "table" ? (columnName, columnIndex) => (
                     <>
                       <ContextMenuItem onSelect={() => {
                         setFilterDialog({ mode: "filterSort" });
-                      }}>{t("toolbox.postgres.filterSort")}</ContextMenuItem>
+                      }}><ListFilter className="h-3.5 w-3.5" />{t("toolbox.postgres.filterSort")}<ContextMenuShortcut>{formatShortcut("Ctrl+R")}</ContextMenuShortcut></ContextMenuItem>
                       <ContextMenuSeparator />
-                      <ContextMenuItem onSelect={() => freezeColumn(columnIndex)}>{t("toolbox.postgres.freezeColumn")}</ContextMenuItem>
-                      <ContextMenuItem disabled={!currentLayout().frozenCount} onSelect={unfreezeAllColumns}>{t("toolbox.postgres.unfreezeAllColumns")}</ContextMenuItem>
-                      <ContextMenuItem onSelect={() => setLayoutDialog({ kind: "columnWidth", columnIndex })}>{t("toolbox.postgres.setColumnWidth")}</ContextMenuItem>
-                      <ContextMenuItem onSelect={() => bestFitColumn(columnIndex)}>{t("toolbox.postgres.bestFitColumn")}</ContextMenuItem>
+                      <ContextMenuItem onSelect={() => freezeColumn(columnIndex)}><Pin className="h-3.5 w-3.5" />{t("toolbox.postgres.freezeColumn")}</ContextMenuItem>
+                      <ContextMenuItem disabled={!currentLayout().frozenCount} onSelect={unfreezeAllColumns}><PinOff className="h-3.5 w-3.5" />{t("toolbox.postgres.unfreezeAllColumns")}</ContextMenuItem>
+                      <ContextMenuItem onSelect={() => setLayoutDialog({ kind: "columnWidth", columnIndex })}><MoveHorizontal className="h-3.5 w-3.5" />{t("toolbox.postgres.setColumnWidth")}</ContextMenuItem>
+                      <ContextMenuItem onSelect={() => bestFitColumn(columnIndex)}><Shrink className="h-3.5 w-3.5" />{t("toolbox.postgres.bestFitColumn")}</ContextMenuItem>
                       <ContextMenuSeparator />
                       <ContextMenuCheckboxItem
                         checked={currentLayout().showFieldType}
@@ -3285,7 +3372,28 @@ export function ToolPostgres() {
                     </>
                   ) : undefined}
                   renderRowHeaderContextMenu={tab.type === "table" ? () => (
-                    <ContextMenuItem onSelect={() => setLayoutDialog({ kind: "rowHeight" })}>{t("toolbox.postgres.setRowHeight")}</ContextMenuItem>
+                    <>
+                      <ContextMenuItem
+                        disabled={!tableEditingEnabled}
+                        onSelect={addRecord}
+                      >
+                        <Plus className="h-3.5 w-3.5" />
+                        {t("toolbox.postgres.addRecord")}
+                        <ContextMenuShortcut>{formatShortcut("Insert")}</ContextMenuShortcut>
+                      </ContextMenuItem>
+                      <ContextMenuItem
+                        disabled={tab.result?.kind !== "tabular" || tab.result.rows.length === 0}
+                        onSelect={() => {
+                          if (tab.result?.kind !== "tabular" || tab.result.rows.length === 0) return;
+                          void copyText(tab.result.rows[0].map((value) => value ?? "NULL").join("\t"));
+                        }}
+                      >
+                        <CopyCheck className="h-3.5 w-3.5" />
+                        {t("toolbox.postgres.copyRow")}
+                      </ContextMenuItem>
+                      <ContextMenuSeparator />
+                      <ContextMenuItem onSelect={() => setLayoutDialog({ kind: "rowHeight" })}><Rows3 className="h-3.5 w-3.5" />{t("toolbox.postgres.setRowHeight")}</ContextMenuItem>
+                    </>
                   ) : undefined}
                   layout={tab.type === "table" ? currentLayout() : undefined}
                   onColumnResize={tab.type === "table" ? setColumnWidth : undefined}
@@ -3509,6 +3617,42 @@ export function ToolPostgres() {
             <AlertDialogCancel>{t("common.cancel")}</AlertDialogCancel>
             <AlertDialogAction onClick={stageDeleteRow}>
               {t("toolbox.postgres.deleteRecord")}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+      <AlertDialog
+        open={deleteConnectionTarget !== null}
+        onOpenChange={(open) => !open && setDeleteConnectionTarget(null)}
+        data-testid="postgres-connection-delete-confirm"
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t("toolbox.postgres.deleteConnectionConfirmTitle")}</AlertDialogTitle>
+            <AlertDialogDescription>
+              {t("toolbox.postgres.deleteConnectionConfirmDescription", {
+                name: deleteConnectionTarget
+                  ? (connections.find((item) => item.id === deleteConnectionTarget)?.name ?? "")
+                  : "",
+              })}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>{t("common.cancel")}</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              onClick={() => {
+                const target = deleteConnectionTarget;
+                setDeleteConnectionTarget(null);
+                if (!target) return;
+                void PostgresConnectionsStorage.remove(target);
+                setConnections((current) =>
+                  current.filter((connection) => connection.id !== target),
+                );
+                if (target === draft.id) setConnected(false);
+              }}
+            >
+              {t("common.delete")}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
