@@ -30,7 +30,13 @@ const MAX_CHECK_LEN: usize = 2048;
 /// Max length of a column/table comment.
 const MAX_COMMENT_LEN: usize = 1024;
 /// Whitelisted FK referential actions (PG confdeltype/confupdtupdtype names).
-const FK_ACTIONS: [&str; 5] = ["NO ACTION", "RESTRICT", "CASCADE", "SET NULL", "SET DEFAULT"];
+const FK_ACTIONS: [&str; 5] = [
+    "NO ACTION",
+    "RESTRICT",
+    "CASCADE",
+    "SET NULL",
+    "SET DEFAULT",
+];
 /// Whitelisted index access methods for `CREATE INDEX ... USING <method>`.
 const INDEX_METHODS: [&str; 6] = ["btree", "hash", "gist", "spgist", "gin", "brin"];
 /// Whitelisted constraint kinds creatable from the designer.
@@ -129,6 +135,11 @@ pub struct PostgresTableDesign {
 pub struct TableDesignChange {
     pub schema: String,
     pub table: String,
+    /// True = CREATE TABLE (new-table designer mode): statements are built
+    /// from add_columns / set_primary_key / add_constraints /
+    /// add_foreign_keys instead of ALTER.
+    #[serde(default)]
+    pub create: bool,
     #[serde(default)]
     pub add_columns: Vec<ColumnDef>,
     #[serde(default)]
@@ -320,7 +331,9 @@ fn validate_identifier(label: &str, value: &str) -> Result<(), String> {
         return Err(format!("{label} name must not be empty"));
     }
     if value.len() > MAX_IDENTIFIER_LEN {
-        return Err(format!("{label} name exceeds {MAX_IDENTIFIER_LEN} characters"));
+        return Err(format!(
+            "{label} name exceeds {MAX_IDENTIFIER_LEN} characters"
+        ));
     }
     if value.contains('\0') {
         return Err(format!("{label} name contains an invalid character"));
@@ -338,10 +351,10 @@ fn validate_data_type(value: &str) -> Result<(), String> {
     if value.len() > 64 {
         return Err("Column data type exceeds 64 characters".into());
     }
-    if !value
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | '_' | '(' | ')' | '[' | ']' | '"' | ',' | '.'))
-    {
+    if !value.chars().all(|c| {
+        c.is_ascii_alphanumeric()
+            || matches!(c, ' ' | '_' | '(' | ')' | '[' | ']' | '"' | ',' | '.')
+    }) {
         return Err("Column data type contains invalid characters".into());
     }
     Ok(())
@@ -386,6 +399,21 @@ fn quote_literal(value: &str) -> String {
 fn validate_change(change: &TableDesignChange) -> Result<(), String> {
     validate_identifier("Schema", &change.schema)?;
     validate_identifier("Table", &change.table)?;
+
+    if change.create {
+        if change.add_columns.is_empty() {
+            return Err("A new table requires at least one column".into());
+        }
+        if !change.drop_columns.is_empty()
+            || !change.modify_columns.is_empty()
+            || !change.rename_columns.is_empty()
+            || !change.drop_constraints.is_empty()
+            || !change.drop_indexes.is_empty()
+            || !change.drop_foreign_keys.is_empty()
+        {
+            return Err("CREATE TABLE cannot include alteration or drop operations".into());
+        }
+    }
 
     let add_names: Vec<String> = change.add_columns.iter().map(|c| c.name.clone()).collect();
     reject_duplicates("column", &add_names)?;
@@ -433,7 +461,11 @@ fn validate_change(change: &TableDesignChange) -> Result<(), String> {
         }
     }
 
-    let constraint_names: Vec<String> = change.add_constraints.iter().map(|c| c.name.clone()).collect();
+    let constraint_names: Vec<String> = change
+        .add_constraints
+        .iter()
+        .map(|c| c.name.clone())
+        .collect();
     reject_duplicates("constraint", &constraint_names)?;
     for constraint in &change.add_constraints {
         validate_identifier("Constraint", &constraint.name)?;
@@ -445,6 +477,12 @@ fn validate_change(change: &TableDesignChange) -> Result<(), String> {
         }
         for column in &constraint.columns {
             validate_identifier("Constraint column", column)?;
+        }
+        if constraint.constraint_type == "u" && constraint.columns.is_empty() {
+            return Err(format!(
+                "UNIQUE constraint {} requires at least one column",
+                constraint.name
+            ));
         }
         if constraint.constraint_type == "c" {
             let definition = constraint
@@ -478,7 +516,10 @@ fn validate_change(change: &TableDesignChange) -> Result<(), String> {
     for index in &change.add_indexes {
         validate_identifier("Index", &index.name)?;
         if !INDEX_METHODS.contains(&index.method.as_str()) {
-            return Err(format!("Index method must be one of {}", INDEX_METHODS.join(", ")));
+            return Err(format!(
+                "Index method must be one of {}",
+                INDEX_METHODS.join(", ")
+            ));
         }
         if index.columns.is_empty() {
             return Err(format!("Index {} requires at least one column", index.name));
@@ -491,12 +532,19 @@ fn validate_change(change: &TableDesignChange) -> Result<(), String> {
         validate_identifier("Index", &index.name)?;
     }
 
-    let fk_names: Vec<String> = change.add_foreign_keys.iter().map(|f| f.name.clone()).collect();
+    let fk_names: Vec<String> = change
+        .add_foreign_keys
+        .iter()
+        .map(|f| f.name.clone())
+        .collect();
     reject_duplicates("foreign key", &fk_names)?;
     for fk in &change.add_foreign_keys {
         validate_identifier("Foreign key", &fk.name)?;
         if fk.columns.is_empty() {
-            return Err(format!("Foreign key {} requires at least one column", fk.name));
+            return Err(format!(
+                "Foreign key {} requires at least one column",
+                fk.name
+            ));
         }
         for column in &fk.columns {
             validate_identifier("Foreign key column", column)?;
@@ -534,9 +582,166 @@ fn validate_change(change: &TableDesignChange) -> Result<(), String> {
 
 // ── DDL statement builder (pure, unit-tested) ────────────────────────────────
 
+/// Builds the CREATE TABLE statement sequence for new-table designer mode.
+/// Column order: data type, DEFAULT, NOT NULL; then PRIMARY KEY, UNIQUE/CHECK
+/// constraints, FOREIGN KEYs; then indexes and comments.
+fn build_create_statements(change: &TableDesignChange) -> Vec<String> {
+    let table = format!(
+        "{}.{}",
+        quote_identifier(&change.schema),
+        quote_identifier(&change.table)
+    );
+    let mut cols: Vec<String> = Vec::new();
+    for column in &change.add_columns {
+        let mut fragment = format!(
+            "{} {}",
+            quote_identifier(&column.name),
+            column.data_type.trim()
+        );
+        if let Some(default) = column
+            .default
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+        {
+            fragment.push_str(&format!(" DEFAULT {default}"));
+        }
+        if !column.nullable {
+            fragment.push_str(" NOT NULL");
+        }
+        cols.push(fragment);
+    }
+    if let Some(pk) = change
+        .set_primary_key
+        .iter()
+        .find(|p| !p.columns.is_empty())
+    {
+        cols.push(format!(
+            "PRIMARY KEY ({})",
+            pk.columns
+                .iter()
+                .map(|c| quote_identifier(c))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    for constraint in &change.add_constraints {
+        match constraint.constraint_type.as_str() {
+            "u" => cols.push(format!(
+                "CONSTRAINT {} UNIQUE ({})",
+                quote_identifier(&constraint.name),
+                constraint
+                    .columns
+                    .iter()
+                    .map(|c| quote_identifier(c))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )),
+            "c" => {
+                if let Some(definition) = constraint
+                    .definition
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+                {
+                    cols.push(format!(
+                        "CONSTRAINT {} CHECK ({definition})",
+                        quote_identifier(&constraint.name)
+                    ));
+                }
+            }
+            "x" => {
+                // EXCLUDE definitions are emitted after CREATE TABLE below,
+                // matching the existing ALTER builder's syntax.
+            }
+            _ => {}
+        }
+    }
+    for fk in &change.add_foreign_keys {
+        cols.push(format!(
+            "CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {}.{} ({}) ON DELETE {} ON UPDATE {}",
+            quote_identifier(&fk.name),
+            fk.columns
+                .iter()
+                .map(|c| quote_identifier(c))
+                .collect::<Vec<_>>()
+                .join(", "),
+            quote_identifier(&fk.references.schema),
+            quote_identifier(&fk.references.table),
+            fk.references
+                .columns
+                .iter()
+                .map(|c| quote_identifier(c))
+                .collect::<Vec<_>>()
+                .join(", "),
+            fk.on_delete.trim(),
+            fk.on_update.trim(),
+        ));
+    }
+    let mut stmts = vec![format!("CREATE TABLE {table} ({})", cols.join(", "))];
+    for constraint in &change.add_constraints {
+        if constraint.constraint_type == "x" {
+            let definition = constraint
+                .definition
+                .as_deref()
+                .map(str::trim)
+                .unwrap_or("");
+            stmts.push(format!(
+                "ALTER TABLE {table} ADD CONSTRAINT {} EXCLUDE {definition}",
+                quote_identifier(&constraint.name)
+            ));
+        }
+    }
+    for index in &change.add_indexes {
+        let columns = index
+            .columns
+            .iter()
+            .map(|c| {
+                if c.desc {
+                    format!("{} DESC", quote_identifier(&c.name))
+                } else {
+                    quote_identifier(&c.name)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let unique = if index.unique { "UNIQUE " } else { "" };
+        stmts.push(format!(
+            "CREATE {unique}INDEX {}.{} ON {table} USING {} ({columns})",
+            quote_identifier(&change.schema),
+            quote_identifier(&index.name),
+            index.method
+        ));
+    }
+    for column in &change.add_columns {
+        if let Some(comment) = column
+            .comment
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+        {
+            stmts.push(format!(
+                "COMMENT ON COLUMN {table}.{} IS {}",
+                quote_identifier(&column.name),
+                quote_literal(comment)
+            ));
+        }
+    }
+    if let Some(comment) = change.set_comment.as_deref() {
+        stmts.push(format!(
+            "COMMENT ON TABLE {table} IS {}",
+            quote_literal(comment)
+        ));
+    }
+    stmts
+}
+
 /// Builds the ordered ALTER statement sequence for a validated change
 /// (AC-S2C-11: drop dependencies first, then columns, then new objects).
 fn build_statements(change: &TableDesignChange) -> Vec<String> {
+    if change.create {
+        return build_create_statements(change);
+    }
     let table = format!(
         "{}.{}",
         quote_identifier(&change.schema),
@@ -582,14 +787,24 @@ fn build_statements(change: &TableDesignChange) -> Vec<String> {
             quote_identifier(&column.name),
             column.data_type.trim()
         );
-        if let Some(default) = column.default.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+        if let Some(default) = column
+            .default
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+        {
             fragment.push_str(&format!(" DEFAULT {default}"));
         }
         if !column.nullable {
             fragment.push_str(" NOT NULL");
         }
         stmts.push(fragment);
-        if let Some(comment) = column.comment.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+        if let Some(comment) = column
+            .comment
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+        {
             stmts.push(format!(
                 "COMMENT ON COLUMN {table}.{} IS {}",
                 quote_identifier(&column.name),
@@ -608,23 +823,37 @@ fn build_statements(change: &TableDesignChange) -> Vec<String> {
         }
         if let Some(nullable) = modify.nullable {
             if nullable {
-                stmts.push(format!("ALTER TABLE {table} ALTER COLUMN {column} DROP NOT NULL"));
+                stmts.push(format!(
+                    "ALTER TABLE {table} ALTER COLUMN {column} DROP NOT NULL"
+                ));
             } else {
-                stmts.push(format!("ALTER TABLE {table} ALTER COLUMN {column} SET NOT NULL"));
+                stmts.push(format!(
+                    "ALTER TABLE {table} ALTER COLUMN {column} SET NOT NULL"
+                ));
             }
         }
         if modify.drop_default {
-            stmts.push(format!("ALTER TABLE {table} ALTER COLUMN {column} DROP DEFAULT"));
-        } else if let Some(default) = modify.default.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+            stmts.push(format!(
+                "ALTER TABLE {table} ALTER COLUMN {column} DROP DEFAULT"
+            ));
+        } else if let Some(default) = modify
+            .default
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+        {
             stmts.push(format!(
                 "ALTER TABLE {table} ALTER COLUMN {column} SET DEFAULT {default}"
             ));
         }
         if modify.drop_comment {
-            stmts.push(format!(
-                "COMMENT ON COLUMN {table}.{column} IS ''"
-            ));
-        } else if let Some(comment) = modify.comment.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+            stmts.push(format!("COMMENT ON COLUMN {table}.{column} IS ''"));
+        } else if let Some(comment) = modify
+            .comment
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+        {
             stmts.push(format!(
                 "COMMENT ON COLUMN {table}.{column} IS {}",
                 quote_literal(comment)
@@ -648,11 +877,7 @@ fn build_statements(change: &TableDesignChange) -> Vec<String> {
                 .map(|c| quote_identifier(c))
                 .collect::<Vec<_>>()
                 .join(", ");
-            let name = pk
-                .name
-                .as_deref()
-                .map(quote_identifier)
-                .unwrap_or_default();
+            let name = pk.name.as_deref().map(quote_identifier).unwrap_or_default();
             if name.is_empty() {
                 stmts.push(format!("ALTER TABLE {table} ADD PRIMARY KEY ({columns})"));
             } else {
@@ -673,10 +898,16 @@ fn build_statements(change: &TableDesignChange) -> Vec<String> {
                     .map(|c| quote_identifier(c))
                     .collect::<Vec<_>>()
                     .join(", ");
-                stmts.push(format!("ALTER TABLE {table} ADD CONSTRAINT {name} UNIQUE ({columns})"));
+                stmts.push(format!(
+                    "ALTER TABLE {table} ADD CONSTRAINT {name} UNIQUE ({columns})"
+                ));
             }
             "c" | "x" => {
-                let definition = constraint.definition.as_deref().map(str::trim).unwrap_or("");
+                let definition = constraint
+                    .definition
+                    .as_deref()
+                    .map(str::trim)
+                    .unwrap_or("");
                 if constraint.constraint_type == "c" {
                     stmts.push(format!(
                         "ALTER TABLE {table} ADD CONSTRAINT {name} CHECK ({definition})"
@@ -746,7 +977,10 @@ fn build_statements(change: &TableDesignChange) -> Vec<String> {
     }
     // 12. Table comment. Some("") clears the comment; None = untouched.
     if let Some(comment) = change.set_comment.as_deref() {
-        stmts.push(format!("COMMENT ON TABLE {table} IS {}", quote_literal(comment)));
+        stmts.push(format!(
+            "COMMENT ON TABLE {table} IS {}",
+            quote_literal(comment)
+        ));
     }
     stmts
 }
@@ -789,11 +1023,7 @@ async fn foreign_keys_pinning_columns(
     if columns.is_empty() {
         return Ok(Vec::new());
     }
-    let relation = format!(
-        "{}.{}",
-        quote_identifier(schema),
-        quote_identifier(table)
-    );
+    let relation = format!("{}.{}", quote_identifier(schema), quote_identifier(table));
     // Map the target column names to attnums inside the table, then look for
     // FK constraints (either direction) whose key arrays overlap them.
     let name_params: Vec<String> = columns.to_vec();
@@ -838,17 +1068,10 @@ async fn foreign_keys_pinning_columns(
 /// Whether the table currently contains at least one row (warnings for
 /// destructive drops, D-B23-5).
 async fn table_has_data(client: &Client, schema: &str, table: &str) -> Result<bool, String> {
-    let relation = format!(
-        "{}.{}",
-        quote_identifier(schema),
-        quote_identifier(table)
-    );
+    let relation = format!("{}.{}", quote_identifier(schema), quote_identifier(table));
     let rows = timeout(
         QUERY_TIMEOUT,
-        client.query(
-            &format!("SELECT EXISTS (SELECT 1 FROM {relation})"),
-            &[],
-        ),
+        client.query(&format!("SELECT EXISTS (SELECT 1 FROM {relation})"), &[]),
     )
     .await
     .map_err(|_| "Catalog query timed out")?
@@ -870,7 +1093,8 @@ async fn db_level_checks(
     // FK itself is dropped in the same change (build order removes FKs first).
     if !change.drop_columns.is_empty() {
         let names: Vec<String> = change.drop_columns.iter().map(|c| c.name.clone()).collect();
-        let blockers = foreign_keys_pinning_columns(client, &change.schema, &change.table, &names).await?;
+        let blockers =
+            foreign_keys_pinning_columns(client, &change.schema, &change.table, &names).await?;
         let dropped: Vec<&str> = change
             .drop_foreign_keys
             .iter()
@@ -887,13 +1111,21 @@ async fn db_level_checks(
         }
     }
     // Primary-key removal with inbound FKs on those columns is rejected.
-    if change.set_primary_key.iter().all(|pk| pk.columns.is_empty()) {
+    if change
+        .set_primary_key
+        .iter()
+        .all(|pk| pk.columns.is_empty())
+    {
         let pk = current_primary_key(client, &change.schema, &change.table).await?;
         if let Some((_, pk_columns)) = pk {
             if !pk_columns.is_empty() {
-                let blockers =
-                    foreign_keys_pinning_columns(client, &change.schema, &change.table, &pk_columns)
-                        .await?;
+                let blockers = foreign_keys_pinning_columns(
+                    client,
+                    &change.schema,
+                    &change.table,
+                    &pk_columns,
+                )
+                .await?;
                 let dropped: Vec<&str> = change
                     .drop_foreign_keys
                     .iter()
@@ -911,7 +1143,9 @@ async fn db_level_checks(
         }
     }
     // Destructive drops on a table with data produce confirmation warnings.
-    if !change.drop_columns.is_empty() && table_has_data(client, &change.schema, &change.table).await? {
+    if !change.drop_columns.is_empty()
+        && table_has_data(client, &change.schema, &change.table).await?
+    {
         for column in &change.drop_columns {
             warnings.push(format!(
                 "The table contains data; dropping column {} will permanently remove its values",
@@ -946,8 +1180,12 @@ pub async fn postgres_table_design_load(
     .await
     .map_err(|_| "Catalog query timed out")?
     .map_err(|error| format!("Failed to load table metadata: {error}"))?;
-    let relation_oid: i64 = meta.try_get(0).map_err(|e| format!("Failed to decode table oid: {e}"))?;
-    let comment: Option<String> = meta.try_get(1).map_err(|e| format!("Failed to decode table comment: {e}"))?;
+    let relation_oid: i64 = meta
+        .try_get(0)
+        .map_err(|e| format!("Failed to decode table oid: {e}"))?;
+    let comment: Option<String> = meta
+        .try_get(1)
+        .map_err(|e| format!("Failed to decode table comment: {e}"))?;
 
     // Columns (attnum order) with PK membership resolved in one pass.
     let column_rows = timeout(
@@ -963,18 +1201,36 @@ pub async fn postgres_table_design_load(
     let mut columns = Vec::new();
     for row in &column_rows {
         columns.push(PostgresDesignColumn {
-            name: row.try_get(0).map_err(|e| format!("Failed to decode column: {e}"))?,
-            data_type: row.try_get(1).map_err(|e| format!("Failed to decode column type: {e}"))?,
-            nullable: row.try_get(2).map_err(|e| format!("Failed to decode nullability: {e}"))?,
-            default: row.try_get(3).map_err(|e| format!("Failed to decode default: {e}"))?,
-            comment: row.try_get(4).map_err(|e| format!("Failed to decode comment: {e}"))?,
-            ordinal: row.try_get(5).map_err(|e| format!("Failed to decode ordinal: {e}"))?,
-            primary_key: row.try_get(6).map_err(|e| format!("Failed to decode primary key: {e}"))?,
+            name: row
+                .try_get(0)
+                .map_err(|e| format!("Failed to decode column: {e}"))?,
+            data_type: row
+                .try_get(1)
+                .map_err(|e| format!("Failed to decode column type: {e}"))?,
+            nullable: row
+                .try_get(2)
+                .map_err(|e| format!("Failed to decode nullability: {e}"))?,
+            default: row
+                .try_get(3)
+                .map_err(|e| format!("Failed to decode default: {e}"))?,
+            comment: row
+                .try_get(4)
+                .map_err(|e| format!("Failed to decode comment: {e}"))?,
+            ordinal: row
+                .try_get(5)
+                .map_err(|e| format!("Failed to decode ordinal: {e}"))?,
+            primary_key: row
+                .try_get(6)
+                .map_err(|e| format!("Failed to decode primary key: {e}"))?,
         });
     }
 
-    let primary_key = current_primary_key(&client, &request.schema, &request.table).await?
-        .map(|(name, pk_columns)| PostgresDesignPrimaryKey { name, columns: pk_columns });
+    let primary_key = current_primary_key(&client, &request.schema, &request.table)
+        .await?
+        .map(|(name, pk_columns)| PostgresDesignPrimaryKey {
+            name,
+            columns: pk_columns,
+        });
 
     // Non-PK constraints (unique/check/exclusion) with covered column names.
     let constraint_rows = timeout(
@@ -990,10 +1246,18 @@ pub async fn postgres_table_design_load(
     let mut constraints = Vec::new();
     for row in &constraint_rows {
         constraints.push(PostgresDesignConstraint {
-            name: row.try_get(0).map_err(|e| format!("Failed to decode constraint: {e}"))?,
-            constraint_type: row.try_get(1).map_err(|e| format!("Failed to decode constraint type: {e}"))?,
-            definition: row.try_get(2).map_err(|e| format!("Failed to decode constraint def: {e}"))?,
-            columns: row.try_get(3).map_err(|e| format!("Failed to decode constraint columns: {e}"))?,
+            name: row
+                .try_get(0)
+                .map_err(|e| format!("Failed to decode constraint: {e}"))?,
+            constraint_type: row
+                .try_get(1)
+                .map_err(|e| format!("Failed to decode constraint type: {e}"))?,
+            definition: row
+                .try_get(2)
+                .map_err(|e| format!("Failed to decode constraint def: {e}"))?,
+            columns: row
+                .try_get(3)
+                .map_err(|e| format!("Failed to decode constraint columns: {e}"))?,
         });
     }
 
@@ -1011,10 +1275,18 @@ pub async fn postgres_table_design_load(
     let mut indexes = Vec::new();
     for row in &index_rows {
         indexes.push(PostgresDesignIndex {
-            name: row.try_get(0).map_err(|e| format!("Failed to decode index: {e}"))?,
-            unique: row.try_get(1).map_err(|e| format!("Failed to decode index uniqueness: {e}"))?,
-            method: row.try_get(2).map_err(|e| format!("Failed to decode index method: {e}"))?,
-            definition: row.try_get(3).map_err(|e| format!("Failed to decode index def: {e}"))?,
+            name: row
+                .try_get(0)
+                .map_err(|e| format!("Failed to decode index: {e}"))?,
+            unique: row
+                .try_get(1)
+                .map_err(|e| format!("Failed to decode index uniqueness: {e}"))?,
+            method: row
+                .try_get(2)
+                .map_err(|e| format!("Failed to decode index method: {e}"))?,
+            definition: row
+                .try_get(3)
+                .map_err(|e| format!("Failed to decode index def: {e}"))?,
             columns: row.try_get(4).unwrap_or_default(),
         });
     }
@@ -1032,14 +1304,24 @@ pub async fn postgres_table_design_load(
     .map_err(|error| format!("Failed to load foreign keys: {error}"))?;
     let mut foreign_keys = Vec::new();
     for row in &fk_rows {
-        let on_delete_code: i8 = row.try_get(5).map_err(|e| format!("Failed to decode FK action: {e}"))?;
-        let on_update_code: i8 = row.try_get(6).map_err(|e| format!("Failed to decode FK action: {e}"))?;
+        let on_delete_code: i8 = row
+            .try_get(5)
+            .map_err(|e| format!("Failed to decode FK action: {e}"))?;
+        let on_update_code: i8 = row
+            .try_get(6)
+            .map_err(|e| format!("Failed to decode FK action: {e}"))?;
         foreign_keys.push(PostgresDesignForeignKey {
-            name: row.try_get(0).map_err(|e| format!("Failed to decode foreign key: {e}"))?,
+            name: row
+                .try_get(0)
+                .map_err(|e| format!("Failed to decode foreign key: {e}"))?,
             columns: row.try_get(1).unwrap_or_default(),
             references: PostgresDesignForeignKeyReference {
-                schema: row.try_get(2).map_err(|e| format!("Failed to decode reference: {e}"))?,
-                table: row.try_get(3).map_err(|e| format!("Failed to decode reference: {e}"))?,
+                schema: row
+                    .try_get(2)
+                    .map_err(|e| format!("Failed to decode reference: {e}"))?,
+                table: row
+                    .try_get(3)
+                    .map_err(|e| format!("Failed to decode reference: {e}"))?,
                 columns: row.try_get(4).unwrap_or_default(),
             },
             on_delete: fk_action_name(on_delete_code).to_string(),
@@ -1144,14 +1426,26 @@ pub async fn postgres_table_design_apply(
                 )
                 .await;
             }
-        } else if change.set_primary_key.iter().all(|pk| pk.columns.is_empty()) {
+        } else if change
+            .set_primary_key
+            .iter()
+            .all(|pk| pk.columns.is_empty())
+        {
             // Dropping a PK that does not exist: nothing to do for the PK part.
             change.set_primary_key.clear();
         }
     }
 
     let stmts = build_statements(&change);
-    finish_apply(request.confirmed, client, state, request.connection_id, stmts, warnings).await
+    finish_apply(
+        request.confirmed,
+        client,
+        state,
+        request.connection_id,
+        stmts,
+        warnings,
+    )
+    .await
 }
 
 fn change_is_empty(change: &TableDesignChange) -> bool {
@@ -1289,9 +1583,7 @@ pub async fn postgres_view_save(
     // Exactly one statement (semicolons inside strings/comments/dollar-quotes
     // are tolerated — same lexer as postgres.rs `single_statement`).
     let single = crate::postgres::single_statement(definition)?;
-    let head = single
-        .trim_start()
-        .to_ascii_uppercase();
+    let head = single.trim_start().to_ascii_uppercase();
     if !head.starts_with("SELECT") && !head.starts_with("WITH") {
         return Err("View definition must be a SELECT or WITH query".into());
     }
@@ -1397,14 +1689,59 @@ mod tests {
             comment: Some("quantity".into()),
         });
         let stmts = build_statements(&change);
-        assert_eq!(stmts[0], r#"ALTER TABLE "public"."orders" ADD COLUMN "qty" integer DEFAULT 1 NOT NULL"#);
-        assert_eq!(stmts[1], r#"COMMENT ON COLUMN "public"."orders"."qty" IS 'quantity'"#);
+        assert_eq!(
+            stmts[0],
+            r#"ALTER TABLE "public"."orders" ADD COLUMN "qty" integer DEFAULT 1 NOT NULL"#
+        );
+        assert_eq!(
+            stmts[1],
+            r#"COMMENT ON COLUMN "public"."orders"."qty" IS 'quantity'"#
+        );
+    }
+
+    #[test]
+    fn create_table_includes_designer_objects_and_comments() {
+        let mut change = change("public", "new_orders");
+        change.create = true;
+        change.add_columns.push(ColumnDef {
+            name: "id".into(),
+            data_type: "integer".into(),
+            nullable: false,
+            default: Some("1".into()),
+            comment: Some("identifier".into()),
+        });
+        change.set_primary_key.push(SetPrimaryKey {
+            name: None,
+            columns: vec!["id".into()],
+        });
+        change.add_indexes.push(AddIndex {
+            name: "new_orders_id_idx".into(),
+            unique: true,
+            method: "btree".into(),
+            columns: vec![IndexColumn {
+                name: "id".into(),
+                desc: true,
+            }],
+        });
+        change.set_comment = Some("new order records".into());
+
+        assert_eq!(
+            build_statements(&change),
+            vec![
+                r#"CREATE TABLE "public"."new_orders" ("id" integer DEFAULT 1 NOT NULL, PRIMARY KEY ("id"))"#,
+                r#"CREATE UNIQUE INDEX "public"."new_orders_id_idx" ON "public"."new_orders" USING btree ("id" DESC)"#,
+                r#"COMMENT ON COLUMN "public"."new_orders"."id" IS 'identifier'"#,
+                r#"COMMENT ON TABLE "public"."new_orders" IS 'new order records'"#,
+            ]
+        );
     }
 
     #[test]
     fn drop_column_builds_alter_drop_column() {
         let mut change = change("public", "orders");
-        change.drop_columns.push(DropColumn { name: "score".into() });
+        change.drop_columns.push(DropColumn {
+            name: "score".into(),
+        });
         let stmts = build_statements(&change);
         assert_eq!(
             stmts,
@@ -1501,9 +1838,14 @@ mod tests {
             name: "idx_orders_score".into(),
             unique: false,
             method: "btree".into(),
-            columns: vec![IndexColumn { name: "score".into(), desc: true }],
+            columns: vec![IndexColumn {
+                name: "score".into(),
+                desc: true,
+            }],
         });
-        change.drop_indexes.push(DropNamed { name: "idx_orders_name".into() });
+        change.drop_indexes.push(DropNamed {
+            name: "idx_orders_name".into(),
+        });
         let stmts = build_statements(&change);
         assert_eq!(stmts[0], r#"DROP INDEX "public"."idx_orders_name""#);
         assert_eq!(
@@ -1529,7 +1871,9 @@ mod tests {
         let stmts = build_statements(&change);
         assert_eq!(
             stmts,
-            vec![r#"ALTER TABLE "public"."orders" ADD CONSTRAINT "fk_orders_customer" FOREIGN KEY ("customer_id") REFERENCES "public"."customers" ("id") ON DELETE CASCADE"#]
+            vec![
+                r#"ALTER TABLE "public"."orders" ADD CONSTRAINT "fk_orders_customer" FOREIGN KEY ("customer_id") REFERENCES "public"."customers" ("id") ON DELETE CASCADE"#
+            ]
         );
     }
 
@@ -1545,14 +1889,18 @@ mod tests {
         let stmts = build_statements(&change);
         assert_eq!(
             stmts,
-            vec![r#"ALTER TABLE "public"."orders" ADD CONSTRAINT "orders_score_check" CHECK (score > 0)"#]
+            vec![
+                r#"ALTER TABLE "public"."orders" ADD CONSTRAINT "orders_score_check" CHECK (score > 0)"#
+            ]
         );
     }
 
     #[test]
     fn drop_order_fk_before_columns_before_adds() {
         let mut change = change("public", "orders");
-        change.drop_foreign_keys.push(DropNamed { name: "fk_a".into() });
+        change.drop_foreign_keys.push(DropNamed {
+            name: "fk_a".into(),
+        });
         change.drop_columns.push(DropColumn { name: "old".into() });
         change.add_columns.push(column("new", "text", true));
         change.add_foreign_keys.push(ForeignKeyDef {
@@ -1576,7 +1924,9 @@ mod tests {
     #[test]
     fn identifier_injection_is_escaped() {
         let mut change = change("public", "orders");
-        change.add_columns.push(column("x; DROP TABLE users; --", "text", true));
+        change
+            .add_columns
+            .push(column("x; DROP TABLE users; --", "text", true));
         let stmts = build_statements(&change);
         assert_eq!(
             stmts,
@@ -1589,9 +1939,14 @@ mod tests {
     #[test]
     fn schema_with_quote_is_escaped() {
         let mut change = change("od\"d", "orders");
-        change.drop_columns.push(DropColumn { name: "score".into() });
+        change.drop_columns.push(DropColumn {
+            name: "score".into(),
+        });
         let stmts = build_statements(&change);
-        assert_eq!(stmts[0], r#"ALTER TABLE "od""d"."orders" DROP COLUMN "score""#);
+        assert_eq!(
+            stmts[0],
+            r#"ALTER TABLE "od""d"."orders" DROP COLUMN "score""#
+        );
     }
 
     #[test]
@@ -1613,6 +1968,23 @@ mod tests {
     }
 
     #[test]
+    fn validate_create_requires_columns_and_rejects_alter_operations() {
+        let mut empty = change("public", "new_table");
+        empty.create = true;
+        assert!(validate_change(&empty)
+            .unwrap_err()
+            .contains("at least one column"));
+
+        let mut invalid = change("public", "new_table");
+        invalid.create = true;
+        invalid.add_columns.push(column("id", "integer", false));
+        invalid.drop_columns.push(DropColumn { name: "old".into() });
+        assert!(validate_change(&invalid)
+            .unwrap_err()
+            .contains("cannot include"));
+    }
+
+    #[test]
     fn validate_rejects_duplicate_column_names() {
         let mut change = change("public", "orders");
         change.add_columns.push(column("notes", "text", true));
@@ -1624,7 +1996,9 @@ mod tests {
     #[test]
     fn validate_rejects_injected_data_type() {
         let mut change = change("public", "orders");
-        change.add_columns.push(column("notes", "text; DROP TABLE x", true));
+        change
+            .add_columns
+            .push(column("notes", "text; DROP TABLE x", true));
         assert!(validate_change(&change).is_err());
     }
 
@@ -1673,7 +2047,10 @@ mod tests {
             name: "idx".into(),
             unique: false,
             method: "nope".into(),
-            columns: vec![IndexColumn { name: "score".into(), desc: false }],
+            columns: vec![IndexColumn {
+                name: "score".into(),
+                desc: false,
+            }],
         });
         assert!(validate_change(&change).is_err());
     }

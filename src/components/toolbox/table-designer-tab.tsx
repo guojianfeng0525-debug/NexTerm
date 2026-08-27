@@ -48,6 +48,9 @@ export interface TableDesignerTabProps {
   connectionId: string;
   schema: string;
   table: string;
+  /** True = new-table mode (CREATE TABLE): no load, table name editable,
+   *  change carries create:true. */
+  createMode?: boolean;
   onLoad: (
     connectionId: string,
     schema: string,
@@ -58,6 +61,8 @@ export interface TableDesignerTabProps {
     change: TableDesignChange,
     confirmed: boolean,
   ) => Promise<{ ddl: string; warnings: string[]; applied: boolean }>;
+  /** Promotes a successfully-created table to normal designer mode. */
+  onCreated?: (table: string) => void;
   onRefresh: () => void;
   readOnly: boolean;
 }
@@ -66,7 +71,7 @@ export interface TableDesignerTabProps {
 
 export function TableDesignerTab(props: TableDesignerTabProps) {
   const { t } = useTranslation();
-  const { connectionId, schema, table, onLoad, onApply, onRefresh, readOnly } =
+  const { connectionId, schema, table, createMode = false, onLoad, onApply, onCreated, onRefresh, readOnly } =
     props;
 
   const [design, setDesign] = useState<TableDesign | null>(null);
@@ -77,6 +82,7 @@ export function TableDesignerTab(props: TableDesignerTabProps) {
   const [warnings, setWarnings] = useState<string[]>([]);
   const [applying, setApplying] = useState(false);
   const [showConfirm, setShowConfirm] = useState(false);
+  const [tableName, setTableName] = useState(table);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // ── Load ─────────────────────────────────────────────────────────────────
@@ -85,7 +91,8 @@ export function TableDesignerTab(props: TableDesignerTabProps) {
     setLoading(true);
     setError(null);
     try {
-      const result = await onLoad(connectionId, schema, table);
+      const targetTable = createMode ? tableName.trim() : table;
+      const result = await onLoad(connectionId, schema, targetTable);
       setDesign(result);
       setDraft(draftFromDesign(result));
       setDdlPreview(null);
@@ -95,18 +102,45 @@ export function TableDesignerTab(props: TableDesignerTabProps) {
     } finally {
       setLoading(false);
     }
-  }, [connectionId, schema, table, onLoad]);
+  }, [connectionId, schema, table, tableName, createMode, onLoad]);
 
   useEffect(() => {
+    if (createMode) {
+      const empty: TableDesign = {
+        schema,
+        table: tableName,
+        columns: [],
+        primaryKey: null,
+        constraints: [],
+        indexes: [],
+        foreignKeys: [],
+        comment: null,
+        hasData: false,
+      };
+      setDesign(empty);
+      setDraft(draftFromDesign(empty));
+      setDdlPreview(null);
+      setWarnings([]);
+      setLoading(false);
+      setError(null);
+      return;
+    }
     void loadDesign();
-  }, [loadDesign]);
+    // createMode intentionally seeds once; typing the table name must not
+    // reset the draft (columns the user added would be lost).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [createMode, schema]);
 
   // ── Diff (local, pure) ───────────────────────────────────────────────────
 
   const change = useMemo(() => {
     if (!design || !draft) return null;
-    return diffTableDesign(design, draft);
-  }, [design, draft]);
+    const diff = diffTableDesign(design, draft);
+    if (createMode) {
+      return { ...diff, create: true, table: tableName.trim() };
+    }
+    return diff;
+  }, [design, draft, createMode, tableName]);
 
   const hasChanges = change ? !isChangeEmpty(change) : false;
 
@@ -146,6 +180,7 @@ export function TableDesignerTab(props: TableDesignerTabProps) {
       if (result.applied) {
         toast.success(t("toolbox.postgres.designer.applied"));
         await loadDesign();
+        if (createMode) onCreated?.(tableName.trim());
         onRefresh();
       }
     } catch (e) {
@@ -155,16 +190,20 @@ export function TableDesignerTab(props: TableDesignerTabProps) {
     } finally {
       setApplying(false);
     }
-  }, [change, hasChanges, connectionId, onApply, t, loadDesign, onRefresh]);
+  }, [change, hasChanges, connectionId, onApply, t, loadDesign, createMode, onCreated, tableName, onRefresh]);
 
   const handleSave = useCallback(() => {
     if (!change || !hasChanges || readOnly) return;
+    if (createMode && !tableName.trim()) {
+      toast.error(t("toolbox.postgres.newTableNameRequired"));
+      return;
+    }
     if (warnings.length > 0) {
       setShowConfirm(true);
       return;
     }
     void doApply();
-  }, [change, hasChanges, readOnly, warnings, doApply]);
+  }, [change, hasChanges, readOnly, warnings, doApply, createMode, tableName, t]);
 
   const handleRevert = useCallback(() => {
     if (design) {
@@ -298,8 +337,21 @@ export function TableDesignerTab(props: TableDesignerTabProps) {
       {/* Toolbar */}
       <div className="flex h-9 shrink-0 items-center gap-1 border-b bg-muted/10 px-2">
         <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-          {schema}.{table}
+          {schema}.
         </span>
+        {createMode ? (
+          <Input
+            className="h-6 w-44 rounded-sm px-2 font-mono text-[12px]"
+            placeholder={t("toolbox.postgres.newTableName")}
+            value={tableName}
+            onChange={(e) => setTableName(e.target.value)}
+            data-testid="designer-table-name"
+          />
+        ) : (
+          <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+            {table}
+          </span>
+        )}
         <div className="flex-1" />
         <Button
           variant="ghost"
@@ -412,6 +464,7 @@ export function TableDesignerTab(props: TableDesignerTabProps) {
                           onChange={(e) => updateColumn(i, { name: e.target.value })}
                           disabled={readOnly}
                           className="h-7 border-0 bg-transparent px-1 text-[12px] focus-visible:ring-1"
+                          data-testid={`designer-column-name-${i}`}
                         />
                       </td>
                       <td className="px-2 py-1">
@@ -420,6 +473,7 @@ export function TableDesignerTab(props: TableDesignerTabProps) {
                           onChange={(e) => updateColumn(i, { dataType: e.target.value })}
                           disabled={readOnly}
                           className="h-7 border-0 bg-transparent px-1 text-[12px] focus-visible:ring-1"
+                          data-testid={`designer-column-type-${i}`}
                         />
                       </td>
                       <td className="px-2 py-1 text-center">

@@ -1444,7 +1444,10 @@
       },
       "group": "分组",
       "groupPlaceholder": "例如：prod、dev…",
-      "accentColor": "强调色"
+      "accentColor": "强调色",
+      "newTable": "新建表",
+      "newTableName": "表名",
+      "newTableNameRequired": "请输入表名"
     },
     "sqlite": {
       "title": "SQLite（实验性）",

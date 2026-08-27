@@ -183,6 +183,8 @@ type WorkspaceTab = {
   objectRole?: "table" | "view" | "materializedView";
   /** B21 object viewer payload (function/sequence/index/constraint/trigger/column). */
   objectReference?: PostgresObjectReference;
+  /** True = new-table designer (CREATE TABLE, no load). */
+  createMode?: boolean;
   sql: string;
   result: DatabaseResult | null;
   baseline?: DatabaseTabularResult;
@@ -763,13 +765,16 @@ export function ToolPostgres() {
     );
     setActiveTab(next.id);
   };
-  const openDesigner = (schema: string, table: string) => {
+  const openDesigner = (schema: string, table: string, createMode = false) => {
     openTab({
-      id: `designer:${schema}.${table}`,
+      id: createMode ? `designer:new:${schema}:${crypto.randomUUID()}` : `designer:${schema}.${table}`,
       type: "designer",
-      title: `${table} (Design)`,
+      title: createMode
+        ? t("toolbox.postgres.newTable")
+        : `${table} (Design)`,
       object: { schema, name: table },
       objectRole: "table",
+      createMode,
       sql: "",
       result: null,
     });
@@ -2109,6 +2114,16 @@ export function ToolPostgres() {
                   )}
                   <ContextMenuItem disabled={!connected} onSelect={() => void refreshNavigator()}>{t("toolbox.postgres.refresh")}</ContextMenuItem>
                   {!activeReference && <ContextMenuItem disabled={!connected} onSelect={createQuery}>{t("toolbox.postgres.newQuery")}</ContextMenuItem>}
+                  {node.kind === "group" && node.reference.path.at(-1) === "tables" && (
+                      <ContextMenuItem
+                        disabled={!connected}
+                        onSelect={() => {
+                          const schemaName = node.reference.path[2] ?? "public";
+                          openDesigner(schemaName, "", true);
+                        }}
+                        data-testid="navigator-new-table"
+                      >{t("toolbox.postgres.newTable")}</ContextMenuItem>
+                    )}
                   {activeReference && activeReference.objectKind !== "column" && (
                     <>
                       <ContextMenuSeparator />
@@ -2242,6 +2257,7 @@ export function ToolPostgres() {
                     connectionId={draft.id}
                     schema={tab.object.schema}
                     table={tab.object.name}
+                    createMode={tab.createMode}
                     onLoad={async (connId: string, schema: string, table: string) =>
                       invoke<TableDesign>("postgres_table_design_load", {
                         request: { connectionId: connId, schema, table },
@@ -2253,6 +2269,20 @@ export function ToolPostgres() {
                         { request: { connectionId: connId, change, confirmed } },
                       )
                     }
+                    onCreated={(createdTable: string) => {
+                      setTabs((current) =>
+                        current.map((item) =>
+                          item.id === tab.id
+                            ? {
+                                ...item,
+                                title: `${createdTable} (Design)`,
+                                object: { schema: tab.object!.schema, name: createdTable },
+                                createMode: false,
+                              }
+                            : item,
+                        ),
+                      );
+                    }}
                     onRefresh={() => void refreshNavigator()}
                     readOnly={postgresConfig.readOnly}
                   />

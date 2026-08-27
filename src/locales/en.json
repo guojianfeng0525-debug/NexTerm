@@ -1444,7 +1444,10 @@
       },
       "group": "Group",
       "groupPlaceholder": "e.g. prod, dev…",
-      "accentColor": "Accent Color"
+      "accentColor": "Accent Color",
+      "newTable": "New Table",
+      "newTableName": "table name",
+      "newTableNameRequired": "Table name is required"
     },
     "sqlite": {
       "title": "SQLite (Experimental)",

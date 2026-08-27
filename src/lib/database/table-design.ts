@@ -139,6 +139,8 @@ export interface SetPrimaryKeyChange {
 export interface TableDesignChange {
   readonly schema: string;
   readonly table: string;
+  /** True = CREATE TABLE (new-table designer mode). */
+  readonly create: boolean;
   readonly addColumns: ColumnDef[];
   readonly dropColumns: Array<{ name: string }>;
   readonly modifyColumns: ModifyColumnChange[];
@@ -192,6 +194,7 @@ export function diffTableDesign(
   const change: TableDesignChange = {
     schema: baseline.schema,
     table: baseline.table,
+    create: false,
     addColumns: [],
     dropColumns: [],
     modifyColumns: [],

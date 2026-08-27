@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 **Patch — 用户反馈三 bug 修复 + UI 布局调整（真实应用 E2E 验证）**。
 
+### Added (PostgreSQL)
+
+- **新建表设计器**：在 PostgreSQL 导航器的“表”分组右键即可新建表；支持表名、列、主键、约束、索引、外键及表/列注释，并在保存成功后自动切换为常规表设计模式以便继续编辑。
+- **CREATE TABLE 安全校验**：服务端拒绝空表和混入 ALTER/DROP 操作的创建请求；CREATE DDL 完整生成索引、排除约束及注释，所有操作保持单事务原子性。
+- **桌面 E2E 覆盖**：新增“右键新建表 → 填写列 → DDL 预览 → 保存 → 导航器出现新表 → 清理”的端到端场景，并为设计器列名/类型提供稳定测试标识。
+
 ### Changed (UI layout)
 - **DDL 预览移到界面右侧面板**：双击导航器表/视图/物化视图时，右侧竖栏显示格式化 DDL（不再单击触发、不再占查询页顶部）。
 - **双击打开表 = 数据网格全屏**：table 浏览 tab 不再有空白占位/分隔条，结果网格占满整个 tab；SQL 执行面板仅查询（query）页保留。
