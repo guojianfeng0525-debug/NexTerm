@@ -1,7 +1,7 @@
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import type { ReactNode } from "react";
-import { useEffect, useMemo, useState } from "react";
+import type { ReactNode, RefObject } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import {
   ContextMenu,
   ContextMenuContent,
@@ -9,9 +9,11 @@ import {
 } from "@/components/ui/context-menu";
 import type {
   DatabaseResult,
+  DatabaseResultColumn,
   GridLayoutState,
 } from "@/lib/database/result-types";
 import type { FindCellMatch } from "@/lib/database/find-matches";
+import { useRowWindow } from "@/lib/database/use-row-window";
 
 /** Default visual width used when computing frozen-column offsets for a
  * column that has no explicit stored width. */
@@ -103,6 +105,254 @@ interface DatabaseResultPaneProps {
   readonly isInsertCellModified?: (insertIndex: number, columnIndex: number) => boolean;
 }
 
+/** Latest-callback handle passed to memoized rows through a stable ref so the
+ * rows can re-render only when their data actually changes while always
+ * calling the freshest parent callbacks. */
+interface RowHandlers {
+  readonly labels: DatabaseResultPaneLabels;
+  readonly renderContextMenu?: DatabaseResultPaneProps["renderContextMenu"];
+  readonly onEditCell?: DatabaseResultPaneProps["onEditCell"];
+  readonly isCellModified?: DatabaseResultPaneProps["isCellModified"];
+  readonly onEditInsertCell?: DatabaseResultPaneProps["onEditInsertCell"];
+  readonly isInsertCellModified?: DatabaseResultPaneProps["isInsertCellModified"];
+  readonly editable: boolean;
+  readonly onEditRequest: (
+    source: "row" | "insert",
+    row: number,
+    column: number,
+  ) => void;
+  readonly editingReset: () => void;
+}
+
+interface CommittedRowProps {
+  readonly row: readonly (string | null)[];
+  readonly index: number;
+  readonly isDeleted: boolean;
+  readonly rowHeight: number | undefined;
+  readonly frozen: boolean;
+  readonly cellStyles: readonly (React.CSSProperties | undefined)[];
+  readonly columns: readonly DatabaseResultColumn[];
+  readonly pkKeySet: ReadonlySet<string>;
+  readonly findMatchKeys: ReadonlySet<string>;
+  readonly currentFindKey: string | null;
+  readonly paginationOffset: number;
+  readonly editing: {
+    source: "row" | "insert";
+    row: number;
+    column: number;
+  } | null;
+  readonly handlersRef: RefObject<RowHandlers>;
+}
+
+/** One committed data row. memo() lets unrelated parent re-renders skip every
+ * untouched row (row arrays keep their identity when a sibling is edited). */
+const CommittedRow = memo(function CommittedRow({
+  row,
+  index,
+  isDeleted,
+  rowHeight,
+  frozen,
+  cellStyles,
+  columns,
+  pkKeySet,
+  findMatchKeys,
+  currentFindKey,
+  paginationOffset,
+  editing,
+  handlersRef,
+}: CommittedRowProps) {
+  const handlers = handlersRef.current;
+  return (
+    <tr
+      style={rowHeight ? { height: `${rowHeight}px` } : undefined}
+      className={`hover:bg-primary/5 ${isDeleted ? "bg-red-500/5 opacity-70" : ""}`}
+    >
+      <td
+        className="border-b border-r px-2 text-right text-muted-foreground"
+        style={
+          frozen
+            ? { position: "sticky", left: 0, zIndex: 4, background: "inherit" }
+            : undefined
+        }
+      >
+        {paginationOffset + index + 1}
+      </td>
+      {/* eslint-disable-next-line react-hooks/refs -- deliberate: read the freshest parent handlers */}
+      {row.map((cell, cellIndex) => {
+        const cellKey = `${index}:${cellIndex}`;
+        const isFindMatch = findMatchKeys.has(cellKey);
+        const isFindCurrent = currentFindKey === cellKey;
+        return (
+          <td
+            key={cellIndex}
+            style={cellStyles[cellIndex]}
+            data-find-current={isFindCurrent ? "true" : undefined}
+            className={`whitespace-nowrap border-b border-r px-2 py-1 select-text ${handlers.isCellModified?.(index, cellIndex) ? "bg-amber-500/10" : ""} ${isFindMatch ? "bg-yellow-200/40" : ""} ${isFindCurrent ? "ring-2 ring-inset ring-yellow-500" : ""}`}
+          >
+            <ContextMenu>
+              <ContextMenuTrigger asChild>
+                <div className="min-w-24">
+                  {editing?.source === "row" &&
+                  editing.row === index &&
+                  editing.column === cellIndex ? (
+                    <input
+                      autoFocus
+                      className="w-full min-w-24 bg-transparent outline-none"
+                      defaultValue={cell ?? ""}
+                      onBlur={(event) => {
+                        handlers.onEditCell?.(index, cellIndex, event.target.value);
+                        handlersRef.current.editingReset();
+                      }}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter") event.currentTarget.blur();
+                        if (event.key === "Escape") handlersRef.current.editingReset();
+                      }}
+                    />
+                  ) : (
+                    <button
+                      type="button"
+                      className="w-full text-left"
+                      disabled={
+                        !handlers.onEditCell ||
+                        !handlers.editable ||
+                        pkKeySet.has(columns[cellIndex]?.key ?? "")
+                      }
+                      onDoubleClick={() =>
+                        handlers.onEditRequest("row", index, cellIndex)
+                      }
+                    >
+                      {cell ?? (
+                        <span className="text-muted-foreground">{handlers.labels.null}</span>
+                      )}
+                    </button>
+                  )}
+                </div>
+              </ContextMenuTrigger>
+              {handlers.renderContextMenu && (
+                <ContextMenuContent data-testid="database-result-context-menu">
+                  {handlers.renderContextMenu(
+                    cell,
+                    row,
+                    columns[cellIndex]?.label ?? "",
+                    index,
+                    cellIndex,
+                    "row",
+                  )}
+                </ContextMenuContent>
+              )}
+            </ContextMenu>
+          </td>
+        );
+      })}
+    </tr>
+  );
+});
+
+interface InsertRowProps {
+  readonly id: string;
+  readonly values: readonly (string | null)[];
+  readonly insertIndex: number;
+  readonly rowHeight: number | undefined;
+  readonly frozen: boolean;
+  readonly cellStyles: readonly (React.CSSProperties | undefined)[];
+  readonly columns: readonly DatabaseResultColumn[];
+  readonly editing: {
+    source: "row" | "insert";
+    row: number;
+    column: number;
+  } | null;
+  readonly handlersRef: RefObject<RowHandlers>;
+}
+
+/** One staged-INSERT row rendered below the committed rows. */
+const InsertRow = memo(function InsertRow({
+  id,
+  values,
+  insertIndex,
+  rowHeight,
+  frozen,
+  cellStyles,
+  columns,
+  editing,
+  handlersRef,
+}: InsertRowProps) {
+  const handlers = handlersRef.current;
+  return (
+    <tr
+      style={rowHeight ? { height: `${rowHeight}px` } : undefined}
+      className="bg-emerald-500/5 hover:bg-primary/5"
+    >
+      <td
+        className="border-b border-r px-2 text-right text-emerald-600"
+        style={
+          frozen
+            ? { position: "sticky", left: 0, zIndex: 4, background: "inherit" }
+            : undefined
+        }
+      >
+        +
+      </td>
+      {/* eslint-disable-next-line react-hooks/refs -- deliberate: read the freshest parent handlers */}
+      {values.map((cell, cellIndex) => (
+        <td
+          key={`${id}:${cellIndex}`}
+          style={cellStyles[cellIndex]}
+          className={`whitespace-nowrap border-b border-r px-2 py-1 select-text ${handlers.isInsertCellModified?.(insertIndex, cellIndex) ? "bg-amber-500/10" : ""}`}
+        >
+          <ContextMenu>
+            <ContextMenuTrigger asChild>
+              <div className="min-w-24">
+                {editing?.source === "insert" &&
+                editing.row === insertIndex &&
+                editing.column === cellIndex ? (
+                  <input
+                    autoFocus
+                    className="w-full min-w-24 bg-transparent outline-none"
+                    defaultValue={cell ?? ""}
+                    onBlur={(event) => {
+                      handlers.onEditInsertCell?.(insertIndex, cellIndex, event.target.value);
+                      handlersRef.current.editingReset();
+                    }}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") event.currentTarget.blur();
+                      if (event.key === "Escape") handlersRef.current.editingReset();
+                    }}
+                  />
+                ) : (
+                  <button
+                    type="button"
+                    className="w-full text-left"
+                    disabled={!handlers.onEditInsertCell}
+                    onDoubleClick={() =>
+                      handlers.onEditRequest("insert", insertIndex, cellIndex)
+                    }
+                  >
+                    {cell ?? (
+                      <span className="text-muted-foreground">{handlers.labels.null}</span>
+                    )}
+                  </button>
+                )}
+              </div>
+            </ContextMenuTrigger>
+            {handlers.renderContextMenu && (
+              <ContextMenuContent data-testid="database-result-context-menu">
+                {handlers.renderContextMenu(
+                  cell,
+                  values,
+                  columns[cellIndex]?.label ?? "",
+                  insertIndex,
+                  cellIndex,
+                  "insert",
+                )}
+              </ContextMenuContent>
+            )}
+          </ContextMenu>
+        </td>
+      ))}
+    </tr>
+  );
+});
+
 export function DatabaseResultPane({
   result,
   height,
@@ -143,6 +393,12 @@ export function DatabaseResultPane({
   const tabularResult = result?.kind === "tabular" ? result : null;
   const commandTags = result?.kind === "empty" ? [] : result?.commandTags ?? [];
   const pagination = tabularResult?.pagination;
+  // Effective row height used both by the grid and the windowing math.
+  const effectiveRowHeight = layout?.rowHeight ?? 24;
+  // The scroll container (the <section>) that owns the grid viewport.
+  const scrollContainerRef = useRef<HTMLElement | null>(null);
+  const totalRows = (tabularResult?.rows.length ?? 0) + pendingInsertRows.length;
+  const rowWindow = useRowWindow(scrollContainerRef, totalRows, effectiveRowHeight);
 
   const columnWidth = (columnIndex: number) =>
     layout?.widths[tabularResult?.columns[columnIndex]?.key ?? ""];
@@ -159,18 +415,34 @@ export function DatabaseResultPane({
       offset += columnWidth(index) ?? DEFAULT_COLUMN_WIDTH;
     }
   }
-  const cellStyle = (columnIndex: number) => {
-    const width = columnWidth(columnIndex);
-    const sticky =
-      frozenCount > 0 && columnIndex < frozenCount
-        ? ({
-            position: "sticky",
-            left: frozenOffsets[columnIndex] ?? ROW_GUTTER_WIDTH,
-            zIndex: 5,
-          } as const)
-        : undefined;
-    return { width: width ? `${width}px` : undefined, ...sticky };
-  };
+  // Column styles (width + frozen sticky offset) are computed once per column
+  // per layout change — the grid calls this for EVERY rendered cell, so
+  // caching avoids repeating the offset loop per cell (perf: wide/large
+  // tables, e.g. 100 rows × many columns).
+  const columnStyles = useMemo(() => {
+    if (!tabularResult) return [];
+    return tabularResult.columns.map((column, columnIndex) => {
+      const width = layout?.widths[column.key ?? ""];
+      const sticky =
+        frozenCount > 0 && columnIndex < frozenCount
+          ? ({
+              position: "sticky",
+              left: frozenOffsets[columnIndex] ?? ROW_GUTTER_WIDTH,
+              zIndex: 5,
+            } as const)
+          : undefined;
+      return { width: width ? `${width}px` : undefined, ...sticky };
+    });
+    // frozenCount/frozenOffsets derive from tabularResult/layout; keep the
+    // memo keyed on the two stable references.
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- see above
+  }, [tabularResult, layout]);
+  /** Primary-key column keys as a Set for O(1) lookups per cell. */
+  const pkKeySet = useMemo(
+    () => new Set(tabularResult?.editability.primaryKeyColumnKeys ?? []),
+    [tabularResult],
+  );
+  const cellStyle = (columnIndex: number) => columnStyles[columnIndex] ?? undefined;
 
   const startResize = (
     event: React.PointerEvent,
@@ -202,17 +474,54 @@ export function DatabaseResultPane({
       ? `${find.matches[find.current].row}:${find.matches[find.current].column}`
       : null;
 
-  // Scroll the active match into view (B-2).
+  // Stable handle for memoized rows: .current is refreshed every render so rows
+  // skip re-rendering while always calling the freshest callbacks.
+  const rowHandlersRef = useRef<RowHandlers>({
+    labels,
+    editable: tabularResult?.editability.editable ?? false,
+    onEditRequest: () => undefined,
+    editingReset: () => undefined,
+  });
+  // eslint-disable-next-line react-hooks/refs -- deliberate latest-callback ref refresh during render
+  rowHandlersRef.current = {
+    labels,
+    renderContextMenu,
+    onEditCell,
+    isCellModified,
+    onEditInsertCell,
+    isInsertCellModified,
+    editable: tabularResult?.editability.editable ?? false,
+    onEditRequest: (source, row, column) => setEditing({ source, row, column }),
+    editingReset: () => setEditing(null),
+  };
+  /** O(1) membership for rows staged for DELETE. */
+  const deletedRowSet = useMemo(() => new Set(deletedRowIndexes), [deletedRowIndexes]);
+
+  // Scroll the active match into view (B-2). Under windowing the target row may
+  // not be mounted yet, so scroll the container by pixel first; once the window
+  // has mounted it, the cell fine-tunes the exact (incl. horizontal) alignment.
   useEffect(() => {
-    if (!find?.open || !currentFindKey) return;
-    const cell = document.querySelector<HTMLElement>(
-      `[data-find-current="true"]`,
-    );
-    cell?.scrollIntoView({ block: "center", inline: "nearest" });
-  }, [find?.open, currentFindKey]);
+    if (!find?.open || !currentFindKey || !find.matches[find.current]) return;
+    const container = scrollContainerRef.current;
+    if (!container) return;
+    if (!rowWindow.enabled) {
+      // Small grids: the target row is always mounted — keep the original
+      // scroll-into-view behavior (vertical + horizontal).
+      const cell = document.querySelector<HTMLElement>(`[data-find-current="true"]`);
+      cell?.scrollIntoView({ block: "center", inline: "nearest" });
+      return;
+    }
+    container.scrollTop = find.matches[find.current].row * effectiveRowHeight;
+    requestAnimationFrame(() => {
+      const cell = document.querySelector<HTMLElement>(`[data-find-current="true"]`);
+      cell?.scrollIntoView({ block: "nearest", inline: "nearest" });
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- matched row is captured via currentFindKey; `find` is an always-fresh inline object
+  }, [find?.open, currentFindKey, effectiveRowHeight, rowWindow.enabled]);
 
   return (
     <section
+      ref={scrollContainerRef}
       className={
         fillHeight
           ? "min-h-0 flex-1 overflow-auto border-t"
@@ -370,186 +679,103 @@ export function DatabaseResultPane({
               </tr>
             </thead>
             <tbody onPointerMove={onPointerMove} onPointerUp={endResize}>
-              {tabularResult.rows.map((row, index) => {
-                const isDeleted = deletedRowIndexes.includes(index);
-                const rowStyle = layout?.rowHeight
-                  ? { height: `${layout.rowHeight}px` }
-                  : undefined;
-                return (
-                  <tr
-                    key={pagination ? pagination.offset + index : index}
-                    style={rowStyle}
-                    className={`hover:bg-primary/5 ${isDeleted ? "bg-red-500/5 opacity-70" : ""}`}
-                  >
-                    <td
-                      className="border-b border-r px-2 text-right text-muted-foreground"
-                      style={
-                        layout?.frozenCount
-                          ? { position: "sticky", left: 0, zIndex: 4, background: "inherit" }
-                          : undefined
-                      }
-                    >
-                      {(pagination?.offset ?? 0) + index + 1}
-                    </td>
-                    {row.map((cell, cellIndex) => {
-                      const cellKey = `${index}:${cellIndex}`;
-                      const isFindMatch = findMatchKeys.has(cellKey);
-                      const isFindCurrent = currentFindKey === cellKey;
-                      return (
+              {(() => {
+                const committedCount = tabularResult.rows.length;
+                // Keep the row being edited mounted even if the scroll window
+                // would otherwise unload it (unmounting the input commits it).
+                const editingGlobal = editing
+                  ? editing.source === "row"
+                    ? editing.row
+                    : committedCount + editing.row
+                  : null;
+                let start = rowWindow.start;
+                let end = rowWindow.end;
+                if (rowWindow.enabled && editingGlobal != null) {
+                  start = Math.min(start, editingGlobal);
+                  end = Math.max(end, editingGlobal + 1);
+                }
+                const windowedRows: React.ReactNode[] = [];
+                if (rowWindow.enabled && start > 0) {
+                  windowedRows.push(
+                    <tr key="spacer-top" aria-hidden="true" data-testid="database-result-window-spacer-top">
                       <td
-                        key={cellKey}
-                        style={cellStyle(cellIndex)}
-                        data-find-current={isFindCurrent ? "true" : undefined}
-                        className={`whitespace-nowrap border-b border-r px-2 py-1 select-text ${isCellModified?.(index, cellIndex) ? "bg-amber-500/10" : ""} ${isFindMatch ? "bg-yellow-200/40" : ""} ${isFindCurrent ? "ring-2 ring-inset ring-yellow-500" : ""}`}
-                      >
-                        <ContextMenu>
-                          <ContextMenuTrigger asChild>
-                            <div className="min-w-24">
-                              {editing?.source === "row" &&
-                              editing.row === index &&
-                              editing.column === cellIndex ? (
-                                <input
-                                  autoFocus
-                                  className="w-full min-w-24 bg-transparent outline-none"
-                                  defaultValue={cell ?? ""}
-                                  onBlur={(event) => {
-                                    onEditCell?.(index, cellIndex, event.target.value);
-                                    setEditing(null);
-                                  }}
-                                  onKeyDown={(event) => {
-                                    if (event.key === "Enter") event.currentTarget.blur();
-                                    if (event.key === "Escape") setEditing(null);
-                                  }}
-                                />
-                              ) : (
-                                <button
-                                  type="button"
-                                  className="w-full text-left"
-                                  disabled={
-                                    !onEditCell ||
-                                    !tabularResult.editability.editable ||
-                                    tabularResult.editability.primaryKeyColumnKeys.includes(
-                                      tabularResult.columns[cellIndex]?.key ?? "",
-                                    )
-                                  }
-                                  onDoubleClick={() =>
-                                    setEditing({ source: "row", row: index, column: cellIndex })
-                                  }
-                                >
-                                  {cell ?? (
-                                    <span className="text-muted-foreground">{labels.null}</span>
-                                  )}
-                                </button>
-                              )}
-                            </div>
-                          </ContextMenuTrigger>
-                          {renderContextMenu && (
-                            <ContextMenuContent data-testid="database-result-context-menu">
-                              {renderContextMenu(
-                                cell,
-                                row,
-                                tabularResult.columns[cellIndex]?.label ?? "",
-                                index,
-                                cellIndex,
-                                "row",
-                              )}
-                            </ContextMenuContent>
-                          )}
-                        </ContextMenu>
-                      </td>
+                        colSpan={tabularResult.columns.length + 1}
+                        className="p-0"
+                        style={{ height: start * effectiveRowHeight }}
+                      />
+                    </tr>,
+                  );
+                }
+                for (let global = start; global < end; global += 1) {
+                  if (global < committedCount) {
+                    windowedRows.push(
+                      <CommittedRow
+                        key={pagination ? pagination.offset + global : global}
+                        row={tabularResult.rows[global]}
+                        index={global}
+                        isDeleted={deletedRowSet.has(global)}
+                        rowHeight={
+                          rowWindow.enabled ? effectiveRowHeight : layout?.rowHeight
+                        }
+                        frozen={Boolean(layout?.frozenCount)}
+                        cellStyles={columnStyles}
+                        columns={tabularResult.columns}
+                        pkKeySet={pkKeySet}
+                        findMatchKeys={findMatchKeys}
+                        currentFindKey={currentFindKey}
+                        paginationOffset={pagination?.offset ?? 0}
+                        editing={editing}
+                        handlersRef={rowHandlersRef}
+                      />,
+                    );
+                  } else {
+                    const insertIndex = global - committedCount;
+                    const insertRow = pendingInsertRows[insertIndex];
+                    if (insertRow) {
+                      windowedRows.push(
+                        <InsertRow
+                          key={insertRow.id}
+                          id={insertRow.id}
+                          values={insertRow.values}
+                          insertIndex={insertIndex}
+                          rowHeight={
+                            rowWindow.enabled ? effectiveRowHeight : layout?.rowHeight
+                          }
+                          frozen={Boolean(layout?.frozenCount)}
+                          cellStyles={columnStyles}
+                          columns={tabularResult.columns}
+                          editing={editing}
+                          handlersRef={rowHandlersRef}
+                        />,
                       );
-                    })}
-                  </tr>
-                );
-              })}
-              {pendingInsertRows.map((insertRow, insertIndex) => (
-                <tr key={insertRow.id} className="bg-emerald-500/5 hover:bg-primary/5">
-                  <td
-                    className="border-b border-r px-2 text-right text-emerald-600"
-                    style={
-                      layout?.frozenCount
-                        ? { position: "sticky", left: 0, zIndex: 4, background: "inherit" }
-                        : undefined
                     }
-                  >
-                    +
-                  </td>
-                  {insertRow.values.map((cell, cellIndex) => (
-                    <td
-                      key={`${insertRow.id}:${cellIndex}`}
-                      style={cellStyle(cellIndex)}
-                      className={`whitespace-nowrap border-b border-r px-2 py-1 select-text ${isInsertCellModified?.(insertIndex, cellIndex) ? "bg-amber-500/10" : ""}`}
-                    >
-                      <ContextMenu>
-                        <ContextMenuTrigger asChild>
-                          <div className="min-w-24">
-                            {editing?.source === "insert" &&
-                            editing.row === insertIndex &&
-                            editing.column === cellIndex ? (
-                              <input
-                                autoFocus
-                                className="w-full min-w-24 bg-transparent outline-none"
-                                defaultValue={cell ?? ""}
-                                onBlur={(event) => {
-                                  onEditInsertCell?.(
-                                    insertIndex,
-                                    cellIndex,
-                                    event.target.value,
-                                  );
-                                  setEditing(null);
-                                }}
-                                onKeyDown={(event) => {
-                                  if (event.key === "Enter") event.currentTarget.blur();
-                                  if (event.key === "Escape") setEditing(null);
-                                }}
-                              />
-                            ) : (
-                              <button
-                                type="button"
-                                className="w-full text-left"
-                                disabled={!onEditInsertCell}
-                                onDoubleClick={() =>
-                                  setEditing({
-                                    source: "insert",
-                                    row: insertIndex,
-                                    column: cellIndex,
-                                  })
-                                }
-                              >
-                                {cell ?? (
-                                  <span className="text-muted-foreground">{labels.null}</span>
-                                )}
-                              </button>
-                            )}
-                          </div>
-                        </ContextMenuTrigger>
-                        {renderContextMenu && (
-                          <ContextMenuContent data-testid="database-result-context-menu">
-                            {renderContextMenu(
-                              cell,
-                              insertRow.values,
-                              tabularResult.columns[cellIndex]?.label ?? "",
-                              insertIndex,
-                              cellIndex,
-                              "insert",
-                            )}
-                          </ContextMenuContent>
-                        )}
-                      </ContextMenu>
-                    </td>
-                  ))}
-                </tr>
-              ))}
-              {!tabularResult.rows.length && !pendingInsertRows.length && (
-                <tr>
-                  <td
-                    colSpan={tabularResult.columns.length + 1}
-                    className="h-16 px-3 text-center text-[12px] text-muted-foreground"
-                  >
-                    {labels.ready}
-                  </td>
-                </tr>
-              )}
+                  }
+                }
+                if (rowWindow.enabled && end < totalRows) {
+                  windowedRows.push(
+                    <tr key="spacer-bottom" aria-hidden="true" data-testid="database-result-window-spacer-bottom">
+                      <td
+                        colSpan={tabularResult.columns.length + 1}
+                        className="p-0"
+                        style={{ height: (totalRows - end) * effectiveRowHeight }}
+                      />
+                    </tr>,
+                  );
+                }
+                if (!windowedRows.length) {
+                  windowedRows.push(
+                    <tr key="empty">
+                      <td
+                        colSpan={tabularResult.columns.length + 1}
+                        className="h-16 px-3 text-center text-[12px] text-muted-foreground"
+                      >
+                        {labels.ready}
+                      </td>
+                    </tr>,
+                  );
+                }
+                return windowedRows;
+              })()}
             </tbody>
           </table>
           {paged && pagination && (

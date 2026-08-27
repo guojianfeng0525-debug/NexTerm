@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] - 2026-08-27
+
+**v2.12 进行中 — SQL 编辑器右键菜单完善 + 数据网格窗口化 + Excel 导出（真实应用 E2E 验证）**。
+
+### Added (Query Editor)
+
+- SQL 编辑器右键菜单补齐编辑组：撤销 / 重做（CodeMirror `undo`/`redo`）、剪切 / 粘贴 / 全选（`cut`/`paste`/`selectAll`），经 `runCmCommand` 包装聚焦查询编辑器执行。
+- 查询结果右键菜单新增「导出 Excel」：复用项目已有 `xlsx` 依赖，`json_to_sheet` + 保存对话框（`.xlsx`），与既有「导出 CSV」并列。
+
+### Changed (Data Grid / Perf)
+
+- **数据网格行窗口化（spacer-tr）**：`database-result-pane.tsx` 通过新增 `useRowWindow` hook（`src/lib/database/use-row-window.ts`）只挂载可视窗口行 + 上下高度占位行，阈值 >60 行自动启用，小结果集保持全量渲染不变。Pg/MySQL/SQLite 三工作区自动受益。
+  - 兼容性处理：find 跳转改为容器像素滚动（目标行未挂载时依旧可用）；编辑中的行强制保持挂载避免滚动触发提前提交；`pendingInsertRows` 并入总行数做 `rowAt(i)` 映射。
+- **行组件 memo 化**（`CommittedRow`/`InsertRow`）：编辑单格时未触及行跳过重渲染；列样式/PK Set/find Set 计算全部 useMemo 缓存。
+- 性能实测（1000 行 × 15 列，真实应用）：打开网格 **1222ms → 40ms（约 30×）**，挂载行从全量 1000 降至窗口 ~30。
+
+### Fixed
+
+- 数据列表工具条在窄窗口（<900px）溢出且无水平滚动：主工具条 header 与查询 tab 内层工具条容器加 `overflow-x-auto`，按钮加 `shrink-0` + 文案 `whitespace-nowrap`，小窗口下可滚动到达最右侧按钮。
+
+### Verified
+
+- tsc 0 错误 / vitest 838（95 文件）/ cargo test 6 / lint 无新增
+- 真实应用 E2E：toolbar-clip（6/6）、perf-baseline（窗口化对比）、postgres-save-to-notes（1/1）、postgres-grid-edit（1/1）、dialog-geometry（7/7）、postgres-query-commands（3/3）
+
 ## [2.11.1] - 2026-08-27
 
 **Patch — 构建体积优化 + 代码分割体验保障（真实应用 E2E 验证）**。

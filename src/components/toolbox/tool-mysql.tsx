@@ -386,7 +386,7 @@ export function ToolMySql() {
       workspace={
         tab && (
           <section className="flex min-h-0 flex-1 flex-col">
-            <div className="flex h-8 shrink-0 items-center gap-1 border-b px-2">
+            <div className="flex h-8 shrink-0 items-center gap-1 overflow-x-auto border-b px-2">
               <ToolButton
                 icon={<Play />}
                 label={t("toolbox.mysql.run")}
@@ -605,14 +605,14 @@ function ToolButton({
       type="button"
       variant="ghost"
       size="sm"
-      className="h-7 gap-1 rounded-sm px-2 text-[12px]"
+      className="h-7 shrink-0 gap-1 rounded-sm px-2 text-[12px]"
       onClick={onClick}
       disabled={disabled}
       title={label}
       data-testid={testId}
     >
       {icon}
-      <span>{label}</span>
+      <span className="whitespace-nowrap">{label}</span>
     </Button>
   );
 }

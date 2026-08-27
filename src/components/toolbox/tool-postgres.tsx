@@ -8,24 +8,28 @@ import {
   type SetStateAction,
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { writeText as writeClipboardText } from "@tauri-apps/plugin-clipboard-manager";
+import { writeText as writeClipboardText, readText as readClipboardText } from "@tauri-apps/plugin-clipboard-manager";
 import { save as saveFile } from "@tauri-apps/plugin-dialog";
-import { writeTextFile } from "@tauri-apps/plugin-fs";
+import { writeTextFile, writeFile as writeBinaryFile } from "@tauri-apps/plugin-fs";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 import {
+  ClipboardPaste,
   Copy,
   Database,
   FileCode2,
   Filter,
   FolderTree,
   KeyRound,
+  ListChecks,
   ListPlus,
   Loader2,
   Play,
   Plus,
+  Redo2,
   RefreshCw,
   Save,
+  Scissors,
   Search,
   Square,
   Table2,
@@ -74,6 +78,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import { CodeEditor } from "@/components/code-editor";
 import type { EditorView } from "@codemirror/view";
+import { undo, redo, selectAll } from "@codemirror/commands";
 import {
   currentStatementAt,
   toggleLineComment,
@@ -997,12 +1002,24 @@ export function ToolPostgres() {
   };
   const appendSqlToNotes = (contentOverride?: string) => {
     if (!tab || tab.type !== "query") return;
-    // Guard: onClick handlers can forward a DOM event object as the first arg.
-    const content = (
-      typeof contentOverride === "string"
-        ? contentOverride
-        : currentStatementSql() || tab.sql
-    ).trim();
+    // Selection first (same resolution as the editor right-click menu): a
+    // non-empty selection wins, then the statement under the caret, then the
+    // whole document. Guard: onClick handlers can forward a DOM event object
+    // as the first arg.
+    let content: string;
+    if (typeof contentOverride === "string") {
+      content = contentOverride;
+    } else {
+      const view = queryEditorViewRef.current;
+      let source = tab.sql;
+      if (view) {
+        const sel = view.state.selection.main;
+        const selected = view.state.doc.sliceString(sel.from, sel.to).trim();
+        source = selected ? selected : currentStatementSql() || tab.sql;
+      }
+      content = source;
+    }
+    content = content.trim();
     if (!content) return;
     noteContentRef.current = content;
     const notes = NotesStorage.load();
@@ -1727,6 +1744,44 @@ export function ToolPostgres() {
       toast.error(t("toolbox.postgres.copyFailed"), { description: String(error) });
     }
   };
+  /** Runs a CodeMirror command on the query editor (undo/redo/selectAll…):
+   *  focus first so the command operates on the visible editor. */
+  const runCmCommand = (cmd: (view: EditorView) => boolean) => {
+    const view = queryEditorViewRef.current;
+    if (!view) return;
+    view.focus();
+    cmd(view);
+  };
+  /** Cut: write the selected text to the clipboard, then delete it. */
+  const cutEditorSelection = async () => {
+    const view = queryEditorViewRef.current;
+    if (!view) return;
+    view.focus();
+    const selection = view.state.selection.main;
+    if (selection.to <= selection.from) return;
+    try {
+      await writeClipboardText(view.state.doc.sliceString(selection.from, selection.to));
+      view.dispatch({ changes: { from: selection.from, to: selection.to, insert: "" } });
+    } catch (error) {
+      toast.error(t("toolbox.postgres.copyFailed"), { description: String(error) });
+    }
+  };
+  /** Paste: insert clipboard text at the caret, replacing the selection. */
+  const pasteIntoEditor = async () => {
+    const view = queryEditorViewRef.current;
+    if (!view) return;
+    view.focus();
+    try {
+      const text = await readClipboardText();
+      const selection = view.state.selection.main;
+      view.dispatch({
+        changes: { from: selection.from, to: selection.to, insert: text },
+        selection: { anchor: selection.from + text.length },
+      });
+    } catch (error) {
+      toast.error(t("toolbox.postgres.copyFailed"), { description: String(error) });
+    }
+  };
   const exportCsv = async () => {
     if (tab?.result?.kind !== "tabular") return;
     const quote = (value: string | null) =>
@@ -1745,6 +1800,29 @@ export function ToolPostgres() {
       toast.success(t("toolbox.postgres.exported"));
     } catch (error) {
       toast.error(t("toolbox.postgres.exportFailed"), { description: String(error) });
+    }
+  };
+  const exportExcel = async () => {
+    if (tab?.result?.kind !== "tabular") return;
+    try {
+      const XLSX = await import("xlsx");
+      const header = tab.result.columns.map((column) => column.label);
+      const rows = tab.result.rows.map((row) => row.map((cell) => cell ?? null));
+      const sheet = XLSX.utils.aoa_to_sheet([header, ...rows]);
+      const workbook = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(workbook, sheet, tab.title || "Result");
+      const path = await saveFile({
+        defaultPath: `${tab.title || "postgres-result"}.xlsx`,
+        filters: [{ name: "Excel", extensions: ["xlsx"] }],
+      });
+      if (!path) return;
+      await writeBinaryFile(
+        path,
+        new Uint8Array(XLSX.write(workbook, { type: "array", bookType: "xlsx" }) as ArrayBuffer),
+      );
+      toast.success(t("toolbox.postgres.exportedExcel"));
+    } catch (error) {
+      toast.error(t("toolbox.postgres.exportFailedExcel"), { description: String(error) });
     }
   };
   const transaction = async (action: "begin" | "commit" | "rollback") => {
@@ -2477,7 +2555,7 @@ export function ToolPostgres() {
       workspace={tab && (
             <section className="flex min-h-0 flex-1">
               <div className="flex min-w-0 flex-1 flex-col">
-              <div className="flex h-8 shrink-0 items-center gap-1 border-b bg-muted/10 px-2">
+              <div className="flex h-8 shrink-0 items-center gap-1 overflow-x-auto border-b bg-muted/10 px-2">
                 <span
                   className="max-w-48 truncate rounded bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground"
                   data-testid="postgres-tab-connection"
@@ -2589,6 +2667,65 @@ export function ToolPostgres() {
                       </div>
                     </ContextMenuTrigger>
                     <ContextMenuContent>
+                      {/* Edit group */}
+                      <ContextMenuItem
+                        onSelect={() => runCmCommand(undo)}
+                      >
+                        <Undo2 className="h-3.5 w-3.5" />
+                        {t("common.undo")}
+                      </ContextMenuItem>
+                      <ContextMenuItem
+                        onSelect={() => runCmCommand(redo)}
+                      >
+                        <Redo2 className="h-3.5 w-3.5" />
+                        {t("common.redo")}
+                      </ContextMenuItem>
+                      <ContextMenuSeparator />
+                      <ContextMenuItem
+                        onSelect={() => void cutEditorSelection()}
+                      >
+                        <Scissors className="h-3.5 w-3.5" />
+                        {t("common.cut")}
+                      </ContextMenuItem>
+                      <ContextMenuItem
+                        onSelect={() => void pasteIntoEditor()}
+                      >
+                        <ClipboardPaste className="h-3.5 w-3.5" />
+                        {t("common.paste")}
+                      </ContextMenuItem>
+                      <ContextMenuItem
+                        onSelect={() => runCmCommand(selectAll)}
+                      >
+                        <ListChecks className="h-3.5 w-3.5" />
+                        {t("common.selectAll")}
+                      </ContextMenuItem>
+                      <ContextMenuSeparator />
+                      {/* SQL group */}
+                      <ContextMenuItem
+                        data-testid="postgres-editor-execute"
+                        disabled={!connected || !tab.sql.trim()}
+                        onSelect={() => void execute()}
+                      >
+                        <Play className="h-3.5 w-3.5" />
+                        {t("toolbox.postgres.run")}
+                      </ContextMenuItem>
+                      <ContextMenuItem
+                        data-testid="postgres-editor-run-selection"
+                        disabled={!connected}
+                        onSelect={() => runSelectionOrStatement()}
+                      >
+                        <ListPlus className="h-3.5 w-3.5" />
+                        {t("toolbox.postgres.runSelection")}
+                      </ContextMenuItem>
+                      <ContextMenuItem
+                        data-testid="postgres-editor-format-sql"
+                        disabled={!connected}
+                        onSelect={formatSqlInEditor}
+                      >
+                        <Wand2 className="h-3.5 w-3.5" />
+                        {t("toolbox.postgres.formatSql")}
+                      </ContextMenuItem>
+                      <ContextMenuSeparator />
                       <ContextMenuItem
                         data-testid="postgres-editor-save-to-notes"
                         disabled={!tab.sql.trim()}
@@ -2608,6 +2745,7 @@ export function ToolPostgres() {
                           </span>
                         </span>
                       </ContextMenuItem>
+                      <ContextMenuSeparator />
                       <ContextMenuItem
                         onSelect={() => void copyText(editorCopyValue())}
                       >
@@ -2799,6 +2937,7 @@ export function ToolPostgres() {
                       </>
                     )}
                     <ContextMenuItem onSelect={() => void exportCsv()}>{t("toolbox.postgres.exportCsv")}</ContextMenuItem>
+                    <ContextMenuItem onSelect={() => void exportExcel()}>{t("toolbox.postgres.exportExcel")}</ContextMenuItem>
                   </>}
                   renderColumnContextMenu={tab.type === "table" ? (columnName, columnIndex) => (
                     <>
@@ -3246,14 +3385,14 @@ function ToolButton({
       type="button"
       variant="ghost"
       size="sm"
-      className="h-7 gap-1 rounded-sm px-2 text-[12px]"
+      className="h-7 shrink-0 gap-1 rounded-sm px-2 text-[12px]"
       onClick={onClick}
       disabled={disabled}
       title={label}
       data-testid={testId}
     >
       <span className="[&>svg]:h-3.5 [&>svg]:w-3.5">{icon}</span>
-      <span>{label}</span>
+      <span className="whitespace-nowrap">{label}</span>
     </Button>
   );
 }

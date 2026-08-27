@@ -48,7 +48,7 @@ export function DatabaseWorkspaceShell({
 }: DatabaseWorkspaceShellProps) {
   return (
     <div className="h-full min-h-0 flex flex-col bg-background text-foreground" data-testid={testId}>
-      <header className="flex h-10 shrink-0 items-center gap-1 border-b bg-muted/25 px-2" data-testid={toolbarTestId}>
+      <header className="flex h-10 shrink-0 items-center gap-1 overflow-x-auto border-b bg-muted/25 px-2" data-testid={toolbarTestId}>
         {toolbar}
       </header>
       <div className="flex min-h-0 flex-1">
