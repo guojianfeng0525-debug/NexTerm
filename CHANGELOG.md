@@ -5,9 +5,9 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] - 2026-08-27
+## [2.12.0] - 2026-08-27
 
-**v2.12 进行中 — SQL 编辑器右键菜单完善 + 数据网格窗口化 + Excel 导出（真实应用 E2E 验证）**。
+**Minor — SQL 编辑器右键菜单完善 + 数据网格窗口化（性能根治）+ Excel 导出（真实应用 E2E 验证）**。
 
 ### Added (Query Editor)
 
@@ -27,8 +27,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Verified
 
-- tsc 0 错误 / vitest 838（95 文件）/ cargo test 6 / lint 无新增
-- 真实应用 E2E：toolbar-clip（6/6）、perf-baseline（窗口化对比）、postgres-save-to-notes（1/1）、postgres-grid-edit（1/1）、dialog-geometry（7/7）、postgres-query-commands（3/3）
+- tsc 0 错误 / vitest 849（97 文件）/ cargo test 全绿 / lint 无新增（1 error 为存量）
+- 真实应用 E2E：toolbar-clip（6/6）、perf-baseline（窗口化对比 1000×15：1222ms→44ms）、postgres-save-to-notes（1/1）、postgres-grid-edit（1/1）、dialog-geometry（7/7）、postgres-query-commands（3/3）
 
 ## [2.11.1] - 2026-08-27
 
