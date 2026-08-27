@@ -17,6 +17,26 @@ export default defineConfig(async () => ({
     },
   },
 
+  build: {
+    // Split heavyweight third-party libraries into stable vendor chunks so the
+    // main entry stays small and unchanged vendors are cacheable. Function-form
+    // manualChunks keeps the mapping close to the real dependency graph.
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (!id.includes('node_modules')) return undefined;
+          if (id.includes('@xterm')) return 'vendor-xterm';
+          if (id.includes('@codemirror') || id.includes('/codemirror') || id.includes('@lezer')) return 'vendor-codemirror';
+          if (id.includes('sql-formatter')) return 'vendor-sql-formatter';
+          if (id.includes('/xlsx')) return 'vendor-xlsx';
+          if (id.includes('recharts') || id.includes('d3-')) return 'vendor-recharts';
+          if (id.includes('react') || id.includes('scheduler') || id.includes('react-dom')) return 'vendor-react';
+          return 'vendor';
+        },
+      },
+    },
+  },
+
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //
   // 1. prevent Vite from obscuring rust errors

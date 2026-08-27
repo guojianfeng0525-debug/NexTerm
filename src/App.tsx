@@ -28,19 +28,23 @@ import { TerminalCallbacksProvider } from './lib/terminal-callbacks-context';
 import { GridRenderer } from './components/terminal/grid-renderer';
 import { ToolboxNav, type WorkspaceSection } from './components/toolbox/toolbox-nav';
 import { AppLockScreen } from './components/toolbox/app-lock-screen';
-import { ServersView } from './components/toolbox/servers-view';
-import { ToolApps } from './components/toolbox/tool-apps';
-import { ToolVault } from './components/toolbox/tool-vault';
-import { ToolTunnels } from './components/toolbox/tool-tunnels';
-import { ToolServices } from './components/toolbox/tool-services';
-import { ToolNotes } from './components/toolbox/tool-notes';
-import { ToolCommandHistory } from './components/toolbox/tool-command-history';
+// Tool views are code-split (React.lazy) so their heavyweight dependencies
+// (codemirror, sql-formatter, xlsx, …) load on demand instead of inflating the
+// main entry. Views stay mounted once resolved (hidden via CSS), so internal
+// state such as the vault unlock persists across section switches.
+const ServersView = lazy(() => import('./components/toolbox/servers-view').then((m) => ({ default: m.ServersView })));
+const ToolApps = lazy(() => import('./components/toolbox/tool-apps').then((m) => ({ default: m.ToolApps })));
+const ToolVault = lazy(() => import('./components/toolbox/tool-vault').then((m) => ({ default: m.ToolVault })));
+const ToolTunnels = lazy(() => import('./components/toolbox/tool-tunnels').then((m) => ({ default: m.ToolTunnels })));
+const ToolServices = lazy(() => import('./components/toolbox/tool-services').then((m) => ({ default: m.ToolServices })));
+const ToolNotes = lazy(() => import('./components/toolbox/tool-notes').then((m) => ({ default: m.ToolNotes })));
+const ToolCommandHistory = lazy(() => import('./components/toolbox/tool-command-history').then((m) => ({ default: m.ToolCommandHistory })));
 const ToolDocuments = lazy(() => import('./components/toolbox/tool-documents').then((m) => ({ default: m.ToolDocuments })));
+const ToolApiDebug = lazy(() => import('./components/toolbox/tool-api-debug').then((m) => ({ default: m.ToolApiDebug })));
+const ToolPostgres = lazy(() => import('./components/toolbox/tool-postgres').then((m) => ({ default: m.ToolPostgres })));
+const ToolSqlite = lazy(() => import('./components/toolbox/tool-sqlite').then((m) => ({ default: m.ToolSqlite })));
+const ToolMySql = lazy(() => import('./components/toolbox/tool-mysql').then((m) => ({ default: m.ToolMySql })));
 const ToolJarDecompiler = lazy(() => import('./components/toolbox/tool-jar-decompiler').then((m) => ({ default: m.ToolJarDecompiler })));
-import { ToolApiDebug } from './components/toolbox/tool-api-debug';
-import { ToolPostgres } from './components/toolbox/tool-postgres';
-import { ToolSqlite } from './components/toolbox/tool-sqlite';
-import { ToolMySql } from './components/toolbox/tool-mysql';
 import { ErrorBoundary } from './components/error-boundary';
 import { initializeAllStorage } from './lib/storage-init';
 import type { TerminalTab } from './lib/terminal-group-types';
@@ -1832,6 +1836,8 @@ function AppContent() {
             )}
           </div>
 
+          {/* ── Tool views: code-split, suspended on first open ── */}
+          <Suspense fallback={<div className="absolute inset-0 flex items-center justify-center bg-background text-xs text-muted-foreground">{'...'}</div>}>
           {/* ── Servers view (always mounted) ── */}
           <div className={cn('absolute inset-0 bg-background', section === 'connection' ? '' : 'hidden')}>
             <ServersView
@@ -1864,9 +1870,7 @@ function AppContent() {
             <ToolCommandHistory />
           </div>
           <div className={cn('absolute inset-0 bg-background', section === 'documents' ? '' : 'hidden')}>
-            <Suspense fallback={<div className="h-full flex items-center justify-center text-xs text-muted-foreground">{'...'}</div>}>
-              <ToolDocuments />
-            </Suspense>
+            <ToolDocuments />
           </div>
           <div className={cn('absolute inset-0 bg-background', section === 'api' ? '' : 'hidden')}>
             <ToolApiDebug active={section === 'api'} />
@@ -1882,11 +1886,10 @@ function AppContent() {
           </div>
           {section === 'jar' && (
             <div className="absolute inset-0 bg-background">
-              <Suspense fallback={<div className="h-full flex items-center justify-center text-xs text-muted-foreground">{'...'}</div>}>
-                <ToolJarDecompiler />
-              </Suspense>
+              <ToolJarDecompiler />
             </div>
           )}
+          </Suspense>
         </div>
       </div>
 
