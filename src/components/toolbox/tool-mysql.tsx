@@ -110,7 +110,8 @@ export function ToolMySql() {
   const tab = tabs.find((item) => item.id === activeTab) ?? tabs[0];
   useEffect(() => {
     const pasteSqlNote = (event: Event) => {
-      const detail = (event as CustomEvent<{ content?: string; handled?: boolean }>).detail;
+      const detail = (event as CustomEvent<{ content?: string; handled?: boolean; provider?: string }>).detail;
+      if (detail?.provider !== undefined && detail.provider !== "mysql") return;
       if (!detail?.content || !tab) return;
       setTabs((current) => current.map((item) => item.id === tab.id ? { ...item, sql: detail.content! } : item));
       detail.handled = true;

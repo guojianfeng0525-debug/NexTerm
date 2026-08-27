@@ -117,6 +117,17 @@ function AppContent() {
     window.addEventListener('nexterm:database-provider-selected', handleDatabaseProviderSelection);
     return () => window.removeEventListener('nexterm:database-provider-selected', handleDatabaseProviderSelection);
   }, []);
+  // Jump to the notes tool when a note is selected from another view (e.g. the
+  // Postgres "save to notes" toast's View action).
+  useEffect(() => {
+    const selectNote = (event: Event) => {
+      const noteId = (event as CustomEvent<{ noteId?: string }>).detail?.noteId;
+      if (!noteId) return;
+      setSection('notes');
+    };
+    window.addEventListener('nexterm:select-note', selectNote);
+    return () => window.removeEventListener('nexterm:select-note', selectNote);
+  }, []);
 
   // App lock: every launch starts locked — the lock screen shows "set a
   // password" on first run and "enter password" afterwards. Nothing else is

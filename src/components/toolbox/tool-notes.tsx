@@ -28,12 +28,16 @@ import {
   ContextMenu,
   ContextMenuContent,
   ContextMenuItem,
+  ContextMenuSeparator,
+  ContextMenuSub,
+  ContextMenuSubContent,
+  ContextMenuSubTrigger,
   ContextMenuTrigger,
 } from '@/components/ui/context-menu';
 const CodeEditor = lazy(() => import('@/components/code-editor').then((m) => ({ default: m.CodeEditor })));
+import type { EditorView } from '@codemirror/view';
 import { NotesStorage, generateId } from '@/lib/toolbox/toolbox-storage';
 import { PostgresConnectionsStorage } from '@/lib/toolbox/postgres-storage';
-import { setSelectedNoteId } from '@/lib/toolbox/note-selection';
 import type { NoteItem, NoteLanguage } from '@/lib/toolbox/toolbox-types';
 import { StickyNote, Plus, Search, Trash2, Copy, Pin, PinOff, FileCode2, Send, Play } from 'lucide-react';
 import { cn } from '@/lib/utils';
@@ -97,12 +101,27 @@ export function ToolNotes() {
   const [search, setSearch] = useState('');
   const [deleteTarget, setDeleteTarget] = useState<NoteItem | null>(null);
   const [quickConnectionId, setQuickConnectionId] = useState('');
-  const postgresConnections = useMemo(() => PostgresConnectionsStorage.load(), []);
+  const [postgresConnections, setPostgresConnections] = useState(() =>
+    PostgresConnectionsStorage.load(),
+  );
+  /** CodeMirror view of the note editor (for right-click selection access). */
+  const noteEditorViewRef = useRef<EditorView | null>(null);
+  /** Whether the note editor had a non-empty selection when the context menu opened. */
+  const [noteMenuSelection, setNoteMenuSelection] = useState(false);
+  /** Content to paste when the note editor's context-menu paste item is picked. */
+  const [noteMenuContent, setNoteMenuContent] = useState('');
   const selectedRef = useRef<NoteItem | null>(null);
   selectedRef.current = notes.find((n) => n.id === selectedId) ?? null;
 
   const selected = selectedRef.current;
-  useEffect(() => { setSelectedNoteId(selectedId); return () => setSelectedNoteId(null); }, [selectedId]);
+  useEffect(() => {
+    const selectNote = (event: Event) => {
+      const noteId = (event as CustomEvent<{ noteId?: string }>).detail?.noteId;
+      if (noteId) setSelectedId(noteId);
+    };
+    window.addEventListener('nexterm:select-note', selectNote);
+    return () => window.removeEventListener('nexterm:select-note', selectNote);
+  }, []);
 
   // Debounced persistence: write to the encrypted SQLite store 500ms after
   // the last change, and flush any pending write on unmount.
@@ -122,9 +141,20 @@ export function ToolNotes() {
   }, []);
 
   useEffect(() => {
-    const refresh = () => setNotes(NotesStorage.load());
+    const refresh = () => {
+      setNotes(NotesStorage.load());
+      setPostgresConnections(PostgresConnectionsStorage.load());
+    };
     window.addEventListener('nexterm:toolbox-changed', refresh);
     return () => window.removeEventListener('nexterm:toolbox-changed', refresh);
+  }, []);
+
+  // Concurrent-write guard: the Postgres tool flushes pending debounced note
+  // edits before re-reading the store, so a save never overwrites fresher data.
+  useEffect(() => {
+    const flush = () => NotesStorage.save(notesRef.current);
+    window.addEventListener('nexterm:toolbox-flush-request', flush);
+    return () => window.removeEventListener('nexterm:toolbox-flush-request', flush);
   }, []);
 
   const patchSelected = useCallback(
@@ -190,7 +220,10 @@ export function ToolNotes() {
 
   const pasteSqlContent = useCallback(() => {
     if (!selected?.content) return;
-    const detail: { content: string; handled?: boolean } = { content: selected.content };
+    const detail: { content: string; handled?: boolean; provider?: string } = {
+      content: selected.content,
+      provider: 'postgres',
+    };
     window.dispatchEvent(new CustomEvent('nexterm:paste-sql-note', { detail }));
     if (!detail.handled) toast.error(t('toolbox.notes.noActiveSqlEditor'));
   }, [selected, t]);
@@ -202,19 +235,86 @@ export function ToolNotes() {
   }, [quickConnectionId, selected]);
 
   const pasteSqlToQuery = useCallback(
-    (content: string) => {
+    (content: string, connectionId?: string, sourceTitle?: string) => {
       const sql = content.trim();
       if (!sql) return;
-      if (!quickConnectionId) {
+      const targetId = connectionId ?? quickConnectionId;
+      if (!targetId) {
         toast.error(t('toolbox.notes.selectConnectionFirst'));
         return;
       }
       window.dispatchEvent(new CustomEvent('nexterm:paste-sql-to-query', {
-        detail: { content: sql, connectionId: quickConnectionId },
+        detail: { content: sql, connectionId: targetId, sourceTitle },
       }));
     },
     [quickConnectionId, t],
   );
+
+  /** Right-click submenu for pasting SQL into a PostgreSQL query page.
+   *  Multiple connections → per-connection submenu; exactly one → direct
+   *  item; none → disabled item with a hint. Shared by the notes list and
+   *  the note editor context menus. */
+  const renderNoteConnectionMenu = (
+    content: string,
+    sourceTitle: string,
+    label: string,
+  ) => {
+    const sql = content.trim();
+    if (postgresConnections.length === 0) {
+      return (
+        <ContextMenuItem disabled title={t('toolbox.notes.noConnectionsHint')}>
+          <Send className="h-3.5 w-3.5" />
+          {label}
+        </ContextMenuItem>
+      );
+    }
+    if (postgresConnections.length === 1) {
+      return (
+        <ContextMenuItem
+          disabled={!sql}
+          onSelect={() => pasteSqlToQuery(sql, postgresConnections[0].id, sourceTitle)}
+        >
+          <Send className="h-3.5 w-3.5" />
+          {label}
+        </ContextMenuItem>
+      );
+    }
+    return (
+      <ContextMenuSub>
+        <ContextMenuSubTrigger disabled={!sql}>
+          <Send className="h-3.5 w-3.5" />
+          {label}
+        </ContextMenuSubTrigger>
+        <ContextMenuSubContent>
+          {postgresConnections.map((connection) => (
+            <ContextMenuItem
+              key={connection.id}
+              onSelect={() => pasteSqlToQuery(sql, connection.id, sourceTitle)}
+            >
+              {connection.name}
+            </ContextMenuItem>
+          ))}
+        </ContextMenuSubContent>
+      </ContextMenuSub>
+    );
+  };
+
+  /** Copy the note editor selection (or the whole note when nothing is
+   *  selected) from the editor right-click menu. */
+  const copyEditorSelection = async () => {
+    const view = noteEditorViewRef.current;
+    const selection = view?.state.selection.main;
+    const text =
+      view && selection && selection.to > selection.from
+        ? view.state.doc.sliceString(selection.from, selection.to)
+        : (selected?.content ?? '');
+    try {
+      await navigator.clipboard.writeText(text);
+      toast.success(t('toolbox.notes.copied'));
+    } catch {
+      toast.error(t('toolbox.notes.copyFailed'));
+    }
+  };
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -299,10 +399,11 @@ export function ToolNotes() {
                     </ContextMenuTrigger>
                     {note.language === 'sql' && (
                       <ContextMenuContent>
-                        <ContextMenuItem onSelect={() => pasteSqlToQuery(note.content)}>
-                          <Send className="h-3.5 w-3.5" />
-                          {t('toolbox.notes.pasteToQueryPage')}
-                        </ContextMenuItem>
+                        {renderNoteConnectionMenu(
+                          note.content,
+                          note.title,
+                          t('toolbox.notes.pasteToQueryPage'),
+                        )}
                       </ContextMenuContent>
                     )}
                   </ContextMenu>
@@ -376,12 +477,54 @@ export function ToolNotes() {
               </div>
               <div className="flex-1 min-h-0 p-2">
                 <Suspense fallback={<div className="h-full flex items-center justify-center text-xs text-muted-foreground">{'...'}</div>}>
-                  <CodeEditor
-                    value={selected.content}
-                    language={selected.language}
-                    onChange={(value) => patchSelected({ content: value })}
-                    className="h-full rounded-lg border-border"
-                  />
+                  <ContextMenu
+                    onOpenChange={(open) => {
+                      if (!open) return;
+                      const view = noteEditorViewRef.current;
+                      const selection = view?.state.selection.main;
+                      const selectedText =
+                        view && selection && selection.to > selection.from
+                          ? view.state.doc
+                              .sliceString(selection.from, selection.to)
+                              .trim()
+                          : '';
+                      const hasSelection = selectedText.length > 0;
+                      setNoteMenuSelection(hasSelection);
+                      setNoteMenuContent(
+                        hasSelection ? selectedText : (selected?.content ?? ''),
+                      );
+                    }}
+                  >
+                    <ContextMenuTrigger asChild>
+                      <div className="h-full">
+                        <CodeEditor
+                          value={selected.content}
+                          language={selected.language}
+                          onChange={(value) => patchSelected({ content: value })}
+                          editorRef={(view) => {
+                            noteEditorViewRef.current = view;
+                          }}
+                          className="h-full rounded-lg border-border"
+                        />
+                      </div>
+                    </ContextMenuTrigger>
+                    {selected.content.trim() && (
+                      <ContextMenuContent>
+                        {renderNoteConnectionMenu(
+                          noteMenuContent,
+                          selected.title,
+                          noteMenuSelection
+                            ? t('toolbox.notes.pasteSelectionToQueryPage')
+                            : t('toolbox.notes.pasteNoteToQueryPage'),
+                        )}
+                        <ContextMenuSeparator />
+                        <ContextMenuItem onSelect={() => void copyEditorSelection()}>
+                          <Copy className="h-3.5 w-3.5" />
+                          {t('common.copy')}
+                        </ContextMenuItem>
+                      </ContextMenuContent>
+                    )}
+                  </ContextMenu>
                 </Suspense>
               </div>
             </>

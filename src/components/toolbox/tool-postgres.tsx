@@ -36,9 +36,13 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
 import {
+  ContextMenu,
+  ContextMenuContent,
   ContextMenuItem,
   ContextMenuSeparator,
+  ContextMenuTrigger,
 } from "@/components/ui/context-menu";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -76,7 +80,7 @@ import {
 } from "@/lib/database/sql-statement-tokenizer";
 import { formatSql, formatSqlSelection } from "@/lib/database/sql-formatter";
 import { generateId, NotesStorage } from "@/lib/toolbox/toolbox-storage";
-import { getSelectedNoteId } from "@/lib/toolbox/note-selection";
+import type { NoteItem } from "@/lib/toolbox/toolbox-types";
 import { ConnectionStorageManager } from "@/lib/connection-storage";
 import { PostgresConnectionsStorage } from "@/lib/toolbox/postgres-storage";
 import type {
@@ -402,10 +406,19 @@ export function ToolPostgres() {
   /** Tab id awaiting dirty-discard confirmation before closing. */
   const [closeTarget, setCloseTarget] = useState<string | null>(null);
   const [disconnectTarget, setDisconnectTarget] = useState<string | null>(null);
-  const [noteTitle, setNoteTitle] = useState<string | null>(null);
+  /** Save-to-notes dialog state: target note id (or "__new__") and the
+   *  editable title used when creating a new note. */
+  const [noteDialog, setNoteDialog] = useState<{
+    target: string;
+    title: string;
+  } | null>(null);
   /** SQL snapshot taken when the save-to-notes dialog opens, so confirming
    *  after switching tabs still writes the intended statement. */
   const noteContentRef = useRef<string>("");
+  /** Content-source label for the query editor's "Save to notes" menu item. */
+  const [editorMenuSource, setEditorMenuSource] = useState<
+    "selection" | "statement" | "document" | null
+  >(null);
   /** Filter & Sort / Custom Filter dialog mode for the active table tab. */
   const [filterDialog, setFilterDialog] = useState<
     { mode: "custom" | "filterSort" } | null
@@ -432,7 +445,10 @@ export function ToolPostgres() {
     );
   useEffect(() => {
     const pasteSqlNote = (event: Event) => {
-      const detail = (event as CustomEvent<{ content?: string; handled?: boolean }>).detail;
+      const detail = (event as CustomEvent<{ content?: string; handled?: boolean; provider?: string }>).detail;
+      // Only this provider responds to provider-scoped paste events; events
+      // without a provider keep working for backward compatibility.
+      if (detail?.provider !== undefined && detail.provider !== "postgres") return;
       if (!detail?.content || !tab) return;
       patchTab(tab.id, { sql: detail.content, dirty: true });
       detail.handled = true;
@@ -655,13 +671,15 @@ export function ToolPostgres() {
       setConnecting(false);
     }
   };
-  const connectEstablished = async (profile: PostgreSQLConnectionProfile) => {
+  const connectEstablished = async (
+    profile: PostgreSQLConnectionProfile,
+  ): Promise<boolean> => {
     setConnecting(true);
     try {
       const saved = { ...profile, updatedAt: Date.now() };
       if (!(await PostgresConnectionsStorage.upsert(saved))) {
         toast.error(t("toolbox.postgres.saveFailed"));
-        return;
+        return false;
       }
       setDraft(saved);
       setSelectedId(saved.id);
@@ -725,6 +743,7 @@ export function ToolPostgres() {
       toast.success(
         t("toolbox.postgres.connected", { version: status.serverVersion }),
       );
+      return true;
     } catch (error) {
       const message = String(error);
       const isHostKeyMismatch = message.includes("host key fingerprint changed");
@@ -744,6 +763,7 @@ export function ToolPostgres() {
             : {}),
         },
       );
+      return false;
     } finally {
       setConnecting(false);
     }
@@ -780,17 +800,34 @@ export function ToolPostgres() {
   }, [connected, connections, draft.id, t]);
   useEffect(() => {
     const pasteToQuery = (event: Event) => {
-      const detail = (event as CustomEvent<{ content?: string; connectionId?: string }>).detail;
+      const detail = (event as CustomEvent<{ content?: string; connectionId?: string; sourceTitle?: string }>).detail;
       const sql = detail?.content?.trim();
       const connection = connections.find((item) => item.id === detail?.connectionId);
-      if (!sql || !connection) return;
+      if (!sql) return;
+      if (!connection) {
+        toast.error(t("toolbox.postgres.pasteConnectionNotFound"));
+        return;
+      }
       void (async () => {
-        if (!connected || draft.id !== connection.id) await connectEstablished(connection);
-        openTab({
+        if (!connected || draft.id !== connection.id) {
+          toast.info(t("toolbox.postgres.connecting"));
+          const ok = await connectEstablished(connection);
+          if (!ok) return; // connectEstablished already surfaced the error toast
+        }
+        const next = {
           ...newQuery(connection.id),
-          title: t("toolbox.postgres.quickQuery"),
+          title: detail?.sourceTitle?.trim() || t("toolbox.postgres.quickQuery"),
           sql,
           dirty: true,
+        };
+        openTab(next);
+        // Focus the new tab's editor and place the caret at the end of the document.
+        requestAnimationFrame(() => {
+          const view = queryEditorViewRef.current;
+          if (!view) return;
+          const end = view.state.doc.length;
+          view.dispatch({ selection: { anchor: end } });
+          view.focus();
         });
       })();
     };
@@ -958,36 +995,152 @@ export function ToolPostgres() {
     patchTab(tab.id, { dirty: false });
     toast.success(t("toolbox.postgres.sqlSaved"));
   };
-  const appendSqlToNotes = () => {
+  const appendSqlToNotes = (contentOverride?: string) => {
     if (!tab || tab.type !== "query") return;
-    const content = currentStatementSql() || tab.sql;
-    if (!content.trim()) return;
+    // Guard: onClick handlers can forward a DOM event object as the first arg.
+    const content = (
+      typeof contentOverride === "string"
+        ? contentOverride
+        : currentStatementSql() || tab.sql
+    ).trim();
+    if (!content) return;
     noteContentRef.current = content;
-    setNoteTitle(tab.title);
-  };
-  const confirmAppendSqlToNotes = () => {
-    if (noteTitle === null) return;
-    const content = noteContentRef.current;
-    const title = noteTitle.trim().replace(/[\r\n]+/g, " ");
-    if (!title || !content.trim()) return;
-    const now = Date.now();
-    const selectedId = getSelectedNoteId();
     const notes = NotesStorage.load();
-    const selected = selectedId ? notes.find((note) => note.id === selectedId) : undefined;
-    const next = selected
-      ? notes.map((note) => note.id === selected.id
-        ? {
-            ...note,
-            language: "sql" as const,
-            content: note.content.trim() ? `${note.content.trimEnd()}\n-- ${title}\n${content}` : `-- ${title}\n${content}`,
-            updatedAt: now,
-          }
-        : note)
-      : [{ id: generateId("note"), title, language: "sql" as const, content: `-- ${title}\n${content}`, createdAt: now, updatedAt: now }, ...notes];
+    const savedTarget = localStorage.getItem("nexterm.notes.lastSaveTarget");
+    const target =
+      savedTarget && savedTarget !== "__new__" &&
+      notes.some((note) => note.id === savedTarget)
+        ? savedTarget
+        : "__new__";
+    setNoteDialog({ target, title: tab.title });
+  };
+  /** True when the target note already contains a `-- {title}` header block,
+   *  which would indicate the same SQL was appended before. */
+  const noteHasDuplicateBlock = (note: NoteItem | undefined, title: string) =>
+    !!note &&
+    note.content
+      .split("\n")
+      .some((line) => line.trim() === `-- ${title.trim().replace(/[\r\n]+/g, " ")}`);
+  const confirmAppendSqlToNotes = () => {
+    if (!noteDialog) return;
+    const content = noteContentRef.current;
+    const now = Date.now();
+    // Ask the notes view to flush any pending (debounced) edits, then read
+    // the latest store state so the target/duplicate checks are authoritative.
+    window.dispatchEvent(new Event("nexterm:toolbox-flush-request"));
+    const notes = NotesStorage.load();
+    let targetId = noteDialog.target;
+    const targetNote =
+      targetId !== "__new__"
+        ? notes.find((note) => note.id === targetId)
+        : undefined;
+    let createdFallback = false;
+    if (targetId !== "__new__" && !targetNote) {
+      // The selected note was deleted while the dialog was open — fall back
+      // to creating a new note.
+      targetId = "__new__";
+      createdFallback = true;
+    }
+    const title = (
+      targetId === "__new__"
+        ? noteDialog.title
+        : targetNote?.title ?? noteDialog.title
+    )
+      .trim()
+      .replace(/[\r\n]+/g, " ");
+    if (!title || !content.trim()) return;
+    let savedToId: string;
+    let next: NoteItem[];
+    if (targetId !== "__new__" && targetNote) {
+      next = notes.map((note) =>
+        note.id === targetNote.id
+          ? {
+              ...note,
+              language: "sql" as const,
+              content: note.content.trim()
+                ? `${note.content.trimEnd()}\n-- ${title}\n${content}`
+                : `-- ${title}\n${content}`,
+              updatedAt: now,
+            }
+          : note,
+      );
+      savedToId = targetNote.id;
+    } else {
+      const note: NoteItem = {
+        id: generateId("note"),
+        title,
+        language: "sql" as const,
+        content: `-- ${title}\n${content}`,
+        createdAt: now,
+        updatedAt: now,
+      };
+      next = [note, ...notes];
+      savedToId = note.id;
+    }
     NotesStorage.save(next);
+    localStorage.setItem("nexterm.notes.lastSaveTarget", savedToId);
     window.dispatchEvent(new Event("nexterm:toolbox-changed"));
-    toast.success(t("toolbox.postgres.saveToNotes"));
-    setNoteTitle(null);
+    if (createdFallback) toast.info(t("toolbox.postgres.saveTargetFallback"));
+    toast.success(t("toolbox.postgres.saveToNotesDone", { title }), {
+      action: {
+        label: t("toolbox.postgres.saveToNotesView"),
+        onClick: () =>
+          window.dispatchEvent(
+            new CustomEvent("nexterm:select-note", {
+              detail: { noteId: savedToId },
+            }),
+          ),
+      },
+    });
+    setNoteDialog(null);
+  };
+  /** Line count of the current editor selection (for the menu subtitle). */
+  const countEditorSelectionLines = (): number => {
+    const view = queryEditorViewRef.current;
+    if (!view) return 0;
+    const selection = view.state.selection.main;
+    if (selection.to <= selection.from) return 0;
+    return view.state.doc.sliceString(selection.from, selection.to).split("\n").length;
+  };
+  /** Determine which slice of the document a right-click "save to notes"
+   *  would take: a non-empty selection, the current statement, or the whole
+   *  document (fallback). */
+  const editorMenuSourceKind = (): "selection" | "statement" | "document" | null => {
+    const view = queryEditorViewRef.current;
+    if (!view) return null;
+    const selection = view.state.selection.main;
+    if (
+      selection.to > selection.from &&
+      view.state.doc.sliceString(selection.from, selection.to).trim()
+    ) {
+      return "selection";
+    }
+    if (currentStatementSql()) return "statement";
+    return "document";
+  };
+  /** Text captured by the editor's "Copy" context-menu item (selection →
+   *  current statement → whole document). */
+  const editorCopyValue = (): string => {
+    const view = queryEditorViewRef.current;
+    if (!view) return tab?.sql ?? "";
+    const selection = view.state.selection.main;
+    if (selection.to > selection.from) {
+      return view.state.doc.sliceString(selection.from, selection.to);
+    }
+    return currentStatementSql() || tab?.sql || "";
+  };
+  /** Open the save-to-notes dialog with the right-click source resolution. */
+  const openSaveToNotesFromEditorMenu = () => {
+    if (!tab || tab.type !== "query") return;
+    const view = queryEditorViewRef.current;
+    let content = "";
+    if (view) {
+      const selection = view.state.selection.main;
+      content = selection.to > selection.from
+        ? view.state.doc.sliceString(selection.from, selection.to).trim()
+        : "";
+    }
+    appendSqlToNotes(content || currentStatementSql() || tab.sql);
   };
   /** Stop the in-flight query (B19): triggers server-side pg_cancel_backend. */
   const stopQuery = async () => {
@@ -2355,7 +2508,7 @@ export function ToolPostgres() {
                     icon={<FileCode2 />}
                     label={t("toolbox.postgres.saveToNotes")}
                     disabled={!tab.sql.trim()}
-                    onClick={appendSqlToNotes}
+                    onClick={() => appendSqlToNotes()}
                     data-testid="postgres-save-to-notes"
                   />
                 )}
@@ -2405,27 +2558,64 @@ export function ToolPostgres() {
               </div>
               {tab.type === "query" && (
                 <div className="min-h-0 flex-1">
-                  <CodeEditor
-                    value={tab.sql}
-                    onChange={(sql) => patchTab(tab.id, { sql, dirty: true })}
-                    language="sql"
-                    queryContext={
-                      tabConnection
-                        ? createPostgresQueryEditorContext({
-                            connectionId: tab.connectionId,
-                            catalog: tabPostgresConfig?.database ?? "",
-                            schema: schema ?? undefined,
-                            lookup: async (request) =>
-                              invoke("postgres_catalog_search", {
-                                request: { connectionId: tab.connectionId, ...request },
-                              }),
-                          })
-                        : undefined
-                    }                    editorRef={(view) => {
-                      queryEditorViewRef.current = view;
+                  <ContextMenu
+                    onOpenChange={(open) => {
+                      if (open) setEditorMenuSource(editorMenuSourceKind());
                     }}
-                    className="h-full"
-                  />
+                  >
+                    <ContextMenuTrigger asChild>
+                      <div className="h-full">
+                        <CodeEditor
+                          value={tab.sql}
+                          onChange={(sql) => patchTab(tab.id, { sql, dirty: true })}
+                          language="sql"
+                          queryContext={
+                            tabConnection
+                              ? createPostgresQueryEditorContext({
+                                  connectionId: tab.connectionId,
+                                  catalog: tabPostgresConfig?.database ?? "",
+                                  schema: schema ?? undefined,
+                                  lookup: async (request) =>
+                                    invoke("postgres_catalog_search", {
+                                      request: { connectionId: tab.connectionId, ...request },
+                                    }),
+                                })
+                              : undefined
+                          }                    editorRef={(view) => {
+                            queryEditorViewRef.current = view;
+                          }}
+                          className="h-full"
+                        />
+                      </div>
+                    </ContextMenuTrigger>
+                    <ContextMenuContent>
+                      <ContextMenuItem
+                        data-testid="postgres-editor-save-to-notes"
+                        disabled={!tab.sql.trim()}
+                        onSelect={openSaveToNotesFromEditorMenu}
+                      >
+                        <FileCode2 className="h-3.5 w-3.5" />
+                        <span className="flex flex-col">
+                          <span>{t("toolbox.postgres.saveToNotes")}</span>
+                          <span className="text-[10px] text-muted-foreground">
+                            {editorMenuSource === "selection"
+                              ? t("toolbox.postgres.saveToNotesSourceSelection", {
+                                  count: countEditorSelectionLines(),
+                                })
+                              : editorMenuSource === "statement"
+                                ? t("toolbox.postgres.saveToNotesSourceStatement")
+                                : t("toolbox.postgres.saveToNotesSourceDocument")}
+                          </span>
+                        </span>
+                      </ContextMenuItem>
+                      <ContextMenuItem
+                        onSelect={() => void copyText(editorCopyValue())}
+                      >
+                        <Copy className="h-3.5 w-3.5" />
+                        {t("common.copy")}
+                      </ContextMenuItem>
+                    </ContextMenuContent>
+                  </ContextMenu>
                 </div>
               )}
               {tab.type === "object" && tab.objectReference && (
@@ -2783,7 +2973,7 @@ export function ToolPostgres() {
         open={pendingSshTrust !== null}
         onOpenChange={(open) => !open && setPendingSshTrust(null)}
       >
-        <DialogContent className="!inset-0 !m-auto !translate-x-0 !translate-y-0 w-[520px] max-w-[90vw] max-h-[85vh] overflow-y-auto">
+        <DialogContent className="top-[50%] left-[50%] -translate-x-1/2 -translate-y-1/2 w-[520px] max-w-[90vw] max-h-[85vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>{t("toolbox.postgres.trustHostKeyTitle")}</DialogTitle>
             <DialogDescription>
@@ -2908,11 +3098,95 @@ export function ToolPostgres() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
-      <Dialog open={noteTitle !== null} onOpenChange={(open) => !open && setNoteTitle(null)}>
-        <DialogContent className="!inset-0 !m-auto !translate-x-0 !translate-y-0 w-[420px] max-w-[90vw]">
+      <Dialog open={noteDialog !== null} onOpenChange={(open) => !open && setNoteDialog(null)}>
+        <DialogContent className="top-[50%] left-[50%] -translate-x-1/2 -translate-y-1/2 w-[460px] max-w-[90vw] max-h-[85vh] overflow-y-auto">
           <DialogHeader><DialogTitle>{t("toolbox.postgres.saveToNotes")}</DialogTitle></DialogHeader>
-          <Input autoFocus value={noteTitle ?? ""} onChange={(event) => setNoteTitle(event.target.value)} />
-          <DialogFooter><Button variant="outline" onClick={() => setNoteTitle(null)}>{t("common.cancel")}</Button><Button data-testid="postgres-save-note-confirm" onClick={confirmAppendSqlToNotes}>{t("common.save")}</Button></DialogFooter>
+          {(() => {
+            const dialogNotes = NotesStorage.load();
+            const targetNote = noteDialog && noteDialog.target !== "__new__"
+              ? dialogNotes.find((note) => note.id === noteDialog.target)
+              : undefined;
+            const isNew = !noteDialog || noteDialog.target === "__new__" || !targetNote;
+            const title = isNew
+              ? (noteDialog?.title ?? "")
+              : (targetNote?.title ?? "");
+            const duplicate = noteHasDuplicateBlock(targetNote, title);
+            const lines = targetNote?.content.trim()
+              ? targetNote.content.split("\n").length
+              : 0;
+            const firstLine = targetNote?.content.split("\n")[0]?.slice(0, 40) ?? "";
+            return (
+              <div className="space-y-3">
+                <div className="space-y-1">
+                  <Label className="text-[11px] text-muted-foreground">{t("toolbox.postgres.saveTargetNote")}</Label>
+                  <Select
+                    value={noteDialog?.target ?? "__new__"}
+                    onValueChange={(value) =>
+                      setNoteDialog((current) =>
+                        current ? { ...current, target: value } : current,
+                      )
+                    }
+                  >
+                    <SelectTrigger data-testid="postgres-save-note-target" className="w-full">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="__new__">{t("toolbox.postgres.saveNewNote")}</SelectItem>
+                      {dialogNotes.map((note) => (
+                        <SelectItem key={note.id} value={note.id}>
+                          {note.title || t("toolbox.notes.untitled")}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                {isNew ? (
+                  <Input
+                    data-testid="postgres-save-note-title"
+                    autoFocus
+                    value={noteDialog?.title ?? ""}
+                    onChange={(event) =>
+                      setNoteDialog((current) =>
+                        current ? { ...current, title: event.target.value } : current,
+                      )
+                    }
+                    placeholder={t("toolbox.postgres.saveNoteTitlePlaceholder")}
+                  />
+                ) : (
+                  <>
+                    <Input data-testid="postgres-save-note-title" disabled value={title} />
+                    <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+                      <Badge variant="secondary" className="text-[9px] px-1.5 py-0 shrink-0">
+                        {t(`toolbox.notes.lang.${targetNote?.language ?? "plain"}` as const)}
+                      </Badge>
+                      <span className="shrink-0 tabular-nums">{t("toolbox.postgres.saveNoteLines", { count: lines })}</span>
+                      <span className="truncate min-w-0 flex-1">{firstLine}</span>
+                    </div>
+                  </>
+                )}
+                {duplicate && (
+                  <p data-testid="postgres-save-note-duplicate" className="text-[11px] text-destructive">
+                    {t("toolbox.postgres.saveDuplicateBlock", { title })}
+                  </p>
+                )}
+                <DialogFooter>
+                  <Button variant="outline" onClick={() => setNoteDialog(null)}>{t("common.cancel")}</Button>
+                  <Button
+                    data-testid="postgres-save-note-confirm"
+                    onClick={confirmAppendSqlToNotes}
+                    disabled={
+                      (isNew && !noteDialog?.title.trim()) ||
+                      duplicate
+                    }
+                  >
+                    {isNew
+                      ? t("toolbox.postgres.saveCreateAndSave")
+                      : t("toolbox.postgres.saveAppendToNote")}
+                  </Button>
+                </DialogFooter>
+              </div>
+            );
+          })()}
         </DialogContent>
       </Dialog>
       {tab?.type === "table" && tab.result?.kind === "tabular" && (
