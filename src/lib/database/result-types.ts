@@ -2,6 +2,8 @@
  * Provider-neutral data received by result UIs. Cell serialization remains
  * provider-owned so values such as BIGINT and NUMERIC never lose precision.
  */
+import type { ParsedDatabaseError } from "./database-error";
+
 export type DatabaseCellValue = string | null;
 
 export type DatabaseColumnSemanticType =
@@ -97,7 +99,16 @@ export interface DatabaseEmptyResult {
   readonly kind: "empty";
 }
 
+/** Query/statement execution failed (feature-design §2.4). The parsed error
+ *  keeps the full server text for diagnostics while the pane shows the
+ *  compact message with optional code / line jump / retry actions. */
+export interface DatabaseErrorResult {
+  readonly kind: "error";
+  readonly error: ParsedDatabaseError;
+}
+
 export type DatabaseResult =
   | DatabaseTabularResult
   | DatabaseCommandResult
-  | DatabaseEmptyResult;
+  | DatabaseEmptyResult
+  | DatabaseErrorResult;

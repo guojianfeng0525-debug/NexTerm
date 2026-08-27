@@ -391,7 +391,10 @@ export function DatabaseResultPane({
     startWidth: number;
   } | null>(null);
   const tabularResult = result?.kind === "tabular" ? result : null;
-  const commandTags = result?.kind === "empty" ? [] : result?.commandTags ?? [];
+  const commandTags =
+    result && result.kind !== "empty" && result.kind !== "error"
+      ? result.commandTags
+      : [];
   const pagination = tabularResult?.pagination;
   // Effective row height used both by the grid and the windowing math. Default
   // layouts store rowHeight = 0 (means "unset"), so treat 0 as the 24px base.

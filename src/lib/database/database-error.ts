@@ -1,6 +1,7 @@
 import { parseMySQLError } from "./parsers/mysql-error";
 import { parsePostgresError } from "./parsers/postgres-error";
 import { parseSQLiteError } from "./parsers/sqlite-error";
+import type { DatabaseErrorResult } from "./result-types";
 
 /**
  * Provider-neutral database error model (feature-design §2.2).
@@ -47,9 +48,6 @@ export function parseProviderError(providerId: string, raw: string): ParsedDatab
 }
 
 /** Wraps a parsed error into a `DatabaseErrorResult` for the result pane. */
-export function databaseErrorResult(error: ParsedDatabaseError): {
-  readonly kind: "error";
-  readonly error: ParsedDatabaseError;
-} {
+export function databaseErrorResult(error: ParsedDatabaseError): DatabaseErrorResult {
   return { kind: "error", error };
 }
