@@ -1785,6 +1785,7 @@
     },
     "notes": {
       "quickExecute": "Quick execute",
+      "quickExecuteConnection": "Select PostgreSQL connection",
       "title": "Notes",
       "description": "Snippets with syntax highlighting for SQL, shell, cmd & more.",
       "new": "New note",
@@ -1799,6 +1800,8 @@
       "noActiveTerminal": "Open and activate a terminal before pasting.",
       "pasteToSqlEditor": "Paste into active SQL editor",
       "noActiveSqlEditor": "Open and activate a database query editor before pasting.",
+      "pasteToQueryPage": "Paste into query page",
+      "selectConnectionFirst": "Select a PostgreSQL connection first.",
       "highlighted": "Highlighted",
       "searchPlaceholder": "Search notes…",
       "empty": "No notes yet",

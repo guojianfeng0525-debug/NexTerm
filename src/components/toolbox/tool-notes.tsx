@@ -24,9 +24,16 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuTrigger,
+} from '@/components/ui/context-menu';
 const CodeEditor = lazy(() => import('@/components/code-editor').then((m) => ({ default: m.CodeEditor })));
 import { NotesStorage, generateId } from '@/lib/toolbox/toolbox-storage';
 import { PostgresConnectionsStorage } from '@/lib/toolbox/postgres-storage';
+import { setSelectedNoteId } from '@/lib/toolbox/note-selection';
 import type { NoteItem, NoteLanguage } from '@/lib/toolbox/toolbox-types';
 import { StickyNote, Plus, Search, Trash2, Copy, Pin, PinOff, FileCode2, Send, Play } from 'lucide-react';
 import { cn } from '@/lib/utils';
@@ -95,6 +102,7 @@ export function ToolNotes() {
   selectedRef.current = notes.find((n) => n.id === selectedId) ?? null;
 
   const selected = selectedRef.current;
+  useEffect(() => { setSelectedNoteId(selectedId); return () => setSelectedNoteId(null); }, [selectedId]);
 
   // Debounced persistence: write to the encrypted SQLite store 500ms after
   // the last change, and flush any pending write on unmount.
@@ -148,6 +156,12 @@ export function ToolNotes() {
   useEffect(() => {
     const flush = () => NotesStorage.save(notesRef.current);
     return () => flush();
+  }, []);
+
+  useEffect(() => {
+    const refresh = () => setNotes(NotesStorage.load());
+    window.addEventListener('nexterm:toolbox-changed', refresh);
+    return () => window.removeEventListener('nexterm:toolbox-changed', refresh);
   }, []);
 
   const patchSelected = useCallback(
@@ -224,6 +238,21 @@ export function ToolNotes() {
     }));
   }, [quickConnectionId, selected]);
 
+  const pasteSqlToQuery = useCallback(
+    (content: string) => {
+      const sql = content.trim();
+      if (!sql) return;
+      if (!quickConnectionId) {
+        toast.error(t('toolbox.notes.selectConnectionFirst'));
+        return;
+      }
+      window.dispatchEvent(new CustomEvent('nexterm:paste-sql-to-query', {
+        detail: { content: sql, connectionId: quickConnectionId },
+      }));
+    },
+    [quickConnectionId, t],
+  );
+
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     const list = q
@@ -278,31 +307,42 @@ export function ToolNotes() {
                 </p>
               ) : (
                 filtered.map((note) => (
-                  <button
-                    key={note.id}
-                    type="button"
-                    onClick={() => setSelectedId(note.id)}
-                    className={cn(
-                      'w-full text-left rounded-lg px-2.5 py-2 transition-colors group',
-                      selectedId === note.id
-                        ? 'bg-primary/10 text-foreground'
-                        : 'hover:bg-accent/60 text-foreground/90',
+                  <ContextMenu key={note.id}>
+                    <ContextMenuTrigger asChild>
+                      <button
+                        type="button"
+                        onClick={() => setSelectedId(note.id)}
+                        className={cn(
+                          'w-full text-left rounded-lg px-2.5 py-2 transition-colors group',
+                          selectedId === note.id
+                            ? 'bg-primary/10 text-foreground'
+                            : 'hover:bg-accent/60 text-foreground/90',
+                        )}
+                      >
+                        <div className="flex items-center gap-1.5 min-w-0">
+                          {note.pinned && <Pin className="h-3 w-3 text-amber-400 shrink-0 fill-amber-400" />}
+                          <span className="text-xs font-medium truncate flex-1">{note.title || t('toolbox.notes.untitled')}</span>
+                          <span className="text-[9px] text-muted-foreground shrink-0">{formatRelativeTime(note.updatedAt, t)}</span>
+                        </div>
+                        <div className="mt-1 flex items-center gap-1.5">
+                          <Badge variant="secondary" className="text-[9px] px-1.5 py-0">
+                            {t(`toolbox.notes.lang.${note.language}` as const)}
+                          </Badge>
+                          <span className="text-[10px] text-muted-foreground truncate">
+                            {note.content.split('\n')[0]?.slice(0, 40) || ''}
+                          </span>
+                        </div>
+                      </button>
+                    </ContextMenuTrigger>
+                    {note.language === 'sql' && (
+                      <ContextMenuContent>
+                        <ContextMenuItem onSelect={() => pasteSqlToQuery(note.content)}>
+                          <Send className="h-3.5 w-3.5" />
+                          {t('toolbox.notes.pasteToQueryPage')}
+                        </ContextMenuItem>
+                      </ContextMenuContent>
                     )}
-                  >
-                    <div className="flex items-center gap-1.5 min-w-0">
-                      {note.pinned && <Pin className="h-3 w-3 text-amber-400 shrink-0 fill-amber-400" />}
-                      <span className="text-xs font-medium truncate flex-1">{note.title || t('toolbox.notes.untitled')}</span>
-                      <span className="text-[9px] text-muted-foreground shrink-0">{formatRelativeTime(note.updatedAt, t)}</span>
-                    </div>
-                    <div className="mt-1 flex items-center gap-1.5">
-                      <Badge variant="secondary" className="text-[9px] px-1.5 py-0">
-                        {t(`toolbox.notes.lang.${note.language}` as const)}
-                      </Badge>
-                      <span className="text-[10px] text-muted-foreground truncate">
-                        {note.content.split('\n')[0]?.slice(0, 40) || ''}
-                      </span>
-                    </div>
-                  </button>
+                  </ContextMenu>
                 ))
               )}
             </div>
@@ -352,15 +392,20 @@ export function ToolNotes() {
                   </Button>
                 )}
                 {selected.language === 'sql' && postgresConnections.length > 0 && (
-                  <>
+                  <div className="flex items-center gap-1.5 border-l border-border pl-2 shrink-0">
                     <Select value={quickConnectionId} onValueChange={setQuickConnectionId}>
-                      <SelectTrigger className="h-8 w-36 text-xs"><SelectValue placeholder="PostgreSQL" /></SelectTrigger>
+                      <SelectTrigger
+                        className="h-8 w-44 text-xs"
+                        aria-label={t('toolbox.notes.quickExecuteConnection')}
+                      >
+                        <SelectValue placeholder={t('toolbox.notes.quickExecuteConnection')} />
+                      </SelectTrigger>
                       <SelectContent>{postgresConnections.map((connection) => <SelectItem key={connection.id} value={connection.id}>{connection.name}</SelectItem>)}</SelectContent>
                     </Select>
                     <Button size="icon" variant="ghost" className="h-8 w-8 shrink-0" disabled={!quickConnectionId} onClick={quickExecuteSql} title={t('toolbox.notes.quickExecute')}>
                       <Play className="h-4 w-4" />
                     </Button>
-                  </>
+                  </div>
                 )}
                 <Button size="icon" variant="ghost" className="h-8 w-8 shrink-0 text-destructive hover:text-destructive" onClick={() => setDeleteTarget(selected)} title={t('common.delete')}>
                   <Trash2 className="h-4 w-4" />

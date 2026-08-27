@@ -75,7 +75,8 @@ import {
   toggleLineComment,
 } from "@/lib/database/sql-statement-tokenizer";
 import { formatSql, formatSqlSelection } from "@/lib/database/sql-formatter";
-import { generateId } from "@/lib/toolbox/toolbox-storage";
+import { generateId, NotesStorage } from "@/lib/toolbox/toolbox-storage";
+import { getSelectedNoteId } from "@/lib/toolbox/note-selection";
 import { ConnectionStorageManager } from "@/lib/connection-storage";
 import { PostgresConnectionsStorage } from "@/lib/toolbox/postgres-storage";
 import type {
@@ -401,6 +402,7 @@ export function ToolPostgres() {
   /** Tab id awaiting dirty-discard confirmation before closing. */
   const [closeTarget, setCloseTarget] = useState<string | null>(null);
   const [disconnectTarget, setDisconnectTarget] = useState<string | null>(null);
+  const [noteTitle, setNoteTitle] = useState<string | null>(null);
   /** Filter & Sort / Custom Filter dialog mode for the active table tab. */
   const [filterDialog, setFilterDialog] = useState<
     { mode: "custom" | "filterSort" } | null
@@ -773,6 +775,26 @@ export function ToolPostgres() {
     window.addEventListener("nexterm:quick-execute-postgres", quickExecute);
     return () => window.removeEventListener("nexterm:quick-execute-postgres", quickExecute);
   }, [connected, connections, draft.id, t]);
+  useEffect(() => {
+    const pasteToQuery = (event: Event) => {
+      const detail = (event as CustomEvent<{ content?: string; connectionId?: string }>).detail;
+      const sql = detail?.content?.trim();
+      const connection = connections.find((item) => item.id === detail?.connectionId);
+      if (!sql || !connection) return;
+      void (async () => {
+        if (!connected || draft.id !== connection.id) await connectEstablished(connection);
+        openTab({
+          ...newQuery(connection.id),
+          title: t("toolbox.postgres.quickQuery"),
+          sql,
+          dirty: true,
+        });
+      })();
+    };
+    window.addEventListener("nexterm:paste-sql-to-query", pasteToQuery);
+    return () => window.removeEventListener("nexterm:paste-sql-to-query", pasteToQuery);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- connectEstablished is a stable inline fn; adding it re-binds the listener on every render
+  }, [connected, connections, draft.id, t]);
   const trustAndConnect = async () => {
     if (!pendingSshTrust) return;
     const trusted = {
@@ -937,9 +959,26 @@ export function ToolPostgres() {
     if (!tab || tab.type !== "query") return;
     const content = currentStatementSql() || tab.sql;
     if (!content.trim()) return;
-    const detail: { content: string; handled?: boolean } = { content };
-    window.dispatchEvent(new CustomEvent("nexterm:append-sql-note", { detail }));
-    if (!detail.handled) toast.error(t("toolbox.notes.noActiveSqlEditor"));
+    setNoteTitle(tab.title);
+  };
+  const confirmAppendSqlToNotes = () => {
+    if (!tab || tab.type !== "query" || noteTitle === null) return;
+    const content = currentStatementSql() || tab.sql;
+    const title = noteTitle.trim().replace(/[\r\n]+/g, " ");
+    if (!title || !content.trim()) return;
+    const now = Date.now();
+    const selectedId = getSelectedNoteId();
+    const notes = NotesStorage.load();
+    const selected = selectedId ? notes.find((note) => note.id === selectedId) : undefined;
+    const next = selected
+      ? notes.map((note) => note.id === selected.id
+        ? { ...note, language: "sql" as const, content: `${note.content.trimEnd()}\n-- ${title}\n${content}`, updatedAt: now }
+        : note)
+      : [{ id: generateId("note"), title, language: "sql" as const, content: `-- ${title}\n${content}`, createdAt: now, updatedAt: now }, ...notes];
+    NotesStorage.save(next);
+    window.dispatchEvent(new Event("nexterm:toolbox-changed"));
+    toast.success(t("toolbox.postgres.saveToNotes"));
+    setNoteTitle(null);
   };
   /** Stop the in-flight query (B19): triggers server-side pg_cancel_backend. */
   const stopQuery = async () => {
@@ -2735,7 +2774,7 @@ export function ToolPostgres() {
         open={pendingSshTrust !== null}
         onOpenChange={(open) => !open && setPendingSshTrust(null)}
       >
-        <DialogContent className="!inset-0 !m-auto w-[520px] max-w-[90vw]">
+        <DialogContent className="!inset-0 !m-auto !translate-x-0 !translate-y-0 w-[520px] max-w-[90vw] max-h-[85vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>{t("toolbox.postgres.trustHostKeyTitle")}</DialogTitle>
             <DialogDescription>
@@ -2860,6 +2899,13 @@ export function ToolPostgres() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+      <Dialog open={noteTitle !== null} onOpenChange={(open) => !open && setNoteTitle(null)}>
+        <DialogContent className="!inset-0 !m-auto !translate-x-0 !translate-y-0 w-[420px] max-w-[90vw]">
+          <DialogHeader><DialogTitle>{t("toolbox.postgres.saveToNotes")}</DialogTitle></DialogHeader>
+          <Input autoFocus value={noteTitle ?? ""} onChange={(event) => setNoteTitle(event.target.value)} />
+          <DialogFooter><Button variant="outline" onClick={() => setNoteTitle(null)}>{t("common.cancel")}</Button><Button data-testid="postgres-save-note-confirm" onClick={confirmAppendSqlToNotes}>{t("common.save")}</Button></DialogFooter>
+        </DialogContent>
+      </Dialog>
       {tab?.type === "table" && tab.result?.kind === "tabular" && (
         <FilterSortDialog
           open={filterDialog !== null}

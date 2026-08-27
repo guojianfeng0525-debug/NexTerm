@@ -1537,7 +1537,7 @@ const handleCancelConnectionAttempt = async () => {
       </DialogContent>
     </Dialog>
     <Dialog open={hostKeyPrompt !== null} onOpenChange={(isOpen) => !isOpen && resolveHostKeyPrompt(false)}>
-      <DialogContent className="!inset-0 !m-auto w-[520px] max-w-[90vw]">
+      <DialogContent className="!inset-0 !m-auto !translate-x-0 !translate-y-0 w-[520px] max-w-[90vw] max-h-[85vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2"><Shield className="h-5 w-5 text-amber-500" />{t('common.confirm')}</DialogTitle>
           <DialogDescription className="whitespace-pre-line break-words font-mono text-xs leading-5">{hostKeyPrompt}</DialogDescription>

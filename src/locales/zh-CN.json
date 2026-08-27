@@ -1785,6 +1785,7 @@
     },
     "notes": {
       "quickExecute": "快速执行",
+      "quickExecuteConnection": "选择 PostgreSQL 连接",
       "title": "记事本",
       "description": "支持 SQL、Shell、Cmd 等语法高亮的文本记录。",
       "new": "新建笔记",
@@ -1799,6 +1800,8 @@
       "noActiveTerminal": "请先打开并激活一个终端窗口。",
       "pasteToSqlEditor": "粘贴到当前 SQL 查询窗口",
       "noActiveSqlEditor": "请先打开并激活一个数据库查询窗口。",
+      "pasteToQueryPage": "粘贴到查询页",
+      "selectConnectionFirst": "请先选择 PostgreSQL 连接。",
       "highlighted": "语法高亮",
       "searchPlaceholder": "搜索笔记…",
       "empty": "暂无笔记",

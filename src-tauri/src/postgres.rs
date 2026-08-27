@@ -2480,8 +2480,9 @@ pub async fn postgres_ssh_fingerprint(
 mod tests {
     use super::{
         build_delete_statement, build_insert_statement, build_order_by_clause,
-        build_where_clause, fingerprint_matches, single_statement, skip_leading_noise,
-        split_sql_statements, validate_parameterized_request, PostgresFilterCondition,
+        build_where_clause, fingerprint_matches, reject_untracked_transaction_control,
+        single_statement, skip_leading_noise, split_sql_statements, validate_parameterized_request,
+        validate_read_only_sql, PostgresFilterCondition,
         PostgresSortClause, PostgresTableFilter,
     };
     use std::collections::{HashMap, HashSet};
@@ -2493,6 +2494,19 @@ mod tests {
             ("score".to_string(), "numeric".to_string()),
             ("note".to_string(), "text".to_string()),
         ])
+    }
+
+    #[test]
+    fn raw_sql_rejects_untracked_transaction_control_in_a_batch() {
+        assert!(reject_untracked_transaction_control("SELECT 1; BEGIN; SELECT 2").is_err());
+        assert!(reject_untracked_transaction_control("SELECT 'BEGIN'").is_ok());
+    }
+
+    #[test]
+    fn read_only_sql_rejects_session_mutation_and_writes() {
+        assert!(validate_read_only_sql("SELECT 1; SHOW search_path").is_ok());
+        assert!(validate_read_only_sql("SET default_transaction_read_only = off").is_err());
+        assert!(validate_read_only_sql("DELETE FROM users").is_err());
     }
 
     #[test]
