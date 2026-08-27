@@ -20,6 +20,7 @@ import {
   FileCode2,
   Filter,
   FolderTree,
+  History,
   KeyRound,
   ListChecks,
   ListPlus,
@@ -46,6 +47,9 @@ import {
   ContextMenuContent,
   ContextMenuItem,
   ContextMenuSeparator,
+  ContextMenuSub,
+  ContextMenuSubContent,
+  ContextMenuSubTrigger,
   ContextMenuTrigger,
 } from "@/components/ui/context-menu";
 import { Input } from "@/components/ui/input";
@@ -91,6 +95,14 @@ import {
   type ParsedDatabaseError,
 } from "@/lib/database/database-error";
 import { revealEditorLine } from "@/lib/database/editor-error-reveal";
+import {
+  generateInsertSql,
+  generateSelectSql,
+  generateUpdateSql,
+  type ColumnMetadata,
+  type SqlGenerationOptions,
+} from "@/lib/database/sql-generation";
+import { addQueryHistory } from "@/lib/database/query-history";
 import { useDatabaseKeyboardShortcuts } from "@/lib/keyboard/use-database-keyboard-shortcuts";
 import { generateId, NotesStorage } from "@/lib/toolbox/toolbox-storage";
 import type { NoteItem } from "@/lib/toolbox/toolbox-types";
@@ -126,6 +138,7 @@ import {
 } from "@/components/toolbox/database-navigator";
 import { DatabaseResultPane } from "@/components/toolbox/database-result-pane";
 import { DatabaseResultErrorPane } from "@/components/toolbox/database-result-error";
+import { QueryHistoryView } from "@/components/toolbox/query-history-view";
 import {
   ObjectViewerTab,
   type ObjectViewerTabState,
@@ -182,6 +195,17 @@ import type {
 } from "@/lib/database/types";
 
 type TableObject = { schema: string; name: string };
+/** Column metadata returned by `postgres_catalog_objects { kind: "columns" }`
+ *  (the loader keeps `PostgresCatalogObjectItem` internal). */
+type PostgresCatalogColumnItem = {
+  readonly kind: string;
+  readonly schema: string;
+  readonly name: string;
+  readonly dataType?: string;
+  readonly nullable?: boolean;
+  readonly default?: string;
+  readonly ordinal?: number;
+};
 /** A row staged for INSERT. Only `edited` column indexes are submitted; the
  * remaining columns keep their server-side DEFAULT. */
 type PendingInsertRow = {
@@ -391,6 +415,9 @@ export function ToolPostgres() {
   const [activeTab, setActiveTab] = useState<string>(() => tabs[0]?.id ?? "");
   const [resultHeight, setResultHeight] = useState(260);
   const [resultDragging, setResultDragging] = useState(false);
+  /** Query-history panel toggle (feature-design §5.3): swaps the result area
+   *  between the grid and the in-pane history view (ux-spec §4.5). */
+  const [historyOpen, setHistoryOpen] = useState(false);
   const [running, setRunning] = useState(false);
   /** Run id of the in-flight query, used by `postgres_cancel` (B19). */
   const runIdRef = useRef(0);
@@ -992,6 +1019,13 @@ export function ToolPostgres() {
         ),
       );
       patchTab(tab.id, { result });
+      addQueryHistory({
+        sql: tab.sql,
+        connectionId: tab.connectionId,
+        connectionName: tabConnection?.name ?? tab.connectionId,
+        providerId: "postgresql",
+        success: true,
+      });
     } catch (error) {
       const parsed = showQueryError(tab.id, error);
       // Whole-document execution: the server LINE n is relative to the first
@@ -1009,6 +1043,13 @@ export function ToolPostgres() {
         const view = queryEditorViewRef.current;
         if (view) revealEditorLine(view, null, parsed.lineNumber);
       }
+      addQueryHistory({
+        sql: tab.sql,
+        connectionId: tab.connectionId,
+        connectionName: tabConnection?.name ?? tab.connectionId,
+        providerId: "postgresql",
+        success: false,
+      });
     } finally {
       setRunning(false);
       if (activeRunIdRef.current === runId) activeRunIdRef.current = null;
@@ -1276,6 +1317,13 @@ export function ToolPostgres() {
         }),
       );
       patchTab(tab.id, { result });
+      addQueryHistory({
+        sql,
+        connectionId: tab.connectionId,
+        connectionName: tabConnection?.name ?? tab.connectionId,
+        providerId: "postgresql",
+        success: true,
+      });
     } catch (error) {
       const parsed = showQueryError(tab.id, error);
       lastErrorRangeRef.current = sentRange ?? null;
@@ -1286,6 +1334,13 @@ export function ToolPostgres() {
         const view = queryEditorViewRef.current;
         if (view) revealEditorLine(view, sentRange ?? null, parsed.lineNumber);
       }
+      addQueryHistory({
+        sql,
+        connectionId: tab.connectionId,
+        connectionName: tabConnection?.name ?? tab.connectionId,
+        providerId: "postgresql",
+        success: false,
+      });
     } finally {
       setRunning(false);
       if (activeRunIdRef.current === runId) activeRunIdRef.current = null;
@@ -1298,6 +1353,129 @@ export function ToolPostgres() {
     patchTab(targetTabId, { result: databaseErrorResult(parsed) });
     return parsed;
   };
+  /** Loads column metadata for a relation through the navigator's catalog
+   *  command (feature-design §4.1). Empty on failure — callers degrade to
+   *  `SELECT *`. */
+  const loadRelationColumns = async (
+    reference: PostgresRelationReference,
+  ): Promise<readonly ColumnMetadata[]> => {
+    try {
+      const items = await invoke<PostgresCatalogColumnItem[]>("postgres_catalog_objects", {
+        request: {
+          connectionId: reference.connectionId,
+          kind: "columns",
+          schema: reference.schema,
+          relation: reference.relation,
+        },
+      });
+      return items.map((item) => ({
+        name: item.name,
+        dataType: item.dataType,
+        nullable: item.nullable,
+        default: item.default,
+      }));
+    } catch {
+      return [];
+    }
+  };
+  /** PG identifier quoting shared by the generated statements. */
+  const postgresSqlOptions = (): SqlGenerationOptions => ({
+    quoteIdentifier: (id: string) => `"${id.replace(/"/g, '""')}"`,
+  });
+  /** Appends generated SQL to the active query editor (selected + focused +
+   *  dirty), or opens a fresh query tab when no editor is mounted
+   *  (feature-design §4.2). */
+  const insertGeneratedSql = (sql: string, connectionId?: string) => {
+    const view = queryEditorViewRef.current;
+    if (view) {
+      const doc = view.state.doc;
+      const insertAt = doc.length;
+      const needsLeadingNewline =
+        insertAt > 0 && doc.sliceString(insertAt - 1, insertAt) !== "\n";
+      const insertText = (needsLeadingNewline ? "\n" : "") + sql + "\n";
+      view.dispatch({ changes: { from: insertAt, to: insertAt, insert: insertText } });
+      view.dispatch({
+        selection: { anchor: insertAt, head: insertAt + insertText.length },
+      });
+      view.focus();
+      patchTab(tab.id, { dirty: true });
+      return;
+    }
+    openTab({
+      ...newQuery(connectionId ?? draft.id),
+      sql,
+      dirty: true,
+    });
+    requestAnimationFrame(() => {
+      const nextView = queryEditorViewRef.current;
+      if (!nextView) return;
+      nextView.dispatch({
+        selection: { anchor: 0, head: nextView.state.doc.length },
+      });
+      nextView.focus();
+    });
+  };
+  /** Builds a generated statement for a relation and inserts it into the
+   *  editor. INSERT/UPDATE need column metadata; when columns cannot be
+   *  loaded the menu degrades to a `SELECT *` template (feature-design §4.1). */
+  const generateRelationSql = async (
+    reference: PostgresRelationReference,
+    kind: "select" | "insert" | "update",
+  ) => {
+    const columns = await loadRelationColumns(reference);
+    const options = postgresSqlOptions();
+    let sql: string;
+    if (kind === "select") {
+      sql = generateSelectSql(
+        reference.schema,
+        reference.relation,
+        columns.length ? columns : null,
+        options,
+      );
+    } else if (columns.length === 0) {
+      // Degradation rule: without column metadata, only a SELECT * template
+      // is valid (feature-design §4.1).
+      sql = generateSelectSql(reference.schema, reference.relation, null, options);
+    } else if (kind === "insert") {
+      sql = generateInsertSql(reference.schema, reference.relation, columns, options);
+    } else {
+      // MVP: primary-key discovery is deferred, so the UPDATE template has
+      // no WHERE clause — the user completes it before running.
+      sql = generateUpdateSql(reference.schema, reference.relation, columns, [], options);
+    }
+    insertGeneratedSql(sql, reference.connectionId);
+  };
+  const generateDeleteSql = (reference: PostgresRelationReference): string =>
+    `DELETE FROM ${quoteQualifiedPostgresName(reference)};`;
+  // ── Query-history cross-component events (feature-design §5.4) ────────────
+  // The history view dispatches these; the provider check is authoritative and
+  // the connection check keeps multi-connection sessions from cross-firing.
+  const onHistoryExecute = useEffectEvent((event: Event) => {
+    const detail = (event as CustomEvent<{ providerId?: string; sql?: string; connectionId?: string }>).detail;
+    if (detail?.providerId !== "postgresql") return;
+    const sql = detail?.sql?.trim();
+    if (!sql || !tab) return;
+    if (detail.connectionId && detail.connectionId !== tab.connectionId) return;
+    patchTab(tab.id, { sql });
+    void runSql(sql);
+  });
+  const onHistoryInsert = useEffectEvent((event: Event) => {
+    const detail = (event as CustomEvent<{ providerId?: string; sql?: string }>).detail;
+    if (detail?.providerId !== "postgresql") return;
+    const sql = detail?.sql;
+    if (!sql) return;
+    insertGeneratedSql(sql);
+  });
+  useEffect(() => {
+    const handleExecute = (event: Event) => onHistoryExecute(event);
+    const handleInsert = (event: Event) => onHistoryInsert(event);
+    window.addEventListener("nexterm:db-query-history-execute", handleExecute);
+    window.addEventListener("nexterm:db-query-history-insert", handleInsert);
+    return () => {
+      window.removeEventListener("nexterm:db-query-history-execute", handleExecute);
+      window.removeEventListener("nexterm:db-query-history-insert", handleInsert);
+    };
+  }, []);
   /** B21: open the read-only object viewer tab for a navigator object. */
   const openObjectViewer = (reference: PostgresObjectReference) => {
     const tab: WorkspaceTab = {
@@ -2556,6 +2734,50 @@ export function ToolPostgres() {
                   {relation && relation.objectRole === "table" && <ContextMenuItem disabled={!connected} onSelect={() => openDesigner(relation.schema, relation.relation)}>{t("toolbox.postgres.designTable")}</ContextMenuItem>}
                   {relation && relation.objectRole === "view" && <ContextMenuItem disabled={!connected} onSelect={() => void openViewDesigner(relation.schema, relation.relation)}>{t("toolbox.postgres.designView")}</ContextMenuItem>}
                   {relation && relation.objectRole === "materializedView" && <ContextMenuItem disabled title={t("toolbox.postgres.materializedViewReadonly")}>{t("toolbox.postgres.designView")}</ContextMenuItem>}
+                  {relation && (
+                    <ContextMenuSub>
+                      <ContextMenuSubTrigger
+                        data-testid="navigator-generate-sql"
+                        disabled={!connected}
+                      >
+                        {t("toolbox.postgres.generateSql")}
+                      </ContextMenuSubTrigger>
+                      <ContextMenuSubContent>
+                        <ContextMenuItem
+                          disabled={!connected}
+                          onSelect={() => void generateRelationSql(relation, "select")}
+                          data-testid="navigator-generate-select"
+                        >
+                          {t("toolbox.postgres.generateSelect")}
+                        </ContextMenuItem>
+                        <ContextMenuItem
+                          disabled={!connected || relation.objectRole !== "table"}
+                          onSelect={() => void generateRelationSql(relation, "insert")}
+                          data-testid="navigator-generate-insert"
+                        >
+                          {t("toolbox.postgres.generateInsert")}
+                        </ContextMenuItem>
+                        <ContextMenuItem
+                          disabled={!connected || relation.objectRole !== "table"}
+                          onSelect={() => void generateRelationSql(relation, "update")}
+                          data-testid="navigator-generate-update"
+                        >
+                          {t("toolbox.postgres.generateUpdate")}
+                        </ContextMenuItem>
+                        <ContextMenuSeparator />
+                        <ContextMenuItem
+                          variant="destructive"
+                          disabled={!connected}
+                          onSelect={() =>
+                            insertGeneratedSql(generateDeleteSql(relation), relation.connectionId)
+                          }
+                          data-testid="navigator-generate-delete"
+                        >
+                          {t("toolbox.postgres.generateDelete")}
+                        </ContextMenuItem>
+                      </ContextMenuSubContent>
+                    </ContextMenuSub>
+                  )}
                   {objectReference?.objectKind === "function" && <ContextMenuItem disabled={!connected} onSelect={() => openObjectViewer(objectReference)}>{t("toolbox.postgres.openFunction")}</ContextMenuItem>}
                   {(objectReference?.objectKind === "sequence" ||
                     objectReference?.objectKind === "index" ||
@@ -2648,6 +2870,15 @@ export function ToolPostgres() {
                     disabled={!tab.sql.trim()}
                     onClick={() => appendSqlToNotes()}
                     data-testid="postgres-save-to-notes"
+                  />
+                )}
+                {tab.type === "query" && (
+                  <ToolButton
+                    icon={<History />}
+                    label={t("toolbox.postgres.history.title")}
+                    disabled={!connected}
+                    onClick={() => setHistoryOpen((open) => !open)}
+                    data-testid="postgres-history"
                   />
                 )}
                  {tab.type === "query" && running && (
@@ -2916,6 +3147,33 @@ export function ToolPostgres() {
                 onPointerDown={() => setResultDragging(true)}
               />
               )}
+              {tab.type === "query" && historyOpen ? (
+                <div
+                  className="shrink-0 overflow-auto border-t"
+                  style={{ height: resultHeight }}
+                  data-testid="postgres-history-panel"
+                >
+                  <QueryHistoryView
+                    open
+                    onOpenChange={setHistoryOpen}
+                    providerId="postgresql"
+                    connectionId={tab.connectionId}
+                    labels={{
+                      history: t("toolbox.postgres.history.title"),
+                      empty: t("toolbox.postgres.history.empty"),
+                      run: t("toolbox.postgres.history.run"),
+                      insertToEditor: t("toolbox.postgres.history.insertToEditor"),
+                      copy: t("toolbox.postgres.history.copy"),
+                      remove: t("toolbox.postgres.history.remove"),
+                      clear: t("toolbox.postgres.history.clear"),
+                      time: t("toolbox.postgres.history.time"),
+                      clearConfirmTitle: t("toolbox.postgres.history.clearConfirmTitle"),
+                      clearConfirmDescription: t("toolbox.postgres.history.clearConfirmDescription"),
+                      cancel: t("common.cancel"),
+                    }}
+                  />
+                </div>
+              ) : (
               <DatabaseResultPane
                 result={tab.result}
                 height={resultHeight}
@@ -3082,6 +3340,7 @@ export function ToolPostgres() {
                     />
                   )}
               />
+              )}
               </>}
               </div>
               {ddlPreview && (
