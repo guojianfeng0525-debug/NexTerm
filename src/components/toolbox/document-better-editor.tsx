@@ -111,6 +111,13 @@ export function BetterEditor({ kind, bytes, onSave, onError }: BetterEditorProps
     </div>
   );
 
+  // WebKit (macOS) renders NO web-layer scrollbar (verified pixel-identical),
+  // so a hint is needed there. Chromium (Windows WebView2 / Linux) honors
+  // ::-webkit-scrollbar (globals.css) — native bars are always visible and
+  // draggable, so the hint would be noise (and its trackpad wording wrong for
+  // desktop machines without a touchpad).
+  const isMac = navigator.platform.toUpperCase().includes('MAC');
+
   if (kind === 'xlsx') {
     return (
       <Suspense fallback={fallback}>
@@ -121,15 +128,17 @@ export function BetterEditor({ kind, bytes, onSave, onError }: BetterEditorProps
             className="h-full"
             i18n={locale as XlsxTranslations | undefined}
           />
-          {/* macOS WKWebView scrollbars are overlay style (hidden until the
-              pointer hovers the grid). A discreet hint tells users the native
-              bar exists and how to scroll horizontally. */}
-          <p
-            className="pointer-events-none absolute bottom-1.5 right-3 z-10 select-none text-[10px] leading-none text-muted-foreground/70"
-            data-testid="xlsx-hscroll-hint"
-          >
-            {t('toolbox.documents.hScrollHint')}
-          </p>
+          {/* macOS-only hint: the overlay bar appears when the pointer hovers
+              the right edge; Shift+scroll also scrolls horizontally (works
+              with a mouse wheel — no trackpad required). */}
+          {isMac && (
+            <p
+              className="pointer-events-none absolute bottom-1.5 right-3 z-10 select-none text-[10px] leading-none text-muted-foreground/70"
+              data-testid="xlsx-hscroll-hint"
+            >
+              {t('toolbox.documents.hScrollHint')}
+            </p>
+          )}
         </div>
       </Suspense>
     );
