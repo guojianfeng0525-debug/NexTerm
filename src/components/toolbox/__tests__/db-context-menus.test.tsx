@@ -33,6 +33,7 @@ const navigatorLabels: NavigatorRelationMenuLabels = {
   generateSqlInsert: "INSERT",
   generateSqlUpdate: "UPDATE",
   generateSqlDelete: "DELETE",
+  generateSqlHint: "仅支持生成 SELECT（列元数据不可用）",
   refresh: "刷新",
   newQuery: "新建查询",
 };
@@ -80,7 +81,7 @@ describe("NavigatorRelationMenu", () => {
     expect(item.getAttribute("data-disabled")).toBe("");
   });
 
-  it("greys out INSERT/UPDATE/DELETE when column metadata is unavailable", async () => {
+  it("hides INSERT/UPDATE/DELETE when column metadata is unavailable and shows a hint", async () => {
     renderMenu(
       <NavigatorRelationMenu
         actions={navigatorActions({ generateInsert: undefined, generateUpdate: undefined, generateDelete: undefined })}
@@ -88,12 +89,16 @@ describe("NavigatorRelationMenu", () => {
       />,
     );
     fireEvent.click(screen.getByText("生成 SQL"));
-    const insert = await screen.findByTestId("navigator-menu-generate-insert");
-    expect(insert.getAttribute("data-disabled")).toBe("");
-    expect(screen.getByTestId("navigator-menu-generate-update").getAttribute("data-disabled")).toBe("");
-    expect(screen.getByTestId("navigator-menu-generate-delete").getAttribute("data-disabled")).toBe("");
-    // SELECT stays enabled.
+    // SELECT stays available.
     expect(screen.getByTestId("navigator-menu-generate-select").getAttribute("data-disabled")).toBeNull();
+    // INSERT/UPDATE/DELETE are hidden (not greyed) when metadata is unavailable (F4.6).
+    expect(screen.queryByTestId("navigator-menu-generate-insert")).toBeNull();
+    expect(screen.queryByTestId("navigator-menu-generate-update")).toBeNull();
+    expect(screen.queryByTestId("navigator-menu-generate-delete")).toBeNull();
+    // A disabled hint explains the degradation.
+    const hint = await screen.findByTestId("navigator-menu-generate-hint");
+    expect(hint.getAttribute("data-disabled")).toBe("");
+    expect(hint.textContent).toContain("列元数据不可用");
   });
 
   it("enables INSERT/UPDATE/DELETE when actions are provided", async () => {
@@ -110,12 +115,15 @@ describe("NavigatorRelationMenu", () => {
     expect(actions.generateInsert).toHaveBeenCalledTimes(1);
   });
 
-  it("marks DELETE as destructive", async () => {
+  it("renders DELETE in the generate SQL submenu as a plain item (danger is conveyed by the generated -- 全表删除 comment)", async () => {
     const actions = navigatorActions({ generateDelete: vi.fn() });
     renderMenu(<NavigatorRelationMenu actions={actions} labels={navigatorLabels} />);
     fireEvent.click(screen.getByText("生成 SQL"));
     const del = await screen.findByTestId("navigator-menu-generate-delete");
-    expect(del.getAttribute("data-variant")).toBe("destructive");
+    // Not a destructive-styled item — the risk is signalled by the SQL comment.
+    expect(del.getAttribute("data-variant")).not.toBe("destructive");
+    fireEvent.click(del);
+    expect(actions.generateDelete).toHaveBeenCalledTimes(1);
   });
 
   it("annotates refresh (F5) and new query (Ctrl+N) shortcuts", () => {

@@ -114,6 +114,7 @@ export function ToolSqlite() {
     generateSqlInsert: t("toolbox.sqlite.generateSqlInsert"),
     generateSqlUpdate: t("toolbox.sqlite.generateSqlUpdate"),
     generateSqlDelete: t("toolbox.sqlite.generateSqlDelete"),
+    generateSqlHint: t("toolbox.sqlite.generateSqlHint"),
     refresh: t("toolbox.sqlite.refresh"),
     newQuery: t("toolbox.sqlite.newQuery"),
   };

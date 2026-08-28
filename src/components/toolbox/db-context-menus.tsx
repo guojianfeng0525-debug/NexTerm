@@ -27,6 +27,7 @@ import {
   FilePlus2,
   FileSpreadsheet,
   Hash,
+  Info,
   ListChecks,
   ListPlus,
   Play,
@@ -74,6 +75,8 @@ export interface NavigatorRelationMenuLabels {
   readonly generateSqlInsert: string;
   readonly generateSqlUpdate: string;
   readonly generateSqlDelete: string;
+  /** Shown as a disabled hint when column metadata is unavailable (F4.6). */
+  readonly generateSqlHint?: string;
   readonly refresh: string;
   readonly newQuery: string;
 }
@@ -82,7 +85,7 @@ export interface NavigatorRelationMenuActions {
   readonly openData: () => void;
   readonly copyName: () => void;
   readonly generateSelect: () => void;
-  /** Absent when column metadata is unavailable → INSERT item greyed out. */
+  /** Absent when column metadata is unavailable → INSERT item hidden. */
   readonly generateInsert?: () => void;
   readonly generateUpdate?: () => void;
   readonly generateDelete?: () => void;
@@ -130,30 +133,44 @@ export function NavigatorRelationMenu({
           >
             {labels.generateSqlSelect}
           </ContextMenuItem>
-          <ContextMenuItem
-            disabled={actions.disabled || !actions.generateInsert}
-            onSelect={() => actions.generateInsert?.()}
-            data-testid="navigator-menu-generate-insert"
-          >
-            {labels.generateSqlInsert}
-          </ContextMenuItem>
-          <ContextMenuItem
-            disabled={actions.disabled || !actions.generateUpdate}
-            onSelect={() => actions.generateUpdate?.()}
-            data-testid="navigator-menu-generate-update"
-          >
-            {labels.generateSqlUpdate}
-          </ContextMenuItem>
-          <ContextMenuSeparator />
-          <ContextMenuItem
-            variant="destructive"
-            disabled={actions.disabled || !actions.generateDelete}
-            onSelect={() => actions.generateDelete?.()}
-            data-testid="navigator-menu-generate-delete"
-          >
-            <Trash2 className="h-3.5 w-3.5" />
-            {labels.generateSqlDelete}
-          </ContextMenuItem>
+          {!actions.generateInsert &&
+            !actions.generateUpdate &&
+            labels.generateSqlHint && (
+              <ContextMenuItem disabled data-testid="navigator-menu-generate-hint">
+                <Info className="h-3.5 w-3.5" />
+                {labels.generateSqlHint}
+              </ContextMenuItem>
+            )}
+          {actions.generateInsert && (
+            <ContextMenuItem
+              disabled={actions.disabled}
+              onSelect={() => actions.generateInsert?.()}
+              data-testid="navigator-menu-generate-insert"
+            >
+              {labels.generateSqlInsert}
+            </ContextMenuItem>
+          )}
+          {actions.generateUpdate && (
+            <ContextMenuItem
+              disabled={actions.disabled}
+              onSelect={() => actions.generateUpdate?.()}
+              data-testid="navigator-menu-generate-update"
+            >
+              {labels.generateSqlUpdate}
+            </ContextMenuItem>
+          )}
+          {actions.generateDelete && (
+            <>
+              <ContextMenuSeparator />
+              <ContextMenuItem
+                disabled={actions.disabled}
+                onSelect={() => actions.generateDelete?.()}
+                data-testid="navigator-menu-generate-delete"
+              >
+                {labels.generateSqlDelete}
+              </ContextMenuItem>
+            </>
+          )}
         </ContextMenuSubContent>
       </ContextMenuSub>
       <ContextMenuSeparator />

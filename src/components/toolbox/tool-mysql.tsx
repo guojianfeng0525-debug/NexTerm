@@ -172,6 +172,7 @@ export function ToolMySql() {
     generateSqlInsert: t("toolbox.mysql.generateSqlInsert"),
     generateSqlUpdate: t("toolbox.mysql.generateSqlUpdate"),
     generateSqlDelete: t("toolbox.mysql.generateSqlDelete"),
+    generateSqlHint: t("toolbox.mysql.generateSqlHint"),
     refresh: t("toolbox.mysql.refresh"),
     newQuery: t("toolbox.mysql.newQuery"),
   };

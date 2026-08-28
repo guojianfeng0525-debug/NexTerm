@@ -1493,7 +1493,7 @@ export function ToolPostgres() {
     insertGeneratedSql(sql, reference.connectionId);
   };
   const generateDeleteSql = (reference: PostgresRelationReference): string =>
-    `DELETE FROM ${quoteQualifiedPostgresName(reference)};`;
+    `-- 全表删除：此语句将删除全部行，请添加 WHERE 条件\nDELETE FROM ${quoteQualifiedPostgresName(reference)};`;
   // ── Query-history cross-component events (feature-design §5.4) ────────────
   // The history view dispatches these; the provider check is authoritative and
   // the connection check keeps multi-connection sessions from cross-firing.
@@ -2822,14 +2822,12 @@ export function ToolPostgres() {
                         </ContextMenuItem>
                         <ContextMenuSeparator />
                         <ContextMenuItem
-                          variant="destructive"
                           disabled={!connected}
                           onSelect={() =>
                             insertGeneratedSql(generateDeleteSql(relation), relation.connectionId)
                           }
                           data-testid="navigator-generate-delete"
                         >
-                          <Trash2 className="h-3.5 w-3.5" />
                           {t("toolbox.postgres.generateDelete")}
                         </ContextMenuItem>
                       </ContextMenuSubContent>
