@@ -346,6 +346,8 @@
       "systemMonitor": "System Monitor",
       "statusBar": "Status Bar",
       "commandSuggestions": "Command Suggestions",
+      "suggestionDebounceMs": "Suggestion Debounce (ms)",
+      "suggestionTuiGateEnabled": "Suppress in Full-Screen Apps",
       "enableNotifications": "Enable Notifications",
       "enableNotificationsDesc": "Show system notifications for important events"
     },

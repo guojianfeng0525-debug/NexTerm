@@ -346,6 +346,8 @@
       "systemMonitor": "系统监视器",
       "statusBar": "状态栏",
       "commandSuggestions": "命令提示",
+      "suggestionDebounceMs": "命令提示防抖（毫秒）",
+      "suggestionTuiGateEnabled": "全屏应用中抑制提示",
       "enableNotifications": "启用通知",
       "enableNotificationsDesc": "显示重要事件的系统通知"
     },

@@ -21,7 +21,7 @@ import { APP_SETTINGS_STORAGE_KEY, APP_SETTINGS_CHANGED_EVENT } from '@/lib/keyb
 import { registerTerminalWorkingDirectoryHandler } from '../lib/terminal-working-directory';
 import { TERMINAL_COMMAND_EVENT, type TerminalCommandDetail } from '../lib/terminal-commands';
 import { SCOPE_GLOBAL } from '../lib/suggestion/types';
-import { isAlternateBuffer, isInputInPromptContext } from '../lib/suggestion/gate';
+import { isAlternateBuffer, isInputInPromptContext, isPasteStart, isPasteEnd, normalizeSuggestionDebounceMs } from '../lib/suggestion/gate';
 import {
   rankSuggestions,
 } from '../lib/suggestion/engine';
@@ -29,6 +29,7 @@ import {
   getStatsForScopes,
   recordUse,
   recordSelection,
+  recordRejection,
   connectionScope,
   cwdScope,
 } from '../lib/suggestion/store';
@@ -358,20 +359,39 @@ export function PtyTerminal({
   const tuiActiveRef = React.useRef(false);
   // Command-suggestion master switch (settings → app_settings → event).
   const suggestionsEnabledRef = React.useRef(true);
+  // TUI hard-gate master switch: when false, the G1 alternate-buffer gate is
+  // disabled entirely (restores pre-Slice-1 behavior). Defaults to true.
+  const tuiGateEnabledRef = React.useRef(true);
+  // IME composition gate: while a CJK/IME composition session is active the
+  // key stream is not shell input yet — never track or pop suggestions.
+  const imeComposingRef = React.useRef(false);
+  // Bracketed-paste gate: while a bracketed paste (\x1b[200~ … \x1b[201~)
+  // streams in, the text is not interactive typing — never track or pop.
+  const pastingRef = React.useRef(false);
+  // Suggestion debounce delay (ms), from settings (default 50).
+  const suggestDebounceRef = React.useRef(50);
   React.useEffect(() => {
     const read = () => {
       try {
-        const parsed = prefGet<{ commandSuggestions?: unknown } | null>(
+        const parsed = prefGet<{
+          commandSuggestions?: unknown;
+          suggestionDebounceMs?: unknown;
+          suggestionTuiGateEnabled?: unknown;
+        } | null>(
           APP_SETTINGS_STORAGE_KEY,
           null,
         );
         suggestionsEnabledRef.current = parsed?.commandSuggestions !== false;
+        tuiGateEnabledRef.current = parsed?.suggestionTuiGateEnabled !== false;
+        suggestDebounceRef.current = normalizeSuggestionDebounceMs(parsed?.suggestionDebounceMs);
         if (!suggestionsEnabledRef.current) {
           setSuggestionsVisible(false);
           suggestionsVisibleRef.current = false;
         }
       } catch {
         suggestionsEnabledRef.current = true;
+        tuiGateEnabledRef.current = true;
+        suggestDebounceRef.current = 50;
       }
     };
     read();
@@ -488,7 +508,12 @@ export function PtyTerminal({
     const lineHeight = (element.clientHeight || container.clientHeight) / Math.max(1, term.rows);
     const cellWidth = (element.clientWidth || container.clientWidth) / Math.max(1, term.cols);
     const BOX_W = 340;
-    const BOX_H = 190;
+    // Use the REAL popup height once it is committed to the DOM; fall back to
+    // a conservative 190 px estimate on the very first paint (suggestionBarRef
+    // is still null before React commits). A wrong below/above flip from the
+    // estimate is corrected on the next frame by refreshSuggestionPosition,
+    // which re-runs this function with the actual height.
+    const BOX_H = suggestionBarRef.current?.offsetHeight ?? 190;
     const left = Math.max(8, Math.min(offsetX + cursorX * cellWidth, container.clientWidth - BOX_W - 8));
     const below = offsetY + cursorY * lineHeight + lineHeight + 6;
     const top = below + BOX_H <= container.clientHeight
@@ -570,8 +595,14 @@ export function PtyTerminal({
   };
 
   const trackInputForSuggestion = (data: string) => {
-    // TUI gate: keys belong to a full-screen app, never track them as shell input.
-    if (tuiActiveRef.current) return;
+    // IME gate: keys during a composition session are candidate text, not
+    // shell input — never track them.
+    if (imeComposingRef.current) return;
+    // Paste gate: bracketed-paste text streaming in is not typing.
+    if (pastingRef.current) return;
+    // TUI gate: keys belong to a full-screen app, never track them as shell
+    // input. The hard gate can be disabled via settings (suggestionTuiGateEnabled).
+    if (tuiActiveRef.current && tuiGateEnabledRef.current) return;
     for (const ch of data) {
       // Tab itself is handled by the remote shell (readline completion); the
       // completed line is captured on the next keystroke or on Enter.
@@ -626,7 +657,11 @@ export function PtyTerminal({
   const scheduleSuggestion = () => {
     if (!suggestionsEnabledRef.current) return;
     if (suppressSuggestionsRef.current) return;
-    if (tuiActiveRef.current) return;
+    // IME gate: never schedule while a composition session is active.
+    if (imeComposingRef.current) return;
+    // Paste gate: never schedule while a bracketed paste is streaming in.
+    if (pastingRef.current) return;
+    if (tuiActiveRef.current && tuiGateEnabledRef.current) return;
     if (suggestTimerRef.current) clearTimeout(suggestTimerRef.current);
     suggestTimerRef.current = setTimeout(() => {
       const input = inputBufferRef.current;
@@ -637,7 +672,7 @@ export function PtyTerminal({
       }
       // TUI gate (re-check after the debounce window): if a full-screen app
       // took over meanwhile, never pop the suggestion.
-      if (tuiActiveRef.current) return;
+      if (tuiActiveRef.current && tuiGateEnabledRef.current) return;
       // Prompt-line gate: only suggest while the shell is actually waiting for
       // input on a line that contains what the user typed. Keys consumed by a
       // line-editor app (mysql/psql) or by TUI navigation never reach the line,
@@ -658,6 +693,12 @@ export function PtyTerminal({
           setSelectedIndex(-1);
           selectedIndexRef.current = -1;
           setSuggestionPos(computeCursorPosition());
+          // The synchronous estimate above runs BEFORE the popup DOM is
+          // committed, so suggestionBarRef is still null and BOX_H fell back
+          // to 190. Re-run on the next frame (after commit) so the real popup
+          // height drives the below/above flip — keeps the box glued to the
+          // cursor even at the bottom of the viewport.
+          refreshSuggestionPosition();
         } else {
           setSuggestionsVisible(false);
           suggestionsVisibleRef.current = false;
@@ -667,7 +708,7 @@ export function PtyTerminal({
         setSuggestionsVisible(false);
         suggestionsVisibleRef.current = false;
       }
-    }, 20);
+    }, suggestDebounceRef.current);
   };
 
   const acceptSuggestion = (cmd: string) => {
@@ -834,7 +875,11 @@ export function PtyTerminal({
     const bufferChangeDisposable = term.buffer.onBufferChange((buffer) => {
       const inTui = isAlternateBuffer(buffer.type);
       tuiActiveRef.current = inTui;
-      if (inTui) {
+      // When the TUI hard gate is disabled via settings, entering the
+      // alternate buffer must NOT tear down the tracked input / popup state
+      // (that would restore the gate even though the toggle is off). The
+      // tracking/scheduling checks already consult tuiGateEnabledRef.
+      if (inTui && tuiGateEnabledRef.current) {
         if (suggestTimerRef.current) {
           clearTimeout(suggestTimerRef.current);
           suggestTimerRef.current = null;
@@ -850,6 +895,54 @@ export function PtyTerminal({
         setSelectedIndex(-1);
         selectedIndexRef.current = -1;
       }
+    });
+
+    // Suggestion-dismissal gates (focus loss / scroll / IME composition).
+    // xterm v6 has no onFocus/onBlur events and no IME event API, so these
+    // listen on the hidden input textarea — the same element xterm's own
+    // CompositionHelper and focus handling use, so the events are guaranteed
+    // to target it (term.textarea is created once during term.open()).
+    //
+    // G2 IME gate: while a composition session is active the key stream is
+    // candidate text, not shell input — hide the popup and block tracking.
+    const suggestionGateTextarea = term.textarea;
+    const onSuggestionImeStart = () => {
+      imeComposingRef.current = true;
+      if (suggestTimerRef.current) {
+        clearTimeout(suggestTimerRef.current);
+        suggestTimerRef.current = null;
+      }
+      setSuggestionsVisible(false);
+      suggestionsVisibleRef.current = false;
+    };
+    const onSuggestionImeEnd = () => {
+      imeComposingRef.current = false;
+    };
+    // G4 focus gate: leaving the terminal hides the popup (inputBuffer kept,
+    // so returning + typing resumes tracking naturally).
+    const onSuggestionBlur = () => {
+      if (suggestTimerRef.current) {
+        clearTimeout(suggestTimerRef.current);
+        suggestTimerRef.current = null;
+      }
+      setSuggestionsVisible(false);
+      suggestionsVisibleRef.current = false;
+    };
+    if (suggestionGateTextarea) {
+      suggestionGateTextarea.addEventListener('compositionstart', onSuggestionImeStart);
+      suggestionGateTextarea.addEventListener('compositionend', onSuggestionImeEnd);
+      suggestionGateTextarea.addEventListener('blur', onSuggestionBlur);
+    }
+
+    // G5 scroll gate: scrolling the scrollback away from the prompt line
+    // dismisses the popup (candidates no longer align with the cursor).
+    const scrollDisposable = term.onScroll(() => {
+      if (suggestTimerRef.current) {
+        clearTimeout(suggestTimerRef.current);
+        suggestTimerRef.current = null;
+      }
+      setSuggestionsVisible(false);
+      suggestionsVisibleRef.current = false;
     });
 
     // Focus terminal to enable keyboard input when this tab is mounted active.
@@ -932,6 +1025,19 @@ export function PtyTerminal({
         }
         if (event.key === 'Escape') {
           event.preventDefault();
+          // Negative feedback: the user dismissed the popup without taking any
+          // suggestion — penalise every candidate currently on screen so they
+          // rank lower next time. Mirrors recordSelection's scope semantics.
+          if (hasCandidates) {
+            for (const cmd of suggestionsRef.current) {
+              try {
+                recordRejection(cmd, connScope);
+                if (cwdScopeRef.current) recordRejection(cmd, cwdScopeRef.current);
+              } catch {
+                /* suggestion learning must never break the terminal */
+              }
+            }
+          }
           hideSuggestions();
           return false;
         }
@@ -1432,8 +1538,16 @@ export function PtyTerminal({
 
     // Handle user input
     const inputDisposable = term.onData((data: string) => {
+      // G3 paste gate: xterm wraps pasted text in bracketed-paste markers
+      // (\x1b[200~ … \x1b[201~) when the shell enabled that mode. While the
+      // markers are present the text is not interactive typing — trackInput
+      // and schedule both short-circuit, but sendInputToPty is unaffected.
+      // The end marker is cleared AFTER tracking so the marker chunk itself
+      // (whose \x1b would otherwise reset the tracked buffer) is skipped too.
+      if (isPasteStart(data)) pastingRef.current = true;
       trackInputForSuggestion(data);
       sendInputToPty(data);
+      if (isPasteEnd(data)) pastingRef.current = false;
     });
 
     // Handle terminal resize — deduplicate to avoid flooding the PTY with
@@ -1564,7 +1678,13 @@ export function PtyTerminal({
       resizeDisposable.dispose();
       lineFeedDisposable.dispose();
       bufferChangeDisposable.dispose();
+      scrollDisposable.dispose();
       workingDirectoryDisposable.dispose();
+      if (suggestionGateTextarea) {
+        suggestionGateTextarea.removeEventListener('compositionstart', onSuggestionImeStart);
+        suggestionGateTextarea.removeEventListener('compositionend', onSuggestionImeEnd);
+        suggestionGateTextarea.removeEventListener('blur', onSuggestionBlur);
+      }
       window.removeEventListener('resize', handleWindowResize);
       resizeObserver.disconnect();
       if (selectionDoc) {

@@ -18,6 +18,9 @@ const mocks = vi.hoisted(() => {
     cols = 80;
     rows = 24;
     options: Record<string, unknown> = {};
+    // Real xterm v6 exposes the hidden input textarea (may be undefined
+    // before open()). The component attaches IME/focus listeners on it.
+    textarea: HTMLTextAreaElement | undefined = undefined;
     buffer = {
       active: {
         length: 0,
@@ -41,6 +44,7 @@ const mocks = vi.hoisted(() => {
     write = vi.fn((_data: string, callback?: () => void) => callback?.());
     onSelectionChange = vi.fn(() => ({ dispose: vi.fn() }));
     onLineFeed = vi.fn(() => ({ dispose: vi.fn() }));
+    onScroll = vi.fn(() => ({ dispose: vi.fn() }));
     attachCustomKeyEventHandler = vi.fn();
     onData = vi.fn(() => ({ dispose: vi.fn() }));
     onResize = vi.fn(() => ({ dispose: vi.fn() }));
