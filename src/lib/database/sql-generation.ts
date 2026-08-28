@@ -21,6 +21,8 @@ export interface ColumnMetadata {
   readonly dataType?: string;
   readonly nullable?: boolean;
   readonly default?: string;
+  /** True when the column is part of the table's primary key. */
+  readonly isPrimaryKey?: boolean;
 }
 
 const DEFAULT_SELECT_LIMIT = 100;
@@ -82,8 +84,11 @@ export function generateUpdateSql(
   const setClause = settable
     .map((column) => `${quote(options, column.name)} = ''`)
     .join(", ");
+  // No primary key ⇒ emit a visible `WHERE 1=1` placeholder instead of an
+  // unguarded UPDATE (product-spec AC-F4.4) — running it is a no-op against a
+  // fake predicate, and the comment forces the user to complete the condition.
   const whereClause = primaryKeyColumns.length > 0
     ? ` WHERE ${primaryKeyColumns.map((pk) => `${quote(options, pk)} = <id>`).join(" AND ")}`
-    : "";
+    : " WHERE 1=1 -- TODO: 补充更新条件";
   return `UPDATE ${qualifiedName(qualifier, table, options)} SET ${setClause}${whereClause};`;
 }

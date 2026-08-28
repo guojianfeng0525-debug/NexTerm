@@ -127,10 +127,12 @@ describe("generateUpdateSql", () => {
     ).toBe('UPDATE "public"."t" SET "id" = \'\' WHERE "id" = <id>;');
   });
 
-  it("omits the WHERE clause when no primary key is given", () => {
+  it("emits a WHERE 1=1 placeholder when no primary key is given", () => {
     expect(
       generateUpdateSql("public", "users", [{ name: "name" }], [], pg),
-    ).toBe('UPDATE "public"."users" SET "name" = \'\';');
+    ).toBe(
+      'UPDATE "public"."users" SET "name" = \'\' WHERE 1=1 -- TODO: 补充更新条件;',
+    );
   });
 
   it("quotes the primary key in the WHERE clause with the dialect", () => {

@@ -232,6 +232,8 @@ type PostgresCatalogColumnItem = {
   readonly nullable?: boolean;
   readonly default?: string;
   readonly ordinal?: number;
+  /** True when the column is part of the table's primary key (P0-1). */
+  readonly isPrimaryKey?: boolean;
 };
 /** A row staged for INSERT. Only `edited` column indexes are submitted; the
  * remaining columns keep their server-side DEFAULT. */
@@ -1383,9 +1385,9 @@ export function ToolPostgres() {
     patchTab(targetTabId, { result: databaseErrorResult(parsed) });
     return parsed;
   };
-  /** Loads column metadata for a relation through the navigator's catalog
-   *  command (feature-design §4.1). Empty on failure — callers degrade to
-   *  `SELECT *`. */
+  /** Loads column metadata (incl. primary-key flags) for a relation through
+   *  the navigator's catalog command (feature-design §4.1). Empty on
+   *  failure — callers degrade to `SELECT *`. */
   const loadRelationColumns = async (
     reference: PostgresRelationReference,
   ): Promise<readonly ColumnMetadata[]> => {
@@ -1403,6 +1405,7 @@ export function ToolPostgres() {
         dataType: item.dataType,
         nullable: item.nullable,
         default: item.default,
+        isPrimaryKey: item.isPrimaryKey,
       }));
     } catch {
       return [];
@@ -1469,9 +1472,19 @@ export function ToolPostgres() {
     } else if (kind === "insert") {
       sql = generateInsertSql(reference.schema, reference.relation, columns, options);
     } else {
-      // MVP: primary-key discovery is deferred, so the UPDATE template has
-      // no WHERE clause — the user completes it before running.
-      sql = generateUpdateSql(reference.schema, reference.relation, columns, [], options);
+      // Primary-key discovery rides on the column metadata (P0-1): PG reports
+      // `isPrimaryKey` per column; empty list falls through to the
+      // `WHERE 1=1 -- TODO` placeholder in generateUpdateSql (AC-F4.3/4.4).
+      const primaryKeys = columns
+        .filter((column) => column.isPrimaryKey)
+        .map((column) => column.name);
+      sql = generateUpdateSql(
+        reference.schema,
+        reference.relation,
+        columns,
+        primaryKeys,
+        options,
+      );
     }
     insertGeneratedSql(sql, reference.connectionId);
   };
