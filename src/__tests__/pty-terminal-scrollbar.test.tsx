@@ -16,6 +16,7 @@ const mocks = vi.hoisted(() => {
         length: 0,
         getLine: vi.fn(),
       },
+      onBufferChange: vi.fn(() => ({ dispose: vi.fn() })),
     };
     parser = {
       registerOscHandler: vi.fn(() => ({ dispose: vi.fn() })),
