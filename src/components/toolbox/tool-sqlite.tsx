@@ -449,6 +449,12 @@ export function ToolSqlite() {
     handlers: {
       "database.query.execute": () => void execute(),
       "database.workspace.newQuery": addQuery,
+      // F1.2: register the editor shortcuts the context menu advertises so
+      // combos are executed instead of silently swallowed (P1-prod). Arrow
+      // wrappers keep evaluation deferred and the style consistent.
+      "database.query.format": () => formatSqlInEditor(),
+      "database.query.toggleComment": () => toggleSqlComment(),
+      "database.tab.close": () => closeTab(activeTab),
     },
   });
 

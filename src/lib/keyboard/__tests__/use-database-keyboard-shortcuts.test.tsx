@@ -238,12 +238,14 @@ describe("scope routing via the hook", () => {
     expect(event.defaultPrevented).toBe(false);
   });
 
-  it("missing handlers still consume the combo silently", () => {
+  it("releases combos whose handler is missing (no preventDefault)", () => {
     render(<Harness testId="postgres-workspace" handlers={{}} />);
     const editor = document.querySelector(".cm-editor") as HTMLElement;
     editor.focus();
     const event = dispatchKey(editor, "Enter", { ctrlKey: true });
-    expect(event.defaultPrevented).toBe(true);
+    // No handler → the combo must reach CodeMirror / browser defaults instead
+    // of being silently swallowed (MySQL/SQLite F1.2 fix).
+    expect(event.defaultPrevented).toBe(false);
   });
 
   it("stops propagation on a matched combo", () => {

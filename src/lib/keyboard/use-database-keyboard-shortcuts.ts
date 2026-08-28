@@ -215,10 +215,15 @@ export function useDatabaseKeyboardShortcuts(
       const result = routeKeyEvent(event, scope, bindingsRef.current ?? []);
       if (!result) return;
 
+      // Missing handler ⇒ release the combo (no preventDefault/stopPropagation)
+      // so CodeMirror or the browser default keeps working. Swallowing keys
+      // with no execution was the F1.2 "silent swallow" defect on MySQL/SQLite.
+      const handler = opts.handlers[result.commandId as DatabaseCommandId];
+      if (!handler) return;
+
       event.preventDefault();
       event.stopPropagation();
-      // Missing handler ⇒ consume silently (feature-design §1.2).
-      opts.handlers[result.commandId as DatabaseCommandId]?.();
+      handler();
     };
 
     window.addEventListener("keydown", handleKeyDown, { capture: true });
