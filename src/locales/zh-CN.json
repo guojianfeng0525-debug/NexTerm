@@ -1235,6 +1235,7 @@
       "constraints": "约束",
       "copyCell": "复制单元格",
       "copyColumnName": "复制列名",
+      "copyColumnDefinition": "复制列定义",
       "copyFailed": "复制结果数据失败",
       "copyName": "复制限定名",
       "copyRow": "复制行",
@@ -1379,6 +1380,7 @@
       "history": {
         "title": "历史",
         "empty": "暂无查询历史",
+        "emptyHint": "执行过的 SQL 会出现在这里",
         "run": "再次执行",
         "insertToEditor": "插入编辑器",
         "copy": "复制",

@@ -13,6 +13,7 @@ import { autocompletion, completionKeymap } from "@codemirror/autocomplete";
 import { loadEditorConfig, EDITOR_CONFIG_CHANGED_EVENT, type EditorConfig } from "@/lib/editor-config";
 import { genericSqlQueryEditorContext, type DatabaseQueryEditorContext } from "@/lib/database/query-editor";
 import { queryEditorCompletionSource, queryEditorDialect } from "@/components/query-editor-codemirror";
+import { errorLineMarkExtension } from "@/lib/database/editor-error-reveal";
 import type { NoteLanguage } from "@/lib/toolbox/toolbox-types";
 
 // Language imports
@@ -320,6 +321,11 @@ export function CodeEditor({
       language === "sql" || filename.toLowerCase().endsWith(".sql");
     if (editorConfig.wordWrap && !isSqlEditor) {
       exts.push(EditorView.lineWrapping);
+    }
+    // SQL editors support the error-line wavy-underline mark driven by
+    // `revealEditorLine` (ux-spec §2.2.1) — register its state field here.
+    if (isSqlEditor) {
+      exts.push(...errorLineMarkExtension());
     }
 
     // Theme: follow the application UI theme by default; a user's explicit

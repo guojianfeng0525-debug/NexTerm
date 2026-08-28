@@ -108,8 +108,10 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { CodeEditor } from "@/components/code-editor";
+import { EditorView as EditorViewImpl } from "@codemirror/view";
 import type { EditorView } from "@codemirror/view";
 import { undo, redo, selectAll } from "@codemirror/commands";
+import { StateEffect } from "@codemirror/state";
 import {
   currentStatementAt,
   toggleLineComment,
@@ -457,6 +459,9 @@ export function ToolPostgres() {
   /** L3 connection-level error banner text (ux-spec §2.2.3 / P2-10). Non-null
    *  renders the persistent banner below the toolbar until reconnect succeeds. */
   const [connectionError, setConnectionError] = useState<string | null>(null);
+  /** True when the query editor has an active selection — drives cut/copy
+   *  menu-item enablement (ux-spec §1.1.4 / P2-2.5). */
+  const [editorHasSelection, setEditorHasSelection] = useState(false);
   /** Run id of the in-flight query, used by `postgres_cancel` (B19). */
   const runIdRef = useRef(0);
   const activeRunIdRef = useRef<number | null>(null);
@@ -2885,6 +2890,22 @@ export function ToolPostgres() {
                     objectReference?.objectKind === "trigger") && <ContextMenuItem disabled={!connected} onSelect={() => objectReference && openObjectViewer(objectReference)}><Eye className="h-3.5 w-3.5" />{t("toolbox.postgres.openObject")}</ContextMenuItem>}
                   <ContextMenuSeparator />
                   <ContextMenuItem disabled={!connected} onSelect={() => void copyText(copyValue())}><Copy className="h-3.5 w-3.5" />{objectReference?.objectKind === "column" ? t("toolbox.postgres.copyColumnName") : t("toolbox.postgres.copyName")}</ContextMenuItem>
+                  {objectReference?.objectKind === "column" && typeof node.metadata?.dataType === "string" && (
+                    <ContextMenuItem
+                      disabled={!connected}
+                      onSelect={() =>
+                        void copyText(
+                          `ALTER TABLE ${quoteQualifiedPostgresName({
+                            connectionId: objectReference.connectionId,
+                            database: objectReference.database,
+                            schema: objectReference.schema,
+                            relation: objectReference.table ?? "",
+                          })} ADD COLUMN "${objectReference.name.replace(/"/g, '""')}" ${node.metadata?.dataType};`,
+                        )
+                      }
+                      data-testid="navigator-copy-column-definition"
+                    ><FileCode className="h-3.5 w-3.5" />{t("toolbox.postgres.copyColumnDefinition")}</ContextMenuItem>
+                  )}
                   {activeReference && activeReference.objectKind !== "constraint" && (
                     <ContextMenuItem disabled={!connected} onSelect={() => activeReference && void generateObjectDdl(activeReference)}><FileCode className="h-3.5 w-3.5" />{t("toolbox.postgres.generateDdl")}</ContextMenuItem>
                   )}
@@ -3053,8 +3074,27 @@ export function ToolPostgres() {
                                     }),
                                 })
                               : undefined
-                          }                    editorRef={(view) => {
+                          }                                              editorRef={(view) => {
                             queryEditorViewRef.current = view;
+                            // Track selection presence for cut/copy menu
+                            // enablement (ux-spec §1.1.4 / P2-2.5).
+                            if (view) {
+                              const sync = (v: typeof view) => {
+                                const sel = v.state.selection.main;
+                                setEditorHasSelection(sel.to > sel.from);
+                              };
+                              sync(view);
+                              const listener = EditorViewImpl.updateListener.of(
+                                (update) => {
+                                  if (update.selectionSet) sync(update.view);
+                                },
+                              );
+                              view.dispatch({
+                                effects: StateEffect.appendConfig.of(listener),
+                              });
+                            } else {
+                              setEditorHasSelection(false);
+                            }
                           }}
                           className="h-full"
                         />
@@ -3078,6 +3118,7 @@ export function ToolPostgres() {
                       </ContextMenuItem>
                       <ContextMenuSeparator />
                       <ContextMenuItem
+                        disabled={!editorHasSelection}
                         onSelect={() => void cutEditorSelection()}
                       >
                         <Scissors className="h-3.5 w-3.5" />
@@ -3085,6 +3126,7 @@ export function ToolPostgres() {
                         <ContextMenuShortcut>{formatShortcut("Ctrl+X")}</ContextMenuShortcut>
                       </ContextMenuItem>
                       <ContextMenuItem
+                        disabled={!editorHasSelection}
                         onSelect={() => void copyText(editorCopyValue())}
                       >
                         <Copy className="h-3.5 w-3.5" />
@@ -3300,6 +3342,7 @@ export function ToolPostgres() {
                     labels={{
                       history: t("toolbox.postgres.history.title"),
                       empty: t("toolbox.postgres.history.empty"),
+                      emptyHint: t("toolbox.postgres.history.emptyHint"),
                       run: t("toolbox.postgres.history.run"),
                       insertToEditor: t("toolbox.postgres.history.insertToEditor"),
                       copy: t("toolbox.postgres.history.copy"),

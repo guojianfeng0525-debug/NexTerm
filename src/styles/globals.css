@@ -418,6 +418,20 @@ html {
   white-space: pre;
 }
 
+/* Failing-statement line mark (ux-spec §2.2.1): red wavy underline + soft
+   destructive background, auto-fading after 2 s via cm-error-line-fade.
+   The JS side clears the decoration at the same 2 s mark. */
+.cm-error-line {
+  background: color-mix(in srgb, var(--destructive) 8%, transparent);
+  text-decoration: underline wavy var(--destructive);
+  text-underline-offset: 3px;
+  animation: cm-error-line-fade 2s ease forwards;
+}
+@keyframes cm-error-line-fade {
+  0%, 60% { opacity: 1; }
+  100% { opacity: 0; }
+}
+
 /* ── TipTap rich-text editor (documents module) ─────────────────────────── */
 .ProseMirror {
   min-height: 60vh;

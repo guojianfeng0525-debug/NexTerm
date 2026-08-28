@@ -1235,6 +1235,7 @@
       "constraints": "Constraints",
       "copyCell": "Copy Cell",
       "copyColumnName": "Copy Column Name",
+      "copyColumnDefinition": "Copy Column Definition",
       "copyFailed": "Failed to copy result data",
       "copyName": "Copy Qualified Name",
       "copyRow": "Copy Row",
@@ -1379,6 +1380,7 @@
       "history": {
         "title": "History",
         "empty": "No query history",
+        "emptyHint": "SQL you run will show up here",
         "run": "Run again",
         "insertToEditor": "Insert into editor",
         "copy": "Copy",
