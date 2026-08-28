@@ -79,8 +79,10 @@ export function flashEditorRange(
   ensureFlashField(view);
   view.dispatch({ effects: flashRangeEffect.of({ from, to }) });
   window.setTimeout(() => {
-    if (!view.destroyed) {
+    try {
       view.dispatch({ effects: clearFlashEffect.of(null) });
+    } catch {
+      /* view already destroyed — the dispatch would throw; ignore */
     }
   }, FLASH_DURATION_MS);
 }
