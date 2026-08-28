@@ -21,6 +21,7 @@ import { APP_SETTINGS_STORAGE_KEY, APP_SETTINGS_CHANGED_EVENT } from '@/lib/keyb
 import { registerTerminalWorkingDirectoryHandler } from '../lib/terminal-working-directory';
 import { TERMINAL_COMMAND_EVENT, type TerminalCommandDetail } from '../lib/terminal-commands';
 import { SCOPE_GLOBAL } from '../lib/suggestion/types';
+import { isAlternateBuffer, isInputInPromptContext } from '../lib/suggestion/gate';
 import {
   rankSuggestions,
 } from '../lib/suggestion/engine';
@@ -351,6 +352,10 @@ export function PtyTerminal({
   const selectedIndexRef = React.useRef(-1);
   const suppressSuggestionsRef = React.useRef(false);
   const suggestionBarRef = React.useRef<HTMLDivElement | null>(null);
+  // TUI gate: true while a full-screen app (vim/less/top/htop/...) owns the
+  // terminal (alternate screen buffer active). While true the suggestion popup
+  // is hard-disabled — keys belong to the app, not to the shell.
+  const tuiActiveRef = React.useRef(false);
   // Command-suggestion master switch (settings → app_settings → event).
   const suggestionsEnabledRef = React.useRef(true);
   React.useEffect(() => {
@@ -565,6 +570,8 @@ export function PtyTerminal({
   };
 
   const trackInputForSuggestion = (data: string) => {
+    // TUI gate: keys belong to a full-screen app, never track them as shell input.
+    if (tuiActiveRef.current) return;
     for (const ch of data) {
       // Tab itself is handled by the remote shell (readline completion); the
       // completed line is captured on the next keystroke or on Enter.
@@ -619,10 +626,23 @@ export function PtyTerminal({
   const scheduleSuggestion = () => {
     if (!suggestionsEnabledRef.current) return;
     if (suppressSuggestionsRef.current) return;
+    if (tuiActiveRef.current) return;
     if (suggestTimerRef.current) clearTimeout(suggestTimerRef.current);
     suggestTimerRef.current = setTimeout(() => {
       const input = inputBufferRef.current;
       if (!input.trim()) {
+        setSuggestionsVisible(false);
+        suggestionsVisibleRef.current = false;
+        return;
+      }
+      // TUI gate (re-check after the debounce window): if a full-screen app
+      // took over meanwhile, never pop the suggestion.
+      if (tuiActiveRef.current) return;
+      // Prompt-line gate: only suggest while the shell is actually waiting for
+      // input on a line that contains what the user typed. Keys consumed by a
+      // line-editor app (mysql/psql) or by TUI navigation never reach the line,
+      // so no popup.
+      if (!isInputInPromptContext(readTerminalLine(), input)) {
         setSuggestionsVisible(false);
         suggestionsVisibleRef.current = false;
         return;
@@ -806,6 +826,31 @@ export function PtyTerminal({
       setHasScrollableContent(term.buffer.active.length > term.rows);
     };
     const lineFeedDisposable = term.onLineFeed(checkScrollability);
+
+    // TUI gate: when a full-screen app enters the alternate screen buffer
+    // (vim/less/top/htop/fzf...), hard-disable the command-suggestion popup —
+    // the keys now belong to that app, not to the shell. Restore tracking as
+    // soon as the app exits back to the normal buffer.
+    const bufferChangeDisposable = term.buffer.onBufferChange((buffer) => {
+      const inTui = isAlternateBuffer(buffer.type);
+      tuiActiveRef.current = inTui;
+      if (inTui) {
+        if (suggestTimerRef.current) {
+          clearTimeout(suggestTimerRef.current);
+          suggestTimerRef.current = null;
+        }
+        inputBufferRef.current = '';
+        // Clear Tab-completion bookkeeping too: a stale preTabInputRef /
+        // tabPendingRef would otherwise poison the resync path after exiting
+        // the TUI, recording a garbage command (prompt text included) on Enter.
+        preTabInputRef.current = '';
+        tabPendingRef.current = false;
+        setSuggestionsVisible(false);
+        suggestionsVisibleRef.current = false;
+        setSelectedIndex(-1);
+        selectedIndexRef.current = -1;
+      }
+    });
 
     // Focus terminal to enable keyboard input when this tab is mounted active.
     if (initialIsActiveRef.current) {
@@ -1518,6 +1563,7 @@ export function PtyTerminal({
       inputDisposable.dispose();
       resizeDisposable.dispose();
       lineFeedDisposable.dispose();
+      bufferChangeDisposable.dispose();
       workingDirectoryDisposable.dispose();
       window.removeEventListener('resize', handleWindowResize);
       resizeObserver.disconnect();

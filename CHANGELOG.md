@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [2.13.0] - 2026-08-28
+
+**DB 工具箱三库（PostgreSQL / MySQL / SQLite）UX 对齐增强 + 终端命令提示框显示时机优化**。
+
+### Added (Database Toolbox)
+
+- **三库右键菜单对齐**：导航树（连接 / 表 / 列 / 索引节点）、SQL 编辑器、结果网格、查询 Tab 四类菜单三库统一——lucide 图标、`ContextMenuShortcut` 快捷键标注（Ctrl+Enter 执行 / F5 刷新 / Ctrl+N 新建查询等）、危险项 `variant="destructive"` 置底；PG 主工具就地补齐图标 / 快捷键 / 危险项，删除连接升级为 AlertDialog 确认。
+- **错误工程化**：三库统一结构化错误解析（`parseDatabaseError`），错误卡进入结果面板（错误码 / LINE 定位 / 一键跳转出错行 / 重试 / 复制），出错行编辑器高亮，轻量 toast 通知。
+- **快捷键接入**：基于 scope-router 激活的 `useDatabaseKeyboardShortcuts` 收敛（Ctrl+Enter 执行、F5 刷新、Ctrl+N 新建查询、表设计器 Ctrl+S 保存 / Escape 退出），与菜单快捷键标注同源。
+- **导航树「生成 SQL ▸」子菜单**：表 / 列节点一键生成 SELECT / INSERT / UPDATE 语句进入编辑器。
+- **查询历史视图**：历史进结果面板（成功 / 失败状态点、耗时、再次执行、插入编辑器、复制、删除、清空确认），三库统一接入。
+
+### Added (Terminal)
+
+- **命令提示框 TUI 全屏抑制**：SSH 终端命令建议框新增双层门控——运行 vim / less / top / htop / fzf 等全屏程序（xterm alternate screen buffer）时**硬性禁用**提示框，退出自动恢复；叠加「提示符行尾上下文」软规则（`suggestion/gate.ts`），TUI 导航 / 行编辑类应用（mysql / psql 等）按键不再误触发弹框。已同步清理进入全屏模式时的输入缓冲 / 防抖计时器 / Tab 补全书签，避免竞态污染命令历史。新增 12 项门控单元测试（含 CJK 多字节 / 边界）。
+
+### Verified
+
+- tsc 0 错误 / vitest 1011（109 文件）全绿 / lint 0 error / 生产构建通过
+- 命令提示框门控经独立 QA 审查 PASS（Note 已闭环）；GATE 视觉门禁 25 项运行时断言 PASS；e2e 集成套件 `db-toolbox-ux.e2e.spec.ts` 4 passed / 1 skipped（预期）
+
 ## [2.12.0] - 2026-08-27
 
 **Minor — SQL 编辑器右键菜单完善 + 数据网格窗口化（性能根治）+ Excel 导出（真实应用 E2E 验证）**。

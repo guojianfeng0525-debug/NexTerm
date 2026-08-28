@@ -45,6 +45,12 @@ export const NAVICAT_BINDINGS: readonly CommandBinding[] = [
     scopes: ["QUERY_EDITOR"],
   },
   {
+    // UX spec §3.1: Ctrl+Enter is the primary run combo (DBeaver/Beekeeper/VS Code).
+    commandId: "database.query.execute",
+    combo: "Ctrl+Enter",
+    scopes: ["QUERY_EDITOR"],
+  },
+  {
     commandId: "database.query.explain",
     combo: "Ctrl+Shift+E",
     scopes: ["QUERY_EDITOR"],

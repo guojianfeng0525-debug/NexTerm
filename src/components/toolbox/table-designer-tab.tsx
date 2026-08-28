@@ -65,13 +65,44 @@ export interface TableDesignerTabProps {
   onCreated?: (table: string) => void;
   onRefresh: () => void;
   readOnly: boolean;
+  /** DESIGNER-scope shortcut hook: Ctrl+S → apply (doApply). When absent the
+   *  component falls back to its internal save handler. */
+  readonly onSaveShortcut?: () => void;
+  /** DESIGNER-scope shortcut hook: Escape → reset draft to the loaded design.
+   *  When absent the component falls back to its internal revert handler. */
+  readonly onRevertShortcut?: () => void;
+}
+
+/**
+ * DESIGNER-domain shortcuts (feature-design §1.3): Ctrl+S applies the design,
+ * Escape reverts the draft. Listens on window keydown; Escape is suppressed
+ * while typing in an input/textarea/contenteditable so editors keep their own
+ * Escape semantics.
+ */
+function useDesignerShortcuts(onSave?: () => void, onRevert?: () => void): void {
+  useEffect(() => {
+    const handler = (event: KeyboardEvent) => {
+      const target = event.target;
+      const typingInField =
+        target instanceof Element &&
+        Boolean(target.closest("input, textarea, [contenteditable='true']"));
+      if ((event.metaKey || event.ctrlKey) && event.key === "s" && !event.altKey) {
+        event.preventDefault();
+        onSave?.();
+      } else if (event.key === "Escape" && !typingInField) {
+        onRevert?.();
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [onSave, onRevert]);
 }
 
 // ── Component ───────────────────────────────────────────────────────────────
 
 export function TableDesignerTab(props: TableDesignerTabProps) {
   const { t } = useTranslation();
-  const { connectionId, schema, table, createMode = false, onLoad, onApply, onCreated, onRefresh, readOnly } =
+  const { connectionId, schema, table, createMode = false, onLoad, onApply, onCreated, onRefresh, readOnly, onSaveShortcut, onRevertShortcut } =
     props;
 
   const [design, setDesign] = useState<TableDesign | null>(null);
@@ -218,6 +249,18 @@ export function TableDesignerTab(props: TableDesignerTabProps) {
     onRefresh();
   }, [loadDesign, onRefresh]);
 
+  // ── Shortcuts (DESIGNER scope, feature-design §1.3) ───────────────────────
+  // Ctrl+S → apply; Escape → revert. Callers may inject their own handlers via
+  // onSaveShortcut / onRevertShortcut; otherwise fall back to the internal
+  // save / revert so the shortcuts work standalone.
+  const shortcutSave = useCallback(() => {
+    if (hasChanges && !readOnly) void handleSave();
+  }, [hasChanges, readOnly, handleSave]);
+  const shortcutRevert = useCallback(() => {
+    if (design) handleRevert();
+  }, [design, handleRevert]);
+  useDesignerShortcuts(onSaveShortcut ?? shortcutSave, onRevertShortcut ?? shortcutRevert);
+
   // ── Column operations ─────────────────────────────────────────────────────
 
   const updateColumn = (index: number, patch: Partial<ColumnDef>) => {
@@ -333,7 +376,8 @@ export function TableDesignerTab(props: TableDesignerTabProps) {
   const d = t; // shorthand
 
   return (
-    <div className="flex h-full flex-col" data-testid="table-designer-tab">
+    <div className="h-full" data-testid="table-designer">
+      <div className="flex h-full flex-col" data-testid="table-designer-tab">
       {/* Toolbar */}
       <div className="flex h-9 shrink-0 items-center gap-1 border-b bg-muted/10 px-2">
         <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
@@ -785,6 +829,7 @@ export function TableDesignerTab(props: TableDesignerTabProps) {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+      </div>
     </div>
   );
 }

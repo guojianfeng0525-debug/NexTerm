@@ -121,6 +121,21 @@ describe("routeKeyEvent (scope priority routing)", () => {
     const event = keyEvent({ key: "r", ctrlKey: true, target: terminal });
     expect(routeKeyEvent(event, "DATA_GRID", bindings)).toBeNull();
   });
+
+  it("prefers a same-rank binding that declares the current scope (Ctrl+S: editor save over grid save)", () => {
+    const ctrlS: readonly CommandBinding[] = [
+      { commandId: "database.data.saveChanges", combo: "Ctrl+S", scopes: ["DATA_GRID"] },
+      { commandId: "database.query.save", combo: "Ctrl+S", scopes: ["QUERY_EDITOR"] },
+    ];
+    const editorEvent = keyEvent({ key: "s", ctrlKey: true });
+    expect(routeKeyEvent(editorEvent, "QUERY_EDITOR", ctrlS)?.commandId).toBe(
+      "database.query.save",
+    );
+    const gridEvent = keyEvent({ key: "s", ctrlKey: true });
+    expect(routeKeyEvent(gridEvent, "DATA_GRID", ctrlS)?.commandId).toBe(
+      "database.data.saveChanges",
+    );
+  });
 });
 
 describe("macOS Cmd/Ctrl equivalence", () => {

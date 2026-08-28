@@ -10,6 +10,7 @@ import {
 import type {
   DatabaseResult,
   DatabaseResultColumn,
+  DatabaseErrorResult,
   GridLayoutState,
 } from "@/lib/database/result-types";
 import type { FindCellMatch } from "@/lib/database/find-matches";
@@ -65,6 +66,11 @@ interface DatabaseResultPaneProps {
   ) => ReactNode;
   /** Row-number gutter context menu (Set Row Height…). Table tab only. */
   readonly renderRowHeaderContextMenu?: () => ReactNode;
+  /** Renders the persistent inline error card for `kind: "error"` results
+   *  (feature-design §2.6). When absent, the pane degrades to the ready
+   *  message area. Kept as a render-function so this shared component never
+   *  imports database-error internals — providers pass their own labels. */
+  readonly renderError?: (error: DatabaseErrorResult["error"]) => ReactNode;
   /** Per-table layout (frozen columns, widths, row height, type/comment
    * toggles). Absent for query-tab grids. */
   readonly layout?: GridLayoutState;
@@ -364,6 +370,7 @@ export function DatabaseResultPane({
   renderContextMenu,
   renderColumnContextMenu,
   renderRowHeaderContextMenu,
+  renderError,
   layout,
   onColumnResize,
   onColumnBestFit,
@@ -391,7 +398,13 @@ export function DatabaseResultPane({
     startWidth: number;
   } | null>(null);
   const tabularResult = result?.kind === "tabular" ? result : null;
-  const commandTags = result?.kind === "empty" ? [] : result?.commandTags ?? [];
+  // Errors render through renderError (or the degraded ready area below);
+  // header keeps the "message" label and an empty command-tags slot.
+  const errorResult = result?.kind === "error" ? result : null;
+  const commandTags =
+    result && result.kind !== "empty" && result.kind !== "error"
+      ? result.commandTags
+      : [];
   const pagination = tabularResult?.pagination;
   // Effective row height used both by the grid and the windowing math. Default
   // layouts store rowHeight = 0 (means "unset"), so treat 0 as the 24px base.
@@ -538,7 +551,13 @@ export function DatabaseResultPane({
           {commandTags.join(" · ")}
         </span>
       </div>
-      {tabularResult ? (
+      {errorResult ? (
+        renderError ? (
+          renderError(errorResult.error)
+        ) : (
+          <div className="p-3 text-[12px] text-muted-foreground">{labels.ready}</div>
+        )
+      ) : tabularResult ? (
         <>
           {find?.open && findLabels && (
             <div

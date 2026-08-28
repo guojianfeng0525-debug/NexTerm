@@ -92,6 +92,8 @@ pub struct PostgresCatalogObject {
     pub default: Option<String>,
     /// Physical column ordinal (columns).
     pub ordinal: Option<i32>,
+    /// `true` when the column is part of the table's primary key (columns).
+    pub is_primary_key: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -488,7 +490,7 @@ pub async fn postgres_catalog_objects(
             PostgresCatalogDetail::None,
         ),
         "columns" => (
-            "SELECT n.nspname, a.attname, format_type(a.atttypid, a.atttypmod), (NOT a.attnotnull)::text, pg_get_expr(ad.adbin, ad.adrelid), a.attnum::int FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace LEFT JOIN pg_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum WHERE n.nspname = $1 AND c.relname = $2 AND a.attnum > 0 AND NOT a.attisdropped AND has_schema_privilege(n.oid, 'USAGE') ORDER BY a.attnum LIMIT $3",
+            "SELECT n.nspname, a.attname, format_type(a.atttypid, a.atttypmod), (NOT a.attnotnull)::text, pg_get_expr(ad.adbin, ad.adrelid), a.attnum::int, EXISTS (SELECT 1 FROM pg_index i WHERE i.indrelid = a.attrelid AND i.indisprimary AND EXISTS (SELECT 1 FROM unnest(i.indkey) k(attnum) WHERE k.attnum = a.attnum))::text FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace LEFT JOIN pg_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum WHERE n.nspname = $1 AND c.relname = $2 AND a.attnum > 0 AND NOT a.attisdropped AND has_schema_privilege(n.oid, 'USAGE') ORDER BY a.attnum LIMIT $3",
             PostgresCatalogDetail::Column,
         ),
         _ => unreachable!("kind whitelist checked above"),
@@ -549,6 +551,7 @@ pub async fn postgres_catalog_objects(
             nullable: None,
             default: None,
             ordinal: None,
+            is_primary_key: None,
         };
         match detail {
             PostgresCatalogDetail::Signature => {
@@ -568,6 +571,7 @@ pub async fn postgres_catalog_objects(
                 object.nullable = row.try_get::<_, String>(3).ok().map(|value| value == "t");
                 object.default = row.try_get::<_, Option<String>>(4).ok().flatten();
                 object.ordinal = row.try_get::<_, i32>(5).ok();
+                object.is_primary_key = row.try_get::<_, String>(6).ok().map(|value| value == "t");
             }
             PostgresCatalogDetail::None => {}
         }

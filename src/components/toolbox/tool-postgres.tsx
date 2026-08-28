@@ -14,25 +14,50 @@ import { writeTextFile, writeFile as writeBinaryFile } from "@tauri-apps/plugin-
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 import {
+  Braces,
   ClipboardPaste,
   Copy,
+  CopyCheck,
+  CopyMinus,
   Database,
+  Eraser,
+  Eye,
+  FileCode,
   FileCode2,
+  FileDown,
+  FilePlus2,
+  FileSpreadsheet,
   Filter,
+  Fingerprint,
   FolderTree,
+  Hash,
+  History,
   KeyRound,
+  LineChart,
   ListChecks,
+  ListFilter,
   ListPlus,
   Loader2,
+  MoveHorizontal,
+  Pencil,
+  PencilRuler,
+  Pin,
+  PinOff,
   Play,
   Plus,
   Redo2,
   RefreshCw,
+  RemoveFormatting,
+  RotateCcw,
+  Rows3,
   Save,
   Scissors,
   Search,
+  Server,
+  Shrink,
   Square,
   Table2,
+  Trash2,
   Undo2,
   Unplug,
   Wand2,
@@ -43,9 +68,14 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
   ContextMenu,
+  ContextMenuCheckboxItem,
   ContextMenuContent,
   ContextMenuItem,
   ContextMenuSeparator,
+  ContextMenuShortcut,
+  ContextMenuSub,
+  ContextMenuSubContent,
+  ContextMenuSubTrigger,
   ContextMenuTrigger,
 } from "@/components/ui/context-menu";
 import { Input } from "@/components/ui/input";
@@ -82,8 +112,25 @@ import { undo, redo, selectAll } from "@codemirror/commands";
 import {
   currentStatementAt,
   toggleLineComment,
+  type SqlStatementRange,
 } from "@/lib/database/sql-statement-tokenizer";
 import { formatSql, formatSqlSelection } from "@/lib/database/sql-formatter";
+import {
+  databaseErrorResult,
+  parseProviderError,
+  type ParsedDatabaseError,
+} from "@/lib/database/database-error";
+import { revealEditorLine } from "@/lib/database/editor-error-reveal";
+import {
+  generateInsertSql,
+  generateSelectSql,
+  generateUpdateSql,
+  type ColumnMetadata,
+  type SqlGenerationOptions,
+} from "@/lib/database/sql-generation";
+import { addQueryHistory } from "@/lib/database/query-history";
+import { flashEditorRange } from "@/lib/database/editor-flash";
+import { useDatabaseKeyboardShortcuts } from "@/lib/keyboard/use-database-keyboard-shortcuts";
 import { generateId, NotesStorage } from "@/lib/toolbox/toolbox-storage";
 import type { NoteItem } from "@/lib/toolbox/toolbox-types";
 import { ConnectionStorageManager } from "@/lib/connection-storage";
@@ -117,6 +164,9 @@ import {
   type DatabaseNavigatorLoadState,
 } from "@/components/toolbox/database-navigator";
 import { DatabaseResultPane } from "@/components/toolbox/database-result-pane";
+import { DatabaseResultErrorPane } from "@/components/toolbox/database-result-error";
+import { QueryHistoryView } from "@/components/toolbox/query-history-view";
+import { formatShortcut } from "@/components/toolbox/db-context-menus";
 import {
   ObjectViewerTab,
   type ObjectViewerTabState,
@@ -173,6 +223,19 @@ import type {
 } from "@/lib/database/types";
 
 type TableObject = { schema: string; name: string };
+/** Column metadata returned by `postgres_catalog_objects { kind: "columns" }`
+ *  (the loader keeps `PostgresCatalogObjectItem` internal). */
+type PostgresCatalogColumnItem = {
+  readonly kind: string;
+  readonly schema: string;
+  readonly name: string;
+  readonly dataType?: string;
+  readonly nullable?: boolean;
+  readonly default?: string;
+  readonly ordinal?: number;
+  /** True when the column is part of the table's primary key (P0-1). */
+  readonly isPrimaryKey?: boolean;
+};
 /** A row staged for INSERT. Only `edited` column indexes are submitted; the
  * remaining columns keep their server-side DEFAULT. */
 type PendingInsertRow = {
@@ -382,13 +445,23 @@ export function ToolPostgres() {
   const [activeTab, setActiveTab] = useState<string>(() => tabs[0]?.id ?? "");
   const [resultHeight, setResultHeight] = useState(260);
   const [resultDragging, setResultDragging] = useState(false);
+  /** Query-history panel toggle (feature-design §5.3): swaps the result area
+   *  between the grid and the in-pane history view (ux-spec §4.5). */
+  const [historyOpen, setHistoryOpen] = useState(false);
   const [running, setRunning] = useState(false);
   /** Run id of the in-flight query, used by `postgres_cancel` (B19). */
   const runIdRef = useRef(0);
   const activeRunIdRef = useRef<number | null>(null);
   /** CodeMirror view of the active query editor (B19 statement ops). */
   const queryEditorViewRef = useRef<EditorView | null>(null);
+  /** Statement range of the last failed execution, so the error pane's
+   *  "jump to line" can map the server `LINE n` back into the editor
+   *  (feature-design §2.5). Null = the whole document was sent. */
+  const lastErrorRangeRef = useRef<SqlStatementRange | null>(null);
   const [configOpen, setConfigOpen] = useState(false);
+  /** Connection id staged for the delete-confirmation AlertDialog
+   *  (ux-spec §1.2.1: 删除连接 needs AlertDialog, not window.confirm). */
+  const [deleteConnectionTarget, setDeleteConnectionTarget] = useState<string | null>(null);
   const [managerOpen, setManagerOpen] = useState(false);
   const [dialogPage, setDialogPage] = useState<DialogPage>("general");
   const [transactionActive, setTransactionActive] = useState(false);
@@ -965,30 +1038,51 @@ export function ToolPostgres() {
     activeRunIdRef.current = runId;
     setRunning(true);
     try {
-      patchTab(tab.id, {
-        result: adaptPostgresQueryResult(
-          await invoke<PostgresQueryRuntimeResult>(
-            explain ? "postgres_explain" : "postgres_execute",
-            {
-              request: {
-                connectionId: tab.connectionId,
-                sql: tab.sql,
-                maxRows: 1_000,
-                runId,
-              },
+      const result = adaptPostgresQueryResult(
+        await invoke<PostgresQueryRuntimeResult>(
+          explain ? "postgres_explain" : "postgres_execute",
+          {
+            request: {
+              connectionId: tab.connectionId,
+              sql: tab.sql,
+              maxRows: 1_000,
+              runId,
             },
-          ),
+          },
         ),
+      );
+      patchTab(tab.id, { result });
+      addQueryHistory({
+        sql: tab.sql,
+        connectionId: tab.connectionId,
+        connectionName: tabConnection?.name ?? tab.connectionId,
+        providerId: "postgresql",
+        success: true,
       });
     } catch (error) {
+      const parsed = showQueryError(tab.id, error);
+      // Whole-document execution: the server LINE n is relative to the first
+      // editor line, so the statement range is null (feature-design §2.5).
+      lastErrorRangeRef.current = null;
       toast.error(
         t(
           explain
             ? "toolbox.postgres.explainFailed"
             : "toolbox.postgres.queryFailed",
         ),
-        { description: String(error) },
+        { description: parsed.message },
       );
+      if (parsed.lineNumber != null && tab.type === "query") {
+        const view = queryEditorViewRef.current;
+        if (view) revealEditorLine(view, null, parsed.lineNumber);
+      }
+      addQueryHistory({
+        sql: tab.sql,
+        connectionId: tab.connectionId,
+        connectionName: tabConnection?.name ?? tab.connectionId,
+        providerId: "postgresql",
+        success: false,
+      });
     } finally {
       setRunning(false);
       if (activeRunIdRef.current === runId) activeRunIdRef.current = null;
@@ -1173,26 +1267,23 @@ export function ToolPostgres() {
       });
     }
   };
-  /** Executes the SQL statement under the caret (Ctrl+Shift+R, B19-A). */
-  const runCurrentStatement = () => {
-    const view = queryEditorViewRef.current;
-    if (!connected || !view) return;
-    const doc = view.state.doc.toString();
-    const range = currentStatementAt(doc, view.state.selection.main.head);
-    if (!range) return;
-    const sql = doc.slice(range.start, range.end).trim();
-    if (!sql) return;
-    void runSql(sql);
-  };
   /** Executes only the selected text, or the current statement when no
-   * selection spans multiple lines (Ctrl+E, B19-A). */
+   * selection spans multiple lines (Ctrl+E / Ctrl+Enter, B19-A). The sent
+   * range is captured so a failure can reveal the exact editor line. */
   const runSelectionOrStatement = () => {
     const view = queryEditorViewRef.current;
     if (!connected || !view) return;
     const selection = view.state.selection.main;
     const selected = view.state.doc.sliceString(selection.from, selection.to).trim();
-    const sql = selected || currentStatementSql();
-    if (sql) void runSql(sql);
+    if (selected) {
+      void runSql(selected, { start: selection.from, end: selection.to });
+      return;
+    }
+    const doc = view.state.doc.toString();
+    const range = currentStatementAt(doc, selection.head);
+    if (!range) return;
+    const sql = doc.slice(range.start, range.end).trim();
+    if (sql) void runSql(sql, range);
   };
   const currentStatementSql = (): string => {
     const view = queryEditorViewRef.current;
@@ -1234,7 +1325,13 @@ export function ToolPostgres() {
       patchTab(tab.id, { sql: formatted });
     }
   };
-  const runSql = async (sql: string) => {
+  const runSql = async (
+    sql: string,
+    /** Range of the sent statement in the editor; null = whole document sent.
+     *  Used to map a server `LINE n` back to an editor line (feature-design
+     *  §2.5). */
+    sentRange?: SqlStatementRange | null,
+  ) => {
     if (!tab) return;
     patchTab(tab.id, { sql });
     const runId = runIdRef.current + 1;
@@ -1242,27 +1339,190 @@ export function ToolPostgres() {
     activeRunIdRef.current = runId;
     setRunning(true);
     try {
-      patchTab(tab.id, {
-        result: adaptPostgresQueryResult(
-          await invoke<PostgresQueryRuntimeResult>("postgres_execute", {
-            request: {
-              connectionId: tab.connectionId,
-              sql,
-              maxRows: 1_000,
-              runId,
-            },
-          }),
-        ),
+      const result = adaptPostgresQueryResult(
+        await invoke<PostgresQueryRuntimeResult>("postgres_execute", {
+          request: {
+            connectionId: tab.connectionId,
+            sql,
+            maxRows: 1_000,
+            runId,
+          },
+        }),
+      );
+      patchTab(tab.id, { result });
+      addQueryHistory({
+        sql,
+        connectionId: tab.connectionId,
+        connectionName: tabConnection?.name ?? tab.connectionId,
+        providerId: "postgresql",
+        success: true,
       });
     } catch (error) {
+      const parsed = showQueryError(tab.id, error);
+      lastErrorRangeRef.current = sentRange ?? null;
       toast.error(t("toolbox.postgres.queryFailed"), {
-        description: String(error),
+        description: parsed.message,
+      });
+      if (parsed.lineNumber != null) {
+        const view = queryEditorViewRef.current;
+        if (view) revealEditorLine(view, sentRange ?? null, parsed.lineNumber);
+      }
+      addQueryHistory({
+        sql,
+        connectionId: tab.connectionId,
+        connectionName: tabConnection?.name ?? tab.connectionId,
+        providerId: "postgresql",
+        success: false,
       });
     } finally {
       setRunning(false);
       if (activeRunIdRef.current === runId) activeRunIdRef.current = null;
     }
   };
+  /** Normalizes a failed invocation into the tab's persistent error result and
+   *  returns the parsed error (feature-design §2.4). */
+  const showQueryError = (targetTabId: string, raw: unknown): ParsedDatabaseError => {
+    const parsed = parseProviderError("postgres", String(raw));
+    patchTab(targetTabId, { result: databaseErrorResult(parsed) });
+    return parsed;
+  };
+  /** Loads column metadata (incl. primary-key flags) for a relation through
+   *  the navigator's catalog command (feature-design §4.1). Empty on
+   *  failure — callers degrade to `SELECT *`. */
+  const loadRelationColumns = async (
+    reference: PostgresRelationReference,
+  ): Promise<readonly ColumnMetadata[]> => {
+    try {
+      const items = await invoke<PostgresCatalogColumnItem[]>("postgres_catalog_objects", {
+        request: {
+          connectionId: reference.connectionId,
+          kind: "columns",
+          schema: reference.schema,
+          relation: reference.relation,
+        },
+      });
+      return items.map((item) => ({
+        name: item.name,
+        dataType: item.dataType,
+        nullable: item.nullable,
+        default: item.default,
+        isPrimaryKey: item.isPrimaryKey,
+      }));
+    } catch {
+      return [];
+    }
+  };
+  /** PG identifier quoting shared by the generated statements. */
+  const postgresSqlOptions = (): SqlGenerationOptions => ({
+    quoteIdentifier: (id: string) => `"${id.replace(/"/g, '""')}"`,
+  });
+  /** Appends generated SQL to the active query editor (selected + focused +
+   *  dirty), or opens a fresh query tab when no editor is mounted
+   *  (feature-design §4.2). The caret lands at the statement end and the
+   *  inserted text gets a transient highlight — never a whole-document
+   *  selection (P1-UX: typing must not replace the generated statement). */
+  const insertGeneratedSql = (sql: string, connectionId?: string) => {
+    const view = queryEditorViewRef.current;
+    if (view) {
+      const doc = view.state.doc;
+      const insertAt = doc.length;
+      const needsLeadingNewline =
+        insertAt > 0 && doc.sliceString(insertAt - 1, insertAt) !== "\n";
+      const insertText = (needsLeadingNewline ? "\n" : "") + sql + "\n";
+      view.dispatch({ changes: { from: insertAt, to: insertAt, insert: insertText } });
+      const end = insertAt + insertText.length;
+      view.dispatch({ selection: { anchor: end, head: end } });
+      const flashFrom = insertAt + (needsLeadingNewline ? 1 : 0);
+      flashEditorRange(view, flashFrom, flashFrom + sql.length);
+      view.focus();
+      patchTab(tab.id, { dirty: true });
+      return;
+    }
+    openTab({
+      ...newQuery(connectionId ?? draft.id),
+      sql,
+      dirty: true,
+    });
+    requestAnimationFrame(() => {
+      const nextView = queryEditorViewRef.current;
+      if (!nextView) return;
+      const end = nextView.state.doc.length;
+      nextView.dispatch({ selection: { anchor: end, head: end } });
+      flashEditorRange(nextView, 0, Math.min(sql.length, end));
+      nextView.focus();
+    });
+  };
+  /** Builds a generated statement for a relation and inserts it into the
+   *  editor. INSERT/UPDATE need column metadata; when columns cannot be
+   *  loaded the menu degrades to a `SELECT *` template (feature-design §4.1). */
+  const generateRelationSql = async (
+    reference: PostgresRelationReference,
+    kind: "select" | "insert" | "update",
+  ) => {
+    const columns = await loadRelationColumns(reference);
+    const options = postgresSqlOptions();
+    let sql: string;
+    if (kind === "select") {
+      sql = generateSelectSql(
+        reference.schema,
+        reference.relation,
+        columns.length ? columns : null,
+        options,
+      );
+    } else if (columns.length === 0) {
+      // Degradation rule: without column metadata, only a SELECT * template
+      // is valid (feature-design §4.1).
+      sql = generateSelectSql(reference.schema, reference.relation, null, options);
+    } else if (kind === "insert") {
+      sql = generateInsertSql(reference.schema, reference.relation, columns, options);
+    } else {
+      // Primary-key discovery rides on the column metadata (P0-1): PG reports
+      // `isPrimaryKey` per column; empty list falls through to the
+      // `WHERE 1=1 -- TODO` placeholder in generateUpdateSql (AC-F4.3/4.4).
+      const primaryKeys = columns
+        .filter((column) => column.isPrimaryKey)
+        .map((column) => column.name);
+      sql = generateUpdateSql(
+        reference.schema,
+        reference.relation,
+        columns,
+        primaryKeys,
+        options,
+      );
+    }
+    insertGeneratedSql(sql, reference.connectionId);
+  };
+  const generateDeleteSql = (reference: PostgresRelationReference): string =>
+    `-- 全表删除：此语句将删除全部行，请添加 WHERE 条件\nDELETE FROM ${quoteQualifiedPostgresName(reference)};`;
+  // ── Query-history cross-component events (feature-design §5.4) ────────────
+  // The history view dispatches these; the provider check is authoritative and
+  // the connection check keeps multi-connection sessions from cross-firing.
+  const onHistoryExecute = useEffectEvent((event: Event) => {
+    const detail = (event as CustomEvent<{ providerId?: string; sql?: string; connectionId?: string }>).detail;
+    if (detail?.providerId !== "postgresql") return;
+    const sql = detail?.sql?.trim();
+    if (!sql || !tab) return;
+    if (detail.connectionId && detail.connectionId !== tab.connectionId) return;
+    patchTab(tab.id, { sql });
+    void runSql(sql);
+  });
+  const onHistoryInsert = useEffectEvent((event: Event) => {
+    const detail = (event as CustomEvent<{ providerId?: string; sql?: string }>).detail;
+    if (detail?.providerId !== "postgresql") return;
+    const sql = detail?.sql;
+    if (!sql) return;
+    insertGeneratedSql(sql);
+  });
+  useEffect(() => {
+    const handleExecute = (event: Event) => onHistoryExecute(event);
+    const handleInsert = (event: Event) => onHistoryInsert(event);
+    window.addEventListener("nexterm:db-query-history-execute", handleExecute);
+    window.addEventListener("nexterm:db-query-history-insert", handleInsert);
+    return () => {
+      window.removeEventListener("nexterm:db-query-history-execute", handleExecute);
+      window.removeEventListener("nexterm:db-query-history-insert", handleInsert);
+    };
+  }, []);
   /** B21: open the read-only object viewer tab for a navigator object. */
   const openObjectViewer = (reference: PostgresObjectReference) => {
     const tab: WorkspaceTab = {
@@ -1521,8 +1781,12 @@ export function ToolPostgres() {
         pendingDeleteRows: [],
       });
     } catch (error) {
+      // Table browsing has no editor statement to reveal — the error still
+      // persists in the table tab's result pane for copy/retry.
+      const parsed = showQueryError(id, error);
+      lastErrorRangeRef.current = null;
       toast.error(t("toolbox.postgres.queryFailed"), {
-        description: String(error),
+        description: parsed.message,
       });
     } finally {
       setRunning(false);
@@ -2084,125 +2348,153 @@ export function ToolPostgres() {
       });
     }
   };
-  const onDatabaseKeyDown = useEffectEvent((event: KeyboardEvent) => {
-      const target = event.target as HTMLElement | null;
-      const typingInField = Boolean(
-        target?.closest?.("input, textarea, select, [contenteditable='true']"),
-      );
-      if (event.key === "Insert" && !typingInField && tab?.type === "table" &&
-          !postgresConfig.readOnly && tab.result?.kind === "tabular" &&
-          tab.result.editability.editable) {
-        event.preventDefault();
-        addRecord();
-        return;
-      }
-      // Find navigation (B-2/B-4): respond while the find bar is open, from
-      // the find input or anywhere outside a cell editor.
-      const inFindInput = Boolean(
-        target?.closest?.('[data-testid="database-result-find-input"]'),
-      );
-      if (
-        event.key === "F3" &&
-        findState.open &&
-        tab?.type === "table" &&
-        (inFindInput || !typingInField)
-      ) {
-        event.preventDefault();
-        findNext();
-        return;
-      }
-      if (
-        event.key === "Escape" &&
-        findState.open &&
-        tab?.type === "table" &&
-        (inFindInput || !typingInField)
-      ) {
-        event.preventDefault();
-        closeFind();
-        return;
-      }
-      if (!(event.metaKey || event.ctrlKey) || event.altKey) return;
-      // Focus guard (R-B18-2): while editing a cell or form field, let the
-      // browser keep Ctrl+F/Ctrl+R default behavior instead of finding or
-      // applying filters in the grid.
-      if (tab?.type === "table" && typingInField) return;
-      if (event.key.toLowerCase() === "f" && tab?.type === "table") {
-        event.preventDefault();
-        setFindState((state) => ({ ...state, open: true, current: 0 }));
-        return;
-      }
-      if (event.key.toLowerCase() === "n" && connected) {
-        event.preventDefault();
-        createQuery();
-      }
-      if (event.key === "Enter" && tab?.type === "query" && !running) {
-        event.preventDefault();
-        void runSelectionOrStatement();
-      }
-      if (event.key.toLowerCase() === "e" && event.shiftKey && tab?.type === "query" && !running) {
-        event.preventDefault();
-        void execute(true);
-      }
-      // B19 query commands (QUERY_EDITOR scope).
-      if (event.key.toLowerCase() === "t" && tab?.type === "query" && running) {
-        event.preventDefault();
-        void stopQuery();
-        return;
-      }
-      if (event.key === "/" && tab?.type === "query") {
-        event.preventDefault();
-        toggleSqlComment();
-        return;
-      }
-      // Step 2: SQL format (Ctrl+Shift+F / ⌘⇧F).
-      if (event.key.toLowerCase() === "f" && event.shiftKey && tab?.type === "query") {
-        event.preventDefault();
-        formatSqlInEditor();
-        return;
-      }
-      if (
-        event.key.toLowerCase() === "r" &&
-        event.shiftKey &&
-        tab?.type === "query" &&
-        !running
-      ) {
-        event.preventDefault();
-        runCurrentStatement();
-        return;
-      }
-      if (event.key.toLowerCase() === "e" && !event.shiftKey && tab?.type === "query" && !running) {
-        event.preventDefault();
-        runSelectionOrStatement();
-        return;
-      }
-      if (event.key.toLowerCase() === "w") {
-        event.preventDefault();
+  // ── Keyboard: database shortcut hook (feature-design §1.2) ────────────────
+  // Modal dialogs short-circuit all DB commands (the dialog keeps the keyboard).
+  const dialogOpen =
+    configOpen ||
+    managerOpen ||
+    pendingSshTrust !== null ||
+    filterDialog !== null ||
+    layoutDialog !== null ||
+    noteDialog !== null ||
+    closeTarget !== null ||
+    disconnectTarget !== null ||
+    deleteTarget !== null ||
+    deleteConnectionTarget !== null ||
+    objectDropTarget !== null;
+  useDatabaseKeyboardShortcuts({
+    testId: "postgres-workspace",
+    dialogOpen,
+    handlers: {
+      "database.query.execute": () => {
+        // Ctrl+Enter / Ctrl+E / Ctrl+Shift+R all land here (the router
+        // matches by command id, so the combo itself is not distinguishable).
+        // Ctrl+Enter/Ctrl+E previously ran the selection-or-statement; that
+        // superset also covers the old Ctrl+Shift+R "current statement" case
+        // (a caret with no selection behaves identically).
+        if (tab?.type === "query" && !running) runSelectionOrStatement();
+      },
+      "database.query.runSelection": () => {
+        if (tab?.type === "query" && !running) runSelectionOrStatement();
+      },
+      "database.query.explain": () => {
+        if (tab?.type === "query" && !running) void execute(true);
+      },
+      "database.query.toggleComment": () => {
+        if (tab?.type === "query") toggleSqlComment();
+      },
+      "database.query.stop": () => {
+        // Preserve the old running-only condition (:2147-2151).
+        if (running) void stopQuery();
+      },
+      "database.query.format": () => {
+        if (tab?.type === "query") formatSqlInEditor();
+      },
+      "database.query.save": () => {
+        // P1-UX: Ctrl+S in the editor saves the current SQL (menu label was
+        // misleading — the combo previously fell through to the grid's
+        // data.saveChanges, a no-op for query tabs).
+        if (tab?.type === "query") saveCurrentSql();
+      },
+      "database.workspace.newQuery": () => {
+        if (connected) createQuery();
+      },
+      "database.tab.close": () => {
         requestCloseTab(activeTab);
-      }
-      if (event.key.toLowerCase() === "s" && !event.shiftKey && tab?.type === "table" &&
-          tab.dirty && !saving) {
-        event.preventDefault();
-        void saveTableChanges();
-      }
-      if (event.key.toLowerCase() === "r" && connected) {
-        event.preventDefault();
+      },
+      "database.object.refresh": () => {
+        void refreshNavigator();
+      },
+      "database.connection.refresh": () => {
+        void refreshNavigator();
+      },
+      "database.data.filterSort": () => {
+        // Ctrl+R: on a table grid it opens Filter & Sort; on a query tab it
+        // keeps the previous refresh-navigator behaviour (old :2187-2202).
+        if (tab?.type === "table") setFilterDialog({ mode: "filterSort" });
+        else if (connected) void refreshNavigator();
+      },
+      "database.data.refresh": () => {
+        if (!connected) return;
         if (tab?.type === "table" && tab.object) {
           const reference = tableReference();
           if (!reference) return;
-          // B18: the dialog applies immediately, so Ctrl+R either replays
-          // the active filter from offset 0 or refreshes the current page.
           const decision = resolveFilterShortcut(tab.activeFilter);
-          if (decision.kind === "replay") {
-            void browse(reference, 0, decision.filter);
-          } else {
-            void browse(reference, tableOffset);
-          }
+          if (decision.kind === "replay") void browse(reference, 0, decision.filter);
+          else void browse(reference, tableOffset);
         } else {
           void refreshNavigator();
         }
-      }    });
+      },
+      "database.data.addRecord": () => {
+        if (
+          tab?.type === "table" &&
+          !postgresConfig.readOnly &&
+          tab.result?.kind === "tabular" &&
+          tab.result.editability.editable
+        ) {
+          addRecord();
+        }
+      },
+      "database.data.saveChanges": () => {
+        if (tab?.type === "table" && tab.dirty && !saving) void saveTableChanges();
+      },
+      "database.data.clearFilter": () => {
+        // Two-in-one (feature-design §1.2): close find when open, else clear
+        // the active filter. The router consumes Escape inside the grid even
+        // when no filter exists — a no-op here keeps other behaviour intact.
+        if (tab?.type !== "table") return;
+        if (findState.open) closeFind();
+        else if (tab.activeFilter) clearFilter();
+      },
+    },
+  });
+  // Find-bar domain (F3 / Ctrl+F / Escape-close) is NOT a command-registry
+  // command, so the hook leaves it alone (feature-design §1.2 note). It stays
+  // as a local listener next to the hook.
+  const onFindKeyDown = useEffectEvent((event: KeyboardEvent) => {
+    const target = event.target as HTMLElement | null;
+    const typingInField = Boolean(
+      target?.closest?.("input, textarea, select, [contenteditable='true']"),
+    );
+    const inFindInput = Boolean(
+      target?.closest?.('[data-testid="database-result-find-input"]'),
+    );
+    if (
+      event.key === "F3" &&
+      findState.open &&
+      tab?.type === "table" &&
+      (inFindInput || !typingInField)
+    ) {
+      event.preventDefault();
+      findNext();
+      return;
+    }
+    // Escape while find is open (the hook only consumes Escape in the grid
+    // body; from the find input or other focus it reaches this listener).
+    if (
+      event.key === "Escape" &&
+      findState.open &&
+      tab?.type === "table" &&
+      (inFindInput || !typingInField)
+    ) {
+      event.preventDefault();
+      closeFind();
+      return;
+    }
+    if (
+      (event.metaKey || event.ctrlKey) &&
+      !event.altKey &&
+      event.key.toLowerCase() === "f" &&
+      tab?.type === "table" &&
+      !typingInField
+    ) {
+      event.preventDefault();
+      setFindState((state) => ({ ...state, open: true, current: 0 }));
+    }
+  });
   useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => onDatabaseKeyDown(event);
+    const onKeyDown = (event: KeyboardEvent) => onFindKeyDown(event);
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, []);
@@ -2441,22 +2733,23 @@ export function ToolPostgres() {
                     void connectEstablished(connection);
                   };
                   return <>
-                    {connected ? <ContextMenuItem disabled={!enabled("database.connection.disconnect")} onSelect={() => void disconnect()}>{t("toolbox.postgres.disconnect")}</ContextMenuItem> : <ContextMenuItem onSelect={reconnect}>{t("common.reconnect")}</ContextMenuItem>}
-                    <ContextMenuItem disabled={!connected} onSelect={createQuery}>{t("toolbox.postgres.newQuery")}</ContextMenuItem>
-                    <ContextMenuItem disabled={!connected} onSelect={() => void refreshNavigator()}>{t("toolbox.postgres.refresh")}</ContextMenuItem>
+                    {connected ? <ContextMenuItem disabled={!enabled("database.connection.disconnect")} onSelect={() => void disconnect()}><Unplug className="h-3.5 w-3.5" />{t("toolbox.postgres.disconnect")}</ContextMenuItem> : <ContextMenuItem onSelect={reconnect}><RefreshCw className="h-3.5 w-3.5" />{t("common.reconnect")}</ContextMenuItem>}
+                    <ContextMenuItem disabled={!connected} onSelect={createQuery}><FilePlus2 className="h-3.5 w-3.5" />{t("toolbox.postgres.newQuery")}<ContextMenuShortcut>{formatShortcut("Ctrl+N")}</ContextMenuShortcut></ContextMenuItem>
+                    <ContextMenuItem disabled={!connected} onSelect={() => void refreshNavigator()}><RefreshCw className="h-3.5 w-3.5" />{t("toolbox.postgres.refresh")}<ContextMenuShortcut>{formatShortcut("F5")}</ContextMenuShortcut></ContextMenuItem>
                     <ContextMenuSeparator />
-                    <ContextMenuItem onSelect={() => setManagerOpen(true)}>{t("toolbox.postgres.connectionManager.menuItem")}</ContextMenuItem>
+                    <ContextMenuItem onSelect={() => setManagerOpen(true)}><Server className="h-3.5 w-3.5" />{t("toolbox.postgres.connectionManager.menuItem")}</ContextMenuItem>
                     <ContextMenuItem onSelect={() => {
                       if (connection) setDraft(connection);
                       setConfigOpen(true);
-                    }}>{t("common.edit")}</ContextMenuItem>
-                    <ContextMenuItem onSelect={() => {
-                      if (window.confirm(t("toolbox.postgres.deleteConfirm", { name: node.label }))) {
-                        void PostgresConnectionsStorage.remove(connectionId);
-                        setConnections((current) => current.filter((connection) => connection.id !== connectionId));
-                        if (connectionId === draft.id) setConnected(false);
-                      }
-                    }}>{t("common.delete")}</ContextMenuItem>
+                    }}><Pencil className="h-3.5 w-3.5" />{t("common.edit")}</ContextMenuItem>
+                    <ContextMenuSeparator />
+                    <ContextMenuItem
+                      variant="destructive"
+                      onSelect={() => setDeleteConnectionTarget(connectionId)}
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                      {t("common.delete")}
+                    </ContextMenuItem>
                   </>;
                 }
                 const objectReference = getPostgresObjectReference(node);
@@ -2492,21 +2785,67 @@ export function ToolPostgres() {
                 };
                 const canDrop = connected && !postgresConfig.readOnly;
                 return <>
-                  {relation && <ContextMenuItem disabled={!enabled("database.object.open")} onSelect={() => void browse(relation)}>{t("toolbox.postgres.openDataAction")}</ContextMenuItem>}
-                  {relation && relation.objectRole === "table" && <ContextMenuItem disabled={!connected} onSelect={() => openDesigner(relation.schema, relation.relation)}>{t("toolbox.postgres.designTable")}</ContextMenuItem>}
-                  {relation && relation.objectRole === "view" && <ContextMenuItem disabled={!connected} onSelect={() => void openViewDesigner(relation.schema, relation.relation)}>{t("toolbox.postgres.designView")}</ContextMenuItem>}
-                  {relation && relation.objectRole === "materializedView" && <ContextMenuItem disabled title={t("toolbox.postgres.materializedViewReadonly")}>{t("toolbox.postgres.designView")}</ContextMenuItem>}
-                  {objectReference?.objectKind === "function" && <ContextMenuItem disabled={!connected} onSelect={() => openObjectViewer(objectReference)}>{t("toolbox.postgres.openFunction")}</ContextMenuItem>}
+                  {relation && <ContextMenuItem disabled={!enabled("database.object.open")} onSelect={() => void browse(relation)}><Table2 className="h-3.5 w-3.5" />{t("toolbox.postgres.openDataAction")}<ContextMenuShortcut>{formatShortcut("Enter")}</ContextMenuShortcut></ContextMenuItem>}
+                  {relation && relation.objectRole === "table" && <ContextMenuItem disabled={!connected} onSelect={() => openDesigner(relation.schema, relation.relation)}><PencilRuler className="h-3.5 w-3.5" />{t("toolbox.postgres.designTable")}</ContextMenuItem>}
+                  {relation && relation.objectRole === "view" && <ContextMenuItem disabled={!connected} onSelect={() => void openViewDesigner(relation.schema, relation.relation)}><PencilRuler className="h-3.5 w-3.5" />{t("toolbox.postgres.designView")}</ContextMenuItem>}
+                  {relation && relation.objectRole === "materializedView" && <ContextMenuItem disabled title={t("toolbox.postgres.materializedViewReadonly")}><PencilRuler className="h-3.5 w-3.5" />{t("toolbox.postgres.designView")}</ContextMenuItem>}
+                  {relation && (
+                    <ContextMenuSub>
+                      <ContextMenuSubTrigger
+                        data-testid="navigator-generate-sql"
+                        disabled={!connected}
+                      >
+                        <Braces className="h-3.5 w-3.5" />
+                        {t("toolbox.postgres.generateSql")}
+                      </ContextMenuSubTrigger>
+                      <ContextMenuSubContent>
+                        <ContextMenuItem
+                          disabled={!connected}
+                          onSelect={() => void generateRelationSql(relation, "select")}
+                          data-testid="navigator-generate-select"
+                        >
+                          {t("toolbox.postgres.generateSelect")}
+                        </ContextMenuItem>
+                        <ContextMenuItem
+                          disabled={!connected || relation.objectRole !== "table"}
+                          onSelect={() => void generateRelationSql(relation, "insert")}
+                          data-testid="navigator-generate-insert"
+                        >
+                          {t("toolbox.postgres.generateInsert")}
+                        </ContextMenuItem>
+                        <ContextMenuItem
+                          disabled={!connected || relation.objectRole !== "table"}
+                          onSelect={() => void generateRelationSql(relation, "update")}
+                          data-testid="navigator-generate-update"
+                        >
+                          {t("toolbox.postgres.generateUpdate")}
+                        </ContextMenuItem>
+                        <ContextMenuSeparator />
+                        <ContextMenuItem
+                          disabled={!connected}
+                          onSelect={() =>
+                            insertGeneratedSql(generateDeleteSql(relation), relation.connectionId)
+                          }
+                          data-testid="navigator-generate-delete"
+                        >
+                          {t("toolbox.postgres.generateDelete")}
+                        </ContextMenuItem>
+                      </ContextMenuSubContent>
+                    </ContextMenuSub>
+                  )}
+                  {objectReference?.objectKind === "function" && <ContextMenuItem disabled={!connected} onSelect={() => openObjectViewer(objectReference)}><Eye className="h-3.5 w-3.5" />{t("toolbox.postgres.openFunction")}</ContextMenuItem>}
                   {(objectReference?.objectKind === "sequence" ||
                     objectReference?.objectKind === "index" ||
                     objectReference?.objectKind === "constraint" ||
-                    objectReference?.objectKind === "trigger") && <ContextMenuItem disabled={!connected} onSelect={() => objectReference && openObjectViewer(objectReference)}>{t("toolbox.postgres.openObject")}</ContextMenuItem>}
-                  <ContextMenuItem disabled={!connected} onSelect={() => void copyText(copyValue())}>{objectReference?.objectKind === "column" ? t("toolbox.postgres.copyColumnName") : t("toolbox.postgres.copyName")}</ContextMenuItem>
+                    objectReference?.objectKind === "trigger") && <ContextMenuItem disabled={!connected} onSelect={() => objectReference && openObjectViewer(objectReference)}><Eye className="h-3.5 w-3.5" />{t("toolbox.postgres.openObject")}</ContextMenuItem>}
+                  <ContextMenuSeparator />
+                  <ContextMenuItem disabled={!connected} onSelect={() => void copyText(copyValue())}><Copy className="h-3.5 w-3.5" />{objectReference?.objectKind === "column" ? t("toolbox.postgres.copyColumnName") : t("toolbox.postgres.copyName")}</ContextMenuItem>
                   {activeReference && activeReference.objectKind !== "constraint" && (
-                    <ContextMenuItem disabled={!connected} onSelect={() => activeReference && void generateObjectDdl(activeReference)}>{t("toolbox.postgres.generateDdl")}</ContextMenuItem>
+                    <ContextMenuItem disabled={!connected} onSelect={() => activeReference && void generateObjectDdl(activeReference)}><FileCode className="h-3.5 w-3.5" />{t("toolbox.postgres.generateDdl")}</ContextMenuItem>
                   )}
-                  <ContextMenuItem disabled={!connected} onSelect={() => void refreshNavigator()}>{t("toolbox.postgres.refresh")}</ContextMenuItem>
-                  {!activeReference && <ContextMenuItem disabled={!connected} onSelect={createQuery}>{t("toolbox.postgres.newQuery")}</ContextMenuItem>}
+                  <ContextMenuSeparator />
+                  <ContextMenuItem disabled={!connected} onSelect={() => void refreshNavigator()}><RefreshCw className="h-3.5 w-3.5" />{t("toolbox.postgres.refresh")}<ContextMenuShortcut>{formatShortcut("F5")}</ContextMenuShortcut></ContextMenuItem>
+                  {!activeReference && <ContextMenuItem disabled={!connected} onSelect={createQuery}><FilePlus2 className="h-3.5 w-3.5" />{t("toolbox.postgres.newQuery")}<ContextMenuShortcut>{formatShortcut("Ctrl+N")}</ContextMenuShortcut></ContextMenuItem>}
                   {node.kind === "group" && node.reference.path.at(-1) === "tables" && (
                       <ContextMenuItem
                         disabled={!connected}
@@ -2515,15 +2854,16 @@ export function ToolPostgres() {
                           openDesigner(schemaName, "", true);
                         }}
                         data-testid="navigator-new-table"
-                      >{t("toolbox.postgres.newTable")}</ContextMenuItem>
+                      ><Table2 className="h-3.5 w-3.5" />{t("toolbox.postgres.newTable")}</ContextMenuItem>
                     )}
                   {activeReference && activeReference.objectKind !== "column" && (
                     <>
                       <ContextMenuSeparator />
                       <ContextMenuItem
+                        variant="destructive"
                         disabled={!canDrop}
                         onSelect={() => activeReference && void requestObjectDrop(activeReference)}
-                      >{dropLabel(activeReference)}</ContextMenuItem>
+                      ><Trash2 className="h-3.5 w-3.5" />{dropLabel(activeReference)}</ContextMenuItem>
                     </>
                   )}
                 </>;
@@ -2588,6 +2928,15 @@ export function ToolPostgres() {
                     disabled={!tab.sql.trim()}
                     onClick={() => appendSqlToNotes()}
                     data-testid="postgres-save-to-notes"
+                  />
+                )}
+                {tab.type === "query" && (
+                  <ToolButton
+                    icon={<History />}
+                    label={t("toolbox.postgres.history.title")}
+                    disabled={!connected}
+                    onClick={() => setHistoryOpen((open) => !open)}
+                    data-testid="postgres-history"
                   />
                 )}
                  {tab.type === "query" && running && (
@@ -2673,12 +3022,14 @@ export function ToolPostgres() {
                       >
                         <Undo2 className="h-3.5 w-3.5" />
                         {t("common.undo")}
+                        <ContextMenuShortcut>{formatShortcut("Ctrl+Z")}</ContextMenuShortcut>
                       </ContextMenuItem>
                       <ContextMenuItem
                         onSelect={() => runCmCommand(redo)}
                       >
                         <Redo2 className="h-3.5 w-3.5" />
                         {t("common.redo")}
+                        <ContextMenuShortcut>{formatShortcut("Ctrl+Shift+Z")}</ContextMenuShortcut>
                       </ContextMenuItem>
                       <ContextMenuSeparator />
                       <ContextMenuItem
@@ -2686,18 +3037,28 @@ export function ToolPostgres() {
                       >
                         <Scissors className="h-3.5 w-3.5" />
                         {t("common.cut")}
+                        <ContextMenuShortcut>{formatShortcut("Ctrl+X")}</ContextMenuShortcut>
+                      </ContextMenuItem>
+                      <ContextMenuItem
+                        onSelect={() => void copyText(editorCopyValue())}
+                      >
+                        <Copy className="h-3.5 w-3.5" />
+                        {t("common.copy")}
+                        <ContextMenuShortcut>{formatShortcut("Ctrl+C")}</ContextMenuShortcut>
                       </ContextMenuItem>
                       <ContextMenuItem
                         onSelect={() => void pasteIntoEditor()}
                       >
                         <ClipboardPaste className="h-3.5 w-3.5" />
                         {t("common.paste")}
+                        <ContextMenuShortcut>{formatShortcut("Ctrl+V")}</ContextMenuShortcut>
                       </ContextMenuItem>
                       <ContextMenuItem
                         onSelect={() => runCmCommand(selectAll)}
                       >
                         <ListChecks className="h-3.5 w-3.5" />
                         {t("common.selectAll")}
+                        <ContextMenuShortcut>{formatShortcut("Ctrl+A")}</ContextMenuShortcut>
                       </ContextMenuItem>
                       <ContextMenuSeparator />
                       {/* SQL group */}
@@ -2708,6 +3069,7 @@ export function ToolPostgres() {
                       >
                         <Play className="h-3.5 w-3.5" />
                         {t("toolbox.postgres.run")}
+                        <ContextMenuShortcut>{formatShortcut("Ctrl+Enter")}</ContextMenuShortcut>
                       </ContextMenuItem>
                       <ContextMenuItem
                         data-testid="postgres-editor-run-selection"
@@ -2716,6 +3078,16 @@ export function ToolPostgres() {
                       >
                         <ListPlus className="h-3.5 w-3.5" />
                         {t("toolbox.postgres.runSelection")}
+                        <ContextMenuShortcut>{formatShortcut("Ctrl+Shift+Enter")}</ContextMenuShortcut>
+                      </ContextMenuItem>
+                      <ContextMenuItem
+                        data-testid="postgres-editor-explain"
+                        disabled={!connected || !tab.sql.trim()}
+                        onSelect={() => void execute(true)}
+                      >
+                        <LineChart className="h-3.5 w-3.5" />
+                        {t("toolbox.postgres.explain")}
+                        <ContextMenuShortcut>{formatShortcut("Ctrl+Shift+E")}</ContextMenuShortcut>
                       </ContextMenuItem>
                       <ContextMenuItem
                         data-testid="postgres-editor-format-sql"
@@ -2724,8 +3096,19 @@ export function ToolPostgres() {
                       >
                         <Wand2 className="h-3.5 w-3.5" />
                         {t("toolbox.postgres.formatSql")}
+                        <ContextMenuShortcut>{formatShortcut("Ctrl+Shift+F")}</ContextMenuShortcut>
+                      </ContextMenuItem>
+                      <ContextMenuItem
+                        data-testid="postgres-editor-toggle-comment"
+                        disabled={!connected}
+                        onSelect={toggleSqlComment}
+                      >
+                        <Hash className="h-3.5 w-3.5" />
+                        {t("toolbox.postgres.toggleComment")}
+                        <ContextMenuShortcut>{formatShortcut("Ctrl+/")}</ContextMenuShortcut>
                       </ContextMenuItem>
                       <ContextMenuSeparator />
+                      {/* Save group */}
                       <ContextMenuItem
                         data-testid="postgres-editor-save-to-notes"
                         disabled={!tab.sql.trim()}
@@ -2745,12 +3128,14 @@ export function ToolPostgres() {
                           </span>
                         </span>
                       </ContextMenuItem>
-                      <ContextMenuSeparator />
                       <ContextMenuItem
-                        onSelect={() => void copyText(editorCopyValue())}
+                        data-testid="postgres-editor-save-sql"
+                        disabled={!tab.sql.trim()}
+                        onSelect={saveCurrentSql}
                       >
-                        <Copy className="h-3.5 w-3.5" />
-                        {t("common.copy")}
+                        <Save className="h-3.5 w-3.5" />
+                        {t("toolbox.postgres.saveSql")}
+                        <ContextMenuShortcut>{formatShortcut("Ctrl+S")}</ContextMenuShortcut>
                       </ContextMenuItem>
                     </ContextMenuContent>
                   </ContextMenu>
@@ -2856,6 +3241,34 @@ export function ToolPostgres() {
                 onPointerDown={() => setResultDragging(true)}
               />
               )}
+              {tab.type === "query" && historyOpen ? (
+                <div
+                  className="shrink-0 overflow-auto border-t"
+                  style={{ height: resultHeight }}
+                  data-testid="postgres-history-panel"
+                >
+                  <QueryHistoryView
+                    open
+                    onOpenChange={setHistoryOpen}
+                    providerId="postgresql"
+                    connectionId={tab.connectionId}
+                    labels={{
+                      history: t("toolbox.postgres.history.title"),
+                      empty: t("toolbox.postgres.history.empty"),
+                      run: t("toolbox.postgres.history.run"),
+                      insertToEditor: t("toolbox.postgres.history.insertToEditor"),
+                      copy: t("toolbox.postgres.history.copy"),
+                      remove: t("toolbox.postgres.history.remove"),
+                      clear: t("toolbox.postgres.history.clear"),
+                      time: t("toolbox.postgres.history.time"),
+                      error: t("toolbox.postgres.history.error"),
+                      clearConfirmTitle: t("toolbox.postgres.history.clearConfirmTitle"),
+                      clearConfirmDescription: t("toolbox.postgres.history.clearConfirmDescription"),
+                      cancel: t("common.cancel"),
+                    }}
+                  />
+                </div>
+              ) : (
               <DatabaseResultPane
                 result={tab.result}
                 height={resultHeight}
@@ -2898,70 +3311,110 @@ export function ToolPostgres() {
                   renderContextMenu={(cell, row, columnName, rowIndex, columnIndex, source = "row") => <>
                     {source === "insert" ? (
                       <>
-                        <ContextMenuItem onSelect={() => void copyText(cell ?? "NULL")}>{t("toolbox.postgres.copyCell")}</ContextMenuItem>
-                        <ContextMenuItem onSelect={() => void copyText(row.map((value) => value ?? "NULL").join("\t"))}>{t("toolbox.postgres.copyRow")}</ContextMenuItem>
+                        <ContextMenuItem onSelect={() => void copyText(cell ?? "NULL")}><Copy className="h-3.5 w-3.5" />{t("toolbox.postgres.copyCell")}</ContextMenuItem>
+                        <ContextMenuItem onSelect={() => void copyText(row.map((value) => value ?? "NULL").join("\t"))}><CopyCheck className="h-3.5 w-3.5" />{t("toolbox.postgres.copyRow")}</ContextMenuItem>
                         <ContextMenuSeparator />
-                        <ContextMenuItem onSelect={() => removeInsertRow(rowIndex)}>{t("toolbox.postgres.removeRecord")}</ContextMenuItem>
-                        <ContextMenuSeparator />
+                        <ContextMenuItem
+                          variant="destructive"
+                          onSelect={() => removeInsertRow(rowIndex)}
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                          {t("toolbox.postgres.removeRecord")}
+                        </ContextMenuItem>
                       </>
                     ) : (
                       <>
-                        <ContextMenuItem onSelect={() => void copyText(cell ?? "NULL")}>{t("toolbox.postgres.copyCell")}</ContextMenuItem>
-                        <ContextMenuItem onSelect={() => void copyText(row.map((value) => value ?? "NULL").join("\t"))}>{t("toolbox.postgres.copyRow")}</ContextMenuItem>
-                        <ContextMenuItem onSelect={() => void copyText(columnName)}>{t("toolbox.postgres.copyColumnName")}</ContextMenuItem>
+                        <ContextMenuItem onSelect={() => void copyText(cell ?? "NULL")}><Copy className="h-3.5 w-3.5" />{t("toolbox.postgres.copyCell")}</ContextMenuItem>
+                        <ContextMenuItem onSelect={() => void copyText(row.map((value) => value ?? "NULL").join("\t"))}><CopyCheck className="h-3.5 w-3.5" />{t("toolbox.postgres.copyRow")}</ContextMenuItem>
+                        <ContextMenuItem onSelect={() => void copyText(columnName)}><CopyMinus className="h-3.5 w-3.5" />{t("toolbox.postgres.copyColumnName")}</ContextMenuItem>
                         <ContextMenuSeparator />
                         {tab.type === "table" && <>
-                          <ContextMenuItem onSelect={() => applyFilterByFieldValue(columnName, cell)}>{t("toolbox.postgres.filterByFieldValue")}</ContextMenuItem>
-                          <ContextMenuItem onSelect={() => setFilterDialog({ mode: "custom" })}>{t("toolbox.postgres.customFilter")}</ContextMenuItem>
+                          <ContextMenuItem onSelect={() => applyFilterByFieldValue(columnName, cell)}><ListFilter className="h-3.5 w-3.5" />{t("toolbox.postgres.filterByFieldValue")}</ContextMenuItem>
+                          <ContextMenuItem onSelect={() => setFilterDialog({ mode: "custom" })}><Filter className="h-3.5 w-3.5" />{t("toolbox.postgres.customFilter")}</ContextMenuItem>
                           <ContextMenuSeparator />
                         </>}
                         {tab.type === "table" && tableEditingEnabled && <>
                           <ContextMenuItem
                             disabled={!canSetNull(columnIndex)}
                             onSelect={() => stageTableEdit(rowIndex, columnIndex, null)}
-                          >{t("toolbox.postgres.setNull")}</ContextMenuItem>
+                          ><Eraser className="h-3.5 w-3.5" />{t("toolbox.postgres.setNull")}</ContextMenuItem>
+                          <ContextMenuItem
+                            disabled={isPrimaryKeyColumn(columnIndex)}
+                            onSelect={() => stageTableEdit(rowIndex, columnIndex, "DEFAULT")}
+                          ><RotateCcw className="h-3.5 w-3.5" />{t("toolbox.postgres.setDefault")}</ContextMenuItem>
                           <ContextMenuItem
                             disabled={isPrimaryKeyColumn(columnIndex)}
                             onSelect={() => stageTableEdit(rowIndex, columnIndex, "")}
-                          >{t("toolbox.postgres.setEmptyString")}</ContextMenuItem>
+                          ><RemoveFormatting className="h-3.5 w-3.5" />{t("toolbox.postgres.setEmptyString")}</ContextMenuItem>
                           <ContextMenuItem
                             disabled={isPrimaryKeyColumn(columnIndex)}
                             onSelect={() => stageTableEdit(rowIndex, columnIndex, crypto.randomUUID())}
-                          >{t("toolbox.postgres.generateUuid")}</ContextMenuItem>
+                          ><Fingerprint className="h-3.5 w-3.5" />{t("toolbox.postgres.generateUuid")}</ContextMenuItem>
                           <ContextMenuSeparator />
                           <ContextMenuItem
+                            variant="destructive"
                             disabled={!rowHasPrimaryKey(row)}
                             onSelect={() => requestDeleteRow(rowIndex)}
-                          >{t("toolbox.postgres.deleteRecord")}</ContextMenuItem>
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                            {t("toolbox.postgres.deleteRecord")}
+                            <ContextMenuShortcut>{formatShortcut("Ctrl+Delete")}</ContextMenuShortcut>
+                          </ContextMenuItem>
                         </>}
+                        <ContextMenuSeparator />
+                        <ContextMenuItem onSelect={() => void exportCsv()}><FileDown className="h-3.5 w-3.5" />{t("toolbox.postgres.exportCsv")}</ContextMenuItem>
+                        <ContextMenuItem onSelect={() => void exportExcel()}><FileSpreadsheet className="h-3.5 w-3.5" />{t("toolbox.postgres.exportExcel")}</ContextMenuItem>
                       </>
                     )}
-                    <ContextMenuItem onSelect={() => void exportCsv()}>{t("toolbox.postgres.exportCsv")}</ContextMenuItem>
-                    <ContextMenuItem onSelect={() => void exportExcel()}>{t("toolbox.postgres.exportExcel")}</ContextMenuItem>
                   </>}
                   renderColumnContextMenu={tab.type === "table" ? (columnName, columnIndex) => (
                     <>
                       <ContextMenuItem onSelect={() => {
                         setFilterDialog({ mode: "filterSort" });
-                      }}>{t("toolbox.postgres.filterSort")}</ContextMenuItem>
+                      }}><ListFilter className="h-3.5 w-3.5" />{t("toolbox.postgres.filterSort")}<ContextMenuShortcut>{formatShortcut("Ctrl+R")}</ContextMenuShortcut></ContextMenuItem>
                       <ContextMenuSeparator />
-                      <ContextMenuItem onSelect={() => freezeColumn(columnIndex)}>{t("toolbox.postgres.freezeColumn")}</ContextMenuItem>
-                      <ContextMenuItem disabled={!currentLayout().frozenCount} onSelect={unfreezeAllColumns}>{t("toolbox.postgres.unfreezeAllColumns")}</ContextMenuItem>
-                      <ContextMenuItem onSelect={() => setLayoutDialog({ kind: "columnWidth", columnIndex })}>{t("toolbox.postgres.setColumnWidth")}</ContextMenuItem>
-                      <ContextMenuItem onSelect={() => bestFitColumn(columnIndex)}>{t("toolbox.postgres.bestFitColumn")}</ContextMenuItem>
+                      <ContextMenuItem onSelect={() => freezeColumn(columnIndex)}><Pin className="h-3.5 w-3.5" />{t("toolbox.postgres.freezeColumn")}</ContextMenuItem>
+                      <ContextMenuItem disabled={!currentLayout().frozenCount} onSelect={unfreezeAllColumns}><PinOff className="h-3.5 w-3.5" />{t("toolbox.postgres.unfreezeAllColumns")}</ContextMenuItem>
+                      <ContextMenuItem onSelect={() => setLayoutDialog({ kind: "columnWidth", columnIndex })}><MoveHorizontal className="h-3.5 w-3.5" />{t("toolbox.postgres.setColumnWidth")}</ContextMenuItem>
+                      <ContextMenuItem onSelect={() => bestFitColumn(columnIndex)}><Shrink className="h-3.5 w-3.5" />{t("toolbox.postgres.bestFitColumn")}</ContextMenuItem>
                       <ContextMenuSeparator />
-                      <ContextMenuItem onSelect={toggleFieldType}>
+                      <ContextMenuCheckboxItem
+                        checked={currentLayout().showFieldType}
+                        onSelect={toggleFieldType}
+                      >
                         {t("toolbox.postgres.showFieldType")}
-                        {currentLayout().showFieldType ? " ✓" : ""}
-                      </ContextMenuItem>
-                      <ContextMenuItem onSelect={toggleComment}>
+                      </ContextMenuCheckboxItem>
+                      <ContextMenuCheckboxItem
+                        checked={currentLayout().showComment}
+                        onSelect={toggleComment}
+                      >
                         {t("toolbox.postgres.showComment")}
-                        {currentLayout().showComment ? " ✓" : ""}
-                      </ContextMenuItem>
+                      </ContextMenuCheckboxItem>
                     </>
                   ) : undefined}
                   renderRowHeaderContextMenu={tab.type === "table" ? () => (
-                    <ContextMenuItem onSelect={() => setLayoutDialog({ kind: "rowHeight" })}>{t("toolbox.postgres.setRowHeight")}</ContextMenuItem>
+                    <>
+                      <ContextMenuItem
+                        disabled={!tableEditingEnabled}
+                        onSelect={addRecord}
+                      >
+                        <Plus className="h-3.5 w-3.5" />
+                        {t("toolbox.postgres.addRecord")}
+                        <ContextMenuShortcut>{formatShortcut("Insert")}</ContextMenuShortcut>
+                      </ContextMenuItem>
+                      <ContextMenuItem
+                        disabled={tab.result?.kind !== "tabular" || tab.result.rows.length === 0}
+                        onSelect={() => {
+                          if (tab.result?.kind !== "tabular" || tab.result.rows.length === 0) return;
+                          void copyText(tab.result.rows[0].map((value) => value ?? "NULL").join("\t"));
+                        }}
+                      >
+                        <CopyCheck className="h-3.5 w-3.5" />
+                        {t("toolbox.postgres.copyRow")}
+                      </ContextMenuItem>
+                      <ContextMenuSeparator />
+                      <ContextMenuItem onSelect={() => setLayoutDialog({ kind: "rowHeight" })}><Rows3 className="h-3.5 w-3.5" />{t("toolbox.postgres.setRowHeight")}</ContextMenuItem>
+                    </>
                   ) : undefined}
                   layout={tab.type === "table" ? currentLayout() : undefined}
                   onColumnResize={tab.type === "table" ? setColumnWidth : undefined}
@@ -2986,7 +3439,43 @@ export function ToolPostgres() {
                   deletedRowIndexes={tab.type === "table" ? tab.pendingDeleteRows : undefined}
                   onEditInsertCell={tableEditingEnabled ? editInsertCell : undefined}
                   isInsertCellModified={isInsertCellModified}
+                  renderError={(error) => (
+                    <DatabaseResultErrorPane
+                      error={error}
+                      labels={{
+                        error: t("toolbox.postgres.errorPane.error"),
+                        copy: t("toolbox.postgres.errorPane.copy"),
+                        retry: t("toolbox.postgres.errorPane.retry"),
+                        jumpToLine: t("toolbox.postgres.errorPane.jumpToLine"),
+                        line: (n) => t("toolbox.postgres.errorPane.line", { n }),
+                        details: t("toolbox.postgres.errorPane.details"),
+                      }}
+                      onRetry={
+                        tab.type === "table"
+                          ? () => {
+                              const reference = tableReference();
+                              if (reference) void browse(reference, tableOffset);
+                            }
+                          : () => void runSql(tab.sql)
+                      }
+                      onCopy={() => void copyText(error.fullText)}
+                      onGoToLine={
+                        error.lineNumber != null && tab.type === "query"
+                          ? () => {
+                              const view = queryEditorViewRef.current;
+                              if (!view) return;
+                              revealEditorLine(
+                                view,
+                                lastErrorRangeRef.current,
+                                error.lineNumber!,
+                              );
+                            }
+                          : undefined
+                      }
+                    />
+                  )}
               />
+              )}
               </>}
               </div>
               {ddlPreview && (
@@ -3149,6 +3638,42 @@ export function ToolPostgres() {
             <AlertDialogCancel>{t("common.cancel")}</AlertDialogCancel>
             <AlertDialogAction onClick={stageDeleteRow}>
               {t("toolbox.postgres.deleteRecord")}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+      <AlertDialog
+        open={deleteConnectionTarget !== null}
+        onOpenChange={(open) => !open && setDeleteConnectionTarget(null)}
+        data-testid="postgres-connection-delete-confirm"
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t("toolbox.postgres.deleteConnectionConfirmTitle")}</AlertDialogTitle>
+            <AlertDialogDescription>
+              {t("toolbox.postgres.deleteConnectionConfirmDescription", {
+                name: deleteConnectionTarget
+                  ? (connections.find((item) => item.id === deleteConnectionTarget)?.name ?? "")
+                  : "",
+              })}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>{t("common.cancel")}</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              onClick={() => {
+                const target = deleteConnectionTarget;
+                setDeleteConnectionTarget(null);
+                if (!target) return;
+                void PostgresConnectionsStorage.remove(target);
+                setConnections((current) =>
+                  current.filter((connection) => connection.id !== target),
+                );
+                if (target === draft.id) setConnected(false);
+              }}
+            >
+              {t("common.delete")}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

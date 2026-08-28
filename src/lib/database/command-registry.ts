@@ -37,11 +37,13 @@ export const DATABASE_COMMAND_IDS = [
   "database.toolbar.bigIcons",
   "database.toolbar.showCaption",
   "database.query.execute",
+  "database.query.runSelection",
   "database.query.explain",
   "database.query.toggleComment",
   "database.query.openFile",
   "database.query.stop",
   "database.query.format",
+  "database.query.save",
   "database.tab.close",
   "database.tab.closeOthers",
   "database.result.copyCell",
@@ -280,6 +282,16 @@ const commands: readonly DatabaseCommandDescriptor[] = [
     defaultBinding: "Ctrl+Shift+R",
   },
   {
+    // UX spec §3.1: run-selection primary combo (Ctrl+Shift+Enter). Ctrl+E /
+    // Ctrl+Shift+R remain registered in NAVICAT_BINDINGS as compatibility aliases.
+    id: "database.query.runSelection",
+    labelKey: "database.command.query.runSelection",
+    scopes: ["QUERY_EDITOR"],
+    requiredCapabilities: [],
+    connectionStates: ["connected"],
+    defaultBinding: "Ctrl+Shift+Enter",
+  },
+  {
     id: "database.query.explain",
     labelKey: "database.command.query.explain",
     scopes: ["QUERY_EDITOR"],
@@ -320,6 +332,17 @@ const commands: readonly DatabaseCommandDescriptor[] = [
     requiredCapabilities: [],
     connectionStates: ["connected"],
     defaultBinding: "Ctrl+Shift+F",
+  },
+  {
+    // P1-UX: Ctrl+S saves the current SQL to the saved-queries store. QUERY_EDITOR
+    // outranks DATA_GRID in scope routing, so grid-focused Ctrl+S still saves
+    // table edits (data.saveChanges) while the editor keeps the save-SQL combo.
+    id: "database.query.save",
+    labelKey: "database.command.query.save",
+    scopes: ["QUERY_EDITOR"],
+    requiredCapabilities: [],
+    connectionStates: ["disconnected", "connected"],
+    defaultBinding: "Ctrl+S",
   },
   {
     id: "database.tab.close",

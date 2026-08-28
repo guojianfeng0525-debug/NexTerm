@@ -259,6 +259,20 @@ export function useKeyboardShortcuts(shortcuts: KeyboardShortcut[], enabled: boo
         return;
       }
 
+      // DB toolbox owns a complete shortcut system (feature-design §1.2 boundary 5):
+      // while focus is inside a database workspace, app-level shortcuts (Ctrl+N new
+      // session, Ctrl+W close, Ctrl+1..9 focus group, Ctrl+B/J/M/Z layout) must not
+      // fire — the DB hook routes those combos itself.
+      const target = event.target;
+      const isDbWorkspaceTarget =
+        target instanceof Element &&
+        Boolean(
+          target.closest(
+            '[data-testid="postgres-workspace"], [data-testid="mysql-workspace"], [data-testid="sqlite-workspace"]',
+          ),
+        );
+      if (isDbWorkspaceTarget) return;
+
       for (const shortcut of shortcuts) {
         const keyMatch = event.key.toLowerCase() === shortcut.key.toLowerCase();
         // On macOS, treat Cmd (metaKey) as the equivalent of Ctrl for shortcut matching.
