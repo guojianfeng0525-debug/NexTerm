@@ -158,7 +158,10 @@ export function TransferQueue({
         </button>
       </CollapsibleTrigger>
       <CollapsibleContent>
-        <ScrollArea className="max-h-40">
+        {/* viewportClassName mirrors max-h onto the actual scroller: Radix's
+            viewport is height:100%, which under a max-h-only Root never
+            shrinks, so long queues overflowed invisibly (no scrollbar). */}
+        <ScrollArea className="max-h-40" viewportClassName="max-h-40">
           {transfers.length === 0 ? (
             <div className="flex items-center justify-center h-12 text-xs text-muted-foreground">
               {t('transferQueue.noTransfers')}

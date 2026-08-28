@@ -1766,7 +1766,12 @@ export function IntegratedFileBrowser({ connectionId, host: _host, isConnected, 
                               }`}
                               onClick={(e) => handleFileClick(file, e)}
                               onDoubleClick={() => handleFileDoubleClick(file)}
-                              onContextMenu={() => {
+                              onContextMenu={(e) => {
+                                // Right-clicking a file row must open ONLY the
+                                // row menu — stop the event before it also
+                                // triggers the empty-area ContextMenu wrapping
+                                // the whole scroll region (double-menu bug).
+                                e.stopPropagation();
                                 if (!selectedFiles.has(file.name)) {
                                   setSelectedFiles(new Set([file.name]));
                                 }

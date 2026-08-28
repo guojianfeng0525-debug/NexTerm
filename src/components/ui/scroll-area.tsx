@@ -7,8 +7,14 @@ import { cn } from "./utils";
 
 const ScrollArea = React.forwardRef<
   React.ElementRef<typeof ScrollAreaPrimitive.Root>,
-  React.ComponentProps<typeof ScrollAreaPrimitive.Root>
->(({ className, children, ...props }, ref) => {
+  React.ComponentProps<typeof ScrollAreaPrimitive.Root> & {
+    /** Styles for the scrolling viewport. Radix's viewport is `size-full`,
+     *  so under a `max-h-*` Root the viewport never shrinks (height:100% of
+     *  an unbounded parent = content height) and scrolling never engages.
+     *  Pass the same `max-h-*` here to bound the actual scroller. */
+    viewportClassName?: string;
+  }
+>(({ className, viewportClassName, children, ...props }, ref) => {
   return (
     <ScrollAreaPrimitive.Root
       ref={ref}
@@ -21,7 +27,10 @@ const ScrollArea = React.forwardRef<
     >
       <ScrollAreaPrimitive.Viewport
         data-slot="scroll-area-viewport"
-        className="focus-visible:ring-ring/50 size-full rounded-[inherit] transition-[color,box-shadow] outline-none focus-visible:ring-[3px] focus-visible:outline-1"
+        className={cn(
+          "focus-visible:ring-ring/50 size-full rounded-[inherit] transition-[color,box-shadow] outline-none focus-visible:ring-[3px] focus-visible:outline-1",
+          viewportClassName,
+        )}
       >
         {children}
       </ScrollAreaPrimitive.Viewport>

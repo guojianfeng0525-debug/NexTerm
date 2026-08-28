@@ -534,9 +534,10 @@ export function DirectoryTransferDialog({
           )}
         </div>
 
-        {/* Error log */}
+        {/* Error log — viewportClassName bounds the actual scroller (see
+            scroll-area.tsx note: a max-h-only Root never scrolls). */}
         {progress.errors.length > 0 && (
-          <ScrollArea className="max-h-24 border rounded text-[10px] font-mono p-2">
+          <ScrollArea className="max-h-24 border rounded text-[10px] font-mono p-2" viewportClassName="max-h-24">
             {progress.errors.map((err, i) => (
               <div key={i} className="text-destructive">
                 {err}
