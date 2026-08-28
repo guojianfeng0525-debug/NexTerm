@@ -2390,6 +2390,12 @@ export function ToolPostgres() {
       "database.query.format": () => {
         if (tab?.type === "query") formatSqlInEditor();
       },
+      "database.query.save": () => {
+        // P1-UX: Ctrl+S in the editor saves the current SQL (menu label was
+        // misleading — the combo previously fell through to the grid's
+        // data.saveChanges, a no-op for query tabs).
+        if (tab?.type === "query") saveCurrentSql();
+      },
       "database.workspace.newQuery": () => {
         if (connected) createQuery();
       },

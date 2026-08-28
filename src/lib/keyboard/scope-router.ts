@@ -122,7 +122,14 @@ export function routeKeyEvent(
 
   // Gather every binding whose scope is active at-or-below the requested
   // scope, then pick the one with the highest scope rank (priority routing).
-  let best: { result: RouteResult; rank: number } | null = null;
+  // Ties (e.g. QUERY_EDITOR vs DATA_GRID both rank 5) go to the binding that
+  // explicitly declares the currently-active scope — so an editor-focused
+  // Ctrl+S hits `database.query.save`, not the grid's `data.saveChanges`.
+  let best: {
+    result: RouteResult;
+    rank: number;
+    scopes: readonly KeyboardScope[];
+  } | null = null;
   for (const binding of bindings) {
     if (binding.scopes.length === 0) continue; // hidden binding
     let bindingRank = 0;
@@ -138,8 +145,15 @@ export function routeKeyEvent(
     if (!combo) continue;
     if (!matchesCombo(event, combo, isMac)) continue;
 
+    const candidate = { result: { commandId: binding.commandId, scope, combo }, rank: bindingRank, scopes: binding.scopes };
     if (!best || bindingRank > best.rank) {
-      best = { result: { commandId: binding.commandId, scope, combo }, rank: bindingRank };
+      best = candidate;
+    } else if (
+      bindingRank === best.rank &&
+      !best.scopes.includes(scope) &&
+      binding.scopes.includes(scope)
+    ) {
+      best = candidate;
     }
   }
   return best?.result ?? null;

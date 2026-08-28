@@ -161,6 +161,26 @@ describe("scope routing via the hook", () => {
     expect(event.defaultPrevented).toBe(true);
   });
 
+  it("QUERY_EDITOR: Ctrl+S routes to query.save, not the grid's data.saveChanges", () => {
+    const saveSql = handlerMock();
+    const saveData = handlerMock();
+    render(
+      <Harness
+        testId="postgres-workspace"
+        handlers={{
+          "database.query.save": () => void saveSql.called++,
+          "database.data.saveChanges": () => void saveData.called++,
+        }}
+      />,
+    );
+    const editor = document.querySelector(".cm-editor") as HTMLElement;
+    editor.focus();
+    const event = dispatchKey(editor, "s", { ctrlKey: true });
+    expect(saveSql.called).toBe(1);
+    expect(saveData.called).toBe(0);
+    expect(event.defaultPrevented).toBe(true);
+  });
+
   it("DATA_GRID: Ctrl+R routes to filterSort", () => {
     const filterSort = handlerMock();
     render(

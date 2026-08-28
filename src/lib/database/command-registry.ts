@@ -43,6 +43,7 @@ export const DATABASE_COMMAND_IDS = [
   "database.query.openFile",
   "database.query.stop",
   "database.query.format",
+  "database.query.save",
   "database.tab.close",
   "database.tab.closeOthers",
   "database.result.copyCell",
@@ -331,6 +332,17 @@ const commands: readonly DatabaseCommandDescriptor[] = [
     requiredCapabilities: [],
     connectionStates: ["connected"],
     defaultBinding: "Ctrl+Shift+F",
+  },
+  {
+    // P1-UX: Ctrl+S saves the current SQL to the saved-queries store. QUERY_EDITOR
+    // outranks DATA_GRID in scope routing, so grid-focused Ctrl+S still saves
+    // table edits (data.saveChanges) while the editor keeps the save-SQL combo.
+    id: "database.query.save",
+    labelKey: "database.command.query.save",
+    scopes: ["QUERY_EDITOR"],
+    requiredCapabilities: [],
+    connectionStates: ["disconnected", "connected"],
+    defaultBinding: "Ctrl+S",
   },
   {
     id: "database.tab.close",
