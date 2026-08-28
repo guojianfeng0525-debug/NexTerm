@@ -270,6 +270,9 @@ export function QueryHistoryView({
                       onClick={(event) => {
                         event.stopPropagation();
                         dispatchExecute(entry.sql);
+                        // Restore focus to the list so Esc (handled at the panel
+                        // container level) can close the panel right after a run.
+                        listRef.current?.focus();
                       }}
                       title={labels.run}
                       data-testid={`query-history-run-${index}`}
@@ -280,7 +283,11 @@ export function QueryHistoryView({
                 </ContextMenuTrigger>
                 <ContextMenuContent data-testid="query-history-context-menu">
                   <ContextMenuItem
-                    onSelect={() => dispatchExecute(entry.sql)}
+                    onSelect={() => {
+                      dispatchExecute(entry.sql);
+                      // Keep focus inside the panel so Esc can still close it.
+                      listRef.current?.focus();
+                    }}
                     data-testid="query-history-menu-run"
                   >
                     <Play className="size-3.5" />
