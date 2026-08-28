@@ -11,7 +11,10 @@
  *       ├── msedge.dll
  *       └── ...
  *
- * then validates it and produces dist/NexTerm-portable.zip. The ZIP's root
+ * then validates it and produces dist/NexTerm_<version>_<arch>-portable.zip
+ * (version from package.json, e.g. NexTerm_2.14.0_x64-portable.zip — aligned
+ * with the installer family NexTerm_<version>_<arch>-setup.exe). The ZIP's
+ * root
  * holds exactly `NexTerm.exe` + `WebView2/` (no wrapper directory), so
  * unzipping yields a directly runnable folder.
  *
@@ -43,7 +46,20 @@ const ARCH = argValue('--arch', 'x64');
 if (ARCH !== 'x64' && ARCH !== 'x86') {
   throw new Error(`Unsupported portable architecture: ${ARCH}`);
 }
+// App version from package.json — the release ZIP must carry it so assets of
+// different releases are distinguishable (aligns with the installer family
+// `NexTerm_<version>_<arch>-setup.exe` produced by tauri bundling).
+const APP_VERSION = (() => {
+  const pkg = JSON.parse(fs.readFileSync(path.join(PROJECT_ROOT, 'package.json'), 'utf8'));
+  return typeof pkg.version === 'string' && pkg.version.trim() ? pkg.version.trim() : null;
+})();
+if (!APP_VERSION) {
+  throw new Error('package.json has no usable "version" — release asset naming requires it');
+}
+// Directory name inside dist/ (kept short); the ZIP asset name carries the
+// version + architecture: NexTerm_<version>_<arch>-portable.zip
 const PORTABLE_NAME = ARCH === 'x64' ? 'NexTerm-portable' : `NexTerm-portable-${ARCH}`;
+const ZIP_NAME = `NexTerm_${APP_VERSION}_${ARCH}-portable.zip`;
 
 /* ── helpers ─────────────────────────────────────────────────────────────── */
 
@@ -205,7 +221,8 @@ function main() {
   // 6. Create the ZIP. The archive's ROOT contains exactly two entries —
   //    `NexTerm.exe` and `WebView2/` — so a user unzips straight into a
   //    runnable folder (no nested `NexTerm-portable/` wrapper directory).
-  const zipPath = path.join(OUT_DIR, `${PORTABLE_NAME}.zip`);
+  //    Asset name: NexTerm_<version>_<arch>-portable.zip
+  const zipPath = path.join(OUT_DIR, ZIP_NAME);
   if (fs.existsSync(zipPath)) fs.rmSync(zipPath, { force: true });
   try {
     // Prefer PowerShell Compress-Archive on Windows. Use `-Path` with the
@@ -233,6 +250,8 @@ function main() {
   log('zip', zipPath);
   log('zip-size', `${(zipSize / 1024 / 1024).toFixed(1)} MB`);
   log('done', `portable distribution ready: ${path.join(OUT_DIR, PORTABLE_NAME)} + ${zipPath}`);
+  // Echo the asset name for CI: the workflow uploads this exact file.
+  console.log(`::notice title=portable-asset::${ZIP_NAME}`);
 }
 
 main();

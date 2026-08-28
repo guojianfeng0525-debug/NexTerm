@@ -21,16 +21,18 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # The portable script names the asset NexTerm_<version>_<arch>-portable.zip
+          # (version read from package.json — see scripts/build-windows-portable.mjs),
+          # matching the installer family (NexTerm_<version>_<arch>-setup.exe).
+          # Upload/release steps glob that pattern so the two never drift apart.
           - arch: x64
             rust_target: ''
             tauri_args: ''
             exe_path: src-tauri/target/release/nexterm.exe
-            archive: NexTerm-portable.zip
           - arch: x86
             rust_target: i686-pc-windows-msvc
             tauri_args: --target i686-pc-windows-msvc
             exe_path: src-tauri/target/i686-pc-windows-msvc/release/nexterm.exe
-            archive: NexTerm-portable-x86.zip
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -143,7 +145,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: NexTerm-portable-${{ matrix.arch }}
-          path: dist/${{ matrix.archive }}
+          path: dist/NexTerm_*_${{ matrix.arch }}-portable.zip
           if-no-files-found: error
 
       # Publish a GitHub Release when a version tag (v*) is pushed.
@@ -153,5 +155,5 @@ jobs:
         with:
           tag_name: ${{ inputs.tag || github.ref_name }}
           files: |
-            dist/${{ matrix.archive }}
+            dist/NexTerm_*_${{ matrix.arch }}-portable.zip
           generate_release_notes: true
