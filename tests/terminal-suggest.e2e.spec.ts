@@ -77,11 +77,13 @@ interface PtyServer {
   line: string;
   /** 是否处于 vim（alternate screen）模式。 */
   inVim: boolean;
+  /** 收到的所有 Input 载荷（utf8），用于诊断替换载荷。 */
+  received: string[];
 }
 
 /** 假 PTY 服务器：回显按键维护 prompt 行；`vim`+Enter 进入 alternate screen。 */
 async function installFakePty(page: Page): Promise<PtyServer> {
-  const server: PtyServer = { line: '', inVim: false };
+  const server: PtyServer = { line: '', inVim: false, received: [] };
   await page.routeWebSocket('ws://127.0.0.1:9001', (ws) => {
     const PROMPT = 'root@host:~# ';
     server.line = PROMPT;
@@ -100,6 +102,7 @@ async function installFakePty(page: Page): Promise<PtyServer> {
         ws.send(ptyFrame(connId, PROMPT));
       } else if (msg.type === 'Input' && msg.connection_id && Array.isArray(msg.data)) {
         const chars = Buffer.from(msg.data).toString('utf8');
+        server.received.push(chars);
         const connId = msg.connection_id;
         for (const ch of chars) {
           if (server.inVim) continue; // vim 模式：按键不回到 shell 行
@@ -302,5 +305,75 @@ test.describe('命令提示框页面级验证（Slice 2/3）', () => {
     await expect(suggestionsLabel.locator('xpath=..').locator('button[role="switch"]')).toHaveCount(1);
     await expect(tuiGateLabel.locator('xpath=..').locator('button[role="switch"]')).toHaveCount(1);
     await expect(debounceLabel.locator('xpath=..').locator('button[role="combobox"]')).toHaveCount(1);
+  });
+
+  test('场景 E: hover 弹窗候选项后按 Enter → 执行用户输入，绝不应用候选（P0 修复）', async ({ page }) => {
+    await installInvokeMock(page);
+    const pty = await installFakePty(page);
+    await page.goto('/');
+    await passAppLock(page);
+    await connectSsh(page, 'QA Suggest E');
+
+    await popupGit(page);
+    const bar = suggestionBar(page);
+    expect(await bar.locator('button').count()).toBeGreaterThan(0);
+
+    // hover 第一项：应为预览高亮（ring），而非实心选中（bg-primary）。
+    const first = bar.locator('button').first();
+    await first.hover();
+    await page.waitForTimeout(150);
+    const cls = await first.getAttribute('class');
+    expect(cls).toContain('ring');
+
+    await page.keyboard.press('Enter');
+    await page.waitForTimeout(300);
+    // Enter 放行执行用户输入 `git `（假 PTY 回显换行到新 prompt），
+    // 行内绝不出现候选词。
+    expect(pty.line).toBe('root@host:~# ');
+    expect(pty.line).not.toContain('git commit');
+  });
+
+  test('场景 F: 输入 `git ` 弹窗后点击候选 `git commit` → 行替换为 `git commit `', async ({ page }) => {
+    await installInvokeMock(page);
+    const pty = await installFakePty(page);
+    await page.goto('/');
+    await passAppLock(page);
+    await connectSsh(page, 'QA Suggest F');
+
+    await popupGit(page);
+    expect(pty.line).toBe('root@host:~# git ');
+
+    await page.locator('[data-suggestion-bar] button', { hasText: 'git commit' }).click();
+    await page.waitForTimeout(300);
+    // A2 尾缀补全：发送 `commit `，行拼成 `git commit `（无残词、无双空格）。
+    expect(pty.line).toBe('root@host:~# git commit ');
+  });
+
+  test('场景 G: Esc 关窗后系统不锁定 + hover/Enter 不误选（回归）', async ({ page }) => {
+    await installInvokeMock(page);
+    const pty = await installFakePty(page);
+    await page.goto('/');
+    await passAppLock(page);
+    await connectSsh(page, 'QA Suggest G');
+
+    await popupGit(page);
+    await page.keyboard.press('Escape');
+    await expect(suggestionBar(page)).toHaveCount(0);
+    await page.waitForTimeout(200);
+
+    // 清行后再次输入，弹窗必须恢复（Esc 之后系统不锁定）。
+    await page.keyboard.press('Control+c');
+    await page.waitForTimeout(200);
+    await page.keyboard.type('git ');
+    await expect(suggestionBar(page)).toBeVisible({ timeout: 5000 });
+    await page.waitForTimeout(300);
+
+    // hover 第一项后 Enter：仍执行原输入，不应用候选。
+    await page.locator('[data-suggestion-bar] button').first().hover();
+    await page.waitForTimeout(150);
+    await page.keyboard.press('Enter');
+    await page.waitForTimeout(300);
+    expect(pty.line).toBe('root@host:~# ');
+    expect(pty.line).not.toContain('git commit');
   });
 });
