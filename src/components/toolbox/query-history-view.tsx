@@ -117,15 +117,12 @@ export function QueryHistoryView({
     }
   }, [open, providerId]);
 
-  // Esc closes the panel no matter where the focus is.
-  useEffect(() => {
-    if (!open) return;
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onOpenChange(false);
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [open, onOpenChange]);
+  // Esc closes the panel when the keypress originates inside the panel.
+  // (Container-level onKeyDown, NOT a window listener — a window listener would
+  // also fire when Esc closes the context menu, wrongly closing the whole panel.)
+  const handleRootKeyDown = (event: React.KeyboardEvent) => {
+    if (event.key === "Escape") onOpenChange(false);
+  };
 
   const filtered = useMemo(
     () =>
@@ -202,7 +199,11 @@ export function QueryHistoryView({
   if (!open) return null;
 
   return (
-    <div className="flex h-full min-h-0 flex-col" data-testid="query-history-view">
+    <div
+      className="flex h-full min-h-0 flex-col"
+      data-testid="query-history-view"
+      onKeyDown={handleRootKeyDown}
+    >
       {/* Header (same h-7 language as the result pane) */}
       <div className="flex h-7 shrink-0 items-center border-b bg-muted/20 px-2 text-[11px]">
         <span className="border-r pr-3 font-medium">{labels.history}</span>
@@ -307,6 +308,15 @@ export function QueryHistoryView({
                   >
                     <Trash2 className="size-3.5" />
                     {labels.remove}
+                  </ContextMenuItem>
+                  <ContextMenuSeparator />
+                  <ContextMenuItem
+                    variant="destructive"
+                    onSelect={() => setConfirmClear(true)}
+                    data-testid="query-history-menu-clear"
+                  >
+                    <Trash2 className="size-3.5" />
+                    {labels.clear}
                   </ContextMenuItem>
                 </ContextMenuContent>
               </ContextMenu>

@@ -178,7 +178,9 @@ describe("QueryHistoryView", () => {
   it("closes the panel on Escape", () => {
     const onOpenChange = vi.fn();
     renderView({ onOpenChange });
-    fireEvent.keyDown(window, { key: "Escape" });
+    // Esc is handled at the panel container level (not a window listener),
+    // so firing inside the panel closes it while menu-level Esc stays isolated.
+    fireEvent.keyDown(screen.getByTestId("query-history-view"), { key: "Escape" });
     expect(onOpenChange).toHaveBeenCalledWith(false);
   });
 
