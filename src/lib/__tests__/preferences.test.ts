@@ -110,6 +110,43 @@ describe('preferences persistence', () => {
     expect(settings.commandSuggestions).toBe(false);
   });
 
+  it('suggestion tuning columns round-trip through sshClientSettings', async () => {
+    const { prefGet, prefSet, resetPreferenceCaches } = await import('../preferences');
+    await hydrate();
+    prefSet('sshClientSettings', {
+      theme: 'dark',
+      autoReconnect: true,
+      logLevel: 'info',
+      maxLogSize: 100,
+      savePasswords: false,
+      autoLockTimeout: 30,
+      hostKeyVerification: true,
+      enableNotifications: true,
+      showConnectionManager: true,
+      showSystemMonitor: true,
+      showStatusBar: true,
+      commandSuggestions: true,
+      suggestionDebounceMs: 200,
+      suggestionTuiGateEnabled: false,
+      connectionTimeout: 30,
+      keepAliveInterval: 60,
+      defaultProtocol: 'SSH',
+      newSession: 'Ctrl+N',
+      closeSession: 'Ctrl+W',
+      nextTab: 'Ctrl+Tab',
+      previousTab: 'Ctrl+Shift+Tab',
+    });
+    // Backend persisted INTEGER 200 (debounce) and INTEGER 0 (gate disabled).
+    expect(DB.app_settings[0]?.suggestion_debounce_ms).toBe(200);
+    expect(DB.app_settings[0]?.suggestion_tui_gate_enabled).toBe(0);
+    // Simulate app restart and verify values survive.
+    resetPreferenceCaches();
+    await hydrate();
+    const settings = prefGet<Record<string, unknown>>('sshClientSettings', {});
+    expect(settings.suggestionDebounceMs).toBe(200);
+    expect(settings.suggestionTuiGateEnabled).toBe(false);
+  });
+
   it('other INTEGER boolean settings convert correctly', async () => {
     DB.app_settings = [
       {

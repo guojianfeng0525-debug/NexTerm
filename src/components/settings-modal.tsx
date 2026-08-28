@@ -106,6 +106,8 @@ export function SettingsModal({ open, onOpenChange, onAppearanceChange }: Settin
     showSystemMonitor: true,
     showStatusBar: true,
     commandSuggestions: true,
+    suggestionDebounceMs: 50,
+    suggestionTuiGateEnabled: true,
     enableNotifications: true,
     
     // Keyboard shortcuts
@@ -283,6 +285,8 @@ export function SettingsModal({ open, onOpenChange, onAppearanceChange }: Settin
         showSystemMonitor: true,
         showStatusBar: true,
         commandSuggestions: true,
+        suggestionDebounceMs: 50,
+        suggestionTuiGateEnabled: true,
         enableNotifications: true,
         newSession: DEFAULT_APP_KEYBOARD_SHORTCUTS.newSession,
         closeSession: DEFAULT_APP_KEYBOARD_SHORTCUTS.closeSession,
@@ -1119,6 +1123,32 @@ export function SettingsModal({ open, onOpenChange, onAppearanceChange }: Settin
                     <Switch
                       checked={settings.commandSuggestions}
                       onCheckedChange={(checked) => updateSetting('commandSuggestions', checked)}
+                    />
+                  </div>
+
+                  <div className="flex items-center justify-between">
+                    <span>{t('settings.interface.suggestionDebounceMs')}</span>
+                    <Select
+                      value={String(settings.suggestionDebounceMs)}
+                      onValueChange={(value) => updateSetting('suggestionDebounceMs', Number(value))}
+                    >
+                      <SelectTrigger className="w-24">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="20">20 ms</SelectItem>
+                        <SelectItem value="50">50 ms</SelectItem>
+                        <SelectItem value="100">100 ms</SelectItem>
+                        <SelectItem value="200">200 ms</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+
+                  <div className="flex items-center justify-between">
+                    <span>{t('settings.interface.suggestionTuiGateEnabled')}</span>
+                    <Switch
+                      checked={settings.suggestionTuiGateEnabled}
+                      onCheckedChange={(checked) => updateSetting('suggestionTuiGateEnabled', checked)}
                     />
                   </div>
                 </div>

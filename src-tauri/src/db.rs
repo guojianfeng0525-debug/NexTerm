@@ -175,6 +175,16 @@ impl DbState {
                 "command_suggestions INTEGER NOT NULL DEFAULT 1",
             ),
             (
+                "app_settings",
+                "suggestion_debounce_ms",
+                "suggestion_debounce_ms INTEGER NOT NULL DEFAULT 50",
+            ),
+            (
+                "app_settings",
+                "suggestion_tui_gate_enabled",
+                "suggestion_tui_gate_enabled INTEGER NOT NULL DEFAULT 1",
+            ),
+            (
                 "documents",
                 "head_version",
                 "head_version INTEGER NOT NULL DEFAULT 0",
@@ -1237,6 +1247,8 @@ CREATE TABLE IF NOT EXISTS "app_settings" (
   follow_terminal_directory INTEGER NOT NULL DEFAULT 1,
   show_resources INTEGER NOT NULL DEFAULT 0,
   command_suggestions INTEGER NOT NULL DEFAULT 1,
+  suggestion_debounce_ms INTEGER NOT NULL DEFAULT 50,
+  suggestion_tui_gate_enabled INTEGER NOT NULL DEFAULT 1,
   api_active_env TEXT NOT NULL DEFAULT '',
   vault_salt TEXT,
   vault_iterations INTEGER,

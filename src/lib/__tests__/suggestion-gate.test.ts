@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { isAlternateBuffer, isInputInPromptContext } from '../suggestion/gate';
+import {
+  isAlternateBuffer,
+  isInputInPromptContext,
+  isPasteStart,
+  isPasteEnd,
+  normalizeSuggestionDebounceMs,
+} from '../suggestion/gate';
 
 describe('suggestion TUI gate — alternate buffer', () => {
   it('treats the alternate screen buffer as TUI mode (hard gate)', () => {
@@ -65,5 +71,52 @@ describe('suggestion TUI gate — prompt-line context', () => {
     // is not a shell-waiting prompt — the popup stays hidden (conservative).
     expect(isInputInPromptContext('abc', 'abc')).toBe(true); // input truly on line end
     expect(isInputInPromptContext('build completed', 'j')).toBe(false);
+  });
+});
+
+describe('suggestion paste gate — bracketed-paste markers', () => {
+  it('detects the bracketed-paste START marker (with or without payload)', () => {
+    expect(isPasteStart('\x1b[200~')).toBe(true);
+    expect(isPasteStart('\x1b[200~ls -la')).toBe(true);
+    expect(isPasteStart('ls -la')).toBe(false);
+  });
+
+  it('detects the bracketed-paste END marker', () => {
+    expect(isPasteEnd('\x1b[201~')).toBe(true);
+    expect(isPasteEnd('tail -f\x1b[201~')).toBe(true);
+    expect(isPasteEnd('tail -f')).toBe(false);
+  });
+
+  it('handles a single chunk carrying the full paste frame', () => {
+    const frame = '\x1b[200~git status\x1b[201~';
+    expect(isPasteStart(frame)).toBe(true);
+    expect(isPasteEnd(frame)).toBe(true);
+  });
+
+  it('is defensive against empty input', () => {
+    expect(isPasteStart('')).toBe(false);
+    expect(isPasteEnd('')).toBe(false);
+  });
+});
+
+describe('suggestion debounce normalization', () => {
+  it('passes through valid numeric delays', () => {
+    expect(normalizeSuggestionDebounceMs(50)).toBe(50);
+    expect(normalizeSuggestionDebounceMs(200)).toBe(200);
+    expect(normalizeSuggestionDebounceMs(0)).toBe(0);
+  });
+
+  it('falls back to the default for garbage input', () => {
+    expect(normalizeSuggestionDebounceMs(undefined)).toBe(50);
+    expect(normalizeSuggestionDebounceMs(null)).toBe(50);
+    expect(normalizeSuggestionDebounceMs('50')).toBe(50);
+    expect(normalizeSuggestionDebounceMs(NaN)).toBe(50);
+    expect(normalizeSuggestionDebounceMs(Infinity)).toBe(50);
+    expect(normalizeSuggestionDebounceMs(-5)).toBe(50);
+  });
+
+  it('honours a custom fallback', () => {
+    expect(normalizeSuggestionDebounceMs(undefined, 100)).toBe(100);
+    expect(normalizeSuggestionDebounceMs(80, 100)).toBe(80);
   });
 });

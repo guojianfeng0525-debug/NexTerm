@@ -38,6 +38,8 @@ type SettingsRow = Row & {
   previous_tab_shortcut?: unknown;
   follow_terminal_directory?: unknown;
   command_suggestions?: unknown;
+  suggestion_debounce_ms?: unknown;
+  suggestion_tui_gate_enabled?: unknown;
   show_resources?: unknown;
   api_active_env?: unknown;
 };
@@ -81,6 +83,8 @@ function assembleSshSettings(): Record<string, unknown> {
     showSystemMonitor: bool(settings.show_system_monitor, true),
     showStatusBar: bool(settings.show_status_bar, true),
     commandSuggestions: bool(settings.command_suggestions, true),
+    suggestionDebounceMs: num(settings.suggestion_debounce_ms, 50),
+    suggestionTuiGateEnabled: bool(settings.suggestion_tui_gate_enabled, true),
     connectionTimeout: num(settings.connection_timeout, 30),
     keepAliveInterval: num(settings.keep_alive_interval, 60),
     defaultProtocol: str(settings.default_protocol, 'SSH'),
@@ -105,6 +109,8 @@ function applySshSettings(obj: Record<string, unknown>): void {
   settings.show_system_monitor = obj.showSystemMonitor;
   settings.show_status_bar = obj.showStatusBar;
   settings.command_suggestions = obj.commandSuggestions;
+  settings.suggestion_debounce_ms = obj.suggestionDebounceMs;
+  settings.suggestion_tui_gate_enabled = obj.suggestionTuiGateEnabled;
   settings.connection_timeout = obj.connectionTimeout;
   settings.keep_alive_interval = obj.keepAliveInterval;
   settings.default_protocol = obj.defaultProtocol;

@@ -21,7 +21,7 @@ import { APP_SETTINGS_STORAGE_KEY, APP_SETTINGS_CHANGED_EVENT } from '@/lib/keyb
 import { registerTerminalWorkingDirectoryHandler } from '../lib/terminal-working-directory';
 import { TERMINAL_COMMAND_EVENT, type TerminalCommandDetail } from '../lib/terminal-commands';
 import { SCOPE_GLOBAL } from '../lib/suggestion/types';
-import { isAlternateBuffer, isInputInPromptContext } from '../lib/suggestion/gate';
+import { isAlternateBuffer, isInputInPromptContext, isPasteStart, isPasteEnd, normalizeSuggestionDebounceMs } from '../lib/suggestion/gate';
 import {
   rankSuggestions,
 } from '../lib/suggestion/engine';
@@ -29,6 +29,7 @@ import {
   getStatsForScopes,
   recordUse,
   recordSelection,
+  recordRejection,
   connectionScope,
   cwdScope,
 } from '../lib/suggestion/store';
@@ -344,12 +345,16 @@ export function PtyTerminal({
   // -1 = nothing selected: Enter runs the typed command unless the user has
   // explicitly picked a suggestion with ↑/↓ (or mouse).
   const [selectedIndex, setSelectedIndex] = React.useState(-1);
+  // -1 = no hover. Hover is a *preview* only — it never drives Enter (only
+  // selectedIndex does). Keyboard selection clears hover so ↑/↓ wins.
+  const [hoverIndex, setHoverIndex] = React.useState(-1);
   const [suggestionPos, setSuggestionPos] = React.useState({ left: 12, top: 12 });
   const inputBufferRef = React.useRef('');
   const suggestTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
   const suggestionsRef = React.useRef<string[]>([]);
   const suggestionsVisibleRef = React.useRef(false);
   const selectedIndexRef = React.useRef(-1);
+  const hoverIndexRef = React.useRef(-1);
   const suppressSuggestionsRef = React.useRef(false);
   const suggestionBarRef = React.useRef<HTMLDivElement | null>(null);
   // TUI gate: true while a full-screen app (vim/less/top/htop/...) owns the
@@ -358,20 +363,39 @@ export function PtyTerminal({
   const tuiActiveRef = React.useRef(false);
   // Command-suggestion master switch (settings → app_settings → event).
   const suggestionsEnabledRef = React.useRef(true);
+  // TUI hard-gate master switch: when false, the G1 alternate-buffer gate is
+  // disabled entirely (restores pre-Slice-1 behavior). Defaults to true.
+  const tuiGateEnabledRef = React.useRef(true);
+  // IME composition gate: while a CJK/IME composition session is active the
+  // key stream is not shell input yet — never track or pop suggestions.
+  const imeComposingRef = React.useRef(false);
+  // Bracketed-paste gate: while a bracketed paste (\x1b[200~ … \x1b[201~)
+  // streams in, the text is not interactive typing — never track or pop.
+  const pastingRef = React.useRef(false);
+  // Suggestion debounce delay (ms), from settings (default 50).
+  const suggestDebounceRef = React.useRef(50);
   React.useEffect(() => {
     const read = () => {
       try {
-        const parsed = prefGet<{ commandSuggestions?: unknown } | null>(
+        const parsed = prefGet<{
+          commandSuggestions?: unknown;
+          suggestionDebounceMs?: unknown;
+          suggestionTuiGateEnabled?: unknown;
+        } | null>(
           APP_SETTINGS_STORAGE_KEY,
           null,
         );
         suggestionsEnabledRef.current = parsed?.commandSuggestions !== false;
+        tuiGateEnabledRef.current = parsed?.suggestionTuiGateEnabled !== false;
+        suggestDebounceRef.current = normalizeSuggestionDebounceMs(parsed?.suggestionDebounceMs);
         if (!suggestionsEnabledRef.current) {
           setSuggestionsVisible(false);
           suggestionsVisibleRef.current = false;
         }
       } catch {
         suggestionsEnabledRef.current = true;
+        tuiGateEnabledRef.current = true;
+        suggestDebounceRef.current = 50;
       }
     };
     read();
@@ -389,6 +413,7 @@ export function PtyTerminal({
   suggestionsRef.current = suggestions;
   suggestionsVisibleRef.current = suggestionsVisible;
   selectedIndexRef.current = selectedIndex;
+  hoverIndexRef.current = hoverIndex;
   
   // Exponential backoff reconnection tracking
   const reconnectAttemptsRef = React.useRef(0);
@@ -488,7 +513,14 @@ export function PtyTerminal({
     const lineHeight = (element.clientHeight || container.clientHeight) / Math.max(1, term.rows);
     const cellWidth = (element.clientWidth || container.clientWidth) / Math.max(1, term.cols);
     const BOX_W = 340;
-    const BOX_H = 190;
+    // Use the REAL popup height once it is committed to the DOM; fall back to
+    // an estimate on the very first paint (suggestionBarRef is still null
+    // before React commits). Estimate: 156 px ≈ 24 px header (label + kbd +
+    // padding) + 6 × 22 px candidate rows (slice(0, 6) caps the list). A wrong
+    // below/above flip from the estimate is corrected on the next frame by
+    // refreshSuggestionPosition, which re-runs this function with the actual
+    // height.
+    const BOX_H = suggestionBarRef.current?.offsetHeight ?? 156;
     const left = Math.max(8, Math.min(offsetX + cursorX * cellWidth, container.clientWidth - BOX_W - 8));
     const below = offsetY + cursorY * lineHeight + lineHeight + 6;
     const top = below + BOX_H <= container.clientHeight
@@ -519,6 +551,9 @@ export function PtyTerminal({
     }
     selectedIndexRef.current = next;
     setSelectedIndex(next);
+    // Keyboard selection wins over mouse preview: drop any hover highlight.
+    hoverIndexRef.current = -1;
+    setHoverIndex(-1);
   };
 
   /** Record executed commands so frequent ones rank higher in suggestions. */
@@ -570,8 +605,14 @@ export function PtyTerminal({
   };
 
   const trackInputForSuggestion = (data: string) => {
-    // TUI gate: keys belong to a full-screen app, never track them as shell input.
-    if (tuiActiveRef.current) return;
+    // IME gate: keys during a composition session are candidate text, not
+    // shell input — never track them.
+    if (imeComposingRef.current) return;
+    // Paste gate: bracketed-paste text streaming in is not typing.
+    if (pastingRef.current) return;
+    // TUI gate: keys belong to a full-screen app, never track them as shell
+    // input. The hard gate can be disabled via settings (suggestionTuiGateEnabled).
+    if (tuiActiveRef.current && tuiGateEnabledRef.current) return;
     for (const ch of data) {
       // Tab itself is handled by the remote shell (readline completion); the
       // completed line is captured on the next keystroke or on Enter.
@@ -626,7 +667,11 @@ export function PtyTerminal({
   const scheduleSuggestion = () => {
     if (!suggestionsEnabledRef.current) return;
     if (suppressSuggestionsRef.current) return;
-    if (tuiActiveRef.current) return;
+    // IME gate: never schedule while a composition session is active.
+    if (imeComposingRef.current) return;
+    // Paste gate: never schedule while a bracketed paste is streaming in.
+    if (pastingRef.current) return;
+    if (tuiActiveRef.current && tuiGateEnabledRef.current) return;
     if (suggestTimerRef.current) clearTimeout(suggestTimerRef.current);
     suggestTimerRef.current = setTimeout(() => {
       const input = inputBufferRef.current;
@@ -637,7 +682,7 @@ export function PtyTerminal({
       }
       // TUI gate (re-check after the debounce window): if a full-screen app
       // took over meanwhile, never pop the suggestion.
-      if (tuiActiveRef.current) return;
+      if (tuiActiveRef.current && tuiGateEnabledRef.current) return;
       // Prompt-line gate: only suggest while the shell is actually waiting for
       // input on a line that contains what the user typed. Keys consumed by a
       // line-editor app (mysql/psql) or by TUI navigation never reach the line,
@@ -657,7 +702,17 @@ export function PtyTerminal({
           // the mouse, so Enter executes what they typed instead.
           setSelectedIndex(-1);
           selectedIndexRef.current = -1;
+          // Candidates were recomputed — a stale selection/hover index could
+          // point past the new list length (Enter would become a dead key).
+          setHoverIndex(-1);
+          hoverIndexRef.current = -1;
           setSuggestionPos(computeCursorPosition());
+          // The synchronous estimate above runs BEFORE the popup DOM is
+          // committed, so suggestionBarRef is still null and BOX_H fell back
+          // to 190. Re-run on the next frame (after commit) so the real popup
+          // height drives the below/above flip — keeps the box glued to the
+          // cursor even at the bottom of the viewport.
+          refreshSuggestionPosition();
         } else {
           setSuggestionsVisible(false);
           suggestionsVisibleRef.current = false;
@@ -667,12 +722,11 @@ export function PtyTerminal({
         setSuggestionsVisible(false);
         suggestionsVisibleRef.current = false;
       }
-    }, 20);
+    }, suggestDebounceRef.current);
   };
 
   const acceptSuggestion = (cmd: string) => {
     const buf = inputBufferRef.current;
-    const trimmedInput = buf.trim();
     // Positive feedback: the user picked this suggestion — boost it for the
     // global and connection scopes (cwd scope if it matches current dir).
     try {
@@ -682,52 +736,129 @@ export function PtyTerminal({
       /* non-critical */
     }
 
-    // Full-command candidate (contains spaces / pipes) that extends the input:
-    // complete the missing tail instead of replacing a word. Enter never runs
-    // the command — it only applies (selects) the suggestion.
-    if (cmd.includes(' ') || cmd.includes('|')) {
-      if (cmd === trimmedInput) {
-        // Selecting the typed command itself changes nothing — just close.
-        setSuggestionsVisible(false);
-        suggestionsVisibleRef.current = false;
-        return;
+    // ── Mid-line cursor: the cursor is NOT at the end of the line. Replace
+    // the token at/under the cursor instead of assuming end-of-line, keeping
+    // any text after the token intact. Only runs when the tracked buffer still
+    // aligns with the visible line (line = prompt + buf), otherwise we fall
+    // back to the end-of-line logic below.
+    const term = xtermRef.current;
+    const buffer = term?.buffer.active;
+    const line = buffer?.getLine(buffer.cursorY);
+    if (term && buffer && line) {
+      const lineRaw = line.translateToString(false);
+      const cursorX = buffer.cursorX;
+      let atLineEnd = cursorX >= lineRaw.length;
+      if (!atLineEnd) {
+        atLineEnd = true;
+        for (let i = cursorX; i < lineRaw.length; i++) {
+          if (lineRaw[i] !== ' ') { atLineEnd = false; break; }
+        }
       }
-      if (cmd.startsWith(trimmedInput) && cmd.length > trimmedInput.length) {
-        const suffix = cmd.slice(trimmedInput.length);
-        sendInputToPty(suffix + ' ');
-        inputBufferRef.current = `${cmd} `;
-        setSuggestionsVisible(false);
-        suggestionsVisibleRef.current = false;
-        setSelectedIndex(-1);
-        selectedIndexRef.current = -1;
-        suppressSuggestionsRef.current = true;
-        window.setTimeout(() => {
-          suppressSuggestionsRef.current = false;
-        }, 250);
-        return;
+      if (!atLineEnd) {
+        // Prompt length estimate: the visible line is `prompt + buf` when the
+        // tracked buffer matches what the user typed.
+        let promptLen = -1;
+        if (lineRaw.endsWith(buf)) promptLen = lineRaw.length - buf.length;
+        else if (lineRaw.trimEnd().endsWith(buf.trim())) promptLen = lineRaw.trimEnd().length - buf.trim().length;
+        if (promptLen >= 0 && cursorX >= promptLen) {
+          // The candidate equals the whole typed input — nothing to change,
+          // just move the cursor to the end of the line.
+          if (cmd.trim() === lineRaw.slice(promptLen).trim()) {
+            let charsToEnd = 0;
+            for (let i = cursorX; i < lineRaw.length; i++) {
+              if (lineRaw[i] !== ' ') charsToEnd++;
+            }
+            sendInputToPty('\x1b[C'.repeat(charsToEnd));
+            inputBufferRef.current = lineRaw.slice(promptLen);
+            hideSuggestions();
+            suppressSuggestionsRef.current = true;
+            window.setTimeout(() => {
+              suppressSuggestionsRef.current = false;
+            }, 250);
+            return;
+          }
+          // Otherwise replace the token at the cursor (on a space → the token
+          // on its left).
+          let tokenStart: number;
+          let tokenEnd: number;
+          let rightLen: number;
+          if (lineRaw[cursorX] === ' ') {
+            tokenEnd = cursorX;
+            let s = cursorX - 1;
+            while (s >= 0 && lineRaw[s] !== ' ') s--;
+            tokenStart = s + 1;
+            rightLen = 0;
+          } else {
+            let e = cursorX;
+            while (e < lineRaw.length && lineRaw[e] !== ' ') e++;
+            tokenEnd = e;
+            let s = cursorX - 1;
+            while (s >= 0 && lineRaw[s] !== ' ') s--;
+            tokenStart = s + 1;
+            rightLen = tokenEnd - cursorX;
+          }
+          const tokLen = tokenEnd - tokenStart;
+          if (tokLen > 0) {
+            // Move the cursor past the token, backspace it, then insert the
+            // candidate — anything after the token shifts right untouched.
+            sendInputToPty('\x1b[C'.repeat(rightLen) + '\x7f'.repeat(tokLen) + cmd);
+            inputBufferRef.current = lineRaw.slice(promptLen, tokenStart) + cmd + lineRaw.slice(tokenEnd);
+            hideSuggestions();
+            suppressSuggestionsRef.current = true;
+            window.setTimeout(() => {
+              suppressSuggestionsRef.current = false;
+            }, 250);
+            return;
+          }
+        }
       }
     }
 
-    // Replace only the word under the cursor (the last whitespace-delimited
-    // token), keeping any prefix like `git ` or `ps -ef | ` intact.
-    const lastSpace = buf.lastIndexOf(' ');
-    const wordToReplace = lastSpace === -1 ? buf : buf.slice(lastSpace + 1);
-    const backspaces = '\x7f'.repeat(wordToReplace.length);
-    setSuggestionsVisible(false);
-    suggestionsVisibleRef.current = false;
-    setSelectedIndex(-1);
-    selectedIndexRef.current = -1;
-    // Briefly suppress re-popup while the pasted characters stream through onData.
+    // ── End-of-line segment replacement ────────────────────────────────
+    // Segment = everything after the last `|` (pipeline). Only the final
+    // segment is completed; earlier pipeline stages stay untouched.
+    const seg = buf.split('|').pop() ?? '';
+    const segTrimmed = seg.trimStart();
+    const L = seg.trim();
+    // Everything before the segment (keeps the `| ` separator space: the
+    // backspaces below only erase the trimmed segment text, never the space).
+    const prefix = buf.slice(0, buf.length - segTrimmed.length);
+
+    // A1: the candidate equals what was already typed — nothing to change.
+    if (cmd === L) {
+      hideSuggestions();
+      return;
+    }
+    // A2: the candidate extends the typed segment — send only the missing
+    // tail. trimStart() drops the leading space of the tail when the typed
+    // segment already ends with a space (`git ` → tail `commit`, not
+    // ` commit`), so no double-space ever reaches the shell.
+    if (cmd.startsWith(L) && cmd.length > L.length) {
+      const tail = cmd.slice(L.length).trimStart();
+      sendInputToPty(tail + ' ');
+      // buf already ends with the typed segment → append the tail.
+      inputBufferRef.current = buf + tail + ' ';
+      hideSuggestions();
+      // Briefly suppress re-popup while the pasted characters stream through.
+      suppressSuggestionsRef.current = true;
+      window.setTimeout(() => {
+        suppressSuggestionsRef.current = false;
+      }, 250);
+      return;
+    }
+    // A3: replace the whole segment — backspace it, then type the candidate.
+    // Send through the key-input path (NOT term.paste): paste routes through
+    // bracketed-paste mode where control chars like backspace are inserted
+    // literally (showing as ^?). Direct input lets readline process them.
+    const backspaces = '\x7f'.repeat(segTrimmed.length);
+    sendInputToPty(backspaces + cmd + ' ');
+    // Direct send bypasses onData, so sync the tracked input buffer manually.
+    inputBufferRef.current = prefix + cmd + ' ';
+    hideSuggestions();
     suppressSuggestionsRef.current = true;
     window.setTimeout(() => {
       suppressSuggestionsRef.current = false;
     }, 250);
-    // Send through the key-input path (NOT term.paste): paste routes through
-    // bracketed-paste mode where control chars like backspace are inserted
-    // literally (showing as ^?). Direct input lets readline process them.
-    sendInputToPty(backspaces + cmd + ' ');
-    // Direct send bypasses onData, so sync the tracked input buffer manually.
-    inputBufferRef.current = lastSpace === -1 ? `${cmd} ` : buf.slice(0, lastSpace + 1) + `${cmd} `;
   };
 
   const acceptSelected = () => {
@@ -754,6 +885,8 @@ export function PtyTerminal({
     suggestionsVisibleRef.current = false;
     setSelectedIndex(-1);
     selectedIndexRef.current = -1;
+    setHoverIndex(-1);
+    hoverIndexRef.current = -1;
   };
 
   React.useEffect(() => {
@@ -834,7 +967,11 @@ export function PtyTerminal({
     const bufferChangeDisposable = term.buffer.onBufferChange((buffer) => {
       const inTui = isAlternateBuffer(buffer.type);
       tuiActiveRef.current = inTui;
-      if (inTui) {
+      // When the TUI hard gate is disabled via settings, entering the
+      // alternate buffer must NOT tear down the tracked input / popup state
+      // (that would restore the gate even though the toggle is off). The
+      // tracking/scheduling checks already consult tuiGateEnabledRef.
+      if (inTui && tuiGateEnabledRef.current) {
         if (suggestTimerRef.current) {
           clearTimeout(suggestTimerRef.current);
           suggestTimerRef.current = null;
@@ -850,6 +987,54 @@ export function PtyTerminal({
         setSelectedIndex(-1);
         selectedIndexRef.current = -1;
       }
+    });
+
+    // Suggestion-dismissal gates (focus loss / scroll / IME composition).
+    // xterm v6 has no onFocus/onBlur events and no IME event API, so these
+    // listen on the hidden input textarea — the same element xterm's own
+    // CompositionHelper and focus handling use, so the events are guaranteed
+    // to target it (term.textarea is created once during term.open()).
+    //
+    // G2 IME gate: while a composition session is active the key stream is
+    // candidate text, not shell input — hide the popup and block tracking.
+    const suggestionGateTextarea = term.textarea;
+    const onSuggestionImeStart = () => {
+      imeComposingRef.current = true;
+      if (suggestTimerRef.current) {
+        clearTimeout(suggestTimerRef.current);
+        suggestTimerRef.current = null;
+      }
+      setSuggestionsVisible(false);
+      suggestionsVisibleRef.current = false;
+    };
+    const onSuggestionImeEnd = () => {
+      imeComposingRef.current = false;
+    };
+    // G4 focus gate: leaving the terminal hides the popup (inputBuffer kept,
+    // so returning + typing resumes tracking naturally).
+    const onSuggestionBlur = () => {
+      if (suggestTimerRef.current) {
+        clearTimeout(suggestTimerRef.current);
+        suggestTimerRef.current = null;
+      }
+      setSuggestionsVisible(false);
+      suggestionsVisibleRef.current = false;
+    };
+    if (suggestionGateTextarea) {
+      suggestionGateTextarea.addEventListener('compositionstart', onSuggestionImeStart);
+      suggestionGateTextarea.addEventListener('compositionend', onSuggestionImeEnd);
+      suggestionGateTextarea.addEventListener('blur', onSuggestionBlur);
+    }
+
+    // G5 scroll gate: scrolling the scrollback away from the prompt line
+    // dismisses the popup (candidates no longer align with the cursor).
+    const scrollDisposable = term.onScroll(() => {
+      if (suggestTimerRef.current) {
+        clearTimeout(suggestTimerRef.current);
+        suggestTimerRef.current = null;
+      }
+      setSuggestionsVisible(false);
+      suggestionsVisibleRef.current = false;
     });
 
     // Focus terminal to enable keyboard input when this tab is mounted active.
@@ -932,6 +1117,19 @@ export function PtyTerminal({
         }
         if (event.key === 'Escape') {
           event.preventDefault();
+          // Negative feedback: the user dismissed the popup without taking any
+          // suggestion — penalise every candidate currently on screen so they
+          // rank lower next time. Mirrors recordSelection's scope semantics.
+          if (hasCandidates) {
+            for (const cmd of suggestionsRef.current) {
+              try {
+                recordRejection(cmd, connScope);
+                if (cwdScopeRef.current) recordRejection(cmd, cwdScopeRef.current);
+              } catch {
+                /* suggestion learning must never break the terminal */
+              }
+            }
+          }
           hideSuggestions();
           return false;
         }
@@ -1432,8 +1630,16 @@ export function PtyTerminal({
 
     // Handle user input
     const inputDisposable = term.onData((data: string) => {
+      // G3 paste gate: xterm wraps pasted text in bracketed-paste markers
+      // (\x1b[200~ … \x1b[201~) when the shell enabled that mode. While the
+      // markers are present the text is not interactive typing — trackInput
+      // and schedule both short-circuit, but sendInputToPty is unaffected.
+      // The end marker is cleared AFTER tracking so the marker chunk itself
+      // (whose \x1b would otherwise reset the tracked buffer) is skipped too.
+      if (isPasteStart(data)) pastingRef.current = true;
       trackInputForSuggestion(data);
       sendInputToPty(data);
+      if (isPasteEnd(data)) pastingRef.current = false;
     });
 
     // Handle terminal resize — deduplicate to avoid flooding the PTY with
@@ -1564,7 +1770,13 @@ export function PtyTerminal({
       resizeDisposable.dispose();
       lineFeedDisposable.dispose();
       bufferChangeDisposable.dispose();
+      scrollDisposable.dispose();
       workingDirectoryDisposable.dispose();
+      if (suggestionGateTextarea) {
+        suggestionGateTextarea.removeEventListener('compositionstart', onSuggestionImeStart);
+        suggestionGateTextarea.removeEventListener('compositionend', onSuggestionImeEnd);
+        suggestionGateTextarea.removeEventListener('blur', onSuggestionBlur);
+      }
       window.removeEventListener('resize', handleWindowResize);
       resizeObserver.disconnect();
       if (selectionDoc) {
@@ -1822,11 +2034,19 @@ export function PtyTerminal({
       ref={containerRef}
       className={`relative h-full w-full pty-terminal-container pty-term-${scopeId} overflow-hidden`}
       onClick={(e) => {
-        // Don't refocus terminal if clicking on search bar or other interactive elements
+        // Don't refocus terminal if clicking on search bar or other interactive
+        // elements. The suggestion bar candidates handle their own clicks
+        // (accept), so a click inside the bar must not steal focus or dismiss.
         const target = e.target as HTMLElement;
         if (target.closest('[data-search-bar]')) {
           return;
         }
+        if (target.closest('[data-suggestion-bar]')) {
+          return;
+        }
+        // Clicking the terminal body leaves the suggestion interaction —
+        // dismiss the popup and refocus the terminal.
+        hideSuggestions();
         xtermRef.current?.focus();
       }}
       style={{
@@ -1870,7 +2090,7 @@ export function PtyTerminal({
         <div
           ref={suggestionBarRef}
           data-suggestion-bar
-          className="absolute z-30 flex flex-col rounded-lg border border-border bg-popover shadow-lg backdrop-blur p-1.5 max-w-[340px]"
+          className="absolute z-30 flex flex-col rounded-lg border border-border/60 bg-popover shadow-xl backdrop-blur p-1.5 max-w-[340px]"
           style={{ left: suggestionPos.left, top: suggestionPos.top }}
         >
           <div className="flex flex-col gap-0.5">
@@ -1882,15 +2102,22 @@ export function PtyTerminal({
                 key={cmd}
                 type="button"
                 onClick={() => acceptSuggestion(cmd)}
-                onMouseEnter={() => {
-                  setSelectedIndex(index);
-                  selectedIndexRef.current = index;
-                }}
+                // Keep focus on the terminal: mousedown on a <button> would
+                // move focus away from the hidden textarea, firing the G4
+                // blur gate which dismisses the popup before the click lands.
+                onMouseDown={(e) => e.preventDefault()}
+                // Hover is ONLY a preview: it never writes selectedIndexRef,
+                // so Enter (which keys off selectedIndex) can never be hijacked
+                // by a mouse pass-over. Leave resets the preview.
+                onMouseEnter={() => setHoverIndex(index)}
+                onMouseLeave={() => setHoverIndex(-1)}
                 className={cn(
                   'flex items-center gap-2 rounded px-2 py-1 text-left text-[11px] font-mono transition-colors shrink-0',
                   index === selectedIndex
                     ? 'bg-primary text-primary-foreground'
-                    : 'text-foreground hover:bg-accent',
+                    : index === hoverIndex
+                      ? 'bg-accent/50 text-foreground ring-1 ring-primary/60'
+                      : 'text-foreground hover:bg-accent',
                 )}
               >
                 <span className="w-3 shrink-0 text-[9px] opacity-70">{index + 1}</span>

@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+**终端命令提示框交互优化（Slice 2-4 及交互修复）**。
+
+### Added / Fixed (Terminal)
+
+- **消隐体系**：IME 组合 / 粘贴（bracketed paste）/ 失焦 / 滚动四类门控——全屏输入法候选、粘贴文本、切窗、滚屏均不再误触发建议弹窗；防抖 20ms → 50ms 可配置。
+- **Esc 负反馈**：关闭建议框时对全部候选降权（`recordRejection`），学习引擎立即降温误候选。
+- **精细配置**：新增「命令提示防抖（毫秒）」下拉（20/50/100/200）与「全屏应用中抑制提示」开关，与既有命令提示总开关同组。
+- **P0 修复·鼠标误选**：hover 仅预览（浅色描边）、不再污染键盘选中——Enter 只响应 ↑/↓ 主动选择，**无选中时 Enter 绝对执行用户输入**；补 onMouseLeave、选中越界重置。
+- **P0 修复·光标跟随**：建议框按实际弹层高度落位（不再以固定 190px 预占触发误翻转），底部光标场景贴行显示。
+- **P1 修复·接受建议重写**：段级替换算法（前缀补尾防双空格 / 整段替换保留管道前缀 / 中段光标右移删词插入），修复 `git log ` + `git status` 拼成脏命令、`git e` + `git fetch` 残词等缺陷。
+- **P1 修复·点击候选**：候选 button 防 blur 抢先关窗，鼠标点击真正生效。
+- **P2**：点击弹窗空白不再误关窗抢焦点（排除 suggestion 区）；dark 主题弹窗边框/阴影对比增强。
+
+### Verified
+
+- tsc 0 错误 / vitest 111 文件 1037 用例全绿 / lint 0 error / E2E 7 场景（A-G）全过（含 hover 后 Enter 执行输入、点击替换 `git commit`、回归）
+- Hy3 视觉复核 4/4 PASS（弹窗贴光标 / vim 抑制 / Esc 无残影 / settings 版式）
+
 ## [2.13.0] - 2026-08-28
 
 **DB 工具箱三库（PostgreSQL / MySQL / SQLite）UX 对齐增强 + 终端命令提示框显示时机优化**。

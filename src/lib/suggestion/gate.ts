@@ -35,3 +35,26 @@ export function isInputInPromptContext(line: string, input: string): boolean {
   if (!line) return false;
   return line.trimEnd().endsWith(trimmedInput);
 }
+
+/**
+ * True when the data chunk carries the bracketed-paste START marker. xterm
+ * wraps pasted text in `\x1b[200~ … \x1b[201~` (when the shell enabled
+ * bracketed-paste mode); while it streams in, the text is not interactive
+ * typing, so the suggestion popup must not track or fire.
+ */
+export function isPasteStart(data: string): boolean {
+  return data.includes('\x1b[200~');
+}
+
+/** True when the data chunk carries the bracketed-paste END marker. */
+export function isPasteEnd(data: string): boolean {
+  return data.includes('\x1b[201~');
+}
+
+/**
+ * Normalize the user-configurable suggestion debounce delay (ms). Any
+ * non-numeric / negative / NaN value falls back to the default 50 ms.
+ */
+export function normalizeSuggestionDebounceMs(value: unknown, fallback = 50): number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : fallback;
+}
