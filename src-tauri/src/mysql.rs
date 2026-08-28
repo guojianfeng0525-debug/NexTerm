@@ -169,6 +169,11 @@ pub async fn mysql_execute(
     {
         if rows.len() == limit {
             truncated = true;
+            // Explicitly drop the streaming result before the connection
+            // goes back to the shared session: mysql_async's drop-based
+            // cancellation is best-effort, and draining it here keeps the
+            // next query on this connection from seeing leftover rows.
+            drop(result);
             break;
         }
         rows.push(

@@ -14,6 +14,9 @@ i18n.use(initReactI18next).init({
   returnNull: false,
 });
 
+// React 19: `act()` from 'react' requires this flag outside of react-dom/test-utils.
+(globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+
 // jsdom lacks ResizeObserver / matchMedia — provide minimal stubs so
 // components that use them (ScrollArea, responsive hooks) render in tests.
 if (typeof globalThis.ResizeObserver === 'undefined') {

@@ -622,7 +622,11 @@ export function LogMonitor({ connectionId, externalLogPath, externalLogPathKey, 
     const sourceName =
       selectedSource?.name ?? selectedSourceId.replace("custom:", "").split("/").pop() ?? "log";
     a.download = `${sourceName}_${new Date().toISOString().replace(/[:.]/g, "-")}.log`;
+    // WebKit requires the anchor to be in the document for the click to fire
+    // a download (matches PtyTerminal's download implementation).
+    document.body.appendChild(a);
     a.click();
+    a.remove();
     URL.revokeObjectURL(url);
   }, [rawLines, selectedSource, selectedSourceId]);
 

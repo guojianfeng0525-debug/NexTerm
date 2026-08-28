@@ -129,7 +129,9 @@ impl ToolboxState {
 
 /// Split an argument string into tokens, honoring double quotes
 /// (e.g. `--path "/my dir/x" -v` → ["--path", "/my dir/x", "-v"]).
-/** True when the path points to a Windows batch script (.bat / .cmd). */
+/** True when the path points to a Windows batch script (.bat / .cmd).
+ *  Windows-only: call sites live inside `#[cfg(windows)]` blocks. */
+#[cfg(windows)]
 fn is_batch_script(path: &str) -> bool {
     let lower = path.to_lowercase();
     lower.ends_with(".bat") || lower.ends_with(".cmd")
@@ -139,6 +141,7 @@ fn is_batch_script(path: &str) -> bool {
 /// script path when it contains spaces and using `call` so the script runs
 /// correctly through cmd.exe (a bare quoted path would be treated as a
 /// program name by cmd, not a script).
+#[cfg(windows)]
 fn batch_invocation(path: &str, args: &[String]) -> String {
     let quoted = if path.contains(' ') {
         format!("\"{}\"", path)
@@ -1748,7 +1751,7 @@ mod tunnel_jump_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, windows))]
 mod batch_script_tests {
     use super::*;
 
@@ -1784,6 +1787,11 @@ mod batch_script_tests {
             "call C:\\Tools\\x.cmd \"my script.js\" -x"
         );
     }
+}
+
+#[cfg(test)]
+mod split_args_tests {
+    use super::*;
 
     #[test]
     fn split_args_handles_quotes() {

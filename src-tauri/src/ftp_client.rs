@@ -44,6 +44,10 @@ pub struct FtpClient {
 }
 
 impl FtpClient {
+    /// Default constructor + flat transfer wrappers form the client's public
+    /// API surface (tests + future non-progress call sites); the commands
+    /// layer currently goes through the `*_with_progress` variants.
+    #[allow(dead_code)]
     pub fn new() -> Self {
         Self { stream: None, config: None }
     }
@@ -146,6 +150,8 @@ impl FtpClient {
         })
     }
 
+    // Public API surface (tests + future non-progress call sites).
+    #[allow(dead_code)]
     pub fn is_connected(&self) -> bool {
         self.stream.is_some()
     }
@@ -205,6 +211,8 @@ impl FtpClient {
     }
 
     /// Download a remote file to a local path. Returns bytes downloaded.
+    // Public API surface (tests + future non-progress call sites).
+    #[allow(dead_code)]
     pub async fn download_file(&mut self, remote_path: &str, local_path: &str) -> Result<u64> {
         self.download_file_with_progress(remote_path, local_path, |_, _| {})
             .await
@@ -251,6 +259,8 @@ impl FtpClient {
     }
 
     /// Upload a local file to a remote path. Returns bytes uploaded.
+    // Public API surface (tests + future non-progress call sites).
+    #[allow(dead_code)]
     pub async fn upload_file(&mut self, local_path: &str, remote_path: &str) -> Result<u64> {
         self.upload_file_with_progress(local_path, remote_path, |_, _| {})
             .await

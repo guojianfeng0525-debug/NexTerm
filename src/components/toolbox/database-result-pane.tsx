@@ -2,11 +2,18 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import type { ReactNode, RefObject } from "react";
 import { memo, useEffect, useMemo, useRef, useState } from "react";
+import { Inbox } from "lucide-react";
 import {
   ContextMenu,
   ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuSeparator,
   ContextMenuTrigger,
 } from "@/components/ui/context-menu";
+import {
+  Copy,
+  Trash2,
+} from "lucide-react";
 import type {
   DatabaseResult,
   DatabaseResultColumn,
@@ -30,6 +37,12 @@ interface DatabaseResultPaneLabels {
   readonly previous: string;
   readonly next: string;
   readonly rowsRange: (from: number, to: number) => string;
+  /** Sub-caption under `ready` in the empty state (ux-spec §4.2). */
+  readonly readyHint?: string;
+  /** "Copy message" context-menu item label (ux-spec §1.2.9). */
+  readonly copyMessage?: string;
+  /** "Clear result" context-menu item label (ux-spec §1.2.9). */
+  readonly clearResult?: string;
 }
 
 /** A row staged for INSERT, rendered below committed rows with a `+` gutter. */
@@ -74,6 +87,12 @@ interface DatabaseResultPaneProps {
   /** Per-table layout (frozen columns, widths, row height, type/comment
    * toggles). Absent for query-tab grids. */
   readonly layout?: GridLayoutState;
+  /** True while a query is running: the stale grid is dimmed and disabled
+   *  so users cannot edit results mid-execution (ux-spec §4.2 / P2-11). */
+  readonly overlay?: boolean;
+  /** Empty-state actions (ux-spec §1.2.9). Absent → menu items disabled. */
+  readonly onCopyReadyMessage?: () => void;
+  readonly onClearResult?: () => void;
   /** Drag-resize callback (columnIndex, new width px). */
   readonly onColumnResize?: (columnIndex: number, width: number) => void;
   /** Double-click best-fit callback (columnIndex). */
@@ -372,6 +391,9 @@ export function DatabaseResultPane({
   renderRowHeaderContextMenu,
   renderError,
   layout,
+  overlay = false,
+  onCopyReadyMessage,
+  onClearResult,
   onColumnResize,
   onColumnBestFit,
   find,
@@ -558,6 +580,10 @@ export function DatabaseResultPane({
           <div className="p-3 text-[12px] text-muted-foreground">{labels.ready}</div>
         )
       ) : tabularResult ? (
+        <div
+          className={overlay ? "opacity-60 pointer-events-none" : undefined}
+          data-testid="database-result-grid-wrap"
+        >
         <>
           {find?.open && findLabels && (
             <div
@@ -817,8 +843,42 @@ export function DatabaseResultPane({
             </div>
           )}
         </>
+        </div>
       ) : (
-        <div className="p-3 text-[12px] text-muted-foreground">{labels.ready}</div>
+        <div className="flex h-24 items-center justify-center gap-2 text-muted-foreground" data-testid="database-result-empty">
+          <ContextMenu>
+            <ContextMenuTrigger asChild>
+              <div className="flex cursor-context-menu items-center gap-2">
+                <Inbox className="size-5 shrink-0" />
+                <span className="text-[12px]">{labels.ready}</span>
+                {labels.readyHint && (
+                  <span className="text-[11px] text-muted-foreground/70">
+                    {labels.readyHint}
+                  </span>
+                )}
+              </div>
+            </ContextMenuTrigger>
+            <ContextMenuContent data-testid="database-result-empty-context-menu">
+              <ContextMenuItem
+                onSelect={onCopyReadyMessage}
+                disabled={!onCopyReadyMessage}
+                data-testid="database-result-empty-copy-message"
+              >
+                <Copy className="h-3.5 w-3.5" />
+                {labels.copyMessage ?? "Copy message"}
+              </ContextMenuItem>
+              <ContextMenuSeparator />
+              <ContextMenuItem
+                onSelect={onClearResult}
+                disabled={!onClearResult}
+                data-testid="database-result-empty-clear-result"
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+                {labels.clearResult ?? "Clear result"}
+              </ContextMenuItem>
+            </ContextMenuContent>
+          </ContextMenu>
+        </div>
       )}
     </section>
   );

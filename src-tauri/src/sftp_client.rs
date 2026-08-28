@@ -112,6 +112,10 @@ pub struct StandaloneSftpClient {
 }
 
 impl StandaloneSftpClient {
+    /// Default constructor + flat transfer wrappers form the client's public
+    /// API surface (tests + future non-progress call sites); the commands
+    /// layer currently goes through the `*_with_progress` variants.
+    #[allow(dead_code)]
     pub fn new() -> Self {
         Self {
             session: None,
@@ -245,6 +249,8 @@ impl StandaloneSftpClient {
         })
     }
 
+    // Public API surface (tests + future non-progress call sites).
+    #[allow(dead_code)]
     pub fn is_connected(&self) -> bool {
         self.session.is_some() && self.sftp.is_some()
     }
@@ -288,6 +294,8 @@ impl StandaloneSftpClient {
     }
 
     /// Download a remote file to a local path. Returns bytes downloaded.
+    // Public API surface (tests + future non-progress call sites).
+    #[allow(dead_code)]
     pub async fn download_file(&self, remote_path: &str, local_path: &str) -> Result<u64> {
         self.download_file_with_progress(remote_path, local_path, |_, _| {})
             .await
@@ -378,6 +386,8 @@ impl StandaloneSftpClient {
         Ok(total_bytes)
     }
 
+    // Public API surface (tests + future non-progress call sites).
+    #[allow(dead_code)]
     pub async fn upload_file(&self, local_path: &str, remote_path: &str) -> Result<u64> {
         self.upload_file_with_progress(local_path, remote_path, |_, _| {})
             .await

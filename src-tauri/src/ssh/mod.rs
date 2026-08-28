@@ -36,7 +36,11 @@ pub static PREFERRED_HOST_KEY_ALGOS: &[keys::Algorithm] = &[
 
 const BASH_VERSION_PROBE: &str = r#"printf '__NEXTERM_BASH_VERSION__%s' "${BASH_VERSION-}""#;
 const BASH_VERSION_MARKER: &str = "__NEXTERM_BASH_VERSION__";
+// Bash shell-integration (OSC 7 cwd reporting) — exercised by unit tests;
+// production wiring is pending the terminal-integration batch.
+#[cfg_attr(not(test), allow(dead_code))]
 const BASH_SHELL_INTEGRATION_PREFIX: &str = r#" stty echo; __nexterm_report_cwd(){ local p=${PWD//%/%25}; p=${p// /%20}; p=${p//#/%23}; p=${p//\?/%3F}; printf '\033]7;file://%s%s\033\\' "${HOSTNAME:-localhost}" "$p"; }; "#;
+#[cfg_attr(not(test), allow(dead_code))]
 const BASH_SHELL_INTEGRATION_SUFFIX: &str = "printf '\\r\\033[2K'\n";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -53,6 +57,9 @@ pub(crate) fn bash_version_from_probe(output: &str) -> Option<BashVersion> {
     Some(BashVersion { major, minor })
 }
 
+// Bash shell-integration command builder — exercised by unit tests;
+// production wiring is pending the terminal-integration batch.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn bash_shell_integration_command(version: BashVersion) -> Vec<u8> {
     let prompt_command = if version >= (BashVersion { major: 5, minor: 1 }) {
         r#"if declare -p PROMPT_COMMAND &>/dev/null; then PROMPT_COMMAND=("${PROMPT_COMMAND[@]}" __nexterm_report_cwd); else PROMPT_COMMAND=(__nexterm_report_cwd); fi; "#
@@ -619,7 +626,7 @@ impl SshClient {
             // writer: both are interactive input and can pollute remote shell
             // history. The safe exec startup above is the only automatic
             // default-directory mechanism.
-            let mut input_channel = channel.make_writer();
+            let input_channel = channel.make_writer();
 
             // Create a channel for resize requests
             let (resize_tx, mut resize_rx) = mpsc::channel::<(u32, u32)>(16);
@@ -632,13 +639,13 @@ impl SshClient {
                 while let Some(data) = input_rx.recv().await {
                     // Write data immediately
                     if let Err(e) = writer.write_all(&data).await {
-                        eprintln!("[PTY] Failed to send data to SSH: {}", e);
+                        tracing::warn!("[PTY] Failed to send data to SSH: {}", e);
                         break;
                     }
                     // Critical: flush immediately after write (like ttyd)
                     // This ensures data is sent to PTY without buffering delay
                     if let Err(e) = writer.flush().await {
-                        eprintln!("[PTY] Failed to flush data to SSH: {}", e);
+                        tracing::warn!("[PTY] Failed to flush data to SSH: {}", e);
                         break;
                     }
                 }
@@ -665,11 +672,11 @@ impl SshClient {
                                     }
                                 }
                                 Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None => {
-                                    eprintln!("[PTY] Channel closed");
+                                    tracing::debug!("[PTY] Channel closed");
                                     break;
                                 }
                                 Some(ChannelMsg::ExitStatus { exit_status }) => {
-                                    eprintln!("[PTY] Process exited with status: {}", exit_status);
+                                    tracing::debug!("[PTY] Process exited with status: {}", exit_status);
                                 }
                                 _ => {}
                             }
@@ -678,9 +685,9 @@ impl SshClient {
                             match resize {
                                 Some((cols, rows)) => {
                                     if let Err(e) = channel.window_change(cols, rows, 0, 0).await {
-                                        eprintln!("[PTY] Failed to send window change: {}", e);
+                                        tracing::warn!("[PTY] Failed to send window change: {}", e);
                                     } else {
-                                        eprintln!("[PTY] Window changed to {}x{}", cols, rows);
+                                        tracing::trace!("[PTY] Window changed to {}x{}", cols, rows);
                                     }
                                 }
                                 None => {

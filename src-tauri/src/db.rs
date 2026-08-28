@@ -332,9 +332,15 @@ impl DbState {
         }
         let temp = Self::temp_backup_path("nexterm-backup");
         let result = (|| {
-            let conn = self.conn.lock().map_err(|_| "db lock poisoned".to_string())?;
-            conn.backup(DatabaseName::Main, &temp, None)
-                .map_err(|e| format!("snapshot database: {e}"))?;
+            // Hold the connection lock only for the snapshot itself; the
+            // PBKDF2 key derivation + encryption + file write below are
+            // CPU/IO-heavy and must not block concurrent small writes
+            // (row_upsert etc.) on the same lock (audit P0-2).
+            {
+                let conn = self.conn.lock().map_err(|_| "db lock poisoned".to_string())?;
+                conn.backup(DatabaseName::Main, &temp, None)
+                    .map_err(|e| format!("snapshot database: {e}"))?;
+            }
             let bytes = std::fs::read(&temp).map_err(|e| format!("read snapshot: {e}"))?;
             let mut salt = [0u8; 16];
             let mut nonce = [0u8; 12];
@@ -903,12 +909,20 @@ pub fn drop_legacy_tables(state: State<'_, Arc<DbState>>) -> Result<(), String> 
 /// explicit caller instead of running during startup, because VACUUM needs an
 /// exclusive lock and temporarily as much free disk space as the database.
 #[tauri::command]
-pub fn database_vacuum(state: State<'_, Arc<DbState>>) -> Result<(), String> {
-    let conn = state
-        .conn
-        .lock()
-        .map_err(|_| "db lock poisoned".to_string())?;
-    conn.execute_batch("VACUUM").map_err(|e| format!("vacuum: {e}"))
+pub async fn database_vacuum(state: State<'_, Arc<DbState>>) -> Result<(), String> {
+    // VACUUM needs the exclusive lock and can run for minutes on large
+    // databases; run it on the blocking pool so the async runtime (and the
+    // rest of the IPC surface) stays responsive (audit P0-2).
+    let db = Arc::clone(state.inner());
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = db
+            .conn
+            .lock()
+            .map_err(|_| "db lock poisoned".to_string())?;
+        conn.execute_batch("VACUUM").map_err(|e| format!("vacuum: {e}"))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -917,21 +931,33 @@ pub fn documents_prune_versions(state: State<'_, Arc<DbState>>) -> Result<usize,
 }
 
 #[tauri::command]
-pub fn export_encrypted_backup(
+pub async fn export_encrypted_backup(
     password: String,
     output_path: String,
     state: State<'_, Arc<DbState>>,
 ) -> Result<(), String> {
-    state.export_encrypted_backup(&password, std::path::Path::new(&output_path))
+    // PBKDF2 (150k iterations) + AES-GCM are CPU-heavy: keep them off the
+    // async runtime workers (audit P0-2).
+    let db = Arc::clone(state.inner());
+    tauri::async_runtime::spawn_blocking(move || {
+        db.export_encrypted_backup(&password, std::path::Path::new(&output_path))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-pub fn restore_encrypted_backup(
+pub async fn restore_encrypted_backup(
     password: String,
     input_path: String,
     state: State<'_, Arc<DbState>>,
 ) -> Result<(), String> {
-    state.restore_encrypted_backup(&password, std::path::Path::new(&input_path))
+    let db = Arc::clone(state.inner());
+    tauri::async_runtime::spawn_blocking(move || {
+        db.restore_encrypted_backup(&password, std::path::Path::new(&input_path))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Retain only the most recently used learned command rows. This avoids

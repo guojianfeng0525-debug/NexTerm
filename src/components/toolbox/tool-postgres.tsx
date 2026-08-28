@@ -38,6 +38,7 @@ import {
   ListFilter,
   ListPlus,
   Loader2,
+  CircleAlert,
   MoveHorizontal,
   Pencil,
   PencilRuler,
@@ -265,6 +266,10 @@ type WorkspaceTab = {
   createMode?: boolean;
   sql: string;
   result: DatabaseResult | null;
+  /** Action verb recorded when `result` is an error, so the error card title
+   *  reads "<action> failed" (ux-spec §2.4 / P2-13) instead of a generic
+   *  "Execution failed". */
+  errorAction?: "query" | "explain" | "browse";
   baseline?: DatabaseTabularResult;
   dirty?: boolean;
   pendingInserts?: readonly PendingInsertRow[];
@@ -449,6 +454,9 @@ export function ToolPostgres() {
    *  between the grid and the in-pane history view (ux-spec §4.5). */
   const [historyOpen, setHistoryOpen] = useState(false);
   const [running, setRunning] = useState(false);
+  /** L3 connection-level error banner text (ux-spec §2.2.3 / P2-10). Non-null
+   *  renders the persistent banner below the toolbar until reconnect succeeds. */
+  const [connectionError, setConnectionError] = useState<string | null>(null);
   /** Run id of the in-flight query, used by `postgres_cancel` (B19). */
   const runIdRef = useRef(0);
   const activeRunIdRef = useRef<number | null>(null);
@@ -749,6 +757,16 @@ export function ToolPostgres() {
       setConnecting(false);
     }
   };
+  /** Heuristic: is this a connection-level (disconnect) failure rather than a
+   *  statement error? Drives the L3 persistent banner (P2-10). */
+  const isConnectionLevelError = (message: string) =>
+    /connection (closed|is already closed|reset)|broken pipe|server closed|connection refused|not connected|terminating connection/i.test(
+      message,
+    );
+  /** Surfaces a connection-level failure as the persistent banner (P2-10). */
+  const reportConnectionError = (message: string) => {
+    if (isConnectionLevelError(message)) setConnectionError(message);
+  };
   const connectEstablished = async (
     profile: PostgreSQLConnectionProfile,
   ): Promise<boolean> => {
@@ -801,6 +819,7 @@ export function ToolPostgres() {
         [`connection:${saved.id}`]: true,
       }));
       setConnected(true);
+      setConnectionError(null);
       const savedQueries = loadSavedQueryTabs(saved.id);
       if (savedQueries.length) {
         setTabs((current) => [
@@ -815,7 +834,7 @@ export function ToolPostgres() {
               dirty: false,
             })),
         ]);
-        setActiveTab(savedQueries[0]!.id);
+        setActiveTab(savedQueries[0].id);
       }
       setConfigOpen(false);
       toast.success(
@@ -825,6 +844,11 @@ export function ToolPostgres() {
     } catch (error) {
       const message = String(error);
       const isHostKeyMismatch = message.includes("host key fingerprint changed");
+      setConnectionError(
+        isHostKeyMismatch
+          ? t("toolbox.postgres.hostKeyMismatch")
+          : message,
+      );
       toast.error(
         isHostKeyMismatch
           ? t("toolbox.postgres.hostKeyMismatch")
@@ -1060,7 +1084,8 @@ export function ToolPostgres() {
         success: true,
       });
     } catch (error) {
-      const parsed = showQueryError(tab.id, error);
+      const parsed = showQueryError(tab.id, error, explain ? "explain" : "query");
+      reportConnectionError(parsed.message);
       // Whole-document execution: the server LINE n is relative to the first
       // editor line, so the statement range is null (feature-design §2.5).
       lastErrorRangeRef.current = null;
@@ -1358,7 +1383,8 @@ export function ToolPostgres() {
         success: true,
       });
     } catch (error) {
-      const parsed = showQueryError(tab.id, error);
+      const parsed = showQueryError(tab.id, error, "query");
+      reportConnectionError(parsed.message);
       lastErrorRangeRef.current = sentRange ?? null;
       toast.error(t("toolbox.postgres.queryFailed"), {
         description: parsed.message,
@@ -1380,10 +1406,15 @@ export function ToolPostgres() {
     }
   };
   /** Normalizes a failed invocation into the tab's persistent error result and
-   *  returns the parsed error (feature-design §2.4). */
-  const showQueryError = (targetTabId: string, raw: unknown): ParsedDatabaseError => {
+   *  returns the parsed error (feature-design §2.4). `action` records the verb
+   *  for the error-card title (P2-13). */
+  const showQueryError = (
+    targetTabId: string,
+    raw: unknown,
+    action: "query" | "explain" | "browse" = "query",
+  ): ParsedDatabaseError => {
     const parsed = parseProviderError("postgres", String(raw));
-    patchTab(targetTabId, { result: databaseErrorResult(parsed) });
+    patchTab(targetTabId, { result: databaseErrorResult(parsed), errorAction: action });
     return parsed;
   };
   /** Loads column metadata (incl. primary-key flags) for a relation through
@@ -1783,7 +1814,8 @@ export function ToolPostgres() {
     } catch (error) {
       // Table browsing has no editor statement to reveal — the error still
       // persists in the table tab's result pane for copy/retry.
-      const parsed = showQueryError(id, error);
+      const parsed = showQueryError(id, error, "browse");
+      reportConnectionError(parsed.message);
       lastErrorRangeRef.current = null;
       toast.error(t("toolbox.postgres.queryFailed"), {
         description: parsed.message,
@@ -1991,6 +2023,8 @@ export function ToolPostgres() {
     });
     setConnected(false);
     setTransactionActive(false);
+    // Manual disconnect is intentional, not a failure — drop the L3 banner.
+    setConnectionError(null);
   };
   const disconnect = () => {
     const dirtyTabs = tabs.filter((item) => item.connectionId === draft.id && item.dirty);
@@ -2653,6 +2687,17 @@ export function ToolPostgres() {
               loadingLabel={t("toolbox.postgres.navigatorLoading")}
               emptyLabel={t("toolbox.postgres.navigatorEmpty")}
               errorLabel={t("toolbox.postgres.navigatorLoadFailed")}
+              onRetryLoad={(node) => {
+                // Re-run the failed subtree load (P2-9): force a reload even
+                // when a (failed) entry already exists in childrenByParent.
+                void loadNavigatorChildren(
+                  node,
+                  postgresNavigatorLabels(t),
+                  setNavigatorChildren,
+                  setNavigatorLoadStates,
+                );
+              }}
+              retryLabel={t("toolbox.postgres.retry")}
               onToggle={treeToggle}
               onSelect={(node) => {
                 setSelectedNavigatorNodeId(node.id);
@@ -3443,7 +3488,12 @@ export function ToolPostgres() {
                     <DatabaseResultErrorPane
                       error={error}
                       labels={{
-                        error: t("toolbox.postgres.errorPane.error"),
+                        error:
+                          tab.errorAction === "explain"
+                            ? t("toolbox.postgres.explainFailedShort")
+                            : tab.errorAction === "browse"
+                              ? t("toolbox.postgres.browseFailed")
+                              : t("toolbox.postgres.queryFailed"),
                         copy: t("toolbox.postgres.errorPane.copy"),
                         retry: t("toolbox.postgres.errorPane.retry"),
                         jumpToLine: t("toolbox.postgres.errorPane.jumpToLine"),
@@ -3557,6 +3607,27 @@ export function ToolPostgres() {
             : t("toolbox.postgres.ready")}
         </span>
       </footer>}
+      banner={connectionError ? (
+        <div
+          className="flex h-9 shrink-0 animate-in fade-in duration-200 items-center gap-2 border-b border-destructive/30 bg-destructive/10 px-3 text-[12px]"
+          data-testid="postgres-connection-banner"
+          role="alert"
+        >
+          <CircleAlert className="size-4 shrink-0 text-destructive" />
+          <span className="min-w-0 flex-1 truncate text-foreground">
+            {connectionError}
+          </span>
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-6 shrink-0 rounded-sm px-2 text-[11px]"
+            onClick={() => void connectEstablished(draft)}
+          >
+            <RefreshCw className="size-3" />
+            {t("toolbox.postgres.reconnect")}
+          </Button>
+        </div>
+      ) : undefined}
     >
       <ConnectionDialog
         open={configOpen}

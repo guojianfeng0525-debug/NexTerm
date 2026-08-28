@@ -284,7 +284,6 @@ export function SystemMonitor({ connectionId }: SystemMonitorProps) {
     if (!connectionId) {
       // eslint-disable-next-line react-hooks/set-state-in-effect
       setStats({ cpu: 0, memory: 0, diskUsage: 0, uptime: '0:00:00' });
-      // eslint-disable-next-line react-hooks/set-state-in-effect
       setProcesses([]);
       return;
     }
@@ -417,13 +416,9 @@ export function SystemMonitor({ connectionId }: SystemMonitorProps) {
   // and CancelledError for clean stale-result suppression on connection switch.
   useEffect(() => {
     if (!connectionId) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect
       setGpuDetection(null);
-      // eslint-disable-next-line react-hooks/set-state-in-effect
       setGpuStats([]);
-      // eslint-disable-next-line react-hooks/set-state-in-effect
       setGpuHistory(new Map());
-      // eslint-disable-next-line react-hooks/set-state-in-effect
       setGpuDetectionDone(false);
       return;
     }

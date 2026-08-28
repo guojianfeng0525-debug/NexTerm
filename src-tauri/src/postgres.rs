@@ -11,7 +11,6 @@ use russh::{
 use serde::{Deserialize, Serialize};
 use sha2_10::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
-use std::future::Future;
 use std::io::Cursor;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -800,48 +799,77 @@ pub async fn postgres_execute(
         .unwrap_or(MAX_QUERY_ROWS)
         .clamp(1, MAX_QUERY_ROWS);
     let token = register_run(&state, &request.connection_id, request.run_id);
-    // The query future is raced against the cancellation token and the
-    // 30s timeout. On cancellation the backend gets pg_cancel_backend over
-    // an independent connection; if it still does not settle within the
-    // grace period the connection is torn down (security constraint §4.2).
+    // The query runs as its own task raced against the cancellation token
+    // and the 30s timeout, so the cancel/timeout paths below can wait for
+    // the REAL query future to settle after pg_cancel_backend instead of a
+    // placeholder `pending()` that always forced a teardown (audit P1-9).
+    // The task holds its own Arc clone of the client; on teardown it is
+    // aborted so the last client reference drops, closing the socket and
+    // aborting the query server-side (security constraint §3.1).
+    let cancel_future = token.clone().cancelled_owned();
+    tokio::pin!(cancel_future);
+    let query_sql = request.sql.clone();
+    let query_client = Arc::clone(&client);
+    let mut query_task = tokio::spawn(async move {
+        query_client.simple_query(&query_sql).await
+    });
     let outcome = {
-        let cancel_future = token.clone().cancelled_owned();
-        let query_future = client.simple_query(&request.sql);
-        tokio::pin!(cancel_future);
-        tokio::pin!(query_future);
-        let query_task = std::future::poll_fn(|cx| {
+        let race = std::future::poll_fn(|cx| {
             if cancel_future.as_mut().poll(cx).is_ready() {
                 return std::task::Poll::Ready(Err(ExecAbort::Cancelled));
             }
-            match query_future.as_mut().poll(cx) {
-                std::task::Poll::Ready(result) => std::task::Poll::Ready(Ok(result)),
+            use std::future::Future;
+            let task = std::pin::pin!(&mut query_task);
+            match task.poll(cx) {
+                std::task::Poll::Ready(joined) => {
+                    std::task::Poll::Ready(Ok(joined))
+                }
                 std::task::Poll::Pending => std::task::Poll::Pending,
             }
         });
-        match tokio::time::timeout(QUERY_TIMEOUT, query_task).await {
-            Ok(Ok(result)) => Ok(result),
-            Ok(Err(_)) => Err(ExecAbort::Cancelled),
+        match tokio::time::timeout(QUERY_TIMEOUT, race).await {
+            Ok(result) => result,
             Err(_) => Err(ExecAbort::Timeout),
         }
     };
     let messages = match outcome {
-        Ok(result) => result.map_err(|error| format!("PostgreSQL query failed: {error}"))?,
+        Ok(Ok(result)) => result.map_err(|error| format!("PostgreSQL query failed: {error}"))?,
+        Ok(Err(_join_error)) => {
+            // The query task itself failed (panic/abort); treat like a query
+            // failure. The connection may be in an unknown state, so reset it.
+            let reset = teardown_connection(
+                &state,
+                &request.connection_id,
+                "PostgreSQL query task terminated unexpectedly",
+            )
+            .await;
+            return Err(format!("PostgreSQL query failed; {reset}"));
+        }
         Err(ExecAbort::Cancelled) => {
             let reason = "Query cancelled".to_string();
             unregister_run(&state, &request.connection_id, request.run_id);
-            match cancel_and_settle(&request.connection_id, &token, std::future::pending()).await
+            let settle = async {
+                let _ = (&mut query_task).await;
+            };
+            match cancel_and_settle(&request.connection_id, &token, settle).await
             {
                 Ok(()) => return Err(reason),
-                Err(reset) => return Err(format!("{reason}; {reset}")),
+                Err(reset) => {
+                    query_task.abort();
+                    return Err(format!("{reason}; {reset}"));
+                }
             }
         }
         Err(ExecAbort::Timeout) => {
             let reason = "PostgreSQL query timed out".to_string();
             unregister_run(&state, &request.connection_id, request.run_id);
-            let settled = settle_within_grace(std::future::pending::<()>()).await;
-            if settled {
+            let settle = async {
+                let _ = (&mut query_task).await;
+            };
+            if settle_within_grace(settle).await {
                 return Err(reason);
             }
+            query_task.abort();
             let reset = teardown_connection(
                 &state,
                 &request.connection_id,
@@ -1649,7 +1677,7 @@ pub async fn postgres_table_data(
         &valid_columns,
         &primary_key_columns,
     )?;
-    let mut values: Vec<Box<dyn tokio_postgres::types::ToSql + Send + Sync>> = where_params
+    let values: Vec<Box<dyn tokio_postgres::types::ToSql + Send + Sync>> = where_params
         .into_iter()
         .map(|value| Box::new(value) as Box<dyn tokio_postgres::types::ToSql + Send + Sync>)
         .collect();
@@ -1980,11 +2008,10 @@ pub async fn postgres_save_table_changes(
     let primary_keys = load_primary_keys(&client, &request.schema, &request.table).await?;
     // M2: transaction markers and BEGIN..COMMIT stay inside this single
     // command, so no other IPC can interleave into the save transaction.
-    let begin = tokio::time::timeout(QUERY_TIMEOUT, client.batch_execute("BEGIN"))
+    tokio::time::timeout(QUERY_TIMEOUT, client.batch_execute("BEGIN"))
         .await
         .map_err(|_| "PostgreSQL save timed out while starting the transaction")?
         .map_err(|error| format!("Failed to begin save transaction: {error}"))?;
-    drop(begin);
     let mut insert_primary_keys = Vec::new();
     let mut affected_rows = Vec::new();
     for (index, step) in request.steps.iter().enumerate() {
@@ -2167,11 +2194,10 @@ pub async fn postgres_save_table_changes(
             }
         }
     }
-    let commit = tokio::time::timeout(QUERY_TIMEOUT, client.batch_execute("COMMIT"))
+    tokio::time::timeout(QUERY_TIMEOUT, client.batch_execute("COMMIT"))
         .await
         .map_err(|_| "PostgreSQL save timed out while committing")?
         .map_err(|error| format!("Failed to commit save transaction: {error}"))?;
-    drop(commit);
     clear_save_marker(&state, &request.connection_id);
     Ok(PostgresSaveTableChangesResult {
         insert_primary_keys,

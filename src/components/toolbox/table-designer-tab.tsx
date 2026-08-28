@@ -75,11 +75,13 @@ export interface TableDesignerTabProps {
 
 /**
  * DESIGNER-domain shortcuts (feature-design §1.3): Ctrl+S applies the design,
- * Escape reverts the draft. Listens on window keydown; Escape is suppressed
- * while typing in an input/textarea/contenteditable so editors keep their own
- * Escape semantics.
+ * Escape reverts the draft. Listens on window keydown. Escape is two-level
+ * (P2-14): while typing in an input/textarea/contenteditable, the first press
+ * exits the input (blur, cancelling the in-progress edit); the next press —
+ * now outside any field — reverts the whole draft.
  */
 function useDesignerShortcuts(onSave?: () => void, onRevert?: () => void): void {
+  const escapedInputRef = useRef(false);
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
       const target = event.target;
@@ -89,7 +91,14 @@ function useDesignerShortcuts(onSave?: () => void, onRevert?: () => void): void 
       if ((event.metaKey || event.ctrlKey) && event.key === "s" && !event.altKey) {
         event.preventDefault();
         onSave?.();
-      } else if (event.key === "Escape" && !typingInField) {
+      } else if (event.key === "Escape") {
+        if (typingInField) {
+          event.preventDefault();
+          (target as HTMLElement).blur?.();
+          escapedInputRef.current = true;
+          return;
+        }
+        escapedInputRef.current = false;
         onRevert?.();
       }
     };

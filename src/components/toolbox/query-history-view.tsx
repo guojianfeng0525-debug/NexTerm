@@ -43,6 +43,8 @@ export type QueryHistoryProviderId = "postgresql" | "mysql" | "sqlite";
 export interface QueryHistoryViewLabels {
   readonly history: string;
   readonly empty: string;
+  /** Sub-caption under the empty label (ux-spec §4.5 / P2-5.9). */
+  readonly emptyHint?: string;
   readonly run: string;
   readonly insertToEditor: string;
   readonly copy: string;
@@ -225,9 +227,14 @@ export function QueryHistoryView({
 
       <ScrollArea className="min-h-0 flex-1">
         {filtered.length === 0 ? (
-          <div className="flex h-24 flex-col items-center justify-center gap-2 text-muted-foreground">
+          <div className="flex h-24 flex-col items-center justify-center gap-2 text-muted-foreground" data-testid="query-history-empty">
             <Inbox className="size-5" />
             <span className="text-[12px]">{labels.empty}</span>
+            {labels.emptyHint && (
+              <span className="text-[11px] text-muted-foreground/70">
+                {labels.emptyHint}
+              </span>
+            )}
           </div>
         ) : (
           <div

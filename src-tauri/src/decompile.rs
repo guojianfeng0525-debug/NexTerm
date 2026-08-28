@@ -385,12 +385,20 @@ pub fn decompile_class_with_options(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
-    let mut child = cmd
+    let child = cmd
         .spawn()
         .map_err(|e| format!("failed to launch java (jd-core): {e}"))?;
 
-    // If a cancel flag is set, spawn a watcher that kills the child.
+    // Hard deadline for the JD-Core child (audit P1-5): a malformed class
+    // can make the JVM hang forever; without a timeout the calling jar_*
+    // command would never return. 60s is generous for a single class.
+    const DECOMPILE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+    let deadline = std::time::Instant::now() + DECOMPILE_TIMEOUT;
+    let timed_out = Arc::new(AtomicBool::new(false));
+    let timed_out_flag = Arc::clone(&timed_out);
+
     if let Some(cancel) = cancel {
+        // Cancel watcher: kills the child as soon as the cancel flag flips.
         let pid = child.id();
         let finished = Arc::new(AtomicBool::new(false));
         let watcher_finished = Arc::clone(&finished);
@@ -404,15 +412,52 @@ pub fn decompile_class_with_options(
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
         });
+        // Deadline watcher: same kill path on timeout.
+        let pid = child.id();
+        let finished2 = Arc::new(AtomicBool::new(false));
+        let watcher2_finished = Arc::clone(&finished2);
+        let timeout_flag = Arc::clone(&timed_out_flag);
+        std::thread::spawn(move || {
+            while !watcher2_finished.load(Ordering::Relaxed) {
+                if std::time::Instant::now() >= deadline {
+                    timeout_flag.store(true, Ordering::Relaxed);
+                    let _ = kill_process(pid);
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        });
         let output = child.wait_with_output();
         finished.store(true, Ordering::Relaxed);
+        finished2.store(true, Ordering::Relaxed);
         let output = output.map_err(|e| format!("failed waiting for jd-core: {e}"))?;
+        if timed_out_flag.load(Ordering::Relaxed) {
+            return Err("jd-core decompilation timed out after 60 seconds".to_string());
+        }
         return decompile_output(output, class_file);
     }
 
+    let pid = child.id();
+    let finished = Arc::new(AtomicBool::new(false));
+    let watcher_finished = Arc::clone(&finished);
+    let timeout_flag = Arc::clone(&timed_out_flag);
+    std::thread::spawn(move || {
+        while !watcher_finished.load(Ordering::Relaxed) {
+            if std::time::Instant::now() >= deadline {
+                timeout_flag.store(true, Ordering::Relaxed);
+                let _ = kill_process(pid);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    });
     let output = child
         .wait_with_output()
         .map_err(|e| format!("failed waiting for jd-core: {e}"))?;
+    finished.store(true, Ordering::Relaxed);
+    if timed_out_flag.load(Ordering::Relaxed) {
+        return Err("jd-core decompilation timed out after 60 seconds".to_string());
+    }
 
     decompile_output(output, class_file)
 }

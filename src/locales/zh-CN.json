@@ -83,7 +83,18 @@
     "quickConnectedDesc": "已连接到 {{name}}",
     "loadingWorkspace": "正在加载工作区…",
     "floatLogs": "浮动日志",
-    "noActiveConnection": "无活动连接"
+    "noActiveConnection": "无活动连接",
+    "fileViewer": "文件查看器",
+    "unableToConnectDesc": "无法连接到服务器，请检查凭据后重试。",
+    "duplicationFailedDesc": "无法为复制的标签页建立连接。",
+    "restoreHighlightEncrypted": "密钥本地加密存储",
+    "restoreHighlightReconnect": "自动重连与重试",
+    "restoreHighlightMonitoring": "实时状态监控",
+    "workspaceRestoreLabel": "工作区恢复",
+    "workspaceRestoreTitle": "正在恢复您的连接",
+    "reconnectingName": "正在重连 {{name}}",
+    "preparingConnections": "正在准备已保存的连接",
+    "unknownHost": "未知主机"
   },
   "connectionDialog": {
     "title": {
@@ -321,6 +332,7 @@
       "desc": "配置安全选项和认证设置。",
       "hostKeyVerification": "主机密钥验证",
       "hostKeyVerificationDesc": "验证 SSH 主机密钥以增强安全性",
+      "hostKeyVerificationWarning": "主机密钥验证已关闭——SSH/SFTP 连接将不验证服务器身份，存在中间人攻击风险。强烈建议保持开启。",
       "savePasswords": "保存密码",
       "savePasswordsDesc": "在本地存储密码（加密）",
       "autoLockTimeout": "自动锁定超时：{{timeout}}分钟",
@@ -1425,6 +1437,10 @@
       "queryConsole": "查询控制台",
       "queryFailed": "查询失败",
       "queryStopFailed": "停止查询失败",
+      "explainFailedShort": "解释失败",
+      "browseFailed": "浏览失败",
+      "reconnect": "重新连接",
+      "retry": "重试",
       "quickQuery": "快速查询",
       "readOnly": "只读：此结果没有可用主键。",
       "readOnlyConnection": "只读连接",

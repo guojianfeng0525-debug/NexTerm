@@ -43,6 +43,30 @@ node scripts/bump-version.mjs major --skip-changelog
 - ✅ Colored output
 - ✅ Same functionality as Node.js version
 
+## Docker SSH Fixture
+
+### ssh-fixture.sh
+
+Starts a disposable Dockerized OpenSSH server used by the ignored Rust integration
+tests in `src-tauri/src/ssh/tests.rs` (e.g. `docker_pty_survives_parallel_sftp_upload`).
+
+```bash
+./scripts/ssh-fixture.sh up       # build image + start container (port 22222)
+./scripts/ssh-fixture.sh status   # show container state
+./scripts/ssh-fixture.sh logs     # follow sshd logs
+./scripts/ssh-fixture.sh down     # stop & remove container (local image kept)
+./scripts/ssh-fixture.sh clean    # down + delete the local fixture image
+```
+
+Run the regression tests after starting the fixture:
+
+```bash
+cd src-tauri && cargo test docker_pty_survives_parallel_sftp_upload -- --ignored --nocapture
+```
+
+Requires a working `docker` CLI. The same steps are wired into the optional
+GitHub Actions job `.github/workflows/docker-ssh-regression.yml`.
+
 ## Options
 
 Both scripts support the same options:

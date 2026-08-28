@@ -83,7 +83,18 @@
     "quickConnectedDesc": "Connected to {{name}}",
     "loadingWorkspace": "Loading workspace…",
     "floatLogs": "Float logs",
-    "noActiveConnection": "No active connection"
+    "noActiveConnection": "No active connection",
+    "fileViewer": "File Viewer",
+    "unableToConnectDesc": "Unable to connect to the server. Please check your credentials and try again.",
+    "duplicationFailedDesc": "Unable to establish connection for the duplicated tab.",
+    "restoreHighlightEncrypted": "Secrets stay encrypted locally",
+    "restoreHighlightReconnect": "Auto reconnect with retry",
+    "restoreHighlightMonitoring": "Live status monitoring",
+    "workspaceRestoreLabel": "Workspace Restore",
+    "workspaceRestoreTitle": "Bringing your connections back online",
+    "reconnectingName": "Reconnecting {{name}}",
+    "preparingConnections": "Preparing saved connections",
+    "unknownHost": "unknown host"
   },
   "connectionDialog": {
     "title": {
@@ -321,6 +332,7 @@
       "desc": "Configure security options and authentication settings.",
       "hostKeyVerification": "Host Key Verification",
       "hostKeyVerificationDesc": "Verify SSH host keys for enhanced security",
+      "hostKeyVerificationWarning": "Host key verification is OFF — SSH/SFTP connections will not verify the server's identity, leaving them exposed to man-in-the-middle attacks. Keeping it ON is strongly recommended.",
       "savePasswords": "Save Passwords",
       "savePasswordsDesc": "Store passwords locally (encrypted)",
       "autoLockTimeout": "Auto Lock Timeout: {{timeout}} minutes",
@@ -1425,6 +1437,10 @@
       "queryConsole": "Query console",
       "queryFailed": "Query failed",
       "queryStopFailed": "Failed to stop the query",
+      "explainFailedShort": "Explain failed",
+      "browseFailed": "Browse failed",
+      "reconnect": "Reconnect",
+      "retry": "Retry",
       "quickQuery": "Quick Query",
       "readOnly": "Read-only: this result has no usable primary key.",
       "readOnlyConnection": "Read-only connection",

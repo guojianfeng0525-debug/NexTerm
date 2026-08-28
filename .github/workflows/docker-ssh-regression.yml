@@ -1,0 +1,116 @@
+# Docker SSH regression — OPTIONAL CI job
+#
+# Runs the Rust integration test that needs a live OpenSSH server backed by a
+# Docker container:
+#
+#   src-tauri/src/ssh/tests.rs :: docker_pty_survives_parallel_sftp_upload
+#     (PTY stays alive while a parallel SFTP upload is in flight — the
+#      concurrency regression from FEATURE BATCH 16's zlib / tunnel work.)
+#
+# The fixture is built and started by scripts/ssh-fixture.sh (see that file
+# for the manual, local workflow):
+#
+#   scripts/ssh-fixture.sh up
+#   cd src-tauri && cargo test docker_pty_survives_parallel_sftp_upload -- --ignored --nocapture
+#
+# Trigger:
+#   - workflow_dispatch: manual runs from the Actions tab (recommended before
+#     every release / after touching src-tauri/src/ssh/**).
+#   - push / pull_request limited to src-tauri/src/ssh/** paths. The job is
+#     NOT part of the required test.yml gate, so a failure here never blocks
+#     merges — it only signals regression risk.
+name: Docker SSH regression
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'src-tauri/src/ssh/**'
+      - 'scripts/ssh-fixture.sh'
+      - '.github/workflows/docker-ssh-regression.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'src-tauri/src/ssh/**'
+      - 'scripts/ssh-fixture.sh'
+      - '.github/workflows/docker-ssh-regression.yml'
+
+concurrency:
+  group: docker-ssh-regression-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      actions: write  # required by actions/upload-artifact@v4 for the log artifact
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      # Same Linux system libraries as the main test workflow — lib.rs embeds
+      # the Tauri runtime, so compiling the test binary needs webkit2gtk etc.
+      - name: Install dependencies (Linux)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev
+
+      # pnpm build produces dist/, which tauri's generate_context! macro embeds
+      # at compile time; cargo test would fail without it. Mirrors test.yml.
+      - name: Install frontend dependencies
+        run: pnpm install
+
+      - name: Build frontend (dist for tauri context)
+        run: pnpm build
+
+      - name: Build & start Docker OpenSSH fixture
+        run: ./scripts/ssh-fixture.sh up
+
+      - name: Smoke-check the fixture endpoint
+        run: |
+          # bash built-in TCP probe — no netcat dependency on the runner.
+          timeout 5 bash -c '</dev/tcp/127.0.0.1/22222'
+          echo "fixture reachable on 127.0.0.1:22222"
+
+      - name: Run Docker SSH regression test
+        working-directory: src-tauri
+        run: |
+          cargo test docker_pty_survives_parallel_sftp_upload \
+            -- --ignored --nocapture 2>&1 | tee /tmp/ssh-regression.log
+
+      # Always upload the raw log so a failure can be diagnosed without
+      # re-running the ~10 min Rust compile on the runner.
+      - name: Upload regression log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ssh-regression-log
+          path: /tmp/ssh-regression.log
+          if-no-files-found: error

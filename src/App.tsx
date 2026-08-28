@@ -129,13 +129,9 @@ function AppContent() {
     return () => window.removeEventListener('nexterm:select-note', selectNote);
   }, []);
 
-  // App lock: every launch starts locked — the lock screen shows "set a
-  // password" on first run and "enter password" afterwards. Nothing else is
-  // rendered until the password is verified.
-  const [appLocked, setAppLocked] = useState<boolean>(true);
-  // After unlock the SQLite-backed stores are hydrated before any UI renders,
-  // so components never read stale/empty caches.
-  const [storageReady, setStorageReady] = useState(false);
+  // App lock + storage hydration gates live in App() — AppContent only mounts
+  // after every SQLite-backed store has been hydrated, so all hooks below run
+  // against populated caches (see audit P0-1/P0-2).
   const [editingConnection, setEditingConnection] = useState<ConnectionConfig | null>(null);
   // Track whether the edit dialog was opened due to a failed connection attempt (double-click)
   // vs. direct edit (right-click). When non-null and matches saved config id, auto-connect after save.
@@ -230,23 +226,6 @@ function AppContent() {
     };
   }, []);
 
-  // After the lock screen is passed, hydrate every SQLite-backed store before
-  // the workspace renders (a short loading state avoids empty-cache flashes).
-  useEffect(() => {
-    if (appLocked || storageReady) return;
-    let cancelled = false;
-    void initializeAllStorage()
-      .catch(() => {
-        /* a failing store degrades to its legacy fallback */
-      })
-      .finally(() => {
-        if (!cancelled) setStorageReady(true);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [appLocked, storageReady]);
-
   const handleCloseActiveTab = useCallback(() => {
     if (!activeGroup?.activeTabId) {
       return;
@@ -309,7 +288,13 @@ function AppContent() {
     toggleZenMode,
   }), [toggleLeftSidebar, toggleRightSidebar, toggleBottomPanel, toggleZenMode]);
 
-  useKeyboardShortcuts([...layoutShortcuts, ...splitViewShortcuts], true);
+  // Stable merged array — spreading inline would create a new reference every
+  // render and re-mount the global keydown listener on each state update.
+  const allShortcuts = useMemo(
+    () => [...layoutShortcuts, ...splitViewShortcuts],
+    [layoutShortcuts, splitViewShortcuts],
+  );
+  useKeyboardShortcuts(allShortcuts, true);
 
   // Save active connections when tabs change (for restore on next launch)
   useEffect(() => {
@@ -729,7 +714,7 @@ function AppContent() {
             console.error('SSH connection failed:', result.error);
             dispatch({ type: 'UPDATE_TAB_STATUS', tabId: sessionId, status: 'disconnected' });
             toast.error(t('app.connectionFailed'), {
-              description: result.error || 'Unable to connect to the server. Please check your credentials and try again.',
+              description: result.error || t('app.unableToConnectDesc'),
             });
             setEditingConnection(toConnectionConfig(connectionData));
             setPendingConnectionId(connection.id);
@@ -748,29 +733,6 @@ function AppContent() {
       }
     }
   };
-
-  const _handleTabClose = useCallback(async (tabId: string) => {
-    // Find which group contains this tab and remove it
-    for (const group of Object.values(state.groups)) {
-      const tab = group.tabs.find(t => t.id === tabId);
-      if (tab) {
-        // Disconnect SFTP/FTP sessions when closing file-browser tabs
-        if (tab.tabType === 'file-browser') {
-          try {
-            if (tab.protocol === 'SFTP') {
-              await invoke('sftp_standalone_disconnect', { connection_id: tabId });
-            } else if (tab.protocol === 'FTP') {
-              await invoke('ftp_disconnect', { connection_id: tabId });
-            }
-          } catch {
-            // Ignore disconnect errors on tab close
-          }
-        }
-        dispatch({ type: 'REMOVE_TAB', groupId: group.id, tabId });
-        break;
-      }
-    }
-  }, [state.groups, dispatch]);
 
   const handleNewTab = useCallback((folderPath?: string) => {
     // Creating a connection returns to the connection workspace.
@@ -883,7 +845,7 @@ function AppContent() {
           });
         } else {
           toast.error(t('app.duplicationFailed'), {
-            description: result.error || 'Unable to establish connection for the duplicated tab.',
+            description: result.error || t('app.duplicationFailedDesc'),
           });
         }
       }
@@ -1136,7 +1098,7 @@ function AppContent() {
               password: config.password || '',
               domain: config.domain || null,
               resolution: config.rdpResolution || '1920x1080',
-              color_depth: config.vncColorDepth || 24,
+              color_depth: config.vncColorDepth ? parseInt(config.vncColorDepth) || 24 : 24,
             }
           });
           dispatch({ type: 'UPDATE_TAB_STATUS', tabId, status: 'connected' });
@@ -1174,7 +1136,7 @@ function AppContent() {
               password: config.password || '',
               domain: config.domain || null,
               resolution: config.rdpResolution || '1920x1080',
-              color_depth: config.vncColorDepth || 24,
+              color_depth: config.vncColorDepth ? parseInt(config.vncColorDepth) || 24 : 24,
             }
           });
           ConnectionStorageManager.updateLastConnected(config.id || tabId);
@@ -1483,7 +1445,7 @@ function AppContent() {
             }
           } else {
             toast.error(t('app.connectionFailed'), {
-              description: result.error || 'Unable to connect to the server. Please check your credentials and try again.',
+              description: result.error || t('app.unableToConnectDesc'),
             });
           }
         } catch (error) {
@@ -1509,11 +1471,11 @@ function AppContent() {
 
   const restoreHighlights = useMemo(() => (
     [
-      { icon: ShieldCheck, label: 'Secrets stay encrypted locally' },
-      { icon: PlugZap, label: 'Auto reconnect with retry' },
-      { icon: Activity, label: 'Live status monitoring' },
+      { icon: ShieldCheck, label: t('app.restoreHighlightEncrypted') },
+      { icon: PlugZap, label: t('app.restoreHighlightReconnect') },
+      { icon: Activity, label: t('app.restoreHighlightMonitoring') },
     ]
-  ), []);
+  ), [t]);
 
   // Check if there are any tabs across all groups
   const hasAnyTabs = allTabs.length > 0;
@@ -1524,27 +1486,6 @@ function AppContent() {
   // Editor tabs are standalone — hide extra panels like file-browser/desktop tabs
   const isEditorTab = activeTab?.tabType === 'editor';
   const hideExtraPanels = isFileBrowserTab || isDesktopTab || isEditorTab;
-
-  // Password gate — no application UI before the password is verified.
-  if (appLocked) {
-    return (
-      <ErrorBoundary label="NexTerm Lock">
-        <AppLockScreen onUnlock={() => setAppLocked(false)} />
-      </ErrorBoundary>
-    );
-  }
-
-  // Storage gate — hydrate SQLite-backed caches before first paint.
-  if (!storageReady) {
-    return (
-      <div className="h-screen flex items-center justify-center bg-background">
-        <div className="flex flex-col items-center gap-3 text-muted-foreground">
-          <Loader2 className="h-7 w-7 animate-spin text-primary" />
-          <span className="text-sm">{t('app.loadingWorkspace')}</span>
-        </div>
-      </div>
-    );
-  }
 
   return (
     <div className="h-screen flex flex-col bg-background">
@@ -1557,8 +1498,8 @@ function AppContent() {
                 <History className="h-6 w-6" />
               </div>
               <div>
-                <p className="text-xs uppercase tracking-[0.25em] text-muted-foreground">Workspace Restore</p>
-                <h3 className="mt-1 text-2xl font-semibold text-foreground">Bringing your connections back online</h3>
+                <p className="text-xs uppercase tracking-[0.25em] text-muted-foreground">{t('app.workspaceRestoreLabel')}</p>
+                <h3 className="mt-1 text-2xl font-semibold text-foreground">{t('app.workspaceRestoreTitle')}</h3>
               </div>
             </div>
 
@@ -1566,8 +1507,8 @@ function AppContent() {
               <div className="flex items-center justify-between text-sm text-muted-foreground" aria-live="polite">
                 <span>
                   {currentRestoreTarget
-                    ? `Reconnecting ${currentRestoreTarget.name}`
-                    : 'Preparing saved connections'}
+                    ? t('app.reconnectingName', { name: currentRestoreTarget.name })
+                    : t('app.preparingConnections')}
                 </span>
                 <span className="font-semibold text-foreground">
                   {restoringProgress.current} / {restoringProgress.total}
@@ -1590,7 +1531,7 @@ function AppContent() {
                     <p className="text-sm font-medium text-foreground">{currentRestoreTarget.name}</p>
                     <p className="text-xs text-muted-foreground">
                       {currentRestoreTarget.username ? `${currentRestoreTarget.username}@` : ''}
-                      {currentRestoreTarget.host || 'unknown host'}
+                      {currentRestoreTarget.host || t('app.unknownHost')}
                     </p>
                   </div>
                 </div>
@@ -1941,7 +1882,45 @@ function AppContent() {
 
 const SystemMonitor = lazy(() => import('./components/system-monitor').then((m) => ({ default: m.SystemMonitor })));
 
+/** Full-screen loading state shown while SQLite stores hydrate (after unlock). */
+function AppStorageLoading() {
+  const { t } = useTranslation();
+  return (
+    <div className="h-screen flex items-center justify-center bg-background">
+      <div className="flex flex-col items-center gap-3 text-muted-foreground">
+        <Loader2 className="h-7 w-7 animate-spin text-primary" />
+        <span className="text-sm">{t('app.loadingWorkspace')}</span>
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
+  // App lock and storage hydration live ABOVE the workspace tree so that
+  // TerminalGroupProvider (and every hook in AppContent) only mounts after the
+  // SQLite stores are hydrated. Mounting the provider during the lock screen
+  // used to initialize the reducer with a default layout and, on the first
+  // dispatch, overwrite the persisted workspace tables (see audit P0-1/P0-2).
+  const [appLocked, setAppLocked] = useState<boolean>(true);
+  const [storageReady, setStorageReady] = useState(false);
+
+  // After the lock screen is passed, hydrate every SQLite-backed store before
+  // the workspace renders (a short loading state avoids empty-cache flashes).
+  useEffect(() => {
+    if (appLocked || storageReady) return;
+    let cancelled = false;
+    void initializeAllStorage()
+      .catch(() => {
+        /* a failing store degrades to its legacy fallback */
+      })
+      .finally(() => {
+        if (!cancelled) setStorageReady(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [appLocked, storageReady]);
+
   // Prefetch code-split tool views during idle time so switching to any tool
   // is instant — no "click then load" flash. Desktop assets are local, so the
   // background fetch is cheap and the lazy() load() promises resolve before
@@ -1969,6 +1948,20 @@ export default function App() {
     const timer = window.setTimeout(prefetch, 1200);
     return () => window.clearTimeout(timer);
   }, []);
+
+  // Password gate — no application UI before the password is verified.
+  if (appLocked) {
+    return (
+      <ErrorBoundary label="NexTerm Lock">
+        <AppLockScreen onUnlock={() => setAppLocked(false)} />
+      </ErrorBoundary>
+    );
+  }
+
+  // Storage gate — hydrate SQLite-backed caches before the workspace mounts.
+  if (!storageReady) {
+    return <AppStorageLoading />;
+  }
 
   return (
     <ErrorBoundary label="NexTerm">

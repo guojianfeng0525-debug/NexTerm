@@ -100,6 +100,12 @@ export interface DatabaseObjectNode {
    * from provider object groups. Undefined = provider object group.
    */
   readonly groupKind?: "connection" | "schema";
+  /**
+   * Provider-owned optional metadata attached at node build time (e.g. a
+   * column node's dataType for "copy column definition"). Treated as opaque
+   * by the shared Navigator.
+   */
+  readonly metadata?: Readonly<Record<string, string | boolean | number | undefined>>;
 }
 
 export type DatabaseExplainCapability = "none" | "text" | "visual";

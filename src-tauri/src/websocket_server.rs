@@ -314,10 +314,21 @@ impl WebSocketServer {
                     match data[0] {
                         0x00 => {
                             if data.len() < 37 {
-                                tracing::warn!("Binary INPUT message too short");
+                                tracing::warn!("Binary INPUT message too short: {} bytes", data.len());
                                 continue;
                             }
                             let connection_id = String::from_utf8_lossy(&data[1..37]).to_string();
+                            // The frame format assumes a 36-byte (UUID) id; a
+                            // different length means the id is truncated or
+                            // NUL-padded and the write below would fail with a
+                            // confusing "PTY connection not found".
+                            if connection_id.bytes().any(|b| b == 0) || connection_id.trim().is_empty() {
+                                tracing::warn!(
+                                    "Binary INPUT connection id is not a 36-byte id (frame len {}); dropping frame",
+                                    data.len()
+                                );
+                                continue;
+                            }
                             let input_data = data[37..].to_vec();
                             if let Err(e) = self
                                 .connection_manager

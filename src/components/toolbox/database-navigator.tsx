@@ -11,6 +11,7 @@ import {
   ListOrdered,
   ListTree,
   Loader2,
+  RotateCw,
   Table2,
   Zap,
 } from "lucide-react";
@@ -93,6 +94,11 @@ interface DatabaseNavigatorProps {
   readonly onSelect: (node: DatabaseObjectNode) => void;
   readonly onOpen: (node: DatabaseObjectNode) => void;
   readonly renderContextMenu?: (node: DatabaseObjectNode) => ReactNode;
+  /** Re-load a subtree whose previous load failed (P2-9). Called from the
+   *  inline retry button next to the error label; defaults to `onToggle`. */
+  readonly onRetryLoad?: (node: DatabaseObjectNode) => void;
+  /** Retry-button label (P2-9); defaults to "Retry". */
+  readonly retryLabel?: string;
 }
 
 export function DatabaseNavigator({
@@ -109,6 +115,8 @@ export function DatabaseNavigator({
   onSelect,
   onOpen,
   renderContextMenu,
+  onRetryLoad,
+  retryLabel = "Retry",
 }: DatabaseNavigatorProps) {
   const normalizedFilter = filter.trim().toLowerCase();
   const renderNodes = (nodes: readonly DatabaseObjectNode[], depth: number) =>
@@ -210,9 +218,24 @@ export function DatabaseNavigator({
                 </p>
               )}
               {loadStates?.[node.id]?.state === "error" && (
-                <p className="h-6 px-2 text-[11px] leading-6 text-destructive" style={{ marginLeft: (depth + 1) * 14 }}>
-                  {errorLabel}
-                </p>
+                <div
+                  className="flex h-6 items-center gap-1 px-2 text-[11px] text-destructive"
+                  style={{ marginLeft: (depth + 1) * 14 }}
+                  data-testid="database-navigator-load-error"
+                >
+                  <span className="truncate leading-6">{errorLabel}</span>
+                  <button
+                    type="button"
+                    className="ml-auto shrink-0 text-[11px] text-primary hover:underline"
+                    onClick={() =>
+                      (onRetryLoad ?? onToggle)(node)
+                    }
+                    data-testid="database-navigator-retry"
+                  >
+                    <RotateCw className="mr-0.5 inline-block size-3" />
+                    {retryLabel}
+                  </button>
+                </div>
               )}
               {childrenByParent[node.id] && !children.length && !loadStates?.[node.id] && (
                 <p className="h-6 px-2 text-[11px] leading-6 text-muted-foreground" style={{ marginLeft: (depth + 1) * 14 }}>

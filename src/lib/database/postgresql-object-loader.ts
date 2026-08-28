@@ -522,6 +522,10 @@ export async function loadPostgresNavigatorChildren(
           item.name,
           role,
         ]),
+        // Column DDL metadata for "copy column definition" (ux-spec §1.2.4).
+        ...(role === "column" && item.dataType
+          ? { metadata: { dataType: item.dataType } }
+          : {}),
       };
     });
   }

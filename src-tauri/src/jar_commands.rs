@@ -12,8 +12,6 @@ use std::sync::{Arc, Mutex};
 
 use tauri::{AppHandle, Emitter, State};
 
-use crate::builder;
-use crate::compile;
 use crate::decompile;
 use crate::jar;
 use crate::jar_db;
@@ -57,6 +55,9 @@ pub struct MemoryIndex {
     pub nested: std::collections::HashMap<String, NestedJarData>,
     /// Every class name (dotted) across the main jar + nested jars — the
     /// clickability index (JD-GUI typeDeclarations equivalent).
+    /// Populated at index build; consumers are tests + `jar_known_class_names`
+    /// walks `entries` directly, so reads here are test-only for now.
+    #[allow(dead_code)]
     pub class_names: std::collections::BTreeSet<String>,
 }
 
@@ -194,7 +195,9 @@ impl MemoryIndex {
 
 pub struct JarState {
     /// Path to the nexterm.db file (shared with the rest of the app — the jar
-    /// feature no longer writes to it).
+    /// feature no longer writes to it). Kept for `JarState::conn` callers
+    /// outside the jar feature.
+    #[allow(dead_code)]
     pub db_path: std::path::PathBuf,
     /// project_id → cancel flag for the active decompile.
     pub cancels: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
@@ -205,7 +208,7 @@ pub struct JarState {
     /// exe layout.
     pub resource_dir: Option<std::path::PathBuf>,
     /// Open jar projects: project_id → in-memory index (JD-GUI: no DB).
-    pub indexes: Arc<Mutex<HashMap<String, MemoryIndex>>>,
+    pub indexes: Arc<Mutex<HashMap<String, Arc<MemoryIndex>>>>,
 }
 
 impl JarState {
@@ -218,6 +221,7 @@ impl JarState {
 impl JarState {
     /// Open a fresh connection to the shared SQLite file (kept for non-jar
     /// features; the jar feature is fully in-memory now).
+    #[allow(dead_code)]
     pub fn conn(&self) -> Result<rusqlite::Connection, String> {
         jar_db::open(&self.db_path)
     }
@@ -438,7 +442,9 @@ pub async fn jar_project_open(
             if entry.read_to_end(&mut bytes).is_err() {
                 continue;
             }
-            let mut cur = std::io::Cursor::new(bytes.clone());
+            // Index from a borrowed slice; `bytes` is moved into the nested
+            // data below, avoiding a full second copy of every nested jar.
+            let mut cur = std::io::Cursor::new(bytes.as_slice());
             let nidx = match jar::index_jar_reader(&mut cur) {
                 Ok(i) => i,
                 Err(_) => continue,
@@ -502,7 +508,7 @@ pub async fn jar_project_open(
         .indexes
         .lock()
         .expect("indexes poisoned")
-        .insert(id.clone(), index);
+        .insert(id.clone(), Arc::new(index));
 
     Ok(ProjectSummary {
         id,
@@ -544,9 +550,10 @@ pub async fn jar_project_delete(
     project_id: String,
     state: State<'_, JarState>,
 ) -> Result<(), String> {
-    // Request cancellation before taking the index lock. Exports hold that
-    // lock while decompiling, so this lets the current JD-Core child exit
-    // before its index and scratch directory are released.
+    // Request cancellation before removing the index. Exports decompile via
+    // JD-Core child processes while holding only an Arc clone of the index,
+    // so this lets the current child exit before the scratch directory is
+    // released.
     let cancel = state.cancel_flag(&project_id);
     cancel.store(true, Ordering::Relaxed);
     tokio::time::sleep(std::time::Duration::from_millis(150)).await;
@@ -781,12 +788,12 @@ pub async fn jar_method_location(
     _descriptor: Option<String>, // reserved for descriptor-accurate matching
     state: State<'_, JarState>,
 ) -> Result<serde_json::Value, String> {
-    use std::path::Path as FsPath;
+    
 
     // Resolve the declaring class: walk the super chain from the named type
     // (JD-GUI searchTypeHavingMember) against the in-memory index.
     fn resolve_member(
-        indexes: &std::collections::HashMap<String, MemoryIndex>,
+        indexes: &std::collections::HashMap<String, Arc<MemoryIndex>>,
         project_id: &str,
         type_internal: &str,
         method_name: &str,
@@ -924,7 +931,7 @@ pub async fn jar_type_hierarchy(
     // super + interfaces become (super → this) edges (JD-GUI subTypeNames).
     let mut children: std::collections::HashMap<String, Vec<String>> =
         std::collections::HashMap::new();
-    let mut read_class = |ix: &MemoryIndex, e: &jar::JarEntryInfo| -> Option<Vec<u8>> {
+    let read_class = |ix: &MemoryIndex, e: &jar::JarEntryInfo| -> Option<Vec<u8>> {
         let lib = if ix.entries.iter().any(|x| std::ptr::eq(x, e)) {
             ""
         } else {
@@ -1369,87 +1376,6 @@ pub async fn jar_resource_read(
     String::from_utf8(bytes).map_err(|_| "Resource is binary, not UTF-8 text.".into())
 }
 
-#[tauri::command]
-pub async fn jar_class_revert(
-    project_id: String,
-    entry_path: String,
-    library_id: Option<String>,
-    _version: Option<i64>,
-    state: State<'_, JarState>,
-) -> Result<ClassView, String> {
-    // View-only mode: "revert" re-decompiles the pristine class from memory.
-    let (is_inner, class_bytes) = {
-        let indexes = state.indexes.lock().expect("indexes poisoned");
-        let ix = indexes.get(&project_id).ok_or("Project not found")?;
-        let lib_id = library_id.clone().unwrap_or_default();
-        let entry = if lib_id.is_empty() {
-            ix.entries.iter().find(|e| e.entry_path == entry_path)
-        } else {
-            ix.nested
-                .get(&lib_id)
-                .and_then(|n| n.entries.iter().find(|e| e.entry_path == entry_path))
-        }
-        .ok_or_else(|| format!("Class not found in archive: {entry_path}"))?;
-        let bytes = ix.read_class_bytes(&lib_id, &entry_path)?;
-        (entry.is_inner_class, bytes)
-    };
-    if !class_bytes.starts_with(&[0xca, 0xfe, 0xba, 0xbe]) {
-        return Err(format!(
-            "Class {entry_path} is not a valid JVM class (missing CAFEBABE magic)."
-        ));
-    }
-    let decompiler_jar = state.decompiler_jar()?;
-    let scratch = state.scratch.join(&project_id);
-    std::fs::create_dir_all(&scratch).map_err(|e| format!("scratch: {e}"))?;
-    let class_file = scratch.join(format!("revert-{}.class", entry_path.replace('/', "_")));
-    std::fs::write(&class_file, &class_bytes).map_err(|e| format!("write class: {e}"))?;
-    let siblings_dir = scratch.join("siblings");
-    let _ = std::fs::remove_dir_all(&siblings_dir);
-    let lib_id = library_id.clone().unwrap_or_default();
-    let classpath_arg = {
-        let indexes = state.indexes.lock().expect("indexes poisoned");
-        let ix = indexes.get(&project_id).ok_or("Project not found")?;
-        ix.extract_sibling_classes_to(&lib_id, &entry_path, &siblings_dir)
-            .ok();
-        siblings_dir.display().to_string()
-    };
-    let result = tauri::async_runtime::spawn_blocking({
-        let cf = class_file.clone();
-        let jd = decompiler_jar.clone();
-        let cp = classpath_arg.clone();
-        let internal_name = entry_path
-            .strip_suffix(".class")
-            .unwrap_or(&entry_path)
-            .to_string();
-        move || decompile::decompile_class_with_classpath(&cf, &jd, &cp, &internal_name, None)
-    })
-    .await
-    .map_err(|e| e.to_string())??;
-    let _ = std::fs::remove_file(&class_file);
-    let source = result.source.clone();
-    let refs = result.refs;
-    let methods: Vec<MethodLine> = jar::extract_methods(&source)
-        .into_iter()
-        .map(|m| MethodLine {
-            name: m.name,
-            line: m.line as i64,
-        })
-        .collect();
-    Ok(ClassView {
-        entry_path: entry_path.clone(),
-        class_name: entry_path_to_class_name(&entry_path),
-        package_name: entry_path_to_package(&entry_path),
-        kind: "class".into(),
-        is_inner_class: is_inner,
-        source: source.clone(),
-        original_source: Some(source),
-        modified: false,
-        compile_status: "none".into(),
-        compile_output: None,
-        refs,
-        methods,
-    })
-}
 
 #[tauri::command]
 pub async fn jar_library_index(
@@ -1697,8 +1623,14 @@ pub async fn jar_export_all(
         let mut resources = 0usize;
         let mut failures = Vec::new();
 
-        let indexes = indexes.lock().expect("indexes poisoned");
-        let ix = indexes.get(&project_id).ok_or("Project not found")?;
+        // Clone the Arc'd index and drop the map lock immediately: the
+        // export loop below runs a JD-Core child process per class and can
+        // take minutes; holding the global `indexes` mutex for that long
+        // blocks every other jar_* command (audit P0-1).
+        let ix = {
+            let indexes = indexes.lock().expect("indexes poisoned");
+            Arc::clone(indexes.get(&project_id).ok_or("Project not found")?)
+        };
         ix.extract_main_classes_to(&classpath)?;
         for (completed, item) in export_items.iter().enumerate() {
             let (entry, class_name, _fallback_entries) = match item {
@@ -1882,7 +1814,7 @@ pub async fn jar_export_all(
                     class_name,
                     fallback_entries,
                 } if failed.contains(class_name) => {
-                    let fallback_entries = write_fallback_classes(ix, fallback_entries, &fallback_root);
+                    let fallback_entries = write_fallback_classes(&ix, fallback_entries, &fallback_root);
                     failures.push(ExportFailure {
                         entry_path: entry_path.clone(),
                         reason: "Source decompilation or write failed; original bytecode preserved".into(),
@@ -1911,7 +1843,6 @@ pub async fn jar_export_all(
             .map_err(|e| format!("serialize export manifest: {e}"))?;
         std::fs::write(&manifest_path, manifest_json)
             .map_err(|e| format!("write export manifest: {e}"))?;
-        drop(indexes);
 
         if want_zip {
             emit_export_progress(
@@ -2152,7 +2083,7 @@ pub async fn jar_pom_open(
         .indexes
         .lock()
         .expect("indexes poisoned")
-        .insert(id.clone(), index);
+        .insert(id.clone(), Arc::new(index));
 
     Ok(serde_json::json!({
         "projectId": id,

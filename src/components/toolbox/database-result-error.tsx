@@ -127,7 +127,9 @@ export function DatabaseResultErrorPane({
 
       {/* Compact message with error code */}
       <div className="mt-1 break-all font-mono text-[12px] text-foreground">
-        {error.code ? `${error.code}: ${error.message}` : error.message}
+        {error.code && !error.message.startsWith(error.code)
+          ? `${error.code}: ${error.message}`
+          : error.message}
       </div>
 
       {/* Static common-error hint (only when the code is known) */}

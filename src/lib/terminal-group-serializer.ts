@@ -50,8 +50,22 @@ export function saveState(state: TerminalGroupState): void {
   const filtered = stripEditorTabs(state);
   cachedState = filtered;
   if (hydrated) {
-    void persistWorkspace(filtered);
+    void queueWorkspacePersist(filtered);
   }
+}
+
+/* Serializes the clear+rewrite cycles: concurrent persistWorkspace runs could
+ * interleave their table clears/upserts (stale rows resurrecting, transient
+ * empty tables). One promise chain, latest state wins within a run. */
+let workspacePersistQueue: Promise<void> = Promise.resolve();
+
+function queueWorkspacePersist(state: TerminalGroupState): Promise<void> {
+  workspacePersistQueue = workspacePersistQueue
+    .then(() => persistWorkspace(state))
+    .catch((error: unknown) => {
+      console.error('[workspace] persistence failed:', error);
+    });
+  return workspacePersistQueue;
 }
 
 function stripEditorTabs(state: TerminalGroupState): TerminalGroupState {

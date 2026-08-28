@@ -408,6 +408,17 @@ async fn collect_system_stats_legacy(
 /// server list show resource usage without the user having connected first.
 #[tauri::command]
 pub async fn probe_server_stats(request: ConnectRequest) -> Result<SystemStats, String> {
+    // Whole-probe deadline: auth and each exec step have their own timeouts,
+    // but a slow host that accepts TCP yet stalls SSH could otherwise drag a
+    // single probe out to minutes (7 legacy commands x 30s exec timeout).
+    const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+    match tokio::time::timeout(PROBE_TIMEOUT, probe_server_stats_inner(request)).await {
+        Ok(result) => result,
+        Err(_) => Err("Server probe timed out after 15 seconds".to_string()),
+    }
+}
+
+async fn probe_server_stats_inner(request: ConnectRequest) -> Result<SystemStats, String> {
     let config = build_ssh_config_from_request(&request)?;
     let mut client = crate::ssh::SshClient::new();
     client.connect(&config).await.map_err(|e| e.to_string())?;
@@ -429,41 +440,52 @@ pub async fn probe_server_stats(request: ConnectRequest) -> Result<SystemStats, 
 #[tauri::command]
 pub async fn probe_all_server_stats(
     requests: Vec<(String, ConnectRequest)>, // (server_id, connect_request)
-    state: State<'_, Arc<ConnectionManager>>,
+    _state: State<'_, Arc<ConnectionManager>>,
 ) -> Result<std::collections::HashMap<String, serde_json::Value>, String> {
-    use futures::stream::{StreamExt, TryStreamExt};
+    use futures::stream::StreamExt;
 
     // Bound concurrency to avoid hammering the network on huge server lists.
     const MAX_CONCURRENT: usize = 6;
 
     let out: std::collections::HashMap<String, serde_json::Value> = futures::stream::iter(requests)
         .map(|(server_id, request)| async move {
-            let config = match build_ssh_config_from_request(&request) {
-                Ok(c) => c,
-                Err(e) => {
+            // Per-host deadline so one unreachable-but-accepting host cannot
+            // drag the whole batch refresh out to minutes.
+            const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+            let server_id = &server_id;
+            let probe = async {
+                let config = match build_ssh_config_from_request(&request) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        return (server_id, serde_json::json!({ "error": e.to_string() }));
+                    }
+                };
+                let mut client = crate::ssh::SshClient::new();
+                if let Err(e) = client.connect(&config).await {
                     return (server_id, serde_json::json!({ "error": e.to_string() }));
                 }
-            };
-            let mut client = crate::ssh::SshClient::new();
-            if let Err(e) = client.connect(&config).await {
-                return (server_id, serde_json::json!({ "error": e.to_string() }));
-            }
-            let os_info = os_detect::detect_os(&client).await;
-            let stats = collect_system_stats(&client, &os_info).await;
-            let mut stats = serde_json::to_value(&stats).unwrap_or(serde_json::json!({}));
-            if let Some(bw) = collect_network_bandwidth(&client, &os_info).await {
-                if let Some(obj) = stats.as_object_mut() {
-                    obj.insert(
-                        "bandwidth".into(),
-                        serde_json::json!({
-                            "rx_bytes_per_sec": bw.rx_bytes_per_sec,
-                            "tx_bytes_per_sec": bw.tx_bytes_per_sec,
-                        }),
-                    );
+                let os_info = os_detect::detect_os(&client).await;
+                let stats = collect_system_stats(&client, &os_info).await;
+                let mut stats = serde_json::to_value(&stats).unwrap_or(serde_json::json!({}));
+                if let Some(bw) = collect_network_bandwidth(&client, &os_info).await {
+                    if let Some(obj) = stats.as_object_mut() {
+                        obj.insert(
+                            "bandwidth".into(),
+                            serde_json::json!({
+                                "rx_bytes_per_sec": bw.rx_bytes_per_sec,
+                                "tx_bytes_per_sec": bw.tx_bytes_per_sec,
+                            }),
+                        );
+                    }
                 }
+                let _ = client.disconnect().await;
+                (server_id, stats)
+            };
+            let server_id = server_id.clone();
+            match tokio::time::timeout(PROBE_TIMEOUT, probe).await {
+                Ok((id, value)) => (id.clone(), value),
+                Err(_) => (server_id, serde_json::json!({ "error": "probe timed out after 15 seconds" })),
             }
-            let _ = client.disconnect().await;
-            (server_id, stats)
         })
         .buffer_unordered(MAX_CONCURRENT)
         .collect()
@@ -1276,13 +1298,6 @@ pub async fn list_connections(
     Ok(state.list_connections().await)
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct TailLogRequest {
-    pub connection_id: String,
-    pub log_path: String,
-    pub lines: Option<u32>, // Number of lines to show (default 50)
-}
-
 #[tauri::command]
 pub async fn tail_log(
     connection_id: String,
@@ -1589,7 +1604,9 @@ pub async fn search_log(
     let client = connection.read().await;
 
     let limit = max_results.unwrap_or(500);
-    let escaped = pattern.replace('\'', "'\\''");
+    // shell_escape_single_quoted below handles quote escaping; pre-escaping
+    // here would double-escape and make patterns containing ' unfindable.
+    let escaped = pattern;
     let grep_flag = if is_regex.unwrap_or(false) {
         "-nE"
     } else {
@@ -2037,13 +2054,6 @@ pub async fn get_disk_usage(
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct TabCompletionRequest {
-    pub connection_id: String,
-    pub input: String,
-    pub cursor_position: usize,
-}
-
 #[derive(Debug, Serialize)]
 pub struct TabCompletionResponse {
     pub success: bool,
@@ -2179,11 +2189,16 @@ fn find_common_prefix(strings: &[String]) -> Option<String> {
     let first = &strings[0];
     let mut prefix = String::new();
 
-    for (i, ch) in first.chars().enumerate() {
-        if strings.iter().all(|s| s.chars().nth(i) == Some(ch)) {
-            prefix.push(ch);
-        } else {
-            break;
+    // Extend the prefix one char at a time; `starts_with` keeps the
+    // comparison on UTF-8 boundaries, replacing the O(i) `nth(i)` scan of
+    // every candidate per position (tab-completion hot path).
+    'outer: for ch in first.chars() {
+        prefix.push(ch);
+        for s in &strings[1..] {
+            if !s.starts_with(prefix.as_str()) {
+                prefix.pop();
+                break 'outer;
+            }
         }
     }
 
@@ -3496,6 +3511,9 @@ pub async fn list_local_files(path: String) -> Result<Vec<FileEntry>, String> {
 fn format_unix_timestamp(secs: i64) -> String {
     // Simple manual conversion for local display
     // This avoids pulling in chrono — we just need a readable date string
+    // Pre-epoch timestamps (negative) would break the year/month loop below;
+    // clamp to the epoch instead of emitting a garbled date.
+    let secs = secs.max(0);
     let days = secs / 86400;
     let time_of_day = secs % 86400;
     let hours = time_of_day / 3600;

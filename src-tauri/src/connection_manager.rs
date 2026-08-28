@@ -160,6 +160,18 @@ impl ConnectionManager {
 
         let client = client.read().await;
 
+        // Bump the generation BEFORE cancelling the old session. The create
+        // step below can take seconds (bash probe + channel open); with the
+        // generation already advanced, any in-flight Close carrying the old
+        // generation is treated as stale and ignored instead of racing the
+        // new session's insertion (audit P1-3).
+        let current_gen = {
+            let mut generations = self.pty_generations.write().await;
+            let gen = generations.entry(connection_id.to_string()).or_insert(0);
+            *gen += 1;
+            *gen
+        };
+
         // Cancel and remove any existing PTY session for this connection first.
         // This ensures the old SSH channel and reader task are torn down before
         // we create a new one, preventing orphaned sessions.
@@ -175,13 +187,6 @@ impl ConnectionManager {
         let pty = client
             .create_pty_session(cols, rows, default_directory)
             .await?;
-
-        // Bump generation so any in-flight Close for the old session is ignored
-        let mut generations = self.pty_generations.write().await;
-        let gen = generations.entry(connection_id.to_string()).or_insert(0);
-        *gen += 1;
-        let current_gen = *gen;
-        drop(generations);
 
         // Store PTY session
         let mut pty_sessions = self.pty_sessions.write().await;
@@ -410,6 +415,8 @@ impl ConnectionManager {
     }
 
     /// Start the frame update loop for a desktop connection.
+    // Pending the desktop-rendering batch (see desktop_protocol::FrameUpdate).
+    #[allow(dead_code)]
     pub async fn start_desktop_stream(
         &self,
         connection_id: &str,

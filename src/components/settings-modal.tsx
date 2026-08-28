@@ -979,6 +979,18 @@ export function SettingsModal({ open, onOpenChange, onAppearanceChange }: Settin
                   />
                 </div>
 
+                {!settings.hostKeyVerification && (
+                  <div
+                    className="flex items-start gap-2 p-3 rounded-lg bg-destructive/10 border border-destructive/30"
+                    data-testid="host-key-verification-warning"
+                  >
+                    <AlertTriangle className="h-4 w-4 text-destructive flex-shrink-0 mt-0.5" />
+                    <p className="text-xs text-destructive">
+                      {t('settings.security.hostKeyVerificationWarning')}
+                    </p>
+                  </div>
+                )}
+
                 <Separator />
 
                 <div className="flex items-center justify-between">

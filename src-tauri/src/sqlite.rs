@@ -3,13 +3,16 @@
 
 use rusqlite::{types::ValueRef, Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, path::Path, sync::Mutex};
+use std::{collections::HashMap, path::Path, sync::{Arc, Mutex}};
 
 const MAX_QUERY_ROWS: usize = 1_000;
 
 #[derive(Default)]
 pub struct SqliteState {
-    connections: Mutex<HashMap<String, Connection>>,
+    // Per-connection handles: commands clone the Arc and release the map
+    // lock before running SQL, so a slow query on one database no longer
+    // blocks catalog listing on another (audit P1-8).
+    connections: Mutex<HashMap<String, Arc<Mutex<Connection>>>>,
 }
 
 #[derive(Deserialize)]
@@ -85,9 +88,10 @@ pub fn sqlite_connect(request: SqliteConnectRequest, state: tauri::State<'_, Sql
     if request.connection_id.trim().is_empty() {
         return Err("SQLite connection ID is required".into());
     }
+    // Open outside the map lock: opening a large/corrupt file can take a while.
     let connection = open_existing(&request.file_path, request.read_only)?;
     state.connections.lock().map_err(|_| "SQLite session state is unavailable")?
-        .insert(request.connection_id.clone(), connection);
+        .insert(request.connection_id.clone(), Arc::new(Mutex::new(connection)));
     Ok(SqliteConnectionStatus { connection_id: request.connection_id, connected: true })
 }
 
@@ -99,8 +103,11 @@ pub fn sqlite_disconnect(connection_id: String, state: tauri::State<'_, SqliteSt
 
 #[tauri::command]
 pub fn sqlite_catalog_objects(connection_id: String, state: tauri::State<'_, SqliteState>) -> Result<Vec<SqliteCatalogItem>, String> {
-    let connections = state.connections.lock().map_err(|_| "SQLite session state is unavailable")?;
-    let connection = connections.get(&connection_id).ok_or_else(|| "SQLite connection is not active".to_string())?;
+    let connection = {
+        let connections = state.connections.lock().map_err(|_| "SQLite session state is unavailable")?;
+        Arc::clone(connections.get(&connection_id).ok_or_else(|| "SQLite connection is not active".to_string())?)
+    };
+    let connection = connection.lock().map_err(|_| "SQLite session state is unavailable")?;
     let mut statement = connection.prepare("SELECT name FROM sqlite_schema WHERE type IN ('table', 'view') AND name NOT LIKE 'sqlite_%' ORDER BY name")
         .map_err(|error| format!("Failed to list SQLite objects: {error}"))?;
     let items = statement.query_map([], |row| Ok(SqliteCatalogItem { name: row.get(0)? }))
@@ -114,8 +121,11 @@ pub fn sqlite_catalog_objects(connection_id: String, state: tauri::State<'_, Sql
 pub fn sqlite_execute(request: SqliteExecuteRequest, state: tauri::State<'_, SqliteState>) -> Result<SqliteQueryResult, String> {
     if request.sql.trim().is_empty() { return Err("SQL cannot be empty".into()); }
     let limit = request.max_rows.unwrap_or(MAX_QUERY_ROWS).clamp(1, MAX_QUERY_ROWS);
-    let connections = state.connections.lock().map_err(|_| "SQLite session state is unavailable")?;
-    let connection = connections.get(&request.connection_id).ok_or_else(|| "SQLite connection is not active".to_string())?;
+    let connection = {
+        let connections = state.connections.lock().map_err(|_| "SQLite session state is unavailable")?;
+        Arc::clone(connections.get(&request.connection_id).ok_or_else(|| "SQLite connection is not active".to_string())?)
+    };
+    let connection = connection.lock().map_err(|_| "SQLite session state is unavailable")?;
     let mut statement = connection.prepare(&request.sql).map_err(|error| format!("SQLite query failed: {error}"))?;
     let columns = statement.column_names().iter().map(ToString::to_string).collect::<Vec<_>>();
     if columns.is_empty() {

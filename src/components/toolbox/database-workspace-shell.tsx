@@ -26,6 +26,9 @@ interface DatabaseWorkspaceShellProps {
   readonly tabStripClassName?: string;
   readonly workspace: ReactNode;
   readonly status?: ReactNode;
+  /** Full-width strip rendered directly below the toolbar (L3 connection-level
+   *  error banner, ux-spec §2.2.3). Absent = no banner. */
+  readonly banner?: ReactNode;
   readonly children?: ReactNode;
 }
 
@@ -44,6 +47,7 @@ export function DatabaseWorkspaceShell({
   tabStripClassName = "flex h-8 shrink-0 items-end overflow-x-auto border-b bg-muted/15",
   workspace,
   status,
+  banner,
   children,
 }: DatabaseWorkspaceShellProps) {
   return (
@@ -51,6 +55,7 @@ export function DatabaseWorkspaceShell({
       <header className="flex h-10 shrink-0 items-center gap-1 overflow-x-auto border-b bg-muted/25 px-2" data-testid={toolbarTestId}>
         {toolbar}
       </header>
+      {banner}
       <div className="flex min-h-0 flex-1">
         {navigator}
         <main className="flex min-w-0 flex-1 flex-col">

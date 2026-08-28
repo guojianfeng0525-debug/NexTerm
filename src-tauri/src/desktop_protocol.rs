@@ -5,6 +5,9 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 /// A decoded framebuffer update — a dirty rectangle with RGBA pixel data.
+// RDP/VNC frame pipeline: wired through `ConnectionManager::start_desktop_stream`
+// in the desktop-rendering batch; kept compiled until that batch lands.
+#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub struct FrameUpdate {
     pub x: u16,
@@ -23,6 +26,8 @@ pub struct FrameUpdate {
 pub trait DesktopProtocol: Send + Sync {
     /// Start the frame update loop, sending `FrameUpdate` messages via the
     /// provided sender until the cancellation token is triggered.
+    // Pending the desktop-rendering batch (see `FrameUpdate` note above).
+    #[allow(dead_code)]
     async fn start_frame_loop(
         &self,
         frame_tx: mpsc::UnboundedSender<FrameUpdate>,
@@ -80,9 +85,12 @@ pub struct DesktopConnectResponse {
 }
 
 // ---------------------------------------------------------------------------
-// Protocol-specific config structs (used internally by the clients)
+// Protocol-specific config structs (used internally by the clients).
+// `password`/`domain`/`color_depth` are part of the wire-level config surface
+// consumed by the desktop-rendering batch (see `FrameUpdate` note above).
 // ---------------------------------------------------------------------------
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct RdpConfig {
     pub host: String,
@@ -94,6 +102,7 @@ pub struct RdpConfig {
     pub height: u16,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct VncConfig {
     pub host: String,

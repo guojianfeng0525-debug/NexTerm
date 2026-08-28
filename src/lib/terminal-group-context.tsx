@@ -1,7 +1,33 @@
 import React, { createContext, useContext, useReducer, useEffect, useRef, useMemo } from 'react';
+import { invoke } from '@tauri-apps/api/core';
 import type { TerminalGroupState, TerminalGroupAction, TerminalGroup, TerminalTab } from './terminal-group-types';
 import { terminalGroupReducer, createDefaultState } from './terminal-group-reducer';
 import { saveState, loadState } from './terminal-group-serializer';
+
+/**
+ * Disconnect the backend session for a closed tab (best-effort). Terminal tabs
+ * need this too: PtyTerminal's cleanup only closes the PTY channel over the
+ * WebSocket — the backend SSH connection itself stays open until ssh_disconnect.
+ * Editor tabs borrow another tab's connection and tools tabs have no session,
+ * so both are skipped.
+ */
+async function disconnectBackendSession(tab: TerminalTab): Promise<void> {
+  try {
+    if (tab.tabType === 'file-browser') {
+      if (tab.protocol === 'SFTP') {
+        await invoke('sftp_standalone_disconnect', { connection_id: tab.id });
+      } else if (tab.protocol === 'FTP') {
+        await invoke('ftp_disconnect', { connection_id: tab.id });
+      }
+    } else if (tab.tabType === 'desktop') {
+      await invoke('desktop_disconnect', { connectionId: tab.id });
+    } else if (tab.tabType === undefined || tab.tabType === 'terminal') {
+      await invoke('ssh_disconnect', { connectionId: tab.id });
+    }
+  } catch {
+    // The backend session may already be gone — closing must never block UI.
+  }
+}
 
 interface TerminalGroupContextType {
   state: TerminalGroupState;
@@ -22,6 +48,11 @@ interface TerminalGroupContextType {
 }
 
 const TerminalGroupContext = createContext<TerminalGroupContextType | null>(null);
+
+/** Flatten every tab across every group, preserving group order. */
+function collectTabs(state: TerminalGroupState): TerminalTab[] {
+  return Object.values(state.groups).flatMap((g) => g.tabs);
+}
 
 function initializeState(): TerminalGroupState {
   const loaded = loadState();
@@ -61,6 +92,23 @@ export function TerminalGroupProvider({ children }: { children: React.ReactNode 
       return;
     }
     saveState(state);
+  }, [state]);
+
+  // Disconnect backend sessions for closed tabs. All close paths (tab bar X,
+  // context-menu close/others/left/right, Ctrl+W) go through the reducer, so
+  // diffing the previous tab set catches every removal exactly once — even
+  // when a dispatched batch removes several tabs at the same time.
+  const prevTabsRef = useRef<TerminalTab[] | null>(null);
+  useEffect(() => {
+    const prevTabs = prevTabsRef.current;
+    prevTabsRef.current = collectTabs(state);
+    if (!prevTabs) return; // initial mount — nothing was closed
+    const currentIds = new Set(Object.keys(state.tabToGroupMap));
+    for (const tab of prevTabs) {
+      if (!currentIds.has(tab.id)) {
+        void disconnectBackendSession(tab);
+      }
+    }
   }, [state]);
 
   // When the number of groups changes (split/merge), fire window resize events

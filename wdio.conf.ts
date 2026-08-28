@@ -4,6 +4,30 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import type { Options } from '@wdio/types';
 
+// ── Serial-execution invariant (do not break) ───────────────────────────────
+// The desktop specs chain application state inside the shared data dir: one
+// spec creates connections / fixtures that later specs reuse (e.g.
+// b22-connections → postgres-*). That state lives in the single application
+// data directory, so the suite MUST run serially — `maxInstances` stays 1.
+// Raising it to parallelise the suite is only safe after every spec stops
+// depending on state written by another spec.
+//
+// `dataDir` below is per-process: each WDIO worker is a separate process that
+// re-parses this config file (runner.run → new ConfigParser(configFile)), so
+// the `mkdtempSync` fallback gives every worker its own unique directory when
+// `NEXTERM_DATA_DIR` is unset. A pinned `NEXTERM_DATA_DIR` is meant as a
+// *single-run* override (debugging against a known dir); sharing one across
+// parallel workers/processes would corrupt each other's app state. The guard
+// below refuses that combination instead of failing in confusing ways later.
+const maxInstances = 1;
+if (maxInstances > 1 && process.env.NEXTERM_DATA_DIR) {
+  throw new Error(
+    '[wdio] NEXTERM_DATA_DIR is shared between parallel WDIO workers; ' +
+      'keep maxInstances = 1, or unset NEXTERM_DATA_DIR so each worker gets ' +
+      'its own isolated directory.',
+  );
+}
+
 const application = resolve('src-tauri/target/debug/nexterm');
 const dataDir = process.env.NEXTERM_DATA_DIR ?? mkdtempSync(join(tmpdir(), 'nexterm-wdio-'));
 const sqliteFixturePath = join(dataDir, `sqlite-e2e-${Date.now()}.db`);
@@ -23,7 +47,10 @@ process.env.NEXTERM_SQLITE_E2E_PATH = sqliteFixturePath;
 export const config: Options.Testrunner = {
   runner: 'local',
   specs: ['./e2e/desktop/**/*.e2e.ts'],
-  maxInstances: 1,
+  // Serial: see the data-dir invariant at the top of this file. maxInstances
+  // is the per-capability worker count; >1 would run specs in parallel and
+  // the shared app data dir would corrupt cross-spec state.
+  maxInstances,
   logLevel: 'info',
   waitforTimeout: 10_000,
   connectionRetryTimeout: 90_000,

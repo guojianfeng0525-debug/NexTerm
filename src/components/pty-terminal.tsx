@@ -459,7 +459,7 @@ export function PtyTerminal({
     } catch (_error) {
       toast.error(t('ptyTerminal.failedToReadClipboard'));
     }
-  }, []);
+  }, [t]);
 
   // Get appearance settings - reloads when appearanceKey changes
   const appearance = React.useMemo(() => loadAppearanceSettings(), [appearanceKey]);
@@ -1329,13 +1329,16 @@ export function PtyTerminal({
     const connectWebSocket = async () => {
       // CRITICAL: Wait for terminal to be properly sized before starting PTY
       await waitForProperSize();
-      
+      // The await above may have raced with cleanup (component unmounted or
+      // effect re-run) — bail out instead of creating an orphan WebSocket.
+      if (!isRunning) return;
+
       // Notify parent that we're connecting
       if (connectionStatusRef.current !== 'connecting') {
         connectionStatusRef.current = 'connecting';
         onConnectionStatusChange?.(connectionId, 'connecting');
       }
-      
+
       // Get the dynamically assigned WebSocket port from the backend
       let wsPort = 9001; // fallback default
       try {
@@ -1344,7 +1347,9 @@ export function PtyTerminal({
       } catch (e) {
         console.warn(`[PTY Terminal] [${connectionId}] Failed to get WebSocket port, using default:`, e);
       }
-      
+      // Re-check after the invoke await — cleanup may have run while waiting.
+      if (!isRunning) return;
+
       console.log(`[PTY Terminal] [${connectionId}] Connecting to WebSocket...`);
       const ws = new WebSocket(`ws://127.0.0.1:${wsPort}`);
       // Receive PTY output as ArrayBuffer so we can avoid the JSON overhead of
@@ -1354,6 +1359,14 @@ export function PtyTerminal({
       // One streaming TextDecoder per WebSocket connection: preserves UTF-8
       // multi-byte sequences that may be split across successive output frames.
       const outputDecoder = new TextDecoder(terminalEncoding);
+      // If cleanup completed while the WebSocket constructor was pending,
+      // close it right away — onopen would otherwise send StartPty and leak a
+      // backend PTY session nobody will ever close.
+      if (!isRunning) {
+        ws.onopen = null;
+        ws.close();
+        return;
+      }
       wsRef.current = ws;
 
       ws.onopen = () => {
@@ -1465,6 +1478,10 @@ export function PtyTerminal({
         }
       };
 
+      // Reused for decoding the connection-id prefix of every binary frame —
+      // never with stream:true (that decoder is `outputDecoder` below).
+      const idDecoder = new TextDecoder();
+
       ws.onmessage = (event) => {
         // Binary frames carry raw PTY output.
         // Format: [0x01][id_len: u16 BE][connection_id bytes][payload bytes]
@@ -1474,7 +1491,7 @@ export function PtyTerminal({
           const idLen = (data[1] << 8) | data[2];
           const payloadOffset = 3 + idLen;
           if (data.length < payloadOffset) return;
-          const frameConnectionId = new TextDecoder().decode(data.subarray(3, payloadOffset));
+          const frameConnectionId = idDecoder.decode(data.subarray(3, payloadOffset));
           if (frameConnectionId !== connectionId) return;
           const payload = data.subarray(payloadOffset);
           if (payload.length === 0) return;
@@ -1525,7 +1542,7 @@ export function PtyTerminal({
               
             case 'Output':
               if (msg.data && msg.data.length > 0) {
-                enqueueOutput(new TextDecoder().decode(new Uint8Array(msg.data)));
+                enqueueOutput(idDecoder.decode(new Uint8Array(msg.data)));
               }
               break;
               
@@ -1750,6 +1767,12 @@ export function PtyTerminal({
           closeMsg.generation = ptyGenerationRef.current;
         }
         ws.send(JSON.stringify(closeMsg));
+      }
+      // Close the socket itself in every state (OPEN and CONNECTING): a
+      // still-connecting socket would otherwise finish its handshake after
+      // unmount and stay open until the app quits. ws.close() on a
+      // CONNECTING socket aborts the connection.
+      if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
         ws.close();
       }
       ptyGenerationRef.current = null;
@@ -1864,7 +1887,7 @@ export function PtyTerminal({
         toast.error(t('ptyTerminal.failedToCopyClipboard'));
       });
     }
-  }, []);
+  }, [t]);
 
   const handlePaste = React.useCallback(async () => {
     await pasteClipboardIntoPty();
