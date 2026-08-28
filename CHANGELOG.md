@@ -7,9 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-**终端命令提示框交互优化（Slice 2-4 及交互修复）**。
+## [2.14.0] - 2026-08-28
 
-### Added / Fixed (Terminal)
+**DB 工具箱 UX 评审收口（P2-9~14 + 杂项）+ 安全/CI 加固 + 发布链路修复**。
+
+### Added (Database Toolbox)
+
+- **L3 连接级错误横幅**（P2-10）：断线 / 连接失败 / host-key 变更时 toolbar 下方出现 h-9 常驻横幅（红色警示 + 重新连接按钮 + fade-in 0.2s），重连成功或手动断开自动消失——替代原 4s 即逝的 toast，错误信息不再丢失。
+- **导航树行内重试**（P2-9）：子树加载失败时错误文案旁出现「重试」按钮，强制重载失败子树。
+- **错误卡标题动词化**（P2-13）：按动作区分「查询失败 / 解释失败 / 浏览失败」（对齐 ux-spec §2.4 模板），错误码与消息重复表意时去重。
+- **列节点「复制列定义」**（评审 1.11）：右键列节点一键复制 `ALTER TABLE … ADD COLUMN …` DDL 片段。
+- **错误行波浪线**（评审 4.6）：SQL 出错行编辑器内红色波浪下划线 + 2s 渐隐自动清除（CodeMirror line decoration）。
+
+### Fixed
+
+- **执行中网格遮罩**（P2-11）：查询运行中旧结果集置灰禁交互（opacity-60 + pointer-events-none），不再可双击编辑过期数据。
+- **剪切 / 复制无选中置灰**（评审 2.5）：编辑器无选中文本时右键 cut/copy 菜单项 disabled。
+- **表设计器 Escape 两级语义**（P2-14）：输入框内首次 Esc 退出编辑，再次 Esc 才 revert 草稿。
+- **结果面板空态升级**（P2-12）：Inbox 图标 + 复制消息 / 清空结果右键菜单；查询历史空态补副文案（5.9）。
+- **传输队列（上传/下载列表）无滚动条**：Radix ScrollArea viewport 在 max-h-only 容器下永不收缩导致溢出被静默裁剪——`viewportClassName` 透传修复，传输队列与目录传输错误日志两处生效。
+- **文件管理右键双菜单**：右键文件同时弹出文件行菜单与空白区菜单（嵌套 ContextMenu 事件冒泡双触发）——行级 `stopPropagation` 修复，右键空白区行为不变。
+- **Windows 免安装包命名**：portable ZIP 由无版本的 `NexTerm-portable.zip` 改为 `NexTerm_<版本>_<架构>-portable.zip`（如 `NexTerm_2.14.0_x64-portable.zip`），与安装版命名族对齐；打包脚本缺版本号 fail-fast，workflow 命名权单源收敛。
+
+### Added (Security / CI)
+
+- **设置页安全警示**（P1）：关闭「主机密钥验证」后设置页显示红色警示条（中间人攻击风险提示）。
+- **TOFU E2E 场景**（P2）：新增 `host-key-tofu.e2e.ts`——首连指纹确认 → 信任保存 → 连接成功，以及拒绝时 fail-closed 不连接。
+- **Docker SSH 回归 CI**（P1）：`scripts/ssh-fixture.sh`（Docker OpenSSH fixture）+ 可选 GitHub Actions job（workflow_dispatch / ssh 路径触发，不阻塞 merge），覆盖 PTY 并发 SFTP 上传回归。
+- **WDIO 并行冲突消除**：强制 `maxInstances = 1` 串行 + 每进程 `mkdtemp` 唯一数据目录，拒绝「并行 + 共享目录」组合。
+- **标签关闭断链修复**（P1-1）：关闭终端/文件/桌面标签页时按协议分发后端断开（ssh / sftp_standalone / ftp / desktop_disconnect），会话不再泄漏。
+- **既有 warning 清理**（P3）：cargo 30 → 0（删废弃 DTO 与死函数、cfg(windows) 收敛、前瞻 API allow+注释、eprintln→tracing）；eslint 1 error + 248 w → 0 error + 243 w（余量为存量技术债）。
+
+### Verified
+
+- tsc 0 error / vitest 113 文件 1041 用例全绿 / cargo test 294 passed 0 failed / cargo check 0 warning / eslint 0 error / i18n en-zh 0 diff
+- `tauri build --no-bundle` 本机跑通（macOS arm64，60MB Mach-O）；正式发布以 release.yml CI 产物为准
+
+### Added / Fixed (Terminal) — 命令提示框交互优化（Slice 2-4 及交互修复）
 
 - **消隐体系**：IME 组合 / 粘贴（bracketed paste）/ 失焦 / 滚动四类门控——全屏输入法候选、粘贴文本、切窗、滚屏均不再误触发建议弹窗；防抖 20ms → 50ms 可配置。
 - **Esc 负反馈**：关闭建议框时对全部候选降权（`recordRejection`），学习引擎立即降温误候选。
