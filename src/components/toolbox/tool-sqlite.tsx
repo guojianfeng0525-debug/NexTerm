@@ -58,6 +58,7 @@ import { resolveDatabaseCommand } from "@/lib/database/command-registry";
 import { databaseErrorResult, parseProviderError } from "@/lib/database/database-error";
 import { generateSelectSql } from "@/lib/database/sql-generation";
 import { addQueryHistory } from "@/lib/database/query-history";
+import { flashEditorRange } from "@/lib/database/editor-flash";
 import {
   currentStatementAt,
   toggleLineComment,
@@ -269,6 +270,14 @@ export function ToolSqlite() {
       next.sql = sql;
       setTabs((current) => [...current, next]);
       setActiveTab(next.id);
+      requestAnimationFrame(() => {
+        const nextView = queryEditorViewRef.current;
+        if (!nextView) return;
+        const end = nextView.state.doc.length;
+        nextView.dispatch({ selection: { anchor: end, head: end } });
+        flashEditorRange(nextView, 0, Math.min(sql.length, end));
+        nextView.focus();
+      });
       return;
     }
     const doc = view.state.doc;
@@ -276,7 +285,10 @@ export function ToolSqlite() {
     const needsLeadingNewline = insertAt > 0 && doc.sliceString(insertAt - 1, insertAt) !== "\n";
     const insertText = (needsLeadingNewline ? "\n" : "") + sql + "\n";
     view.dispatch({ changes: { from: insertAt, to: insertAt, insert: insertText } });
-    view.dispatch({ selection: { anchor: insertAt, head: insertAt + insertText.length } });
+    const end = insertAt + insertText.length;
+    view.dispatch({ selection: { anchor: end, head: end } });
+    const flashFrom = insertAt + (needsLeadingNewline ? 1 : 0);
+    flashEditorRange(view, flashFrom, flashFrom + sql.length);
     view.focus();
   };
   const runCmCommand = (cmd: (view: EditorView) => boolean) => {

@@ -129,6 +129,7 @@ import {
   type SqlGenerationOptions,
 } from "@/lib/database/sql-generation";
 import { addQueryHistory } from "@/lib/database/query-history";
+import { flashEditorRange } from "@/lib/database/editor-flash";
 import { useDatabaseKeyboardShortcuts } from "@/lib/keyboard/use-database-keyboard-shortcuts";
 import { generateId, NotesStorage } from "@/lib/toolbox/toolbox-storage";
 import type { NoteItem } from "@/lib/toolbox/toolbox-types";
@@ -1417,7 +1418,9 @@ export function ToolPostgres() {
   });
   /** Appends generated SQL to the active query editor (selected + focused +
    *  dirty), or opens a fresh query tab when no editor is mounted
-   *  (feature-design §4.2). */
+   *  (feature-design §4.2). The caret lands at the statement end and the
+   *  inserted text gets a transient highlight — never a whole-document
+   *  selection (P1-UX: typing must not replace the generated statement). */
   const insertGeneratedSql = (sql: string, connectionId?: string) => {
     const view = queryEditorViewRef.current;
     if (view) {
@@ -1427,9 +1430,10 @@ export function ToolPostgres() {
         insertAt > 0 && doc.sliceString(insertAt - 1, insertAt) !== "\n";
       const insertText = (needsLeadingNewline ? "\n" : "") + sql + "\n";
       view.dispatch({ changes: { from: insertAt, to: insertAt, insert: insertText } });
-      view.dispatch({
-        selection: { anchor: insertAt, head: insertAt + insertText.length },
-      });
+      const end = insertAt + insertText.length;
+      view.dispatch({ selection: { anchor: end, head: end } });
+      const flashFrom = insertAt + (needsLeadingNewline ? 1 : 0);
+      flashEditorRange(view, flashFrom, flashFrom + sql.length);
       view.focus();
       patchTab(tab.id, { dirty: true });
       return;
@@ -1442,9 +1446,9 @@ export function ToolPostgres() {
     requestAnimationFrame(() => {
       const nextView = queryEditorViewRef.current;
       if (!nextView) return;
-      nextView.dispatch({
-        selection: { anchor: 0, head: nextView.state.doc.length },
-      });
+      const end = nextView.state.doc.length;
+      nextView.dispatch({ selection: { anchor: end, head: end } });
+      flashEditorRange(nextView, 0, Math.min(sql.length, end));
       nextView.focus();
     });
   };
