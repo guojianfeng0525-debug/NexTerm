@@ -171,3 +171,53 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+  # Keep only the N most recent version releases; older ones are deleted
+  # entirely (release + tag + assets). Runs after every successful release.
+  cleanup-old-releases:
+    needs: generate-checksums
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/') || inputs.tag != ''
+    permissions:
+      contents: write
+    env:
+      KEEP: "3"
+    steps:
+      - name: Delete releases older than the newest ${{ env.KEEP }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # Stable releases only (draft/prerelease never block the rotation).
+          # Sort by version descending; keep the first $KEEP, delete the rest.
+          mapfile -t all < <(gh api --paginate "repos/$REPO/releases" \
+            --jq '.[] | select(.draft == false and .prerelease == false) | [.tag_name, .id] | @tsv')
+          echo "stable releases found: ${#all[@]}"
+
+          versions=()
+          declare -A id_of=()
+          for row in "${all[@]}"; do
+            tag="${row%%$'\t'*}"
+            id="${row##*$'\t'}"
+            # v2.10.1 -> 0002.0010.0001 for lexicographic ordering
+            v="${tag#v}"
+            key=$(echo "$v" | awk -F. '{printf "%08d.%08d.%08d", $1, $2, $3}')
+            versions+=("$key|$tag|$id")
+          done
+
+          sorted=$(printf '%s\n' "${versions[@]}" | sort -r)
+          i=0
+          for entry in $sorted; do
+            i=$((i+1))
+            if [ "$i" -le "$KEEP" ]; then
+              echo "keep: ${entry#*|}"
+            else
+              tag="${entry#*|}"; tag="${tag%%|*}"
+              id="${entry##*|}"
+              echo "deleting release $tag (id=$id)"
+              gh api -X DELETE "repos/$REPO/releases/$id"
+              echo "deleting tag $tag"
+              git push https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git --delete "refs/tags/$tag" || true
+            fi
+          done
+

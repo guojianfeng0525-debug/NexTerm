@@ -1,8 +1,9 @@
 name: Build Windows Portable (Fixed WebView2)
 
 on:
+  # Only version tags build installers. Pushes to main run the Test workflow
+  # (unit tests + i18n check) instead — no release artifacts are produced.
   push:
-    branches: [main]
     tags: ['v*']
   workflow_dispatch:
     inputs:
