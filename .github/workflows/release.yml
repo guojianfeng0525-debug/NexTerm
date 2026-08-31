@@ -39,9 +39,12 @@ jobs:
         with:
           tag_name: ${{ inputs.tag || github.ref_name }}
           name: nexterm ${{ inputs.tag || github.ref_name }}
-          body: 'See the assets to download this version and install.'
           draft: false
           prerelease: ${{ inputs.prerelease || false }}
+          # No explicit body: softprops preserves the body of an existing
+          # release (important when re-running this workflow to repair a
+          # botched release); notes for fresh releases come from the portable
+          # workflow's generate_release_notes.
 
   release:
     needs: create-release
