@@ -17,7 +17,34 @@ on:
         type: boolean
 
 jobs:
+  # Publish the release BEFORE any build starts.
+  #
+  # tauri-action can only attach assets to a release it can look up by tag,
+  # and the by-tag lookup cannot see draft releases. When no published
+  # release exists it tries to create one, which fails with
+  # "Resource not accessible by integration" (observed on v2.14.0, where the
+  # platform jobs raced the portable workflow and lost). Creating and
+  # publishing the release up front — via softprops/action-gh-release, the
+  # same action the portable workflow already uses successfully — removes
+  # that race: every build job then finds a published release and only
+  # uploads assets.
+  create-release:
+    if: startsWith(github.ref, 'refs/tags/') || inputs.tag != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Create and publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          name: nexterm ${{ inputs.tag || github.ref_name }}
+          body: 'See the assets to download this version and install.'
+          draft: false
+          prerelease: ${{ inputs.prerelease || false }}
+
   release:
+    needs: create-release
     permissions:
       contents: write
     strategy:
