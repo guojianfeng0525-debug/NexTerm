@@ -136,7 +136,7 @@ jobs:
   generate-checksums:
     needs: release
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/')
+    if: startsWith(github.ref, 'refs/tags/') || inputs.tag != ''
     permissions:
       contents: write
     steps:
