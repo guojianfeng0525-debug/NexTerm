@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.14.1] - 2026-08-31
+
+**发布链路修复版**：修复 2.14.0 发布事故（平台资产缺失）+ CI 三平台测试连续失败，发布流程自动化加固。
+
+### Fixed (CI / Release)
+
+- **v2.14.0 平台资产全丢事故**：macOS / Linux / Windows 安装包全部缺失，release 只剩 portable ZIP。根因是 tauri-action 按 tag 查找 release 时看不到未发布状态，自行创建被 403 拒绝——此前版本成功纯属时序运气。新增 `create-release` 前置 job（构建开始前即创建并发布 release），彻底消除竞态。
+- **Windows JAR 重编译条目损坏**（产品 Bug）：`compile.rs` 收集 .class 路径时 Windows 下产出反斜杠分隔的 JAR 条目名（`com\example\A.class`），回写 JAR 后条目损坏。统一转为 `/` 分隔。
+- **Test workflow 三平台连续失败**（8/25 起）：`jar_hierarchy` 集成测试漏标 `#[ignore]`（CI 无 JDK）；`pom` 测试误断言开发机 `.m2` 仓库内容，改为自建临时夹具。
+- **Release workflow 死链路清理**：删除 updater / homebrew-tap 相关 job（应用未启用自动更新、仓库无签名密钥与 tap token，每次发布必红）。
+
+### Changed (CI)
+
+- **main push 不再触发安装包构建**：portable workflow 仅 tag 触发；main 推送只跑测试门禁。
+- **Release 产物自动保留最近 3 个版本**：每次发布完成后按语义化版本清理旧 release（含 tag），避免产物无限堆积。
+
 ## [2.14.0] - 2026-08-28
 
 **DB 工具箱 UX 评审收口（P2-9~14 + 杂项）+ 安全/CI 加固 + 发布链路修复**。
