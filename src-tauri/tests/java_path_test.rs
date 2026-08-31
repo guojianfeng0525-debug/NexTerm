@@ -1,6 +1,11 @@
 // Verify find_java works with restricted PATH (GUI app simulation).
 use nexterm_lib::decompile;
 #[test]
+// macOS/Linux ship a PATH-independent /usr/bin/java stub, so clearing the
+// environment is recoverable there. Windows has no system java at all: a real
+// GUI launch inherits the user PATH, and the "no PATH, no JAVA_HOME" state
+// this test simulates is unrecoverable by design — skip it on Windows.
+#[cfg(not(windows))]
 fn find_java_gui_env() {
     // Save and clear PATH + JAVA_HOME to simulate GUI launch.
     let old_path = std::env::var("PATH").ok();
