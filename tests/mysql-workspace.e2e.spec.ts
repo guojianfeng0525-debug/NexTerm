@@ -11,7 +11,15 @@ test.describe("MySQL workspace", () => {
     } } }); });
     await page.goto("/");
     const setup = page.getByRole("button", { name: "Set Password" }); if (await setup.isVisible()) { await page.getByRole("textbox", { name: "New password" }).fill("e2e-password"); await page.getByRole("textbox", { name: "Confirm password" }).fill("e2e-password"); await setup.click(); }
-    await page.getByTestId("toolbox-nav-mysql").click();
+    // MySQL/SQLite have no dedicated nav entry since FEATURE BATCH 21+22 —
+    // they are provider switches inside the database workspace. Enter via the
+    // same CustomEvent the PG connection dialog's provider select dispatches.
+    // Wait for the app shell (nav rail) first: the provider-selection listener
+    // mounts with AppContent after storage hydration.
+    await expect(page.getByTestId("toolbox-nav-postgres")).toBeVisible();
+    await page.evaluate(() => {
+      window.dispatchEvent(new CustomEvent("nexterm:database-provider-selected", { detail: "mysql" }));
+    });
     const workspace = page.getByTestId("mysql-workspace"); await expect(workspace).toBeVisible(); await expect(workspace.getByTestId("mysql-run")).toBeDisabled();
     await page.getByTestId("mysql-new-connection").click(); const dialog = page.getByTestId("mysql-connection-dialog");
     await page.getByTestId("database-provider-select").click(); await expect(page.getByRole("option", { name: "MySQL (Experimental)" })).toBeVisible(); await page.getByRole("option", { name: "MySQL (Experimental)" }).click();

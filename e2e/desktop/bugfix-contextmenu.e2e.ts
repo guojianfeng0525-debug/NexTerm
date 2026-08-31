@@ -73,7 +73,8 @@ describe('bugfix: global contextmenu suppression', () => {
     const menuText = await menu.getText();
     console.log('CONTEXT MENU TEXT:', JSON.stringify(menuText));
     expect(menuText).toContain('打开数据');
-    expect(menuText).toContain('复制名称');
+    // Renamed 复制名称 → 复制限定名 in b66ee9e (v2.14.0).
+    expect(menuText).toContain('复制限定名');
     await browser.keys('Escape');
     await menu.waitForExist({ reverse: true });
   });

@@ -24,6 +24,7 @@ interface PostgresCatalogObjectItem {
   readonly nullable?: boolean;
   readonly default?: string;
   readonly ordinal?: number;
+  readonly comment?: string;
 }
 
 export interface PostgresNavigatorConnection {
@@ -522,9 +523,15 @@ export async function loadPostgresNavigatorChildren(
           item.name,
           role,
         ]),
-        // Column DDL metadata for "copy column definition" (ux-spec §1.2.4).
-        ...(role === "column" && item.dataType
-          ? { metadata: { dataType: item.dataType } }
+        // Column DDL metadata for "copy column definition" (ux-spec §1.2.4)
+        // plus the column comment surfaced as the node tooltip (DBeaver).
+        ...(role === "column" && (item.dataType || item.comment)
+          ? {
+              metadata: {
+                ...(item.dataType ? { dataType: item.dataType } : {}),
+                ...(item.comment ? { comment: item.comment } : {}),
+              },
+            }
           : {}),
       };
     });

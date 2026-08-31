@@ -1,8 +1,45 @@
 import { expect } from '@wdio/globals';
+import { mkdirSync } from 'node:fs';
 import { unlockApp, waitForVisible } from './helpers/webkit';
+
+// Debug screenshots are written here; wdio's saveScreenshot fails if the
+// directory is missing, so create it eagerly.
+mkdirSync('./test-results/postgres', { recursive: true });
 
 async function rightClick(element: WebdriverIO.Element) {
   await element.click({ button: 'right' });
+}
+
+/**
+ * Replaces the CodeMirror editor content.
+ *
+ * `element.setValue()` / `clearValue()` send keys that CodeMirror does not
+ * turn into document changes, so `tab.sql` in React state keeps the previous
+ * text — `execute()` then bails out on `!tab.sql.trim()` and the Run button
+ * never enters its disabled (in-flight) state. Driving the editor through
+ * `execCommand('insertText')` goes through CodeMirror's own input pipeline
+ * and keeps React state in sync.
+ */
+async function setEditorSql(sql: string) {
+  // Scope the lookup to the workspace: notes / object-viewer render their own
+  // `.cm-editor`, and focusing a hidden one makes `execCommand('selectAll')`
+  // select the whole document — the following insertText then replaces the
+  // entire body and every testid below disappears.
+  const ok = await browser.execute((value: string) => {
+    const workspace = document.querySelector('[data-testid="postgres-workspace"]');
+    const content = workspace?.querySelector('.cm-content') as HTMLElement | null;
+    if (!content) return false;
+    content.focus();
+    const active = document.activeElement;
+    if (!active || !content.contains(active)) return false;
+    document.execCommand('selectAll');
+    document.execCommand('insertText', false, value);
+    return true;
+  }, sql);
+  if (!ok) {
+    throw new Error('setEditorSql: query editor is not focusable — refusing to run execCommand against the whole document');
+  }
+  await browser.pause(300);
 }
 
 async function configureTheme(label: '深色' | '浅色') {
@@ -72,16 +109,16 @@ describe('PostgreSQL visual workspace', () => {
     await browser.saveScreenshot('./test-results/postgres/03-object-list.png');
 
     const workspace = await $('[data-testid="postgres-workspace"]');
-    const editor = await workspace.$('.cm-content');
-    await editor.click();
-    await editor.clearValue();
+    await setEditorSql('SELECT 1;');
     await expect($('[data-testid="postgres-run"]')).toBeEnabled();
-    await editor.setValue('SELECT pg_sleep(1);');
+    // Long enough that the in-flight (Run disabled) window survives the
+    // polling latency of the assertion below, short enough that the following
+    // "enabled again" assertion still lands inside wdio's default 5s wait.
+    await setEditorSql('SELECT pg_sleep(3);');
     await $('[data-testid="postgres-run"]').click();
     await expect($('[data-testid="postgres-run"]')).toBeDisabled();
     await expect($('[data-testid="postgres-run"]')).toBeEnabled();
-    await editor.clearValue();
-    await editor.setValue(
+    await setEditorSql(
       'SELECT id, username, email, age, active, credit, created_at, last_login FROM public.users ORDER BY username LIMIT 20;',
     );
     await browser.saveScreenshot('./test-results/postgres/04-query-editor.png');
@@ -142,6 +179,14 @@ describe('PostgreSQL visual workspace', () => {
     await browser.saveScreenshot('./test-results/postgres/06b-view-data.png');
 
     await $('[data-testid="postgres-disconnect"]').click();
+    // Disconnecting a workspace with unsaved SQL asks for confirmation first
+    // (tool-postgres `disconnect()`): the CREATE VIEW statement typed above
+    // left the query tab dirty. Discard it — the assertions below only care
+    // about the connected/disconnected toolbar state.
+    const discardAndDisconnect = await $('button=丢弃并断开');
+    if (await discardAndDisconnect.isExisting()) {
+      await discardAndDisconnect.click();
+    }
     await expect($('[data-testid="postgres-connect"]')).toBeEnabled();
     await expect($('[data-testid="postgres-disconnect"]')).not.toBeExisting();
   });

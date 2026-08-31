@@ -94,6 +94,8 @@ pub struct PostgresCatalogObject {
     pub ordinal: Option<i32>,
     /// `true` when the column is part of the table's primary key (columns).
     pub is_primary_key: Option<bool>,
+    /// Column comment from `col_description` (columns).
+    pub comment: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -348,12 +350,14 @@ async fn sequence_ddl(client: &Client, schema: &str, name: &str) -> Result<Strin
 }
 
 /// Builds a `CREATE TABLE` definition by composing column/constraint/index
-/// fragments (architecture D-B21-8, AC-21C-3).
+/// fragments (architecture D-B21-8, AC-21C-3). Column and table comments are
+/// appended as `COMMENT ON` statements so the generated DDL round-trips the
+/// schema's documentation (DBeaver parity).
 async fn table_ddl(client: &Client, schema: &str, name: &str) -> Result<String, String> {
     let columns = timeout(
         QUERY_TIMEOUT,
         client.query(
-            "SELECT a.attname, format_type(a.atttypid, a.atttypmod), NOT a.attnotnull, pg_get_expr(ad.adbin, ad.adrelid) FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace LEFT JOIN pg_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum WHERE n.nspname = $1 AND c.relname = $2 AND a.attnum > 0 AND NOT a.attisdropped AND has_schema_privilege(n.oid, 'USAGE') ORDER BY a.attnum",
+            "SELECT a.attname, format_type(a.atttypid, a.atttypmod), NOT a.attnotnull, pg_get_expr(ad.adbin, ad.adrelid), pg_catalog.col_description(c.oid, a.attnum) FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace LEFT JOIN pg_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum WHERE n.nspname = $1 AND c.relname = $2 AND a.attnum > 0 AND NOT a.attisdropped AND has_schema_privilege(n.oid, 'USAGE') ORDER BY a.attnum",
             &[&schema, &name],
         ),
     )
@@ -382,11 +386,15 @@ async fn table_ddl(client: &Client, schema: &str, name: &str) -> Result<String, 
     .map_err(|error| format!("Failed to load table indexes: {error}"))?;
 
     let mut body: Vec<String> = Vec::new();
+    // Column comments collected while composing the body, emitted as
+    // `COMMENT ON COLUMN` statements after the CREATE TABLE (index-order).
+    let mut column_comments: Vec<(String, String)> = Vec::new();
     for row in &columns {
         let column_name: String = row.try_get(0).map_err(|e| format!("Failed to decode column: {e}"))?;
         let data_type: String = row.try_get(1).map_err(|e| format!("Failed to decode column type: {e}"))?;
         let nullable: bool = row.try_get(2).map_err(|e| format!("Failed to decode nullability: {e}"))?;
         let default: Option<String> = row.try_get(3).map_err(|e| format!("Failed to decode default: {e}"))?;
+        let comment: Option<String> = row.try_get(4).map_err(|e| format!("Failed to decode column comment: {e}"))?;
         let mut fragment = format!("    {} {}", quote_identifier(&column_name), data_type);
         if let Some(default) = default.filter(|value| !value.is_empty()) {
             fragment.push_str(&format!(" DEFAULT {default}"));
@@ -395,6 +403,9 @@ async fn table_ddl(client: &Client, schema: &str, name: &str) -> Result<String, 
             fragment.push_str(" NOT NULL");
         }
         body.push(fragment);
+        if let Some(comment) = comment.filter(|value| !value.trim().is_empty()) {
+            column_comments.push((column_name, comment));
+        }
     }
     for row in &constraints {
         let constraint_name: String = row.try_get(0).map_err(|e| format!("Failed to decode constraint: {e}"))?;
@@ -417,7 +428,49 @@ async fn table_ddl(client: &Client, schema: &str, name: &str) -> Result<String, 
         ddl.push_str(&indexdef);
         ddl.push(';');
     }
+    // Table-level comment first, then column comments, each as a standalone
+    // statement — mirroring pg_dump's own emission order.
+    let table_comment = timeout(
+        QUERY_TIMEOUT,
+        client.query_opt(
+            "SELECT pg_catalog.obj_description(c.oid, 'pg_class') FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = $1 AND c.relname = $2",
+            &[&schema, &name],
+        ),
+    )
+    .await
+    .map_err(|_| "Catalog query timed out")?
+    .map_err(|error| format!("Failed to load table comment: {error}"))?
+    .and_then(|row| {
+        row.try_get::<_, Option<String>>(0)
+            .ok()
+            .flatten()
+            .filter(|value| !value.trim().is_empty())
+    });
+    if let Some(comment) = table_comment {
+        ddl.push_str("\n\n");
+        ddl.push_str(&format!(
+            "COMMENT ON TABLE {}.{} IS {};",
+            quote_identifier(schema),
+            quote_identifier(name),
+            quote_comment_literal(&comment)
+        ));
+    }
+    for (column_name, comment) in column_comments {
+        ddl.push('\n');
+        ddl.push_str(&format!(
+            "COMMENT ON COLUMN {}.{} IS {};",
+            quote_identifier(schema),
+            quote_identifier(&column_name),
+            quote_comment_literal(&comment)
+        ));
+    }
     Ok(ddl)
+}
+
+/// SQL string literal with doubled single quotes for `COMMENT ON ... IS '...'`
+/// (same escaping contract as postgres_design.rs's quote_literal).
+fn quote_comment_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
 }
 
 /// Builds the `CREATE OR REPLACE VIEW / MATERIALIZED VIEW` text from
@@ -490,7 +543,7 @@ pub async fn postgres_catalog_objects(
             PostgresCatalogDetail::None,
         ),
         "columns" => (
-            "SELECT n.nspname, a.attname, format_type(a.atttypid, a.atttypmod), (NOT a.attnotnull)::text, pg_get_expr(ad.adbin, ad.adrelid), a.attnum::int, EXISTS (SELECT 1 FROM pg_index i WHERE i.indrelid = a.attrelid AND i.indisprimary AND EXISTS (SELECT 1 FROM unnest(i.indkey) k(attnum) WHERE k.attnum = a.attnum))::text FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace LEFT JOIN pg_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum WHERE n.nspname = $1 AND c.relname = $2 AND a.attnum > 0 AND NOT a.attisdropped AND has_schema_privilege(n.oid, 'USAGE') ORDER BY a.attnum LIMIT $3",
+            "SELECT n.nspname, a.attname, format_type(a.atttypid, a.atttypmod), (NOT a.attnotnull)::text, pg_get_expr(ad.adbin, ad.adrelid), a.attnum::int, EXISTS (SELECT 1 FROM pg_index i WHERE i.indrelid = a.attrelid AND i.indisprimary AND EXISTS (SELECT 1 FROM unnest(i.indkey) k(attnum) WHERE k.attnum = a.attnum))::text, pg_catalog.col_description(a.attrelid, a.attnum) FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace LEFT JOIN pg_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum WHERE n.nspname = $1 AND c.relname = $2 AND a.attnum > 0 AND NOT a.attisdropped AND has_schema_privilege(n.oid, 'USAGE') ORDER BY a.attnum LIMIT $3",
             PostgresCatalogDetail::Column,
         ),
         _ => unreachable!("kind whitelist checked above"),
@@ -552,6 +605,7 @@ pub async fn postgres_catalog_objects(
             default: None,
             ordinal: None,
             is_primary_key: None,
+            comment: None,
         };
         match detail {
             PostgresCatalogDetail::Signature => {
@@ -572,6 +626,7 @@ pub async fn postgres_catalog_objects(
                 object.default = row.try_get::<_, Option<String>>(4).ok().flatten();
                 object.ordinal = row.try_get::<_, i32>(5).ok();
                 object.is_primary_key = row.try_get::<_, String>(6).ok().map(|value| value == "t");
+                object.comment = row.try_get::<_, Option<String>>(7).ok().flatten();
             }
             PostgresCatalogDetail::None => {}
         }
@@ -817,7 +872,7 @@ pub async fn postgres_object_props(
             let col = timeout(
                 QUERY_TIMEOUT,
                 client.query_one(
-                    "SELECT a.attnum::int, format_type(a.atttypid, a.atttypmod), NOT a.attnotnull, pg_get_expr(ad.adbin, ad.adrelid) FROM pg_attribute a LEFT JOIN pg_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum WHERE a.attrelid = $1::text::oid AND a.attname = $2",
+                    "SELECT a.attnum::int, format_type(a.atttypid, a.atttypmod), NOT a.attnotnull, pg_get_expr(ad.adbin, ad.adrelid), pg_catalog.col_description(a.attrelid, a.attnum) FROM pg_attribute a LEFT JOIN pg_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum WHERE a.attrelid = $1::text::oid AND a.attname = $2",
                     &[&oid_param(oid), &request.name],
                 ),
             )
@@ -829,6 +884,7 @@ pub async fn postgres_object_props(
                 ("dataType", 1, "string"),
                 ("nullable", 2, "bool"),
                 ("default", 3, "option-string"),
+                ("comment", 4, "option-string"),
             ] {
                 let value = match kind {
                     "i64" => col.try_get::<_, i64>(index).ok().map(|value| value.to_string()),

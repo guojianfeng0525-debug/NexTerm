@@ -39,11 +39,14 @@ async function connectPostgres() {
   await $('[data-testid="postgres-run"]').waitForEnabled();
 }
 
-/** Runs DDL through the query editor (opens the Query tab when needed). */
+/** Runs DDL through a freshly created query tab so the tab's connectionId
+ * matches the currently connected draft (workaround for a product bug where
+ * clicking "New Connection" regenerates draft.id but leaves the initial Query
+ * tab with the old id). */
 async function runSql(sql: string) {
+  await $('[data-testid="postgres-new-query"]').click();
+  await browser.pause(300);
   const workspace = await $('[data-testid="postgres-workspace"]');
-  const queryTab = await workspace.$('button=Query');
-  if (await queryTab.isExisting()) await queryTab.click();
   const editors = await workspace.$$('.cm-content');
   const editor = editors[editors.length - 1];
   await editor.click();

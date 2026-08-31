@@ -113,11 +113,12 @@ describe('B21 navigator context menus and open semantics', () => {
     await menu.waitForExist({ reverse: true });
 
     // Relation object menu (B21 §5.3: Open Data / Copy Name / Generate DDL /
-    // Refresh / Drop).
+    // Refresh / Drop). copyName text was renamed 复制名称 → 复制限定名 in
+    // b66ee9e (v2.14.0); the assertion tracks the current label.
     const objectMenu = await openContextMenu('button=users');
     const objectMenuText = await objectMenu.getText();
     expect(objectMenuText).toContain('打开数据');
-    expect(objectMenuText).toContain('复制名称');
+    expect(objectMenuText).toContain('复制限定名');
     expect(objectMenuText).toContain('生成 DDL');
     expect(objectMenuText).toContain('刷新');
     expect(objectMenuText).toContain('删除表');
@@ -129,7 +130,7 @@ describe('B21 navigator context menus and open semantics', () => {
     await $('[data-testid="postgres-connect"]').waitForEnabled();
     const disconnectedMenu = await openContextMenu('button=users');
     const disconnectedMenuText = await disconnectedMenu.getText();
-    expect(disconnectedMenuText).toContain('复制名称');
+    expect(disconnectedMenuText).toContain('复制限定名');
     const openDataItem = await disconnectedMenu.$('[role="menuitem"]*=打开数据');
     if (await openDataItem.isExisting()) {
       // Radix marks disabled items with the `data-disabled` attribute.

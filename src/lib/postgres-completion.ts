@@ -9,6 +9,8 @@ export type PostgresCatalogItem = {
   relation?: string;
   dataType?: string;
   signature?: string;
+  /** Column comment (`col_description`) / relation comment (`obj_description`). */
+  comment?: string;
 };
 
 export type PostgresCatalogLookup = (request: {
@@ -145,7 +147,15 @@ function relationAtCursor(text: string): { schema?: string; relation: string } |
 
 function catalogOption(item: PostgresCatalogItem): Completion {
   const type = item.kind === "column" ? "property" : item.kind === "function" ? "function" : item.kind === "type" ? "type" : "class";
-  return { label: item.name, type, detail: item.signature ?? item.dataType ?? item.schema };
+  // DBeaver parity: when a comment exists it leads the detail line so the
+  // tooltip explains the object; the raw type/signature stays as suffix.
+  const base = item.signature ?? item.dataType ?? item.schema;
+  const detail = item.comment
+    ? base
+      ? `${base} — ${item.comment}`
+      : item.comment
+    : base;
+  return { label: item.name, type, detail };
 }
 
 /** Combines instant static completion with the connected PostgreSQL catalog. */

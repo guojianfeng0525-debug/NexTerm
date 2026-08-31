@@ -310,16 +310,28 @@ pub fn run() {
     #[cfg(debug_assertions)]
     let builder = builder.plugin(tauri_plugin_wdio_webdriver::init());
 
+    // Single-instance: a second launch focuses the existing window instead
+    // of spawning a whole new WebView2 process group (each instance costs
+    // ~7 Chromium processes).
+    // Skipped under NEXTERM_DATA_DIR (desktop E2E): WDIO serial runs stop the
+    // previous spec's app with SIGTERM→SIGKILL; the dying instance still owns
+    // the single-instance socket, so a fast-relaunched test instance connects
+    // to it and exits(0) before its WebDriver session is usable — every spec
+    // after the first failed with "app neither showed lock screen".
+    let e2e_mode = std::env::var_os("NEXTERM_DATA_DIR").is_some();
+    let builder: tauri::Builder<tauri::Wry> = if e2e_mode {
+        builder
+    } else {
+        builder.plugin(tauri_plugin_single_instance::init(
+            |app, _args, _cwd| {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.set_focus();
+                    let _ = window.unminimize();
+                }
+            },
+        ))
+    };
     builder
-        // Single-instance: a second launch focuses the existing window instead
-        // of spawning a whole new WebView2 process group (each instance costs
-        // ~7 Chromium processes).
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.set_focus();
-                let _ = window.unminimize();
-            }
-        }))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_opener::init())
@@ -607,6 +619,7 @@ pub fn run() {
             postgres::postgres_table_delete,
             postgres::postgres_catalog_schemas,
             postgres::postgres_catalog_search,
+            postgres::postgres_set_search_path,
             postgres::postgres_ssh_fingerprint,
             // B21 catalog-domain commands (postgres_catalog.rs)
             postgres_catalog::postgres_catalog_objects,

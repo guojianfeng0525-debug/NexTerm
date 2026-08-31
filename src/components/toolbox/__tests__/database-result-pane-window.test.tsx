@@ -111,6 +111,47 @@ describe("DatabaseResultPane windowing", () => {
     expect(container.querySelectorAll("tbody tr").length).toBeGreaterThan(0);
   });
 
+  it("keeps staged INSERT rows mounted when the committed rows are windowed", () => {
+    // B17 regression: "Add Record" on a virtualized grid staged a row below the
+    // scroll window, so nothing appeared until the user scrolled to the bottom.
+    const layout = {
+      frozenCount: 0,
+      widths: {},
+      rowHeight: 24,
+      showFieldType: false,
+      showComment: false,
+    } as const;
+    const { container } = render(
+      <DatabaseResultPane
+        result={makeResult(500)}
+        fillHeight
+        height={480}
+        paged={false}
+        onPrevious={() => undefined}
+        onNext={() => undefined}
+        labels={baseLabels}
+        layout={layout}
+        pendingInsertRows={[
+          { id: "ins-1", values: ["new-0", null, "new-2"] },
+        ]}
+        deletedRowIndexes={[]}
+      />,
+    );
+    const rows = Array.from(container.querySelectorAll("tbody tr"));
+    const staged = rows.find(
+      (row) => row.querySelector("td:first-child")?.textContent?.trim() === "+",
+    );
+    expect(staged).toBeDefined();
+    // The staged row sits below every committed row: only the bottom spacer
+    // (gap to the last committed row) may precede it.
+    const stagedIndex = rows.indexOf(staged!);
+    const bottomSpacer = rows.findIndex((row) =>
+      row.getAttribute("data-testid") === "database-result-window-spacer-bottom",
+    );
+    expect(bottomSpacer).toBeLessThan(stagedIndex);
+    expect(staged!.textContent).toContain("new-0");
+  });
+
   it("renders an error result through renderError with the shared header", () => {
     const error = {
       kind: "error" as const,

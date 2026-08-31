@@ -77,8 +77,11 @@ test.describe('PostgreSQL workspace', () => {
     const navigator = page.getByTestId('postgres-workspace').locator('aside').first();
     const users = navigator.getByRole('button', { name: 'users', exact: true });
     await expect(users).toBeVisible();
+    // Single-click selects (navigator highlight); since FEATURE BATCH 21+22
+    // opening a table's data grid requires a DOUBLE-click (onOpen).
     await users.click();
     await expect(users).toHaveClass(/bg-primary\/10/);
+    await users.dblclick();
     await expect(
       page.getByTestId('postgres-workspace').getByRole('main').getByRole('button', { name: 'users', exact: true }),
     ).toBeVisible();

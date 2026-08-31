@@ -126,6 +126,7 @@ import {
 import { revealEditorLine } from "@/lib/database/editor-error-reveal";
 import {
   generateInsertSql,
+  generateInsertValuesSql,
   generateSelectSql,
   generateUpdateSql,
   type ColumnMetadata,
@@ -353,6 +354,12 @@ async function loadNavigatorChildren(
 function quoteQualifiedPostgresName(reference: PostgresRelationReference): string {
   const quote = (identifier: string) => `"${identifier.replace(/"/g, '""')}"`;
   return `${quote(reference.schema)}.${quote(reference.relation)}`;
+}
+
+/** Escapes a string for use inside a single-quoted PG literal (e.g. the
+ *  `'schema.table'::regclass` cast used by table statistics). */
+function quoteLiteralText(value: string): string {
+  return value.replace(/'/g, "''");
 }
 
 function postgresNavigatorLabels(t: TFunction): PostgresNavigatorGroupLabels {
@@ -772,6 +779,27 @@ export function ToolPostgres() {
   const reportConnectionError = (message: string) => {
     if (isConnectionLevelError(message)) setConnectionError(message);
   };
+  /**
+   * Points every untouched query tab at `connectionId`.
+   *
+   * The workspace boots with one placeholder query tab bound to the initial
+   * draft id, and "New connection" mints a fresh profile id. Without this
+   * rebind the placeholder keeps the stale id, so the first Run in a brand new
+   * connection executes against an id the backend has never seen and fails
+   * with "PostgreSQL connection is not active" — the user has no way to tell
+   * why their first query does nothing. Tabs that have already been executed
+   * (result != null) are left alone so real work is never silently moved to
+   * another connection.
+   */
+  const rebindUntouchedQueryTabs = (connectionId: string) => {
+    setTabs((current) =>
+      current.map((tab) =>
+        tab.type === "query" && !tab.result
+          ? { ...tab, connectionId }
+          : tab,
+      ),
+    );
+  };
   const connectEstablished = async (
     profile: PostgreSQLConnectionProfile,
   ): Promise<boolean> => {
@@ -825,6 +853,7 @@ export function ToolPostgres() {
       }));
       setConnected(true);
       setConnectionError(null);
+      rebindUntouchedQueryTabs(saved.id);
       const savedQueries = loadSavedQueryTabs(saved.id);
       if (savedQueries.length) {
         setTabs((current) => [
@@ -942,6 +971,22 @@ export function ToolPostgres() {
     return () => window.removeEventListener("nexterm:paste-sql-to-query", pasteToQuery);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- connectEstablished is a stable inline fn; adding it re-binds the listener on every render
   }, [connected, connections, draft.id, t]);
+  // Keep the backend session's search_path aligned with the navigator's
+  // selected schema so bare table names in user SQL resolve like DBeaver:
+  // picking `myschema` in the tree makes `SELECT * FROM users` hit
+  // `myschema.users` first (public stays as fallback). Fires on connect and
+  // on every schema switch; failures are surfaced as a passive toast only —
+  // the session still works with the server-default search_path.
+  useEffect(() => {
+    if (!connected || !schema) return;
+    void invoke("postgres_set_search_path", {
+      request: { connectionId: draft.id, schema },
+    }).catch((error: unknown) => {
+      toast.warning(t("toolbox.postgres.searchPathSyncFailed"), {
+        description: String(error),
+      });
+    });
+  }, [connected, schema, draft.id, t]);
   const trustAndConnect = async () => {
     if (!pendingSshTrust) return;
     const trusted = {
@@ -1452,6 +1497,74 @@ export function ToolPostgres() {
   const postgresSqlOptions = (): SqlGenerationOptions => ({
     quoteIdentifier: (id: string) => `"${id.replace(/"/g, '""')}"`,
   });
+  /** Quick action: run `SELECT COUNT(*)` against a relation and surface the
+   *  result as a toast — zero-tab feedback for the most common "how many rows
+   *  does this table have" question. Reuses the quick-execute error path. */
+  const quickCountRows = async (reference: PostgresRelationReference) => {
+    if (!connected) return;
+    const sql = `SELECT COUNT(*) AS count FROM ${quoteQualifiedPostgresName(reference)};`;
+    try {
+      const result = await invoke<PostgresQueryRuntimeResult>("postgres_execute", {
+        request: { connectionId: reference.connectionId, sql, maxRows: 1 },
+      });
+      const value = result.rows[0]?.[0];
+      toast.success(t("toolbox.postgres.quickCountDone", { count: value ?? "0" }));
+    } catch (error) {
+      toast.error(t("toolbox.postgres.queryFailed"), { description: String(error) });
+    }
+  };
+  /** Quick action: open a query tab pre-filled with table statistics
+   *  (estimated rows, on-disk + total size, dead tuples, last analyze) and
+   *  execute it immediately — mirrors pgAdmin's "Statistics" tab using only
+   *  catalog tables available to non-superusers. */
+  const openTableStats = async (reference: PostgresRelationReference) => {
+    if (!connected) return;
+    const sql = [
+      `SELECT c.relname AS table_name,`,
+      `       c.reltuples::bigint AS estimated_rows,`,
+      `       pg_size_pretty(pg_total_relation_size(c.oid)) AS total_size,`,
+      `       pg_size_pretty(pg_relation_size(c.oid)) AS table_size,`,
+      `       pg_size_pretty(pg_indexes_size(c.oid)) AS indexes_size,`,
+      `       n_dead_tup AS dead_tuples,`,
+      `       last_analyze, last_autoanalyze`,
+      `  FROM pg_catalog.pg_class c`,
+      `  JOIN pg_catalog.pg_stat_user_tables s ON s.relid = c.oid`,
+      ` WHERE c.oid = '${quoteLiteralText(`${reference.schema}.${reference.relation}`)}'::regclass;`,
+    ].join("\n");
+    const quickTab = { ...newQuery(reference.connectionId), title: t("toolbox.postgres.tableStats"), sql };
+    openTab(quickTab);
+    setRunning(true);
+    try {
+      const result = await invoke<PostgresQueryRuntimeResult>("postgres_execute", {
+        request: { connectionId: reference.connectionId, sql, maxRows: 100 },
+      });
+      patchTab(quickTab.id, { result: adaptPostgresQueryResult(result), dirty: false });
+    } catch (error) {
+      toast.error(t("toolbox.postgres.queryFailed"), { description: String(error) });
+    } finally {
+      setRunning(false);
+    }
+  };
+  /** Quick action (result grid): copy one committed row as a runnable INSERT
+   *  statement. Column names come from the result header; values are escaped
+   *  as PG string literals / NULL. Insert-staged rows are not offered this
+   *  action (they have no committed values yet). */
+  const copyRowAsInsert = async (
+    row: readonly (string | null)[],
+    result: DatabaseResult | null,
+  ) => {
+    const tableObject = tab.type === "table" ? tab.object : undefined;
+    const qualifier = tableObject?.schema ?? "";
+    const table = tableObject?.name;
+    const columnNames = result?.kind === "tabular" ? result.columns.map((column) => column.label) : [];
+    if (!table || columnNames.length === 0) {
+      toast.error(t("toolbox.postgres.copyAsInsertUnavailable"));
+      return;
+    }
+    await copyText(
+      generateInsertValuesSql(qualifier, table, columnNames, row, postgresSqlOptions()),
+    );
+  };
   /** Appends generated SQL to the active query editor (selected + focused +
    *  dirty), or opens a fresh query tab when no editor is mounted
    *  (feature-design §4.2). The caret lands at the statement end and the
@@ -2547,8 +2660,13 @@ export function ToolPostgres() {
           icon={<Plus />}
           label={t("toolbox.postgres.newConnection")}
           onClick={() => {
-            setDraft(newConnection());
+            const next = newConnection();
+            setDraft(next);
             setSelectedId(null);
+            // The placeholder query tab still points at the previous draft id;
+            // move it onto the profile being created so the first query after
+            // connecting targets the right connection.
+            rebindUntouchedQueryTabs(next.id);
             setDialogPage("general");
             setConfigOpen(true);
           }}
@@ -2839,6 +2957,26 @@ export function ToolPostgres() {
                   {relation && relation.objectRole === "table" && <ContextMenuItem disabled={!connected} onSelect={() => openDesigner(relation.schema, relation.relation)}><PencilRuler className="h-3.5 w-3.5" />{t("toolbox.postgres.designTable")}</ContextMenuItem>}
                   {relation && relation.objectRole === "view" && <ContextMenuItem disabled={!connected} onSelect={() => void openViewDesigner(relation.schema, relation.relation)}><PencilRuler className="h-3.5 w-3.5" />{t("toolbox.postgres.designView")}</ContextMenuItem>}
                   {relation && relation.objectRole === "materializedView" && <ContextMenuItem disabled title={t("toolbox.postgres.materializedViewReadonly")}><PencilRuler className="h-3.5 w-3.5" />{t("toolbox.postgres.designView")}</ContextMenuItem>}
+                  {relation && (
+                    <>
+                      <ContextMenuItem
+                        disabled={!connected}
+                        onSelect={() => void quickCountRows(relation)}
+                        data-testid="navigator-quick-count"
+                      >
+                        <Hash className="h-3.5 w-3.5" />
+                        {t("toolbox.postgres.quickCountRows")}
+                      </ContextMenuItem>
+                      <ContextMenuItem
+                        disabled={!connected}
+                        onSelect={() => void openTableStats(relation)}
+                        data-testid="navigator-table-stats"
+                      >
+                        <LineChart className="h-3.5 w-3.5" />
+                        {t("toolbox.postgres.tableStats")}
+                      </ContextMenuItem>
+                    </>
+                  )}
                   {relation && (
                     <ContextMenuSub>
                       <ContextMenuSubTrigger
@@ -3414,6 +3552,7 @@ export function ToolPostgres() {
                       <>
                         <ContextMenuItem onSelect={() => void copyText(cell ?? "NULL")}><Copy className="h-3.5 w-3.5" />{t("toolbox.postgres.copyCell")}</ContextMenuItem>
                         <ContextMenuItem onSelect={() => void copyText(row.map((value) => value ?? "NULL").join("\t"))}><CopyCheck className="h-3.5 w-3.5" />{t("toolbox.postgres.copyRow")}</ContextMenuItem>
+                        <ContextMenuItem onSelect={() => void copyRowAsInsert(row, tab.result)}><ClipboardPaste className="h-3.5 w-3.5" />{t("toolbox.postgres.copyAsInsert")}</ContextMenuItem>
                         <ContextMenuItem onSelect={() => void copyText(columnName)}><CopyMinus className="h-3.5 w-3.5" />{t("toolbox.postgres.copyColumnName")}</ContextMenuItem>
                         <ContextMenuSeparator />
                         {tab.type === "table" && <>

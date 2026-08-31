@@ -16,7 +16,11 @@ describe('SQLite native workspace', () => {
     await browser.tauri.switchWindow('main');
   });
 
-  it('opens a temporary real SQLite database and verifies a real query result', async () => {
+  it.skip('opens a temporary real SQLite database and verifies a real query result', async () => {
+    // SKIPPED: commit fe1d1f2 ("chore(toolbox): hide mysql and sqlite
+    // navigation") removed the `sqlite` entry from NAV_ENTRIES, so
+    // `[data-testid="toolbox-nav-sqlite"]` no longer renders. Re-enable this
+    // spec once the SQLite navigation entry is restored.
     const fixturePath = process.env.NEXTERM_SQLITE_E2E_PATH;
     if (!fixturePath) throw new Error('SQLite E2E fixture path is unavailable');
 

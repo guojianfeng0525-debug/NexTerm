@@ -462,6 +462,9 @@ pub struct PostgresCatalogItem {
     pub data_type: Option<String>,
     pub signature: Option<String>,
     pub relation_kind: Option<String>,
+    /// Column comment (`col_description`) for column completion; table/view
+    /// comment (`obj_description`) for relation completion.
+    pub comment: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -2390,14 +2393,14 @@ pub async fn postgres_catalog_search(
     let prefix = format!("{}%", request.prefix.unwrap_or_default());
     let rows = match request.kind.as_str() {
         "relation" => client.query(
-            "SELECT n.nspname, c.relname, c.relkind::text FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.relkind IN ('r','v','m','p') AND has_schema_privilege(n.oid, 'USAGE') AND ($1::text IS NULL OR n.nspname = $1) AND c.relname ILIKE $2 ORDER BY n.nspname, c.relname LIMIT $3",
+            "SELECT n.nspname, c.relname, c.relkind::text, pg_catalog.obj_description(c.oid, 'pg_class') FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.relkind IN ('r','v','m','p') AND has_schema_privilege(n.oid, 'USAGE') AND ($1::text IS NULL OR n.nspname = $1) AND c.relname ILIKE $2 ORDER BY n.nspname, c.relname LIMIT $3",
             &[&request.schema, &prefix, &limit],
         ).await,
         "column" => {
             let schema = request.schema.as_deref().ok_or_else(|| "Schema is required for column completion".to_string())?;
             let relation = request.relation.as_deref().ok_or_else(|| "Relation is required for column completion".to_string())?;
             client.query(
-                "SELECT n.nspname, a.attname, format_type(a.atttypid, a.atttypmod) FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = $1 AND c.relname = $2 AND a.attnum > 0 AND NOT a.attisdropped AND a.attname ILIKE $3 ORDER BY a.attnum LIMIT $4",
+                "SELECT n.nspname, a.attname, format_type(a.atttypid, a.atttypmod), pg_catalog.col_description(c.oid, a.attnum) FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = $1 AND c.relname = $2 AND a.attnum > 0 AND NOT a.attisdropped AND a.attname ILIKE $3 ORDER BY a.attnum LIMIT $4",
                 &[&schema, &relation, &prefix, &limit],
             ).await
         }
@@ -2446,9 +2449,72 @@ pub async fn postgres_catalog_search(
                 } else {
                     None
                 },
+                // Optional 4th column: comment for relation/column kinds.
+                // try_get keeps older shapes tolerant; other kinds never
+                // select a 4th column so the lookup simply yields None.
+                comment: if request.kind == "relation" || request.kind == "column" {
+                    row.try_get::<_, Option<String>>(3).ok().flatten()
+                } else {
+                    None
+                },
             })
         })
         .collect()
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PostgresSetSearchPathRequest {
+    pub connection_id: String,
+    /// Target schema (validated as an identifier and quoted; never raw SQL).
+    pub schema: String,
+}
+
+/// Validates a schema name for the `SET search_path` statement. Identifier
+/// whitelist: names are interpolated into a quoted identifier slot, so
+/// anything outside [A-Za-z0-9_$] is rejected outright rather than relying
+/// on quoting alone (defense in depth with quote_identifier). Returns the
+/// ready-to-execute statement.
+fn build_set_search_path_statement(schema: &str) -> Result<String, String> {
+    let schema = schema.trim();
+    if schema.is_empty() {
+        return Err("Schema is required".into());
+    }
+    if !schema
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
+    {
+        return Err("Schema name contains unsupported characters".into());
+    }
+    Ok(format!(
+        "SET search_path TO {}, public",
+        quote_identifier(schema)
+    ))
+}
+
+/// Syncs the session `search_path` to the navigator's selected schema so bare
+/// table names in user SQL resolve the way DBeaver does: selecting `myschema`
+/// in the tree makes `SELECT * FROM users` hit `myschema.users` first, with
+/// `public` kept as fallback. `SET` is a session-local statement — it mutates
+/// no persisted data — so read-only connections may set it too.
+#[tauri::command]
+pub async fn postgres_set_search_path(
+    request: PostgresSetSearchPathRequest,
+    state: tauri::State<'_, PostgresState>,
+) -> Result<(), String> {
+    let statement = build_set_search_path_statement(&request.schema)?;
+    let client = state
+        .clients
+        .read()
+        .await
+        .get(&request.connection_id)
+        .cloned()
+        .ok_or_else(|| "PostgreSQL connection is not active".to_string())?;
+    tokio::time::timeout(QUERY_TIMEOUT, client.execute(statement.as_str(), &[]))
+        .await
+        .map_err(|_| "Setting search_path timed out".to_string())?
+        .map_err(|error| format!("Failed to set search_path: {error}"))?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -2506,12 +2572,35 @@ pub async fn postgres_ssh_fingerprint(
 mod tests {
     use super::{
         build_delete_statement, build_insert_statement, build_order_by_clause,
-        build_where_clause, fingerprint_matches, reject_untracked_transaction_control,
-        single_statement, skip_leading_noise, split_sql_statements, validate_parameterized_request,
-        validate_read_only_sql, PostgresFilterCondition,
-        PostgresSortClause, PostgresTableFilter,
+        build_set_search_path_statement, build_where_clause, fingerprint_matches,
+        reject_untracked_transaction_control, single_statement, skip_leading_noise,
+        split_sql_statements, validate_parameterized_request, validate_read_only_sql,
+        PostgresFilterCondition, PostgresSortClause, PostgresTableFilter,
     };
     use std::collections::{HashMap, HashSet};
+
+    #[test]
+    fn set_search_path_quotes_and_appends_public_fallback() {
+        assert_eq!(
+            build_set_search_path_statement("myschema").unwrap(),
+            "SET search_path TO \"myschema\", public"
+        );
+        assert_eq!(
+            build_set_search_path_statement(" app_2 ").unwrap(),
+            "SET search_path TO \"app_2\", public"
+        );
+    }
+
+    #[test]
+    fn set_search_path_rejects_empty_and_unsafe_names() {
+        assert!(build_set_search_path_statement("").is_err());
+        assert!(build_set_search_path_statement("   ").is_err());
+        // Injection carriers never reach the statement, even though quoting
+        // would also neutralize them.
+        assert!(build_set_search_path_statement("public; DROP TABLE x").is_err());
+        assert!(build_set_search_path_statement("weird\"name").is_err());
+        assert!(build_set_search_path_statement("sch-ema").is_err());
+    }
 
     fn column_types() -> HashMap<String, String> {
         HashMap::from([

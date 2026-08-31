@@ -116,11 +116,19 @@ async function waitForEditorText(fragments: string[], timeoutMs = 20_000) {
   throw new Error(`Editor text did not include ${fragments.join(', ')} — last text: ${last.slice(0, 120)}`);
 }
 
+/** Opens a fresh query tab so the tab's connectionId matches the currently
+ * connected draft (workaround for a product bug where clicking "New Connection"
+ * regenerates draft.id but leaves the initial Query tab with the old id). */
+async function openFreshQueryTab() {
+  await $('[data-testid="postgres-new-query"]').click();
+  await browser.pause(300);
+}
+
 /** Idempotently (re)creates the B21 fixture objects so the spec is repeatable
  * even after the drop test removed the trigger in a previous run. */
 async function ensureFixture() {
+  await openFreshQueryTab();
   const workspace = await $('[data-testid="postgres-workspace"]');
-  await workspace.$('button=Query').click();
   const editors = await workspace.$$('.cm-content');
   const editor = editors[editors.length - 1];
   await editor.click();
@@ -290,8 +298,8 @@ describe('B21 navigator object coverage', () => {
 
   it('drops a trigger after confirmation and refreshes the tree', async () => {
     // Recreate the fixture trigger idempotently so the spec is repeatable.
+    await openFreshQueryTab();
     const workspace = await $('[data-testid="postgres-workspace"]');
-    await workspace.$('button=Query').click();
     const editors = await workspace.$$('.cm-content');
     const editor = editors[editors.length - 1];
     await editor.click();

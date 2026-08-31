@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useLayoutEffect, useRef } from "react";
 import {
   type CommandBinding,
   type KeyboardScope,
@@ -149,7 +149,14 @@ export function useDatabaseKeyboardShortcuts(
   const optionsRef = useRef(options);
   const bindingsRef = useRef<readonly CommandBinding[] | null>(null);
 
-  useEffect(() => {
+  // Sync the ref synchronously at commit time. A passive useEffect leaves a
+  // window between the DOM update (running=true renders the Stop button) and
+  // the effect flush; a keydown arriving in that window reads a stale handler
+  // closure (running=false) and Ctrl+T becomes a silent no-op — precisely the
+  // moment the user presses it. useLayoutEffect closes before paint, before
+  // any input event can be dispatched.
+  const syncOptions = useLayoutEffect;
+  syncOptions(() => {
     optionsRef.current = options;
   });
 
@@ -161,7 +168,6 @@ export function useDatabaseKeyboardShortcuts(
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       const opts = optionsRef.current;
-
       // Boundary 1 — DIALOG short-circuit: hand the keyboard entirely to the
       // dialog controls (resolveScope would otherwise fall through to DB scopes).
       if (opts.dialogOpen) return;
@@ -169,8 +175,32 @@ export function useDatabaseKeyboardShortcuts(
       // Boundary 2 — own-workspace ownership: all three tools are mounted at
       // once; ignore events whose focus is outside this tool's workspace.
       const activeElement = document.activeElement;
-      if (!(activeElement instanceof Element)) return;
-      if (!activeElement.closest(`[data-testid="${opts.testId}"]`)) return;
+      // No initializer: every path below either assigns or returns, so the
+      // initial value would never be read (no-useless-assignment).
+      let scopeAnchor: Element;
+      if (
+        activeElement instanceof Element &&
+        activeElement.closest(`[data-testid="${opts.testId}"]`)
+      ) {
+        scopeAnchor = activeElement;
+      } else {
+        // Boundary 2b — focus lost. WebKit/Chromium move focus to <body> the
+        // moment the focused element becomes disabled, which is exactly what
+        // the Run button does when a query starts. With no owner every database
+        // shortcut dies silently — Ctrl+T (stop) included, precisely while a
+        // query is running. Claim ownership for this tool when it is the
+        // visible section: inactive sections carry the `hidden` class, so at
+        // most one tool can ever match.
+        const focusLost =
+          !activeElement ||
+          activeElement === document.body ||
+          activeElement === document.documentElement;
+        if (!focusLost) return;
+        const container = document.querySelector(`[data-testid="${opts.testId}"]`);
+        if (!(container instanceof HTMLElement)) return;
+        if (container.getClientRects().length === 0) return;
+        scopeAnchor = container;
+      }
 
       const typingInField =
         event.target instanceof Element &&
@@ -180,7 +210,7 @@ export function useDatabaseKeyboardShortcuts(
       // does not register a design handler (e.g. MySQL/SQLite without a table
       // designer), the event is left untouched so TableDesignerTab's own
       // useDesignerShortcuts keeps working (feature-design §1.3).
-      if (resolveDesignerScope(activeElement)) {
+      if (resolveDesignerScope(activeElement instanceof Element ? activeElement : null)) {
         const command = matchDesignerCommand(event, typingInField);
         if (command && opts.handlers[command]) {
           event.preventDefault();
@@ -197,10 +227,9 @@ export function useDatabaseKeyboardShortcuts(
       };
       const scope = resolveScope({
         dialogOpen: false,
-        activeElement,
+        activeElement: scopeAnchor,
         anchors,
       });
-
       // Boundary 4 — multiple CodeMirror instances: when the tool declares an
       // ownership check (notes / object-viewer editors are also `.cm-editor`),
       // a foreign editor is left alone.

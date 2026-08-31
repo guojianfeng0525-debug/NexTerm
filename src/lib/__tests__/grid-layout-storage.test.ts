@@ -62,7 +62,8 @@ describe("grid layout storage (B18 Slice C)", () => {
       widths: {},
       rowHeight: 0,
       showFieldType: false,
-      showComment: false,
+      // Absent flag inherits the default (comments on) instead of `false`.
+      showComment: true,
     });
   });
 });

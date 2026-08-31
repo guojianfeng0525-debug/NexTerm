@@ -92,3 +92,39 @@ export function generateUpdateSql(
     : " WHERE 1=1 -- TODO: 补充更新条件";
   return `UPDATE ${qualifiedName(qualifier, table, options)} SET ${setClause}${whereClause};`;
 }
+
+/**
+ * Renders a cell value as a SQL literal for "copy row as INSERT".
+ *
+ * Contract: receives the **already-serialized** cell strings from the result
+ * grid (`DatabaseCellValue`). Provider-specific display formatting (e.g. PG
+ * `t`/`f` booleans) is preserved verbatim — the value round-trips back into
+ * the same dialect that produced it. Unquoted fallback (`raw`) is only used
+ * by callers that explicitly opt out.
+ */
+export function formatSqlCellLiteral(
+  value: string | null,
+  options: { readonly raw?: boolean } = {},
+): string {
+  if (value === null) return "NULL";
+  if (options.raw) return value;
+  return `'${value.replace(/'/g, "''")}'`;
+}
+
+/**
+ * Builds a ready-to-run `INSERT INTO … VALUES (…)` statement from one result
+ * row ("copy row as INSERT" quick action). Column names come from the grid
+ * header (`columnNames`); values are serialized cells escaped as literals.
+ */
+export function generateInsertValuesSql(
+  qualifier: string,
+  table: string,
+  columnNames: readonly string[],
+  values: readonly (string | null)[],
+  options: SqlGenerationOptions,
+): string {
+  const count = Math.min(columnNames.length, values.length);
+  const names = columnNames.slice(0, count).map((name) => quote(options, name));
+  const literals = values.slice(0, count).map((value) => formatSqlCellLiteral(value));
+  return `INSERT INTO ${qualifiedName(qualifier, table, options)} (${names.join(", ")}) VALUES (${literals.join(", ")});`;
+}

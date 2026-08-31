@@ -435,6 +435,21 @@ export function DatabaseResultPane({
   const scrollContainerRef = useRef<HTMLElement | null>(null);
   const totalRows = (tabularResult?.rows.length ?? 0) + pendingInsertRows.length;
   const rowWindow = useRowWindow(scrollContainerRef, totalRows, effectiveRowHeight);
+  /** Staged INSERT rows live at the very end of the grid. Under windowing the
+   * viewport is usually parked far above them, so a row staged by "Add Record"
+   * would never be mounted — the click would look like a no-op. Keep every
+   * staged row mounted (they are user-staged, so bounded) and scroll the
+   * newest one into view. */
+  const pendingInsertCount = pendingInsertRows.length;
+  const previousInsertCountRef = useRef(pendingInsertCount);
+  useEffect(() => {
+    const staged = pendingInsertCount > previousInsertCountRef.current;
+    previousInsertCountRef.current = pendingInsertCount;
+    if (!staged) return;
+    const container = scrollContainerRef.current;
+    if (!container) return;
+    container.scrollTop = container.scrollHeight;
+  }, [pendingInsertCount, totalRows]);
 
   const columnWidth = (columnIndex: number) =>
     layout?.widths[tabularResult?.columns[columnIndex]?.key ?? ""];
@@ -685,6 +700,9 @@ export function DatabaseResultPane({
                     key={column.key}
                     className="relative whitespace-nowrap border-b border-r px-2 py-1 text-left font-medium"
                     style={cellStyle(columnIndex)}
+                    title={[column.providerType, column.providerComment]
+                      .filter(Boolean)
+                      .join("\n") || undefined}
                   >
                     {renderColumnContextMenu ? (
                       <ContextMenu>
@@ -727,18 +745,15 @@ export function DatabaseResultPane({
             <tbody onPointerMove={onPointerMove} onPointerUp={endResize}>
               {(() => {
                 const committedCount = tabularResult.rows.length;
-                // Keep the row being edited mounted even if the scroll window
-                // would otherwise unload it (unmounting the input commits it).
-                const editingGlobal = editing
-                  ? editing.source === "row"
-                    ? editing.row
-                    : committedCount + editing.row
-                  : null;
+                // Keep the committed row being edited mounted even if the
+                // scroll window would otherwise unload it (unmounting the
+                // input commits it). Staged INSERT rows are always mounted
+                // below, so they need no window extension.
                 let start = rowWindow.start;
                 let end = rowWindow.end;
-                if (rowWindow.enabled && editingGlobal != null) {
-                  start = Math.min(start, editingGlobal);
-                  end = Math.max(end, editingGlobal + 1);
+                if (rowWindow.enabled && editing?.source === "row") {
+                  start = Math.min(start, editing.row);
+                  end = Math.max(end, editing.row + 1);
                 }
                 const windowedRows: React.ReactNode[] = [];
                 if (rowWindow.enabled && start > 0) {
@@ -752,62 +767,63 @@ export function DatabaseResultPane({
                     </tr>,
                   );
                 }
-                for (let global = start; global < end; global += 1) {
-                  if (global < committedCount) {
-                    windowedRows.push(
-                      <CommittedRow
-                        key={pagination ? pagination.offset + global : global}
-                        row={tabularResult.rows[global]}
-                        index={global}
-                        isDeleted={deletedRowSet.has(global)}
-                        rowHeight={
-                          rowWindow.enabled ? effectiveRowHeight : layout?.rowHeight
-                        }
-                        frozen={Boolean(layout?.frozenCount)}
-                        cellStyles={columnStyles}
-                        columns={tabularResult.columns}
-                        pkKeySet={pkKeySet}
-                        findMatchKeys={findMatchKeys}
-                        currentFindKey={currentFindKey}
-                        paginationOffset={pagination?.offset ?? 0}
-                        editing={editing}
-                        handlersRef={rowHandlersRef}
-                      />,
-                    );
-                  } else {
-                    const insertIndex = global - committedCount;
-                    const insertRow = pendingInsertRows[insertIndex];
-                    if (insertRow) {
-                      windowedRows.push(
-                        <InsertRow
-                          key={insertRow.id}
-                          id={insertRow.id}
-                          values={insertRow.values}
-                          insertIndex={insertIndex}
-                          rowHeight={
-                            rowWindow.enabled ? effectiveRowHeight : layout?.rowHeight
-                          }
-                          frozen={Boolean(layout?.frozenCount)}
-                          cellStyles={columnStyles}
-                          columns={tabularResult.columns}
-                          editing={editing}
-                          handlersRef={rowHandlersRef}
-                        />,
-                      );
-                    }
-                  }
+                const committedEnd = Math.min(end, committedCount);
+                for (let global = start; global < committedEnd; global += 1) {
+                  windowedRows.push(
+                    <CommittedRow
+                      key={pagination ? pagination.offset + global : global}
+                      row={tabularResult.rows[global]}
+                      index={global}
+                      isDeleted={deletedRowSet.has(global)}
+                      rowHeight={
+                        rowWindow.enabled ? effectiveRowHeight : layout?.rowHeight
+                      }
+                      frozen={Boolean(layout?.frozenCount)}
+                      cellStyles={columnStyles}
+                      columns={tabularResult.columns}
+                      pkKeySet={pkKeySet}
+                      findMatchKeys={findMatchKeys}
+                      currentFindKey={currentFindKey}
+                      paginationOffset={pagination?.offset ?? 0}
+                      editing={editing}
+                      handlersRef={rowHandlersRef}
+                    />,
+                  );
                 }
-                if (rowWindow.enabled && end < totalRows) {
+                // The gap between the window and the committed rows is
+                // spacer-filled BEFORE the staged rows, so the staged rows keep
+                // their position below every committed row.
+                if (rowWindow.enabled && committedEnd < committedCount) {
                   windowedRows.push(
                     <tr key="spacer-bottom" aria-hidden="true" data-testid="database-result-window-spacer-bottom">
                       <td
                         colSpan={tabularResult.columns.length + 1}
                         className="p-0"
-                        style={{ height: (totalRows - end) * effectiveRowHeight }}
+                        style={{
+                          height: (committedCount - committedEnd) * effectiveRowHeight,
+                        }}
                       />
                     </tr>,
                   );
                 }
+                pendingInsertRows.forEach((insertRow, insertIndex) => {
+                  windowedRows.push(
+                    <InsertRow
+                      key={insertRow.id}
+                      id={insertRow.id}
+                      values={insertRow.values}
+                      insertIndex={insertIndex}
+                      rowHeight={
+                        rowWindow.enabled ? effectiveRowHeight : layout?.rowHeight
+                      }
+                      frozen={Boolean(layout?.frozenCount)}
+                      cellStyles={columnStyles}
+                      columns={tabularResult.columns}
+                      editing={editing}
+                      handlersRef={rowHandlersRef}
+                    />,
+                  );
+                });
                 if (!windowedRows.length) {
                   windowedRows.push(
                     <tr key="empty">

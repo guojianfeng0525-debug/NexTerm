@@ -320,7 +320,12 @@ const commands: readonly DatabaseCommandDescriptor[] = [
   {
     id: "database.query.stop",
     labelKey: "database.command.query.stop",
-    scopes: ["QUERY_EDITOR"],
+    // Stop must be reachable wherever focus sits after starting a query:
+    // clicking the toolbar Run button moves focus to that button (scope drops
+    // to WORKSPACE) and results focus the grid (DATA_GRID), so a
+    // QUERY_EDITOR-only scope made Ctrl+T a dead key exactly when the user
+    // needed it. The handler is a no-op unless a query is actually running.
+    scopes: ["QUERY_EDITOR", "WORKSPACE", "DATA_GRID"],
     requiredCapabilities: [],
     connectionStates: ["connected"],
     defaultBinding: "Ctrl+T",

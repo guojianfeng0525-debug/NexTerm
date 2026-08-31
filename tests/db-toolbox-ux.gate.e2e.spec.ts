@@ -327,7 +327,9 @@ test('GATE: menu / error card / history / layout visual contract', async ({ page
     .count();
   record(
     'history context menu has a destructive item (remove)',
-    destructiveItems === 1,
+    // The menu now carries two destructive actions (remove entry + clear all)
+    // — assert presence, not an exact count.
+    destructiveItems >= 1,
     `destructive=${destructiveItems}`,
   );
   await page.keyboard.press('Escape');

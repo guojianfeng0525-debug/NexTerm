@@ -139,6 +139,11 @@ export function ToolSqlite() {
     removeRecord: t("toolbox.sqlite.removeRecord"),
   };
 
+  // Declared before the effects below: they reference it in their listeners,
+  // and `react-hooks/immutability` rejects reaching a `const` that is declared
+  // later in the component body.
+  const patchTab = (id: string, patch: Partial<Tab>) => setTabs((current) => current.map((item) => item.id === id ? { ...item, ...patch } : item));
+
   useEffect(() => {
     const pasteSqlNote = (event: Event) => {
       const detail = (event as CustomEvent<{ content?: string; handled?: boolean; provider?: string }>).detail;
@@ -181,7 +186,6 @@ export function ToolSqlite() {
     return () => window.removeEventListener("nexterm:toolbox-changed", update);
   }, []);
 
-  const patchTab = (id: string, patch: Partial<Tab>) => setTabs((current) => current.map((item) => item.id === id ? { ...item, ...patch } : item));
   const load = async (node: DatabaseObjectNode) => {
     try { const next = await loadSqliteNavigatorChildren(node, t("toolbox.sqlite.tables")); setChildren((current) => ({ ...current, [node.id]: next })); return next; }
     catch (error) { toast.error(t("toolbox.sqlite.metadataFailed"), { description: String(error) }); return []; }

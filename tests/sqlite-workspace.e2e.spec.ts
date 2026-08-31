@@ -30,7 +30,15 @@ test.describe('SQLite workspace', () => {
       await setupPassword.click();
     }
 
-    await page.getByTestId('toolbox-nav-sqlite').click();
+    // MySQL/SQLite have no dedicated nav entry since FEATURE BATCH 21+22 —
+    // they are provider switches inside the database workspace. Enter via the
+    // same CustomEvent the PG connection dialog's provider select dispatches.
+    // Wait for the app shell (nav rail) first: the provider-selection listener
+    // mounts with AppContent after storage hydration.
+    await expect(page.getByTestId('toolbox-nav-postgres')).toBeVisible();
+    await page.evaluate(() => {
+      window.dispatchEvent(new CustomEvent('nexterm:database-provider-selected', { detail: 'sqlite' }));
+    });
     const workspace = page.getByTestId('sqlite-workspace');
     await expect(workspace).toBeVisible();
     await expect(workspace.getByTestId('sqlite-run')).toBeDisabled();

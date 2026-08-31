@@ -6,7 +6,9 @@ export const DEFAULT_GRID_LAYOUT: GridLayoutState = {
   /** 0 = use the default row height. */
   rowHeight: 0,
   showFieldType: false,
-  showComment: false,
+  /** Comments on by default (DBeaver parity); legacy layouts that never
+   * stored the flag fall back to this default rather than `false`. */
+  showComment: true,
 };
 
 /** Layout persistence is scoped per provider/connection/schema/table so the
@@ -45,7 +47,13 @@ export function loadGridLayout(key: string): GridLayoutState {
           ? candidate.rowHeight
           : 0,
       showFieldType: Boolean(candidate.showFieldType),
-      showComment: Boolean(candidate.showComment),
+      // Only an explicitly stored boolean overrides the default; layouts
+      // saved before the comment column existed (flag absent/undefined)
+      // inherit `true` instead of silently hiding comments.
+      showComment:
+        typeof candidate.showComment === "boolean"
+          ? candidate.showComment
+          : DEFAULT_GRID_LAYOUT.showComment,
     };
   } catch {
     return DEFAULT_GRID_LAYOUT;

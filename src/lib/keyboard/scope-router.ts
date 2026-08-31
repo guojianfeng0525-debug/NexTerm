@@ -132,14 +132,18 @@ export function routeKeyEvent(
   } | null = null;
   for (const binding of bindings) {
     if (binding.scopes.length === 0) continue; // hidden binding
+    // A binding applies in the current scope when ANY of its declared scopes
+    // ranks at-or-below the requested one — multi-scope commands (e.g. query
+    // stop: QUERY_EDITOR + WORKSPACE + DATA_GRID) must stay reachable when
+    // focus drops to the workspace level, not be pinned to their highest
+    // scope. Taking the unconditional max here made Ctrl+T a dead key the
+    // moment the Run button disabled itself and focus fell to <body>.
     let bindingRank = 0;
     for (const s of binding.scopes) {
       const rank = scopeRank[s] ?? 0;
-      if (rank > bindingRank) bindingRank = rank;
+      if (rank <= requestedRank && rank > bindingRank) bindingRank = rank;
     }
-    // A binding applies when its (highest) scope rank is <= requested rank
-    // (i.e. we fall back from DIALOG down to lower scopes).
-    if (bindingRank > requestedRank) continue;
+    if (bindingRank === 0) continue; // no declared scope at-or-below focus
 
     const combo = parseKeyboardShortcut(binding.combo);
     if (!combo) continue;

@@ -168,6 +168,11 @@ export function DatabaseNavigator({
             className={`flex h-6 w-full items-center gap-1 px-1 text-left text-[12px] outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring ${selected ? "bg-primary/10 text-primary" : "hover:bg-accent/70"} ${isVirtualGroup ? "h-7 border-b border-border/60 bg-accent/40 text-[11px] font-medium uppercase tracking-wide" : ""}`}
             data-testid={isVirtualGroup ? "connection-group-header" : "database-navigator-node"}
             data-node-id={node.id}
+            title={
+              typeof node.metadata?.comment === "string" && node.metadata.comment
+                ? node.metadata.comment
+                : undefined
+            }
           >
             <span style={{ width: depth * 14 }} />
             {node.expandable ? (

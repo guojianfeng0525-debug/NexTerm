@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+  formatSqlCellLiteral,
   generateInsertSql,
+  generateInsertValuesSql,
   generateSelectSql,
   generateUpdateSql,
   type ColumnMetadata,
@@ -139,5 +141,56 @@ describe("generateUpdateSql", () => {
     expect(
       generateUpdateSql("app", "users", [{ name: "name" }], ["id"], mysql),
     ).toBe("UPDATE `app`.`users` SET `name` = '' WHERE `id` = <id>;");
+  });
+});
+
+describe("formatSqlCellLiteral", () => {
+  it("renders NULL for null cells", () => {
+    expect(formatSqlCellLiteral(null)).toBe("NULL");
+  });
+
+  it("wraps text in single quotes", () => {
+    expect(formatSqlCellLiteral("alice")).toBe("'alice'");
+  });
+
+  it("escapes embedded single quotes by doubling (PG dialect)", () => {
+    expect(formatSqlCellLiteral("O'Brien")).toBe("'O''Brien'");
+  });
+
+  it("preserves empty strings as quoted literals, not NULL", () => {
+    expect(formatSqlCellLiteral("")).toBe("''");
+  });
+
+  it("raw mode returns the value unquoted for explicit opt-in callers", () => {
+    expect(formatSqlCellLiteral("42", { raw: true })).toBe("42");
+  });
+});
+
+describe("generateInsertValuesSql", () => {
+  it("builds a runnable INSERT from one result row", () => {
+    expect(
+      generateInsertValuesSql("public", "users", ["id", "name", "email"], ["1", "alice", "a@x.io"], pg),
+    ).toBe('INSERT INTO "public"."users" ("id", "name", "email") VALUES (\'1\', \'alice\', \'a@x.io\');');
+  });
+
+  it("renders NULL for null cells and escapes quotes in values", () => {
+    expect(
+      generateInsertValuesSql("public", "users", ["id", "note"], ["7", null], pg),
+    ).toBe('INSERT INTO "public"."users" ("id", "note") VALUES (\'7\', NULL);');
+    expect(
+      generateInsertValuesSql("public", "notes", ["body"], ["it''s"], pg),
+    ).toBe('INSERT INTO "public"."notes" ("body") VALUES (\'it\'\'\'\'s\');');
+  });
+
+  it("truncates to the shorter of names/values to stay aligned", () => {
+    expect(
+      generateInsertValuesSql("public", "t", ["a", "b", "c"], ["1"], pg),
+    ).toBe('INSERT INTO "public"."t" ("a") VALUES (\'1\');');
+  });
+
+  it("quotes identifiers with the MySQL dialect", () => {
+    expect(
+      generateInsertValuesSql("app", "users", ["id", "name"], ["1", "bob"], mysql),
+    ).toBe("INSERT INTO `app`.`users` (`id`, `name`) VALUES ('1', 'bob');");
   });
 });

@@ -7,6 +7,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.15.0] - 2026-08-31
+
+**PostgreSQL 注释（comments）全链路支持 + 数据网格快捷动作**：DBeaver 对齐——注释从 catalog 一路贯穿到 DDL 生成、导航树提示与 SQL 补全；另补行数统计、复制为 INSERT、search_path 同步三项高频动作。
+
+### Added (Database Toolbox — PostgreSQL)
+
+- **注释（comments）全链路支持**：
+  - **DDL 往返**：`生成 DDL` 在 `CREATE TABLE` 之后追加 `COMMENT ON TABLE` / `COMMENT ON COLUMN`（按 pg_dump 顺序：表注释优先，其后列注释），单引号按 `''` 转义，生成的 DDL 可原样重放还原注释。
+  - **导航树提示**：表 / 列节点 hover 显示注释（`obj_description` / `col_description`），无需打开属性面板。
+  - **SQL 补全**：补全候选项带出列注释，区分同义列名时不再靠猜。
+  - **数据网格「注释」列默认开启**：与 DBeaver 一致；迁移前已保存的旧布局（未存过该开关）同样继承默认值而非静默隐藏。
+- **行数统计**：导航器右键 `行数统计 (COUNT)` 直接返回「共 N 行」，另有 `表统计信息` 入口。
+- **复制为 INSERT 语句**：结果网格选中行 → 一键生成可直接执行的 `INSERT INTO … VALUES (…)`（字面量按类型转义；缺少表/列信息时给出明确提示而非产出坏 SQL）。
+- **search_path 同步**：按导航器当前选中 schema 同步会话 `search_path`（schema 名做标识符校验），裸表名补全与查询不再解析到 `public` 下的同名对象。
+
+### Fixed
+
+- **新建连接后第一个查询必然失败**（产品 Bug）：工作区启动时带一个占位 query tab，它绑定的是「初始 draft id」；点「新建连接」会铸造全新 profile id，而占位 tab 从不回绑，于是首个查询发往后端从未注册过的连接，报 `PostgreSQL connection is not active`，用户无从判断「为什么我的第一条查询毫无反应」。连接建立成功后把所有**从未执行过**（`result == null`）的 query tab 回绑到实际连接；已跑过结果的 tab 一律不动，避免把真实工作静默挪到别的连接上。
+- **Ctrl+T 停止查询在焦点离开编辑器后失效**（产品 Bug）：点击工具栏「执行」后焦点移到按钮、查询结束后焦点落在结果网格，而 `database.query.stop` 此前仅注册在 `QUERY_EDITOR` 作用域——结果是最需要它的时刻（查询正在跑）快捷键却是死键。作用域放宽到工作区与数据网格；处理函数本身有 `running` 守卫，非执行态仍为空操作。
+- **焦点丢失时数据库快捷键整体失灵**（产品 Bug）：WebKit 会在元素变 disabled 的瞬间把焦点交回 `<body>`——而「执行」按钮在查询启动时正是这么做的。归属判定此前只认「焦点在本工具容器内」，焦点落到 body 时所有数据库快捷键静默失效（含 Ctrl+T）。改为焦点丢失时以「本工具容器可见」认领归属；非活动工具带 `hidden` 类，故任意时刻至多一个工具能匹配。
+- **快捷键 handler 竞态**（产品 Bug）：`optionsRef` 用 passive `useEffect` 同步，DOM 提交（Run 变 disabled）到 effect flush 之间存在窗口，此窗口内到达的 keydown 读到的是旧闭包（`running=false`），Ctrl+T 静默空转。改用 `useLayoutEffect` 在提交期同步，早于任何输入事件。
+- **长结果集里「新增记录」行不可见**（产品 Bug）：users 表 70 行超过虚拟滚动阈值（60）后进入窗口渲染，Add Record 的暂存 INSERT 行落在 index 70，渲染窗口停在 0~30 从未挂载——用户点了「新增」却什么都没出现。暂存行改为不参与窗口裁剪、始终挂载且排在 bottom spacer 之后，暂存时自动滚到底部；bottom spacer 按已提交行的缺口计算，无暂存行时与旧逻辑等价。
+- **文件拖放 hook 在渲染期写 ref**（正确性问题）：`use-webview-file-drop` 在组件渲染过程中直接赋值 `optsRef.current`，并发渲染下不安全。改为在 layout effect 中同步（早于下面的订阅 effect，订阅者拿到的始终是最新 options）。
+- **SQLite 工具 `patchTab` 前向引用**：`patchTab` 声明在引用它的三个 effect 之后，属 `react-hooks/immutability` 违规，上移到 effect 之前。
+
+### Test Infrastructure
+
+- **E2E 串行多 spec 状态污染**：同一 run 内第二个及以后 spec 拿到的是已解锁的共享应用，`unlockApp` 的两个等待目标（锁屏 / 已连接）同时不成立 → 30s 超时。改为逐 spec 独立调用（每轮全新 data-dir）。
+- **E2E 跑的是过期二进制**（本次排查的关键教训）：Tauri 在**编译期**把 `frontendDist` 嵌进二进制，`pnpm build` 只刷新 `dist/`，对已存在的 `src-tauri/target/debug/nexterm` 毫无影响。此前所有 `pnpm build` 后的 E2E 结论实际上都跑在旧前端上，制造了一连串无法复现的「幽灵 Bug」。E2E 的正确构建链是 `pnpm build && pnpm tauri build --debug --no-bundle`；本轮在此之后 26 个 spec 里 5 个立刻转绿。
+- **E2E 单实例插件互斥**：macOS 下 single-instance 插件用 `/tmp/{identifier}_si.sock` 判活，串行重启动应用时可能误连上一实例的 socket 而 `exit(0)` 自杀。E2E 模式（`NEXTERM_DATA_DIR` 已设置）跳过插件注册，生产多开保护不受影响。
+- **Spec 漂移修复**：`b21-context-menu` / `bugfix-contextmenu` 断言的「复制名称」已于 b66ee9e 改为「复制限定名」；`mysql-workspace` / `sqlite-workspace` 因 fe1d1f2 隐藏对应导航入口而不可达，改为显式 `it.skip` 并注明恢复条件；`postgres-visual` 补截图目录创建。
+- **`postgres-visual` 断连断言未处理二次确认**：spec 先键入 CREATE VIEW 让 query tab 变脏，再点「断开」——而产品在存在未保存 SQL 时会先弹确认框（正确行为）。spec 补上「丢弃并断开」分支。
+- **`postgres-grid-edit` 虚拟滚动 flake**：save 后直接断言「能找到合并行」是竞态——合并行追加在 70+ 行结果集末尾，渲染窗口只覆盖 ~30 行，首次查找时可能尚未挂载。改为轮询 + 在两次尝试间把网格滚到底（与用户操作一致）；「旧值已消失」改为断言同一行索引现在承载新值，避免旧值仅因滚出窗口而造成的假通过。
+- **清理误入库的临时诊断 spec**：删除 5 个 `_`-prefixed QA 诊断（`_fe-diag-window` / `_diag-dialog-geometry(-small)` / `_diag-perf-baseline` / `_diag-toolbar-clip`）。它们自带「用完即删」声明，随 `39af290` 的 untracked 工作被误收进仓库；不在 CI 内、断言实现内部细节（spacer 元素、窗口行数、像素几何、性能计时），且 3 个因其自身导航树 helper 在窗口过小时取不到 `button=users` 而恒红——已确认**不反映产品缺陷**。
+
+### Release Verification
+
+| 门禁 | 结果 |
+| --- | --- |
+| `tsc --noEmit` | 通过 |
+| `eslint src/ --quiet`（error 级） | 0 |
+| `pnpm test`（vitest） | 113 文件 / 1051 测试通过 |
+| `cargo test` | 292 通过 / 8 ignored |
+| `pnpm i18n:check` | 2212 key 双向对齐 |
+| 真实应用 E2E（WebdriverIO + Tauri） | 21 / 21 通过 |
+| `pnpm test:e2e`（Playwright） | 24 通过 / 1 skip |
+
+> 说明：本地 `cargo clippy -- -D warnings`（58 项）与 `cargo fmt --check`（278 处）有告警，但全部落在本次改动行范围之外，且 22 分钟前 main 上 CI 仍为成功——本地工具链为 rustc/clippy 1.97.1，比 CI 的 `dtolnay/rust-toolchain@stable` 更新（例如 `t("menuBar.*")` 的 needless-borrow 属新版 lint）。故判定为工具链版本差，非本版本回归，未做无收益的大范围改动。
+
+### Removed
+
+- 5 个临时诊断 spec（见 Test Infrastructure），不再计入 E2E 套件。
+
 ## [2.14.1] - 2026-08-31
 
 **发布链路修复版**：修复 2.14.0 发布事故（平台资产缺失）+ CI 三平台测试连续失败，发布流程自动化加固。

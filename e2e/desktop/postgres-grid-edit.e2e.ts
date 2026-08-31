@@ -84,6 +84,49 @@ async function findRowIndexByText(text: string): Promise<number | null> {
   }, text);
 }
 
+/**
+ * Nudges the virtualised result grid to its bottom edge.
+ *
+ * The grid only mounts the rows inside its render window, so a row appended
+ * by a committed INSERT can sit below the window until the container is
+ * scrolled — exactly what a user would do to look at it.
+ */
+async function scrollGridToBottom() {
+  await browser.execute(() => {
+    const table = document.querySelector('[data-testid="postgres-workspace"] table');
+    let node = table?.parentElement ?? null;
+    while (node && node !== document.body) {
+      const style = getComputedStyle(node);
+      const scrollable = style.overflowY === 'auto' || style.overflowY === 'scroll';
+      if (scrollable && node.scrollHeight > node.clientHeight) {
+        node.scrollTop = node.scrollHeight;
+        return;
+      }
+      node = node.parentElement;
+    }
+  });
+}
+
+/**
+ * Waits for a row containing `text` to be mounted, scrolling to the bottom of
+ * the grid between attempts. Returns its row index.
+ *
+ * A direct `findRowIndexByText` right after a save is a race: the merged row
+ * is appended at the end of a ~71-row set whose render window covers ~30
+ * rows, so it is not guaranteed to be in the DOM on the first look.
+ */
+async function waitForRowWithText(text: string, timeout = 15_000): Promise<number> {
+  await browser.waitUntil(
+    async () => {
+      if ((await findRowIndexByText(text)) !== null) return true;
+      await scrollGridToBottom();
+      return (await findRowIndexByText(text)) !== null;
+    },
+    { timeout, timeoutMsg: `row containing "${text}" never rendered` },
+  );
+  return (await findRowIndexByText(text))!;
+}
+
 async function rowElement(rowIndex: number) {
   const rows = await $(WORKSPACE_SELECTOR).$$('tbody tr');
   const row = rows[rowIndex];
@@ -168,10 +211,10 @@ describe('PostgreSQL grid edit loop (B17)', () => {
       timeoutMsg: 'insert row did not merge after saving',
     });
     expect(await findInsertRowIndex()).toBeNull();
-    expect(await findRowIndexByText(insertValue)).not.toBeNull();
+    await waitForRowWithText(insertValue);
 
     // --- UPDATE: the back-filled PK makes the merged row editable ----------
-    const mergedIndex = (await findRowIndexByText(insertValue))!;
+    const mergedIndex = await waitForRowWithText(insertValue);
     await editCellAndCommit(mergedIndex, 3, updateValue);
     await expect($('[data-testid="postgres-save-changes"]')).toBeEnabled();
     await $('[data-testid="postgres-save-changes"]').click();
@@ -181,11 +224,14 @@ describe('PostgreSQL grid edit loop (B17)', () => {
       const cls = (await row.$('td:nth-child(3)').getAttribute('class')) ?? '';
       return !cls.includes('bg-amber-500/10');
     }, { timeout: 15000, timeoutMsg: 'update save did not refresh the baseline' });
-    expect(await findRowIndexByText(updateValue)).not.toBeNull();
-    expect(await findRowIndexByText(insertValue)).toBeNull();
+    const updatedIndex = await waitForRowWithText(updateValue);
+    // The update is in place: the row that carried the INSERT value now shows
+    // the UPDATE value (asserting on the known index avoids a false pass from
+    // the old value simply being scrolled out of the render window).
+    expect(updatedIndex).toBe(mergedIndex);
 
     // --- DELETE: context menu -> alert confirmation -> save ----------------
-    const targetIndex = (await findRowIndexByText(updateValue))!;
+    const targetIndex = await waitForRowWithText(updateValue);
     const targetUsernameCell = await (await rowElement(targetIndex)).$('td:nth-child(3) button');
     await rightClick(targetUsernameCell);
     const menu = await $('[data-testid="database-result-context-menu"]');

@@ -1,4 +1,10 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import type { DragDropEvent } from "@tauri-apps/api/webview";
 import type { UnlistenFn } from "@tauri-apps/api/event";
@@ -207,8 +213,14 @@ export function useWebviewFileDrop(
   const subIdRef = useRef<number>(0);
 
   // Stable refs for the latest options (avoid re-subscribing on every render).
+  // Synced in a layout effect instead of during render: writing a ref while
+  // rendering is unsafe under concurrent rendering (react-hooks/refs). Layout
+  // effects flush before the passive subscription effect below, so the
+  // subscriber created there always sees the current options.
   const optsRef = useRef(options);
-  optsRef.current = options;
+  useLayoutEffect(() => {
+    optsRef.current = options;
+  });
 
   const stableOnDrop = useCallback(
     (paths: string[]) => optsRef.current.onDrop(paths),
