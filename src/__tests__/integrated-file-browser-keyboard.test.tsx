@@ -207,6 +207,12 @@ describe('IntegratedFileBrowser terminal directory following', () => {
         mocks.invoke.mock.calls.filter(([, args]) => args.path === '/srv/app'),
       ).toHaveLength(1);
     });
+    // Wait for the initial follow load to COMMIT (breadcrumb renders
+    // '/srv/app') before clicking Home. On slow runners the click can land
+    // while currentPath is still the initial '/home', making navigateTo
+    // early-return and swallowing the click; the follow load then commits
+    // '/srv/app' and the breadcrumb never shows '/home'.
+    await screen.findByTitle('/srv/app');
     fireEvent.click(screen.getByTitle('Home'));
     await waitFor(() => {
       expect(mocks.invoke).toHaveBeenCalledWith('list_files', {

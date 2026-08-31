@@ -108,8 +108,10 @@ fn parse_diagnostics(stderr: &str, base_dir: &Path) -> Vec<CompileDiagnostic> {
     for line in stderr.lines() {
         let line = line.trim();
         // Pattern: <file>:<line>: <level>: <message>   or   <file>:<line>:<col>: <level>: <message>
+        // The file may carry a Windows drive prefix ("C:\..."), whose colon
+        // must not be mistaken for the line separator.
         let re = regex::Regex::new(
-            r#"^(?P<file>[^:]+):(?P<line>\d+)(?::(?P<col>\d+))?:\s*(?P<level>error|warning):\s*(?P<msg>.+)$"#,
+            r#"^(?P<file>(?:[A-Za-z]:)?[^:]+):(?P<line>\d+)(?::(?P<col>\d+))?:\s*(?P<level>error|warning):\s*(?P<msg>.+)$"#,
         )
         .unwrap();
         if let Some(caps) = re.captures(line) {
@@ -248,6 +250,24 @@ mod tests {
         assert_eq!(errs[1].level, "warning");
         assert_eq!(errs[1].column, 7);
         assert_eq!(errs[2].line, 9);
+    }
+
+    #[test]
+    fn parse_diagnostics_windows_drive_paths() {
+        // javac on Windows emits "C:\work\src\Foo.java:3: error: ..."; the
+        // drive colon must not be consumed as the line separator.
+        // NOTE: strip_prefix against a "C:\..." base only succeeds on a real
+        // Windows host (Path only treats drive prefixes as absolute there),
+        // so the file assertion checks the suffix instead of equality.
+        let base = std::path::Path::new(r"C:\work");
+        let errs = parse_diagnostics(
+            r"C:\work\src\Foo.java:3: error: ';' expected",
+            base,
+        );
+        assert_eq!(errs.len(), 1, "drive-colon path must parse at all");
+        assert_eq!(errs[0].line, 3);
+        assert_eq!(errs[0].level, "error");
+        assert!(errs[0].file.ends_with(r"src\Foo.java"));
     }
 
     #[test]
