@@ -269,17 +269,24 @@ mod tests {
 
     #[test]
     fn resolve_from_local_repo() {
-        let repo = local_repo_root();
-        if !repo.is_dir() {
-            eprintln!("skipping: no local maven repo");
-            return;
-        }
-        // postgresql 42.3.4 is known to exist in the dev repo.
-        let jar = resolve_dependency_jar(&repo, "org.postgresql", "postgresql", "42.3.4");
-        assert!(jar.is_some(), "postgresql jar should resolve");
-        if let Some(j) = jar {
+        // Build a throwaway local repository instead of asserting against
+        // whatever happens to sit in this machine's ~/.m2 (CI runners have
+        // an .m2 dir but not the dev machine's postgresql 42.3.4).
+        let tmp = std::env::temp_dir().join(format!("pom-repo-test-{}", std::process::id()));
+        let artifact_dir = tmp.join("org/postgresql/postgresql/42.3.4");
+        std::fs::create_dir_all(&artifact_dir).unwrap();
+        let jar = artifact_dir.join("postgresql-42.3.4.jar");
+        std::fs::write(&jar, b"fake jar bytes").unwrap();
+
+        let resolved = resolve_dependency_jar(&tmp, "org.postgresql", "postgresql", "42.3.4");
+        assert!(resolved.is_some(), "postgresql jar should resolve");
+        if let Some(j) = resolved {
             assert!(j.is_file());
         }
+        // Missing artifact must not resolve.
+        assert!(resolve_dependency_jar(&tmp, "org.postgresql", "postgresql", "9.9.9").is_none());
+
+        std::fs::remove_dir_all(&tmp).ok();
     }
 
     #[test]

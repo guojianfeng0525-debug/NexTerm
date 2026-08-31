@@ -255,7 +255,10 @@ fn method_location_resolution() {
 /// JD-GUI ContainerLoader parity: a class with an inner class must decompile
 /// WITH the inner class body when the sibling-classes dir is supplied (the
 /// revert / method-location paths extract siblings like jar_decompile).
+/// Ignored like the other javac/jd-core integration tests in this file: CI
+/// runners have no JDK, so the fixture cannot be compiled there.
 #[test]
+#[ignore]
 fn inner_class_resolves_from_full_container() {
     let dir = std::env::temp_dir().join(format!("jar-innersib-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();

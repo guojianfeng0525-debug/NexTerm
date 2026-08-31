@@ -202,7 +202,15 @@ pub fn compile_sources(
                 if p.is_dir() {
                     walk(&p, root, out);
                 } else if p.extension().map(|e| e == "class").unwrap_or(false) {
-                    let rel = p.strip_prefix(root).unwrap_or(&p).display().to_string();
+                    // JAR entry names always use '/' separators; on Windows
+                    // Path::display() would yield 'com\example\A.class' and
+                    // corrupt the entry name when written back into a JAR.
+                    let rel = p
+                        .strip_prefix(root)
+                        .unwrap_or(&p)
+                        .display()
+                        .to_string()
+                        .replace('\\', "/");
                     if let Ok(bytes) = std::fs::read(&p) {
                         out.push((rel, bytes));
                     }
