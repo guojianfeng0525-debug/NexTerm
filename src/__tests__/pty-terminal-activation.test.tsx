@@ -335,6 +335,52 @@ describe('PtyTerminal activation', () => {
     expect(terminal.refresh).toHaveBeenCalledWith(0, terminal.rows - 1);
   });
 
+  it('repaints all rows when the document becomes visible again', async () => {
+    renderTerminal(true);
+    await flushTimers();
+    const terminal = mocks.terminals[0];
+    terminal.refresh.mockClear();
+
+    // WKWebView can discard the canvas backing store while the app is
+    // hidden/occluded. Switching back fires visibilitychange; the terminal
+    // must force a full-row repaint instead of showing a garbled canvas.
+    Object.defineProperty(document, 'visibilityState', {
+      configurable: true,
+      value: 'visible',
+    });
+    await act(async () => {
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+
+    expect(terminal.refresh).toHaveBeenCalledWith(0, terminal.rows - 1);
+  });
+
+  it('repaints all rows when the window regains focus', async () => {
+    renderTerminal(true);
+    await flushTimers();
+    const terminal = mocks.terminals[0];
+    terminal.refresh.mockClear();
+
+    await act(async () => {
+      window.dispatchEvent(new Event('focus'));
+    });
+
+    expect(terminal.refresh).toHaveBeenCalledWith(0, terminal.rows - 1);
+  });
+
+  it('stops occlusion repaints after unmount', async () => {
+    renderTerminal(true);
+    await flushTimers();
+    const terminal = mocks.terminals[0];
+    terminal.refresh.mockClear();
+
+    cleanup();
+    window.dispatchEvent(new Event('focus'));
+    document.dispatchEvent(new Event('visibilitychange'));
+
+    expect(terminal.refresh).not.toHaveBeenCalled();
+  });
+
   it('routes Edit menu commands only to the addressed active terminal', () => {
     render(
       <>

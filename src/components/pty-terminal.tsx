@@ -310,6 +310,10 @@ export function PtyTerminal({
   const wsRef = React.useRef<WebSocket | null>(null);
   const rendererRef = React.useRef<string>('canvas');
   const webglAddonRef = React.useRef<WebglAddon | null>(null);
+  // Renderer-occlusion recovery, installed by the main terminal effect. Kept
+  // in a ref so the isActive effect can run it when a hidden tab is shown
+  // again (tab switches do not fire visibilitychange/focus).
+  const recoverRendererRef = React.useRef<(() => void) | null>(null);
   const clipboardAddonRef = React.useRef<ClipboardAddon | null>(null);
   const containerRef = React.useRef<HTMLDivElement | null>(null);
   const initialIsActiveRef = React.useRef(isActive);
@@ -922,21 +926,69 @@ export function PtyTerminal({
     
     term.open(terminalRef.current);
     
+    // --- WebGL renderer setup + occlusion (花屏) recovery ---------------
+    // WKWebView (Tauri on macOS) can discard the drawing buffer — and
+    // sometimes kill the whole GL context without firing webglcontextlost —
+    // whenever a canvas stops being composited: hidden terminal tabs
+    // (display:none), an occluded/minimized window, or App Nap suspension
+    // ("放一会"). xterm only re-renders dirty rows, so nothing repaints and
+    // the screen stays garbled until new output arrives. Two defences:
+    //   1. preserveDrawingBuffer=true keeps the last good frame in the
+    //      buffer so an evicted composite shows stale-but-valid pixels.
+    //   2. On visibility/focus regain, rebuild the renderer if the GL
+    //      context died and force a full-row repaint.
+    const fallBackFromWebgl = () => {
+      if (webglAddonRef.current) {
+        try { webglAddonRef.current.dispose(); } catch (_e) { /* already disposed */ }
+        webglAddonRef.current = null;
+      }
+      rendererRef.current = 'canvas';
+      console.warn('[PTY Terminal] WebGL context lost, falling back to DOM renderer');
+    };
+    const attachWebglAddon = () => {
+      const webglAddon = new WebglAddon(true);
+      webglAddon.onContextLoss(fallBackFromWebgl);
+      term.loadAddon(webglAddon);
+      webglAddonRef.current = webglAddon;
+      rendererRef.current = 'webgl';
+    };
+    const recoverFromOcclusion = () => {
+      if (webglAddonRef.current && (terminalRef.current?.offsetWidth ?? 0) > 0) {
+        const glCanvas = terminalRef.current?.querySelector('canvas');
+        const gl =
+          (glCanvas as HTMLCanvasElement | null)?.getContext('webgl2') ??
+          (glCanvas as HTMLCanvasElement | null)?.getContext('webgl') ??
+          null;
+        if (gl?.isContextLost()) {
+          console.warn('[PTY Terminal] WebGL context lost while occluded, rebuilding renderer');
+          try { webglAddonRef.current.dispose(); } catch (_e) { /* already disposed */ }
+          webglAddonRef.current = null;
+          try {
+            attachWebglAddon();
+          } catch (e) {
+            rendererRef.current = 'canvas';
+            console.warn('[PTY Terminal] WebGL rebuild failed, staying on DOM renderer:', e);
+          }
+        }
+      }
+      if (term.rows > 0) {
+        term.refresh(0, term.rows - 1);
+      }
+    };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        recoverFromOcclusion();
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('focus', recoverFromOcclusion);
+    recoverRendererRef.current = recoverFromOcclusion;
+
     // Load WebGL renderer for better performance
     // NOTE: WebGL doesn't support transparency, so skip it when background image is set
     if (!appearance.backgroundImage) {
       try {
-        const webglAddon = new WebglAddon();
-        // Dispose listener — xterm calls this when the addon is disposed
-        webglAddon.onContextLoss(() => {
-          webglAddon.dispose();
-          webglAddonRef.current = null;
-          rendererRef.current = 'canvas';
-          console.warn('[PTY Terminal] WebGL context lost, falling back to canvas');
-        });
-        term.loadAddon(webglAddon);
-        webglAddonRef.current = webglAddon;
-        rendererRef.current = 'webgl';
+        attachWebglAddon();
         console.log('[PTY Terminal] WebGL renderer loaded');
       } catch (e) {
         rendererRef.current = 'canvas';
@@ -1801,6 +1853,9 @@ export function PtyTerminal({
         suggestionGateTextarea.removeEventListener('blur', onSuggestionBlur);
       }
       window.removeEventListener('resize', handleWindowResize);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('focus', recoverFromOcclusion);
+      recoverRendererRef.current = null;
       resizeObserver.disconnect();
       if (selectionDoc) {
         selectionDoc.removeEventListener('mousedown', trackSelectionDragStart, true);
@@ -1876,9 +1931,12 @@ export function PtyTerminal({
       if (container.offsetWidth <= 0 || container.offsetHeight <= 0) return;
 
       fitAddon.fit();
-      if (term.rows > 0) {
-        term.refresh(0, term.rows - 1);
-      }
+      // A hidden tab (display:none) can lose its WebGL context without
+      // webglcontextlost ever firing in WKWebView — a plain refresh() would
+      // draw into the dead context and the tab would come back garbled
+      // (花屏). The recovery routine rebuilds the renderer if needed before
+      // repainting (it also refreshes all rows).
+      recoverRendererRef.current?.();
       term.focus();
     });
 
