@@ -932,7 +932,10 @@ export function IntegratedFileBrowser({ connectionId, host: _host, isConnected, 
     }
   };
 
-  const handleUpload = async () => {
+  const handleUpload = async (remoteDirectory?: string) => {
+    // Guard against DOM events leaking in from onClick={handleUpload} bindings.
+    const targetDirectory =
+      typeof remoteDirectory === "string" && remoteDirectory ? remoteDirectory : currentPath;
     try {
       const selected = await tauriOpen({
         multiple: true,
@@ -944,7 +947,7 @@ export function IntegratedFileBrowser({ connectionId, host: _host, isConnected, 
 
       dispatchTransfer({
         type: "ENQUEUE",
-        items: buildFileUploadItems(paths, currentPath),
+        items: buildFileUploadItems(paths, targetDirectory),
       });
       toast.info(t('fileBrowser.toast.queuedUpload', { count: paths.length }));
     } catch (error) {
@@ -952,7 +955,10 @@ export function IntegratedFileBrowser({ connectionId, host: _host, isConnected, 
     }
   };
 
-  const handleUploadFolder = async () => {
+  const handleUploadFolder = async (remoteDirectory?: string) => {
+    // Guard against DOM events leaking in from onClick={handleUploadFolder} bindings.
+    const targetDirectory =
+      typeof remoteDirectory === "string" && remoteDirectory ? remoteDirectory : currentPath;
     try {
       const selected = await tauriOpen({
         multiple: true,
@@ -978,22 +984,22 @@ export function IntegratedFileBrowser({ connectionId, host: _host, isConnected, 
         );
         const plan = buildDirectoryUploadPlan(
           directoryPath,
-          currentPath,
+          targetDirectory,
           entries,
         );
 
         // Create remote directories before enqueuing file transfers.
         // Shell-quote escaping is handled on the Rust side.
-        for (const remoteDirectory of plan.directories) {
+        for (const planDirectory of plan.directories) {
           try {
             await invoke<boolean>("create_directory", {
               connectionId,
-              path: remoteDirectory,
+              path: planDirectory,
             });
             createdDirectoryCount += 1;
           } catch (err) {
             dirErrors.push(
-              `${remoteDirectory}: ${err instanceof Error ? err.message : String(err)}`,
+              `${planDirectory}: ${err instanceof Error ? err.message : String(err)}`,
             );
           }
         }
@@ -1652,10 +1658,10 @@ export function IntegratedFileBrowser({ connectionId, host: _host, isConnected, 
           <Button variant="ghost" size="sm" className="h-6 shrink-0 rounded-md px-2" onClick={handleCreateFolder}>
             <FolderPlus className="h-3.5 w-3.5" />
           </Button>
-          <Button variant="ghost" size="sm" className="h-6 shrink-0 rounded-md px-2" title={t('fileBrowser.toolbar.uploadFiles')} onClick={handleUpload}>
+          <Button variant="ghost" size="sm" className="h-6 shrink-0 rounded-md px-2" title={t('fileBrowser.toolbar.uploadFiles')} onClick={() => void handleUpload()}>
             <Upload className="h-3.5 w-3.5" />
           </Button>
-          <Button variant="ghost" size="sm" className="h-6 shrink-0 rounded-md px-2" title={t('fileBrowser.toolbar.uploadFolder')} onClick={handleUploadFolder}>
+          <Button variant="ghost" size="sm" className="h-6 shrink-0 rounded-md px-2" title={t('fileBrowser.toolbar.uploadFolder')} onClick={() => void handleUploadFolder()}>
             <FolderUp className="h-3.5 w-3.5" />
           </Button>
 
@@ -1958,6 +1964,14 @@ export function IntegratedFileBrowser({ connectionId, host: _host, isConnected, 
                         <FolderDown className="mr-2 h-4 w-4" />
                         {t('fileBrowser.contextMenu.downloadDirectory')}
                       </ContextMenuItem>
+                      <ContextMenuItem onClick={() => void handleUpload(file.path)}>
+                        <Upload className="mr-2 h-4 w-4" />
+                        {t('fileBrowser.contextMenu.upload')}
+                      </ContextMenuItem>
+                      <ContextMenuItem onClick={() => void handleUploadFolder(file.path)}>
+                        <FolderUp className="mr-2 h-4 w-4" />
+                        {t('fileBrowser.contextMenu.uploadFolder')}
+                      </ContextMenuItem>
                       <ContextMenuSeparator />
                     </>
                   )}
@@ -2062,11 +2076,11 @@ export function IntegratedFileBrowser({ connectionId, host: _host, isConnected, 
                 </>
               )}
               
-              <ContextMenuItem onClick={handleUpload}>
+              <ContextMenuItem onClick={() => void handleUpload()}>
                 <Upload className="mr-2 h-4 w-4" />
                 {t('fileBrowser.contextMenu.upload')}
               </ContextMenuItem>
-              <ContextMenuItem onClick={handleUploadFolder}>
+              <ContextMenuItem onClick={() => void handleUploadFolder()}>
                 <FolderUp className="mr-2 h-4 w-4" />
                 {t('fileBrowser.contextMenu.uploadFolder')}
               </ContextMenuItem>

@@ -593,6 +593,8 @@ describe('v2.16 SFTP file list: single context menu + clipboard keys', () => {
     const menuText = await openMenuText();
     expect(menuText).toContain('打开文件夹');
     expect(menuText).toContain('下载目录');
+    expect(menuText).toContain('上传');
+    expect(menuText).toContain('上传文件夹');
     expect(menuText).not.toContain('在编辑器中打开');
     expect(menuText).not.toContain('新建文件');
     expect(menuText).not.toContain('新建文件夹');

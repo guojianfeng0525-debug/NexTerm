@@ -2,6 +2,7 @@ import React from 'react';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { IntegratedFileBrowser } from '../components/integrated-file-browser';
+import { open as tauriOpen } from '@tauri-apps/plugin-dialog';
 import { createTestIpc } from '../lib/__tests__/helpers/test-ipc';
 import { hydratePreferences, resetPreferenceCaches } from '../lib/preferences';
 
@@ -95,6 +96,13 @@ const FILE_B = {
   permissions: '-rw-r--r--',
   file_type: 'File',
 };
+const DIRECTORY = {
+  name: 'docs',
+  size: 0,
+  modified: null,
+  permissions: 'drwxr-xr-x',
+  file_type: 'Directory',
+};
 
 interface InvokeArgs {
   connectionId?: string;
@@ -177,6 +185,7 @@ beforeEach(async () => {
   await hydratePreferences();
   mocks.invoke.mockReset();
   installInvoke();
+  vi.mocked(tauriOpen).mockReset();
   mocks.warning.mockReset();
   mocks.success.mockReset();
   mocks.info.mockReset();
@@ -439,5 +448,107 @@ describe('IntegratedFileBrowser row context menu file-type branching', () => {
     expect(screen.getAllByText('Download')).toHaveLength(1);
     expect(screen.getAllByText('Open Folder')).toHaveLength(1);
     expect(screen.getAllByText('Download directory')).toHaveLength(1);
+  });
+
+  it('uploads files from a directory menu into that directory', async () => {
+    installInvoke({
+      list_files: () => [DIRECTORY, FILE_A],
+    });
+    vi.mocked(tauriOpen).mockResolvedValue(['/local/report.txt']);
+
+    render(
+      <IntegratedFileBrowser
+        connectionId="conn-directory-upload"
+        isConnected
+        onClose={() => {}}
+      />,
+    );
+    expect(await screen.findByText('docs')).toBeTruthy();
+
+    // Row menus render before the empty-area menu in this flat test mock.
+    fireEvent.click(screen.getAllByText('Upload')[0]);
+
+    await waitFor(() => {
+      expect(invokeCalls('upload_remote_file')).toHaveLength(1);
+    });
+    expect(invokeCalls('upload_remote_file')[0][1]).toMatchObject({
+      remotePath: '/home/docs/report.txt',
+      localPath: '/local/report.txt',
+    });
+  });
+
+  it('uploads a folder from a directory menu under that directory', async () => {
+    installInvoke({
+      list_files: () => [DIRECTORY],
+      list_local_files_recursive: () => [
+        { relative_path: 'src', name: 'src', size: 0, file_type: 'Directory' },
+        { relative_path: 'src/main.py', name: 'main.py', size: 128, file_type: 'File' },
+      ],
+    });
+    vi.mocked(tauriOpen).mockResolvedValue(['/local/project']);
+
+    render(
+      <IntegratedFileBrowser
+        connectionId="conn-directory-folder-upload"
+        isConnected
+        onClose={() => {}}
+      />,
+    );
+    expect(await screen.findByText('docs')).toBeTruthy();
+
+    fireEvent.click(screen.getAllByText('Upload Folder')[0]);
+
+    await waitFor(() => {
+      expect(invokeCalls('upload_remote_file')).toHaveLength(1);
+    });
+    const directories = invokeCalls('create_directory').map(([, args]) => args.path);
+    expect(directories).toEqual(['/home/docs/project', '/home/docs/project/src']);
+    expect(invokeCalls('upload_remote_file')[0][1]).toMatchObject({
+      remotePath: '/home/docs/project/src/main.py',
+      localPath: '/local/project/src/main.py',
+    });
+  });
+
+  it('toolbar upload does not leak the click event into the remote directory', async () => {
+    vi.mocked(tauriOpen).mockResolvedValue(['/local/toolbar.txt']);
+    await renderBrowser('conn-toolbar-upload');
+
+    // The toolbar button binds onClick directly, so the handler receives a
+    // MouseEvent. It must fall back to currentPath instead of coercing the
+    // event into the remote directory.
+    fireEvent.click(screen.getByTitle('Upload files'));
+
+    await waitFor(() => {
+      expect(invokeCalls('upload_remote_file')).toHaveLength(1);
+    });
+    expect(invokeCalls('upload_remote_file')[0][1]).toMatchObject({
+      remotePath: '/home/toolbar.txt',
+      localPath: '/local/toolbar.txt',
+    });
+  });
+
+  it('toolbar folder upload does not leak the click event into the remote directory', async () => {
+    installInvoke({
+      list_local_files_recursive: () => [
+        { relative_path: 'pkg', name: 'pkg', size: 0, file_type: 'Directory' },
+        { relative_path: 'pkg/a.ts', name: 'a.ts', size: 64, file_type: 'File' },
+      ],
+    });
+    vi.mocked(tauriOpen).mockResolvedValue(['/local/pkg-src']);
+    await renderBrowser('conn-toolbar-folder-upload');
+
+    fireEvent.click(screen.getByTitle('Upload folder'));
+
+    await waitFor(() => {
+      expect(invokeCalls('upload_remote_file')).toHaveLength(1);
+    });
+    expect(invokeCalls('create_directory').map(([, args]) => args.path)).toEqual([
+      '/home/pkg-src',
+      '/home/pkg-src/pkg',
+    ]);
+    expect(invokeCalls('upload_remote_file')[0][1]).toMatchObject({
+      remotePath: '/home/pkg-src/pkg/a.ts',
+      localPath: '/local/pkg-src/pkg/a.ts',
+    });
   });
 });
