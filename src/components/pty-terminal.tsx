@@ -1845,6 +1845,15 @@ export function PtyTerminal({
     term.options.scrollback = opts.scrollback;
     // Refit so any font-size change propagates as a PTY resize.
     fitRef.current?.fit();
+    // WKWebView's WebGL renderer can retain the previous theme in its glyph
+    // atlas. Clear the atlas and explicitly refresh visible rows so switching
+    // the app between light/dark repaints immediately instead of leaving a
+    // dark terminal inside a light window (or vice versa).
+    // Test doubles may omit this renderer-specific API.
+    if (typeof term.clearTextureAtlas === "function") {
+      term.clearTextureAtlas();
+    }
+    term.refresh(0, Math.max(0, term.rows - 1));
   }, [themeKey, appearanceKey]);
 
   React.useEffect(() => {

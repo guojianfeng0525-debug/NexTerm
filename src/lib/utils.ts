@@ -10,13 +10,17 @@ export type ThemeMode = 'dark' | 'light' | 'auto';
 
 export function applyTheme(theme: ThemeMode): void {
   const root = document.documentElement;
-  
   if (theme === 'auto') {
     const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
     root.classList.toggle('dark', prefersDark);
   } else {
     root.classList.toggle('dark', theme === 'dark');
   }
+
+  // Portaled terminal instances also watch the class mutation, but WKWebView
+  // can delay that observer during a settings-dialog transition. An explicit
+  // app event makes the xterm repaint prompt and deterministic.
+  window.dispatchEvent(new CustomEvent('nexterm:theme-changed', { detail: { theme } }));
 }
 
 export function getSavedTheme(): ThemeMode {

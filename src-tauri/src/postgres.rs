@@ -2573,7 +2573,7 @@ mod tests {
     use super::{
         build_delete_statement, build_insert_statement, build_order_by_clause,
         build_set_search_path_statement, build_where_clause, fingerprint_matches,
-        reject_untracked_transaction_control, single_statement, skip_leading_noise,
+        reject_untracked_transaction_control, single_statement,
         split_sql_statements, validate_parameterized_request, validate_read_only_sql,
         PostgresFilterCondition, PostgresSortClause, PostgresTableFilter,
     };

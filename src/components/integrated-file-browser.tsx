@@ -156,6 +156,14 @@ export function IntegratedFileBrowser({ connectionId, host: _host, isConnected, 
   const committedPathRef = useRef('/home');
   committedPathRef.current = currentPath; // mirror latest state every render
   const [clipboard, setClipboard] = useState<{ files: FileItem[], operation: 'copy' | 'cut' } | null>(null);
+  // System-clipboard download batch (Ctrl+C → download to cache dir →
+  // clipboard_write_files). Kept in a ref, not state: the async transfer
+  // loop reads/mutates it without needing re-renders. A new Ctrl+C batch
+  // simply replaces any in-flight one — the latest copy intent wins.
+  const clipboardBatchRef = useRef<{
+    pending: Set<string>; // cache-dir destination paths still in flight
+    collected: string[];  // local paths downloaded successfully
+  } | null>(null);
   const [renamingFile, setRenamingFile] = useState<FileItem | null>(null);
   const [newFileName, setNewFileName] = useState('');
   const [deletingFile, setDeletingFile] = useState<FileItem | null>(null);
@@ -322,10 +330,8 @@ export function IntegratedFileBrowser({ connectionId, host: _host, isConnected, 
             }
             break;
           case 'v':
-            if (clipboard) {
-              event.preventDefault();
-              void handlePasteFiles();
-            }
+            event.preventDefault();
+            void handlePasteWithSystemClipboard();
             break;
           case 'a':
             event.preventDefault();
@@ -404,6 +410,32 @@ export function IntegratedFileBrowser({ connectionId, host: _host, isConnected, 
       document.removeEventListener('mouseup', handleMouseUp);
     };
   }, [resizingColumn]);
+
+  /**
+   * Settle one system-clipboard batch download (Ctrl+C). Called from the
+   * transfer loop when a batch download finishes (success, failure, or throw).
+   * When the last pending file settles, writes all successfully downloaded
+   * local paths to the OS clipboard as file references and toasts.
+   */
+  function settleClipboardBatch(destPath: string, succeeded: boolean) {
+    const batch = clipboardBatchRef.current;
+    if (!batch || !batch.pending.has(destPath)) return;
+    batch.pending.delete(destPath);
+    if (succeeded) batch.collected.push(destPath);
+    if (batch.pending.size > 0) return;
+    clipboardBatchRef.current = null;
+    if (batch.collected.length === 0) return;
+    invoke<void>('clipboard_write_files', { paths: batch.collected })
+      .then(() => {
+        toast.success(t('fileBrowser.toast.clipboardCopied', { count: batch.collected.length }));
+      })
+      .catch((err) => {
+        console.error('clipboard_write_files failed:', err);
+        toast.error(t('fileBrowser.toast.clipboardWriteFailed'), {
+          description: err instanceof Error ? err.message : String(err),
+        });
+      });
+  }
 
   // Transfer processing loop — modeled on file-browser-view.tsx
   useEffect(() => {
@@ -487,6 +519,10 @@ export function IntegratedFileBrowser({ connectionId, host: _host, isConnected, 
                 onClick: () => { void invoke("open_in_os", { path: destDir }).catch(() => {}); },
               },
             });
+            // System-clipboard download batch: track completion. When the
+            // last pending file of the batch finishes, write all successfully
+            // downloaded local paths to the OS clipboard as file references.
+            settleClipboardBatch(destPath, true);
           } else {
             dispatchTransfer({
               type: "FAIL",
@@ -496,6 +532,9 @@ export function IntegratedFileBrowser({ connectionId, host: _host, isConnected, 
             toast.error(t('fileBrowser.toast.downloadFailed', { name: nextItem.fileName }), {
               description: result.error ?? "Unknown error",
             });
+            // Failed clipboard-batch download: release the batch slot so the
+            // batch can still finish with the remaining files.
+            settleClipboardBatch(nextItem.destinationPath, false);
           }
         }
       } catch (err) {
@@ -507,6 +546,8 @@ export function IntegratedFileBrowser({ connectionId, host: _host, isConnected, 
         toast.error(t('fileBrowser.toast.transferFailed', { name: nextItem.fileName }), {
           description: err instanceof Error ? err.message : String(err),
         });
+        // Thrown download (cancelled / IPC error): also release the batch slot.
+        settleClipboardBatch(nextItem.destinationPath, false);
       } finally {
         processTransferRef.current = false;
       }
@@ -1107,6 +1148,71 @@ export function IntegratedFileBrowser({ connectionId, host: _host, isConnected, 
   function handleCopyFiles(files: FileItem[]) {
     setClipboard({ files, operation: 'copy' });
     toast.success(t('fileBrowser.toast.copiedToClipboard', { count: files.length }));
+    void downloadSelectedToSystemClipboard(files);
+  };
+
+  /**
+   * Ctrl+C system-clipboard integration: download the selected remote files
+   * into the dedicated cache dir (<appCache>/clipboard-downloads/) via the
+   * normal transfer queue, then write the local paths to the OS clipboard as
+   * file references so the user can paste them in Finder/Explorer.
+   * Read/queue failures are non-fatal: the virtual clipboard still works.
+   */
+  async function downloadSelectedToSystemClipboard(files: FileItem[]) {
+    // Only plain files participate — directory paste-to-Finder is out of scope.
+    const filesToDownload = files.filter(f => f.type === 'file' && f.name !== '..');
+    if (filesToDownload.length === 0) return;
+    try {
+      const cacheDir = await invoke<string>('get_clipboard_cache_dir');
+      const destinations = filesToDownload.map((f) => `${cacheDir.replace(/[\\/]+$/, '')}/${f.name}`);
+      // A fresh Ctrl+C batch replaces any in-flight one (latest intent wins).
+      clipboardBatchRef.current = {
+        pending: new Set(destinations),
+        collected: [],
+      };
+      dispatchTransfer({
+        type: "ENQUEUE",
+        items: filesToDownload.map((f, i) => ({
+          fileName: f.name,
+          direction: "download" as const,
+          sourcePath: f.path,
+          destinationPath: destinations[i],
+          totalBytes: f.size,
+        })),
+      });
+      toast.info(t('fileBrowser.toast.clipboardDownloading', { count: filesToDownload.length }));
+    } catch (error) {
+      // Cache dir unavailable (e.g. Rust command missing) — degrade gracefully.
+      clipboardBatchRef.current = null;
+      console.error('Failed to download selection to system clipboard:', error);
+    }
+  };
+
+  /**
+   * Ctrl+V with system-clipboard priority:
+   * 1. Virtual clipboard (in-app remote→remote copy/cut) non-empty → existing
+   *    remote paste logic.
+   * 2. Otherwise read OS clipboard file references → enqueue uploads into the
+   *    current remote directory. Failures toast and never crash.
+   */
+  async function handlePasteWithSystemClipboard() {
+    if (clipboard) {
+      await handlePasteFiles();
+      return;
+    }
+    let localPaths: string[];
+    try {
+      localPaths = await invoke<string[]>('clipboard_read_files');
+    } catch (error) {
+      console.error('clipboard_read_files failed:', error);
+      toast.error(t('fileBrowser.toast.clipboardReadFailed'));
+      return;
+    }
+    if (!localPaths || localPaths.length === 0) return;
+    const items = buildFileUploadItems(localPaths, currentPath);
+    if (items.length === 0) return;
+    dispatchTransfer({ type: "ENQUEUE", items });
+    toast.info(t('fileBrowser.toast.queuedUploadToPath', { count: items.length, path: currentPath }));
   };
 
   function handleCutFiles(files: FileItem[]) {
@@ -1767,10 +1873,11 @@ export function IntegratedFileBrowser({ connectionId, host: _host, isConnected, 
                               onClick={(e) => handleFileClick(file, e)}
                               onDoubleClick={() => handleFileDoubleClick(file)}
                               onContextMenu={(e) => {
-                                // Right-clicking a file row must open ONLY the
-                                // row menu — stop the event before it also
-                                // triggers the empty-area ContextMenu wrapping
-                                // the whole scroll region (double-menu bug).
+                                // Selection-only handler. Menu opening is
+                                // fully owned by the ContextMenu triggers
+                                // here and on the enclosing empty area; the
+                                // nested double-menu root cause is fixed in
+                                // ui/context-menu.tsx (trigger stopPropagation).
                                 e.stopPropagation();
                                 if (!selectedFiles.has(file.name)) {
                                   setSelectedFiles(new Set([file.name]));
@@ -1810,17 +1917,20 @@ export function IntegratedFileBrowser({ connectionId, host: _host, isConnected, 
                             </div>
                           </ContextMenuTrigger>
 
-                          <ContextMenuContent className="w-64">
+                          <ContextMenuContent
+                            className="w-64 max-h-64"
+                            collisionPadding={64}
+                          >
                   {/* File-specific actions */}
                   {file.type === 'file' && (
                     <>
                       <ContextMenuItem onClick={() => handleFileDoubleClick(file)}>
                         <Eye className="mr-2 h-4 w-4" />
-                        Open
+                        {t('fileBrowser.contextMenu.open')}
                       </ContextMenuItem>
                       <ContextMenuItem onClick={() => handleFileDoubleClick(file)}>
                         <Edit className="mr-2 h-4 w-4" />
-                        Edit
+                        {t('fileBrowser.contextMenu.openInEditor')}
                       </ContextMenuItem>
                       {onOpenInLogMonitor && (
                         <ContextMenuItem onClick={() => {
@@ -1842,7 +1952,7 @@ export function IntegratedFileBrowser({ connectionId, host: _host, isConnected, 
                     <>
                       <ContextMenuItem onClick={() => handleFileDoubleClick(file)}>
                         <Folder className="mr-2 h-4 w-4" />
-                        Open Folder
+                        {t('fileBrowser.contextMenu.openFolder')}
                       </ContextMenuItem>
                       <ContextMenuItem onClick={() => handleDownloadDirectory(file)}>
                         <FolderDown className="mr-2 h-4 w-4" />
@@ -1931,7 +2041,7 @@ export function IntegratedFileBrowser({ connectionId, host: _host, isConnected, 
                   </ContextMenuTrigger>
 
                   {/* Empty space context menu */}
-                  <ContextMenuContent className="w-48">
+                  <ContextMenuContent className="w-48" collisionPadding={16}>
               <ContextMenuItem onClick={handleNewFile}>
                 <File className="mr-2 h-4 w-4" />
                 {t('fileBrowser.contextMenu.newFile')}

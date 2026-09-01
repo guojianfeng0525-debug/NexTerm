@@ -7,7 +7,6 @@
 //!
 //! Run: cargo test --test jar_e2e -- --ignored --nocapture
 use std::collections::HashMap;
-use std::path::Path;
 
 use nexterm_lib::builder;
 use nexterm_lib::compile;

@@ -1302,7 +1302,7 @@ CREATE TABLE IF NOT EXISTS "terminal_appearance" (
   letter_spacing REAL NOT NULL DEFAULT 0,
   cursor_style TEXT NOT NULL DEFAULT 'block',
   cursor_blink INTEGER NOT NULL DEFAULT 1,
-  theme TEXT NOT NULL DEFAULT 'default',
+  theme TEXT NOT NULL DEFAULT 'vs-code-dark',
   scrollback INTEGER NOT NULL DEFAULT 10000,
   allow_transparency INTEGER NOT NULL DEFAULT 0,
   opacity REAL NOT NULL DEFAULT 1,

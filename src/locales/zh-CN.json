@@ -566,6 +566,8 @@
       "owner": "所有者"
     },
     "contextMenu": {
+      "open": "打开",
+      "openFolder": "打开文件夹",
       "download": "下载",
       "downloadDirectory": "下载目录",
       "upload": "上传",
@@ -595,6 +597,10 @@
       "downloaded": "{{name}} 下载成功",
       "downloadFailed": "下载失败：{{name}}",
       "transferFailed": "传输失败：{{name}}",
+      "clipboardCopied": "已复制 {{count}} 个文件，可在本地粘贴",
+      "clipboardDownloading": "正在下载 {{count}} 个文件到系统剪贴板…",
+      "clipboardReadFailed": "读取系统剪贴板文件失败",
+      "clipboardWriteFailed": "写入系统剪贴板文件失败",
       "copiedToClipboard": "{{count}} 项已复制到剪贴板",
       "cutToClipboard": "{{count}} 项已剪切到剪贴板",
       "pasted": "{{count}} 项{{operation}}成功",
@@ -1147,7 +1153,7 @@
   },
   "fileEditorView": {
     "failedToLoad": "加载文件失败",
-    "fileSaved": "{{fileName}} 已保存",
+    "fileSaved": "{{fileName}} 已保存为 {{encoding}}",
     "failedToSave": "保存文件失败",
     "connectionLost": "连接已断开，重新连接以继续编辑。",
     "loading": "正在加载 {{fileName}}…",
@@ -1163,7 +1169,10 @@
     "downloadAndOpen": "下载并用本地应用打开",
     "downloading": "正在下载…",
     "openedWithOs": "{{fileName}} 已用本地应用打开",
-    "failedToOpenWithOs": "无法用本地应用打开文件"
+    "failedToOpenWithOs": "无法用本地应用打开文件",
+    "encodingLabel": "文本编码",
+    "encodingTooltip": "未修改时：用该编码重新加载；已修改时：保存时转换为该编码。",
+    "decodeReplacements": "解码已替换无效字符"
   },
   "desktopViewer": {
     "clipboardAccessDenied": "剪贴板访问被拒绝",
@@ -1468,8 +1477,14 @@
       "saveCreateAndSave": "新建并保存",
       "saveDuplicateBlock": "该笔记已包含「{{title}}」片段，跳过以避免重复追加。",
       "saveFailed": "保存连接失败",
+      "saveModeAppend": "追加模式",
+      "saveModeCreate": "新建模式",
       "saveNewNote": "新建笔记…",
+      "saveNoteComboboxPlaceholder": "选择或输入笔记标题…",
+      "saveNoteCommentLabel": "SQL 注释",
+      "saveNoteCommentPlaceholder": "该条 SQL 的注释（必填）",
       "saveNoteLines": "{{count}} 行",
+      "saveNoteNoMatches": "无匹配笔记，保存时将新建",
       "saveNoteTitlePlaceholder": "笔记标题",
       "saveSql": "保存 SQL",
       "saveSqlAndDisconnect": "保存 SQL 并断开",

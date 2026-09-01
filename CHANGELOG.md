@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **SFTP 系统剪贴板文件互操作**：文件列表 Ctrl/Cmd+C 将选中远程文件下载到应用缓存并写入 macOS / Windows / Linux 系统剪贴板，可在 Finder / Explorer 粘贴；Ctrl/Cmd+V 在应用内虚拟剪贴板为空时读取本地文件引用并排队上传，虚拟剪贴板仍优先服务远程→远程复制/剪切。
+- **服务器文件在线编辑编码转换**：独立文本编辑器新增编码选择器，支持 UTF-8、GBK、GB18030、Big5、Shift_JIS、EUC-JP、EUC-KR、Windows-1252、ISO-8859-1。干净文件切换编码会按新编码重新解码；已修改文件切换编码会在保存时转换，且不可表示字符直接报错而非静默替换。
+- **文件列表右键菜单按类型分支**：文件行提供打开/编辑/日志监视/下载等文件动作；目录行提供打开文件夹与目录下载，避免目录与文件操作混用。
+- **PostgreSQL「保存到记事本」重构**：目标笔记改为可搜索 Combobox，追加/新建模式即时切换；SQL 注释必填并作为片段头行，重复片段检测会禁用保存。
+
+### Fixed
+
+- **嵌套右键菜单双弹框**：`ContextMenuTrigger` 在次级 mousedown 合成 contextmenu 后阻止事件冒泡，文件行右键不再同时触发外层空白区菜单。
+- **保存到记事本超长标题布局**：对话框 grid 轨道可收缩、触发值和搜索输入截断、Popover 与触发器同宽且限制在视口内，修复浮层失控与按钮遮挡。
+- **浅色主题终端残留深色**：统一旧默认主题 sentinel，主题切换显式通知 portaled terminal，并清理 xterm WebGL glyph atlas 后刷新可见行。
+- **右键菜单贴底裁切**：文件菜单增加 viewport collision padding 与内部滚动高度上限，末项在矮视口中保持可完整点按。
+
+### Test Infrastructure
+
+- 新增真实应用 E2E：PostgreSQL 保存到记事本全链路、SFTP 文件/目录/空白区右键菜单与系统剪贴板空态、远程编辑器 GBK 编码读取。
+- E2E 菜单截图改为 WebDriver viewport 捕获，并在截图前后校验菜单 opacity、背景与 viewport 几何，避免采集到错误窗口或透明动画态。
+
 ## [2.15.0] - 2026-08-31
 
 **PostgreSQL 注释（comments）全链路支持 + 数据网格快捷动作**：DBeaver 对齐——注释从 catalog 一路贯穿到 DDL 生成、导航树提示与 SQL 补全；另补行数统计、复制为 INSERT、search_path 同步三项高频动作。

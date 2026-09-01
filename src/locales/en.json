@@ -566,6 +566,8 @@
       "owner": "Owner"
     },
     "contextMenu": {
+      "open": "Open",
+      "openFolder": "Open Folder",
       "download": "Download",
       "downloadDirectory": "Download directory",
       "upload": "Upload",
@@ -595,6 +597,10 @@
       "downloaded": "Downloaded {{name}}",
       "downloadFailed": "Download failed: {{name}}",
       "transferFailed": "Transfer failed: {{name}}",
+      "clipboardCopied": "{{count}} file(s) copied — ready to paste locally",
+      "clipboardDownloading": "Downloading {{count}} file(s) to the system clipboard…",
+      "clipboardReadFailed": "Failed to read files from the system clipboard",
+      "clipboardWriteFailed": "Failed to write files to the system clipboard",
       "copiedToClipboard": "{{count}} item(s) copied to clipboard",
       "cutToClipboard": "{{count}} item(s) cut to clipboard",
       "pasted": "{{count}} item(s) {{operation}} successfully",
@@ -1147,7 +1153,7 @@
   },
   "fileEditorView": {
     "failedToLoad": "Failed to load file",
-    "fileSaved": "{{fileName}} saved",
+    "fileSaved": "{{fileName}} saved as {{encoding}}",
     "failedToSave": "Failed to save file",
     "connectionLost": "Connection lost. Reconnect to continue editing.",
     "loading": "Loading {{fileName}}…",
@@ -1164,6 +1170,10 @@
     "downloading": "Downloading…",
     "openedWithOs": "{{fileName}} opened with local application",
     "failedToOpenWithOs": "Failed to open file with local application"
+    ,
+    "encodingLabel": "Text encoding",
+    "encodingTooltip": "Clean file: reload with this encoding. Modified file: convert to this encoding when saving.",
+    "decodeReplacements": "Decoded with replacements"
   },
   "desktopViewer": {
     "clipboardAccessDenied": "Clipboard access denied",
@@ -1468,8 +1478,14 @@
       "saveCreateAndSave": "Create & save",
       "saveDuplicateBlock": "This note already contains the \"{{title}}\" block. Skip to avoid appending a duplicate.",
       "saveFailed": "Failed to save connection",
+      "saveModeAppend": "Append mode",
+      "saveModeCreate": "Create mode",
       "saveNewNote": "New note…",
+      "saveNoteComboboxPlaceholder": "Select or type a note title…",
+      "saveNoteCommentLabel": "SQL comment",
+      "saveNoteCommentPlaceholder": "Comment for this SQL (required)",
       "saveNoteLines": "{{count}} lines",
+      "saveNoteNoMatches": "No matching note — a new one will be created",
       "saveNoteTitlePlaceholder": "Note title",
       "saveSql": "Save SQL",
       "saveSqlAndDisconnect": "Save SQL and disconnect",

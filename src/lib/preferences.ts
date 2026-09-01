@@ -150,7 +150,7 @@ function assembleAppearance(): Record<string, unknown> {
     letterSpacing: num(appearance.letter_spacing, 0),
     cursorStyle: str(appearance.cursor_style, 'block'),
     cursorBlink: bool(appearance.cursor_blink, true),
-    theme: str(appearance.theme, 'default'),
+    theme: str(appearance.theme, 'vs-code-dark'),
     scrollback: num(appearance.scrollback, 10000),
     allowTransparency: bool(appearance.allow_transparency, false),
     opacity: num(appearance.opacity, 1),

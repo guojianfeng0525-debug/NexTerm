@@ -42,21 +42,26 @@ function useThemeKey(): number {
   const [themeKey, setThemeKey] = useState(0);
 
   useEffect(() => {
+    const bumpThemeKey = () => setThemeKey((key) => key + 1);
     const observer = new MutationObserver((mutations) => {
       for (const mutation of mutations) {
         if (mutation.attributeName === 'class') {
-          setThemeKey((key) => key + 1);
+          bumpThemeKey();
           break;
         }
       }
     });
 
+    window.addEventListener('nexterm:theme-changed', bumpThemeKey);
     observer.observe(document.documentElement, {
       attributes: true,
       attributeFilter: ['class'],
     });
 
-    return () => observer.disconnect();
+    return () => {
+      window.removeEventListener('nexterm:theme-changed', bumpThemeKey);
+      observer.disconnect();
+    };
   }, []);
 
   return themeKey;

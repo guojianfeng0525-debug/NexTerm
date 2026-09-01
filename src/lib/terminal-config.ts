@@ -51,6 +51,9 @@ export function normalizeAppearanceSettings(
 ): TerminalAppearanceSettings {
   return {
     ...settings,
+    // Older preference fallback rows used the sentinel value "default"; map
+    // them to the real selectable preset so light-mode auto-switching works.
+    theme: settings.theme === 'default' ? 'vs-code-dark' : settings.theme,
     scrollback: normalizeScrollbackLines(settings.scrollback),
   };
 }
@@ -86,20 +89,20 @@ export const defaultLightTerminalTheme: ITheme = {
   selectionBackground: 'rgba(0, 90, 200, 0.3)',
   selectionInactiveBackground: 'rgba(0, 90, 200, 0.15)',
   black: '#000000',
-  red: '#cd3131',
-  green: '#00bc00',
-  yellow: '#949800',
+  red: '#b91c1c',
+  green: '#00711f',
+  yellow: '#71690a',
   blue: '#0451a5',
   magenta: '#bc05bc',
   cyan: '#0598bc',
   white: '#555555',
   brightBlack: '#666666',
   brightRed: '#cd3131',
-  brightGreen: '#14ce14',
-  brightYellow: '#b5ba00',
+  brightGreen: '#047828',
+  brightYellow: '#7a7508',
   brightBlue: '#0451a5',
   brightMagenta: '#bc05bc',
-  brightCyan: '#0598bc',
+  brightCyan: '#03748d',
   brightWhite: '#a5a5a5',
 };
 

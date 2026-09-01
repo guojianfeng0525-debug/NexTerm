@@ -3887,6 +3887,7 @@ version = "2.15.0"
 dependencies = [
  "aes-gcm 0.10.3",
  "anyhow",
+ "arboard",
  "async-std",
  "async-trait",
  "base64 0.22.1",
@@ -3896,10 +3897,14 @@ dependencies = [
  "betteroffice-xlsx",
  "betteroffice-xlsx-model",
  "dirs",
+ "encoding_rs",
  "futures",
  "hex",
  "libc",
  "mysql_async",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-foundation",
  "open",
  "pbkdf2 0.12.2",
  "rand 0.8.7",
@@ -3935,6 +3940,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-subscriber",
+ "windows 0.61.3",
  "zip",
 ]
 

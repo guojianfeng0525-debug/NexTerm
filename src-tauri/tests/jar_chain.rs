@@ -4,7 +4,6 @@
 //!   open (index + DB rows) → decompile (CFR) → save (version + modified)
 //!   → compile (javac) → build (new JAR) → original untouched.
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
 
 use nexterm_lib::jar_db;
 use nexterm_lib::{builder, compile, decompile, jar};

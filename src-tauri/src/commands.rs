@@ -1077,6 +1077,95 @@ pub async fn read_file_content(
     }
 }
 
+/// A text file decoded through an explicitly selected encoding.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EncodedFileContent {
+    pub content: String,
+    /// True when the selected encoding contained bytes that could not be
+    /// represented in JavaScript's UTF-16 string model and were replaced.
+    pub had_errors: bool,
+}
+
+fn encoding_for_label(label: &str) -> Result<&'static encoding_rs::Encoding, String> {
+    encoding_rs::Encoding::for_label(label.as_bytes())
+        .ok_or_else(|| format!("Unsupported text encoding: {label}"))
+}
+
+fn decode_with_encoding(bytes: Vec<u8>, label: &str) -> Result<EncodedFileContent, String> {
+    let encoding = encoding_for_label(label)?;
+    let (decoded, _, had_errors) = encoding.decode(&bytes);
+    let mut content = decoded.into_owned();
+
+    // A UTF-8 BOM is metadata, not editor content. Strip it so saving does not
+    // accidentally duplicate the marker after an encoding conversion.
+    if encoding == encoding_rs::UTF_8 && content.starts_with('\u{feff}') {
+        content.replace_range(0..'\u{feff}'.len_utf8(), "");
+    }
+
+    Ok(EncodedFileContent {
+        content,
+        had_errors,
+    })
+}
+
+fn encode_with_encoding(text: &str, label: &str) -> Result<Vec<u8>, String> {
+    let encoding = encoding_for_label(label)?;
+    let (encoded, _, had_errors) = encoding.encode(text);
+    if had_errors {
+        return Err(format!(
+            "Some characters cannot be represented in {label}; choose UTF-8 or another Unicode encoding"
+        ));
+    }
+    Ok(encoded.into_owned())
+}
+
+/// Read a remote text file as bytes and decode it with the selected encoding.
+/// Unlike the legacy `cat`-based command, invalid bytes are not silently
+/// coerced to UTF-8 before the requested decoder runs.
+#[tauri::command]
+pub async fn read_file_content_with_encoding(
+    connection_id: String,
+    path: String,
+    encoding: String,
+    state: State<'_, Arc<ConnectionManager>>,
+) -> Result<EncodedFileContent, String> {
+    let connection = state
+        .get_connection(&connection_id)
+        .await
+        .ok_or("Connection not found")?;
+    let client = connection.read().await;
+    let bytes = client
+        .download_file_to_memory(&path)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    decode_with_encoding(bytes, &encoding)
+}
+
+/// Encode editor text and upload it without an intermediate UTF-8 `cat`
+/// command. Selecting a different encoding before save converts the file.
+#[tauri::command]
+pub async fn create_file_with_encoding(
+    connection_id: String,
+    path: String,
+    content: String,
+    encoding: String,
+    state: State<'_, Arc<ConnectionManager>>,
+) -> Result<bool, String> {
+    let bytes = encode_with_encoding(&content, &encoding)?;
+    let connection = state
+        .get_connection(&connection_id)
+        .await
+        .ok_or("Connection not found")?;
+    let client = connection.read().await;
+
+    match client.upload_file_from_bytes(&bytes, &path).await {
+        Ok(_) => Ok(true),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
 /// Response for `read_remote_file_base64`.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Base64FileResponse {
@@ -4651,5 +4740,36 @@ mod jump_config_tests {
         req.key_path = None;
         let err = build_jump(&req).unwrap_err();
         assert!(err.contains("no key path"));
+    }
+}
+
+#[cfg(test)]
+mod encoding_tests {
+    use super::*;
+
+    #[test]
+    fn decodes_and_encodes_gbk_round_trip() {
+        let text = "中文编码转换：NexTerm";
+        let bytes = encode_with_encoding(text, "gbk").unwrap();
+        assert_ne!(bytes, text.as_bytes());
+        let decoded = decode_with_encoding(bytes, "gbk").unwrap();
+        assert!(!decoded.had_errors);
+        assert_eq!(decoded.content, text);
+    }
+
+    #[test]
+    fn strips_utf8_bom_on_load_but_not_on_save() {
+        let bytes = [0xEF, 0xBB, 0xBF, b'h', b'i'];
+        let decoded = decode_with_encoding(bytes.to_vec(), "utf-8").unwrap();
+        assert_eq!(decoded.content, "hi");
+        assert_eq!(encode_with_encoding("hi", "utf-8").unwrap(), b"hi".to_vec());
+    }
+
+    #[test]
+    fn rejects_unsupported_and_unrepresentable_targets() {
+        assert!(encoding_for_label("not-an-encoding").is_err());
+        // emoji cannot be represented in ISO-8859-1; saving must fail rather
+        // than silently replacing it with '?'.
+        assert!(encode_with_encoding("🙂", "iso-8859-1").is_err());
     }
 }

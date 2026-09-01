@@ -1,4 +1,5 @@
 mod commands;
+mod clipboard_files;
 mod config_archive;
 mod connection_manager;
 pub mod db;
@@ -532,6 +533,8 @@ pub fn run() {
             commands::rename_file,
             commands::create_file,
             commands::read_file_content,
+            commands::create_file_with_encoding,
+            commands::read_file_content_with_encoding,
             commands::read_remote_file_base64,
             commands::copy_file,
             commands::detect_gpu,
@@ -665,6 +668,10 @@ pub fn run() {
             jar_commands::jar_class_info,
             jar_commands::jar_maven_sources,
             jar_commands::jar_read_source_file,
+            // System clipboard file-list read/write (SFTP panel copy/paste)
+            clipboard_files::clipboard_read_files,
+            clipboard_files::clipboard_write_files,
+            clipboard_files::get_clipboard_cache_dir,
             // Note: PTY terminal I/O now uses WebSocket instead of IPC
             // WebSocket server runs on a dynamically assigned port (9001-9010)
         ])

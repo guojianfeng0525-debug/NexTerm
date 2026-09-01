@@ -1,7 +1,6 @@
 //! Reproduces the user's failure: an old DB where jar_classes lacks
 //! library_id. Both db::DbState::open and jar_db::open must migrate it so
 //! list_classes works.
-use std::path::Path;
 
 #[test]
 #[ignore]

@@ -49,6 +49,7 @@ async-std = "1"
 dirs = "6"
 open = "5"
 base64 = "0.22"
+encoding_rs = "0.8"
 sys-locale = "0.3"
 reqwest = { version = "0.12", features = ["json", "stream", "blocking", "multipart"] }
 rusqlite = { version = "0.32", features = ["bundled", "backup"] }
@@ -71,6 +72,30 @@ zip = { version = "8.6.0", default-features = false, features = ["deflate", "def
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+# System clipboard file-list support (SFTP panel copy/paste).
+# macOS: NSPasteboard + NSURL (main-thread only, hence objc2).
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSPasteboard"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSDictionary", "NSString", "NSURL", "NSValue"] }
+
+# Windows: CF_HDROP / DROPFILES via raw clipboard APIs.
+# Version aligned with the windows 0.61.3 already in the dependency tree
+# (pulled by tao/tauri on the Windows target).
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
+    "Win32_UI_Shell",
+    "Win32_System_Ole",
+] }
+
+# Linux: text/uri-list via arboard (degraded mode; same 3.6.x as the
+# clipboard-manager plugin already uses).
+[target.'cfg(target_os = "linux")'.dependencies]
+arboard = "3"
 
 [dev-dependencies]
 rusqlite = "0.32"

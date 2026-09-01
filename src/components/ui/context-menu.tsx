@@ -41,6 +41,15 @@ function ContextMenuTrigger({
           shiftKey: event.shiftKey,
           metaKey: event.metaKey,
         }));
+
+        // The synthetic contextmenu above already opened this trigger's menu.
+        // Stop the mousedown from bubbling to an ancestor ContextMenuTrigger,
+        // whose wrapper would otherwise dispatch a second synthetic
+        // contextmenu and open a stacked duplicate menu (nested-trigger bug
+        // in the SFTP file list). Left clicks and other buttons return
+        // earlier and still bubble normally; a genuine contextmenu event
+        // reaching an already-open Radix menu is idempotent.
+        event.stopPropagation();
       }}
     />
   );

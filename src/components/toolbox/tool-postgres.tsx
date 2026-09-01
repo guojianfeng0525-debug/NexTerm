@@ -15,6 +15,7 @@ import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 import {
   Braces,
+  ChevronsUpDown,
   ClipboardPaste,
   Copy,
   CopyCheck,
@@ -89,6 +90,15 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import {
+  Command,
+  CommandEmpty,
+  CommandGroup,
+  CommandInput,
+  CommandItem,
+  CommandList,
+} from "@/components/ui/command";
 import {
   Dialog,
   DialogContent,
@@ -504,12 +514,15 @@ export function ToolPostgres() {
   /** Tab id awaiting dirty-discard confirmation before closing. */
   const [closeTarget, setCloseTarget] = useState<string | null>(null);
   const [disconnectTarget, setDisconnectTarget] = useState<string | null>(null);
-  /** Save-to-notes dialog state: target note id (or "__new__") and the
-   *  editable title used when creating a new note. */
+  /** Save-to-notes dialog state: the combobox input text (an existing note
+   *  title when appending, otherwise the new note's title) plus the required
+   *  SQL comment that is written into the note as its `-- comment` line. */
   const [noteDialog, setNoteDialog] = useState<{
-    target: string;
     title: string;
+    comment: string;
   } | null>(null);
+  /** Open state of the note-target combobox popover inside the dialog. */
+  const [noteComboboxOpen, setNoteComboboxOpen] = useState(false);
   /** SQL snapshot taken when the save-to-notes dialog opens, so confirming
    *  after switching tabs still writes the intended statement. */
   const noteContentRef = useRef<string>("");
@@ -1193,20 +1206,22 @@ export function ToolPostgres() {
     noteContentRef.current = content;
     const notes = NotesStorage.load();
     const savedTarget = localStorage.getItem("nexterm.notes.lastSaveTarget");
-    const target =
-      savedTarget && savedTarget !== "__new__" &&
-      notes.some((note) => note.id === savedTarget)
-        ? savedTarget
-        : "__new__";
-    setNoteDialog({ target, title: tab.title });
+    const savedNote =
+      savedTarget && savedTarget !== "__new__"
+        ? notes.find((note) => note.id === savedTarget)
+        : undefined;
+    setNoteComboboxOpen(false);
+    // Prefill with the last-saved note's title (append mode) or the tab
+    // title (new-note mode); the combobox re-derives the mode from input.
+    setNoteDialog({ title: savedNote?.title ?? tab.title, comment: "" });
   };
-  /** True when the target note already contains a `-- {title}` header block,
+  /** True when the target note already contains a `-- {comment}` header block,
    *  which would indicate the same SQL was appended before. */
-  const noteHasDuplicateBlock = (note: NoteItem | undefined, title: string) =>
+  const noteHasDuplicateBlock = (note: NoteItem | undefined, comment: string) =>
     !!note &&
     note.content
       .split("\n")
-      .some((line) => line.trim() === `-- ${title.trim().replace(/[\r\n]+/g, " ")}`);
+      .some((line) => line.trim() === `-- ${comment.trim().replace(/[\r\n]+/g, " ")}`);
   const confirmAppendSqlToNotes = () => {
     if (!noteDialog) return;
     const content = noteContentRef.current;
@@ -1214,38 +1229,29 @@ export function ToolPostgres() {
     // Ask the notes view to flush any pending (debounced) edits, then read
     // the latest store state so the target/duplicate checks are authoritative.
     window.dispatchEvent(new Event("nexterm:toolbox-flush-request"));
+    const inputTitle = noteDialog.title.trim();
+    const comment = noteDialog.comment.trim().replace(/[\r\n]+/g, " ");
+    if (!inputTitle || !comment || !content.trim()) return;
     const notes = NotesStorage.load();
-    let targetId = noteDialog.target;
-    const targetNote =
-      targetId !== "__new__"
-        ? notes.find((note) => note.id === targetId)
-        : undefined;
-    let createdFallback = false;
-    if (targetId !== "__new__" && !targetNote) {
-      // The selected note was deleted while the dialog was open — fall back
-      // to creating a new note.
-      targetId = "__new__";
-      createdFallback = true;
-    }
+    // Trim-exact match against an existing note title → append mode; any
+    // other input creates a new note with the typed title.
+    const targetNote = notes.find((note) => note.title.trim() === inputTitle);
     const title = (
-      targetId === "__new__"
-        ? noteDialog.title
-        : targetNote?.title ?? noteDialog.title
+      targetNote ? targetNote.title : noteDialog.title
     )
       .trim()
       .replace(/[\r\n]+/g, " ");
-    if (!title || !content.trim()) return;
     let savedToId: string;
     let next: NoteItem[];
-    if (targetId !== "__new__" && targetNote) {
+    if (targetNote) {
       next = notes.map((note) =>
         note.id === targetNote.id
           ? {
               ...note,
               language: "sql" as const,
               content: note.content.trim()
-                ? `${note.content.trimEnd()}\n-- ${title}\n${content}`
-                : `-- ${title}\n${content}`,
+                ? `${note.content.trimEnd()}\n-- ${comment}\n${content}`
+                : `-- ${comment}\n${content}`,
               updatedAt: now,
             }
           : note,
@@ -1256,7 +1262,7 @@ export function ToolPostgres() {
         id: generateId("note"),
         title,
         language: "sql" as const,
-        content: `-- ${title}\n${content}`,
+        content: `-- ${comment}\n${content}`,
         createdAt: now,
         updatedAt: now,
       };
@@ -1266,7 +1272,6 @@ export function ToolPostgres() {
     NotesStorage.save(next);
     localStorage.setItem("nexterm.notes.lastSaveTarget", savedToId);
     window.dispatchEvent(new Event("nexterm:toolbox-changed"));
-    if (createdFallback) toast.info(t("toolbox.postgres.saveTargetFallback"));
     toast.success(t("toolbox.postgres.saveToNotesDone", { title }), {
       action: {
         label: t("toolbox.postgres.saveToNotesView"),
@@ -1278,6 +1283,7 @@ export function ToolPostgres() {
           ),
       },
     });
+    setNoteComboboxOpen(false);
     setNoteDialog(null);
   };
   /** Line count of the current editor selection (for the menu subtitle). */
@@ -4015,84 +4021,172 @@ export function ToolPostgres() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
-      <Dialog open={noteDialog !== null} onOpenChange={(open) => !open && setNoteDialog(null)}>
-        <DialogContent className="top-[50%] left-[50%] -translate-x-1/2 -translate-y-1/2 w-[460px] max-w-[90vw] max-h-[85vh] overflow-y-auto">
+      <Dialog
+        open={noteDialog !== null}
+        onOpenChange={(open) => {
+          if (!open) {
+            setNoteComboboxOpen(false);
+            setNoteDialog(null);
+          }
+        }}
+      >
+        <DialogContent className="grid w-[460px] grid-cols-[minmax(0,1fr)] max-w-[90vw] max-h-[85vh] overflow-y-auto">
           <DialogHeader><DialogTitle>{t("toolbox.postgres.saveToNotes")}</DialogTitle></DialogHeader>
           {(() => {
             const dialogNotes = NotesStorage.load();
-            const targetNote = noteDialog && noteDialog.target !== "__new__"
-              ? dialogNotes.find((note) => note.id === noteDialog.target)
+            const inputTitle = noteDialog?.title ?? "";
+            const matchedNote = inputTitle.trim()
+              ? dialogNotes.find((note) => note.title.trim() === inputTitle.trim())
               : undefined;
-            const isNew = !noteDialog || noteDialog.target === "__new__" || !targetNote;
-            const title = isNew
-              ? (noteDialog?.title ?? "")
-              : (targetNote?.title ?? "");
-            const duplicate = noteHasDuplicateBlock(targetNote, title);
-            const lines = targetNote?.content.trim()
-              ? targetNote.content.split("\n").length
+            const isNew = !matchedNote;
+            const comment = noteDialog?.comment ?? "";
+            const duplicate = noteHasDuplicateBlock(matchedNote, comment);
+            const lines = matchedNote?.content.trim()
+              ? matchedNote.content.split("\n").length
               : 0;
-            const firstLine = targetNote?.content.split("\n")[0]?.slice(0, 40) ?? "";
+            const firstLine = matchedNote?.content.split("\n")[0]?.slice(0, 40) ?? "";
             return (
               <div className="space-y-3">
-                <div className="space-y-1">
+                <div className="min-w-0 space-y-1">
                   <Label className="text-[11px] text-muted-foreground">{t("toolbox.postgres.saveTargetNote")}</Label>
-                  <Select
-                    value={noteDialog?.target ?? "__new__"}
-                    onValueChange={(value) =>
-                      setNoteDialog((current) =>
-                        current ? { ...current, target: value } : current,
-                      )
-                    }
-                  >
-                    <SelectTrigger data-testid="postgres-save-note-target" className="w-full">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="__new__">{t("toolbox.postgres.saveNewNote")}</SelectItem>
-                      {dialogNotes.map((note) => (
-                        <SelectItem key={note.id} value={note.id}>
-                          {note.title || t("toolbox.notes.untitled")}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
+                  <Popover open={noteComboboxOpen} onOpenChange={setNoteComboboxOpen}>
+                    <PopoverTrigger asChild>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        role="combobox"
+                        aria-expanded={noteComboboxOpen}
+                        data-testid="postgres-save-note-target"
+                        className="w-full justify-between font-normal"
+                      >
+                        <span className="min-w-0 flex-1 truncate text-left">
+                          {inputTitle || t("toolbox.postgres.saveNoteComboboxPlaceholder")}
+                        </span>
+                        <ChevronsUpDown className="size-4 shrink-0 opacity-50" />
+                      </Button>
+                    </PopoverTrigger>
+                    <PopoverContent
+                      className="max-w-[calc(100vw-3rem)] p-0 shadow-xl"
+                      style={{
+                        width: "min(var(--radix-popover-trigger-width), calc(100vw - 3rem))",
+                      }}
+                      align="start"
+                      sideOffset={6}
+                      collisionPadding={16}
+                    >
+                      <Command className="h-fit">
+                        <CommandInput
+                          data-testid="postgres-save-note-title"
+                          value={inputTitle}
+                          onValueChange={(value) =>
+                            setNoteDialog((current) =>
+                              current ? { ...current, title: value } : current,
+                            )
+                          }
+                          placeholder={t("toolbox.postgres.saveNoteComboboxPlaceholder")}
+                          className="truncate"
+                          style={{ textOverflow: "ellipsis" }}
+                        />
+                        <CommandList className="max-h-56">
+                          <CommandEmpty>{t("toolbox.postgres.saveNoteNoMatches")}</CommandEmpty>
+                          <CommandGroup>
+                            {dialogNotes.map((note) => (
+                              <CommandItem
+                                key={note.id}
+                                value={note.title}
+                                onSelect={() => {
+                                  setNoteDialog((current) =>
+                                    current ? { ...current, title: note.title } : current,
+                                  );
+                                  setNoteComboboxOpen(false);
+                                }}
+                              >
+                                <span className="min-w-0 flex-1 truncate">
+                                  {note.title || t("toolbox.notes.untitled")}
+                                </span>
+                                <Badge variant="secondary" className="px-1.5 py-0 text-[9px] shrink-0">
+                                  {t(`toolbox.notes.lang.${note.language}` as const)}
+                                </Badge>
+                                <span className="shrink-0 tabular-nums text-[11px] text-muted-foreground">
+                                  {t("toolbox.postgres.saveNoteLines", {
+                                    count: note.content.trim()
+                                      ? note.content.split("\n").length
+                                      : 0,
+                                  })}
+                                </span>
+                              </CommandItem>
+                            ))}
+                          </CommandGroup>
+                        </CommandList>
+                      </Command>
+                    </PopoverContent>
+                  </Popover>
                 </div>
-                {isNew ? (
-                  <Input
-                    data-testid="postgres-save-note-title"
-                    autoFocus
-                    value={noteDialog?.title ?? ""}
-                    onChange={(event) =>
-                      setNoteDialog((current) =>
-                        current ? { ...current, title: event.target.value } : current,
-                      )
-                    }
-                    placeholder={t("toolbox.postgres.saveNoteTitlePlaceholder")}
-                  />
-                ) : (
-                  <>
-                    <Input data-testid="postgres-save-note-title" disabled value={title} />
-                    <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
-                      <Badge variant="secondary" className="text-[9px] px-1.5 py-0 shrink-0">
-                        {t(`toolbox.notes.lang.${targetNote?.language ?? "plain"}` as const)}
+                <div
+                  data-testid="postgres-save-note-mode"
+                  className="flex min-w-0 items-center gap-1.5 text-[11px] text-muted-foreground"
+                >
+                  <Badge
+                    variant={isNew ? "outline" : "secondary"}
+                    className="px-1.5 py-0 text-[9px] shrink-0"
+                  >
+                    {isNew
+                      ? t("toolbox.postgres.saveModeCreate")
+                      : t("toolbox.postgres.saveModeAppend")}
+                  </Badge>
+                  {!isNew && (
+                    <>
+                      <Badge variant="secondary" className="px-1.5 py-0 text-[9px] shrink-0">
+                        {t(`toolbox.notes.lang.${matchedNote?.language ?? "plain"}` as const)}
                       </Badge>
                       <span className="shrink-0 tabular-nums">{t("toolbox.postgres.saveNoteLines", { count: lines })}</span>
                       <span className="truncate min-w-0 flex-1">{firstLine}</span>
-                    </div>
-                  </>
-                )}
+                    </>
+                  )}
+                </div>
+                <div className="min-w-0 space-y-1">
+                  <Label className="text-[11px] text-muted-foreground">
+                    {t("toolbox.postgres.saveNoteCommentLabel")}
+                    <span className="ml-0.5 text-destructive">*</span>
+                  </Label>
+                  <Input
+                    data-testid="postgres-save-note-comment"
+                    value={comment}
+                    onChange={(event) =>
+                      setNoteDialog((current) =>
+                        current ? { ...current, comment: event.target.value } : current,
+                      )
+                    }
+                    placeholder={t("toolbox.postgres.saveNoteCommentPlaceholder")}
+                  />
+                </div>
                 {duplicate && (
-                  <p data-testid="postgres-save-note-duplicate" className="text-[11px] text-destructive">
-                    {t("toolbox.postgres.saveDuplicateBlock", { title })}
-                  </p>
+                  <div
+                    data-testid="postgres-save-note-duplicate"
+                    className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-2.5 py-2 text-[11px] font-medium text-destructive"
+                  >
+                    <CircleAlert className="mt-0.5 size-3.5 shrink-0" aria-hidden="true" />
+                    <span className="min-w-0 flex-1 break-words">
+                      {t("toolbox.postgres.saveDuplicateBlock", { title: comment })}
+                    </span>
+                  </div>
                 )}
                 <DialogFooter>
-                  <Button variant="outline" onClick={() => setNoteDialog(null)}>{t("common.cancel")}</Button>
+                  <Button
+                    variant="outline"
+                    onClick={() => {
+                      setNoteComboboxOpen(false);
+                      setNoteDialog(null);
+                    }}
+                  >
+                    {t("common.cancel")}
+                  </Button>
                   <Button
                     data-testid="postgres-save-note-confirm"
                     onClick={confirmAppendSqlToNotes}
                     disabled={
-                      (isNew && !noteDialog?.title.trim()) ||
+                      (isNew && !inputTitle.trim()) ||
+                      !comment.trim() ||
                       duplicate
                     }
                   >

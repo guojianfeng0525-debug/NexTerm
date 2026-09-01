@@ -4,6 +4,13 @@ import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
 import { Save, RefreshCw, FileWarning, ExternalLink, Image as ImageIcon, FileArchive, Download } from "lucide-react";
 import { Button } from "./ui/button";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "./ui/select";
 const CodeEditor = lazy(() => import("./code-editor").then((m) => ({ default: m.CodeEditor })));
 import { classifyFileByExtension, type FileViewKind } from "@/lib/editor-config";
 
@@ -24,6 +31,23 @@ interface FileEditorViewProps {
   isConnected: boolean;
 }
 
+const TEXT_ENCODINGS = [
+  { value: "utf-8", label: "UTF-8" },
+  { value: "gbk", label: "GBK" },
+  { value: "gb18030", label: "GB18030" },
+  { value: "big5", label: "Big5" },
+  { value: "shift_jis", label: "Shift_JIS" },
+  { value: "euc-jp", label: "EUC-JP" },
+  { value: "euc-kr", label: "EUC-KR" },
+  { value: "windows-1252", label: "Windows-1252" },
+  { value: "iso-8859-1", label: "ISO-8859-1" },
+];
+
+interface EncodedFileContent {
+  content: string;
+  hadErrors: boolean;
+}
+
 export function FileEditorView({
   connectionId,
   filePath,
@@ -33,12 +57,19 @@ export function FileEditorView({
   const { t } = useTranslation();
   const [content, setContent] = useState("");
   const [savedContent, setSavedContent] = useState("");
+  const [encoding, setEncoding] = useState("utf-8");
+  const [savedEncoding, setSavedEncoding] = useState("utf-8");
+  const [decodeHadErrors, setDecodeHadErrors] = useState(false);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const dirty = content !== savedContent;
+  const dirty = content !== savedContent || encoding !== savedEncoding;
   const contentRef = useRef(content);
   contentRef.current = content;
+  const savedContentRef = useRef(savedContent);
+  savedContentRef.current = savedContent;
+  const encodingRef = useRef(encoding);
+  encodingRef.current = encoding;
 
   // File-type classification
   const fileKind: FileViewKind = classifyFileByExtension(fileName);
@@ -51,17 +82,30 @@ export function FileEditorView({
   // Download-to-open state (for binary/image files)
   const [downloading, setDownloading] = useState(false);
 
-  const loadFile = useCallback(async () => {
+  const readTextFile = useCallback(async (encodingToLoad: string) => {
+    const response = await invoke<EncodedFileContent>(
+      "read_file_content_with_encoding",
+      {
+        connectionId,
+        path: filePath,
+        encoding: encodingToLoad,
+      },
+    );
+    return response;
+  }, [connectionId, filePath]);
+
+  const loadFile = useCallback(async (encodingOverride?: string) => {
     if (fileKind === "text") {
+      const encodingToLoad = encodingOverride ?? encodingRef.current;
       setLoading(true);
       setError(null);
       try {
-        const text = await invoke<string>("read_file_content", {
-          connectionId,
-          path: filePath,
-        });
-        setContent(text);
-        setSavedContent(text);
+        const response = await readTextFile(encodingToLoad);
+        setContent(response.content);
+        setSavedContent(response.content);
+        setEncoding(encodingToLoad);
+        setSavedEncoding(encodingToLoad);
+        setDecodeHadErrors(response.hadErrors);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         setError(msg);
@@ -86,7 +130,7 @@ export function FileEditorView({
       }
     }
     // For "binary" kind, no remote loading needed
-  }, [connectionId, filePath, fileKind]);
+  }, [fileKind, readTextFile]);
 
   useEffect(() => {
     if (isConnected) {
@@ -97,20 +141,58 @@ export function FileEditorView({
   const handleSave = useCallback(async () => {
     setSaving(true);
     try {
-      await invoke<boolean>("create_file", {
+      await invoke<boolean>("create_file_with_encoding", {
         connectionId,
         path: filePath,
         content: contentRef.current,
+        encoding: encodingRef.current,
       });
       setSavedContent(contentRef.current);
-      toast.success(t('fileEditorView.fileSaved', { fileName }));
+      setSavedEncoding(encodingRef.current);
+      setDecodeHadErrors(false);
+      toast.success(t('fileEditorView.fileSaved', {
+        fileName,
+        encoding: encodingRef.current,
+      }));
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       toast.error(t('fileEditorView.failedToSave'), { description: msg });
     } finally {
       setSaving(false);
     }
-  }, [connectionId, filePath, fileName]);
+  }, [connectionId, filePath, fileName, t]);
+
+  const handleEncodingChange = useCallback(async (nextEncoding: string) => {
+    if (fileKind !== "text" || nextEncoding === encodingRef.current) return;
+
+    // With unsaved edits, changing the selector means "encode the edited text
+    // as this format on the next save". With a clean buffer, it reloads and
+    // decodes the same remote bytes using the newly selected format.
+    if (contentRef.current !== savedContentRef.current) {
+      setEncoding(nextEncoding);
+      setDecodeHadErrors(false);
+      return;
+    }
+
+    const previousEncoding = encodingRef.current;
+    setEncoding(nextEncoding);
+    setLoading(true);
+    setError(null);
+    try {
+      const response = await readTextFile(nextEncoding);
+      setContent(response.content);
+      setSavedContent(response.content);
+      setSavedEncoding(nextEncoding);
+      setDecodeHadErrors(response.hadErrors);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setEncoding(previousEncoding);
+      setError(msg);
+      toast.error(t('fileEditorView.failedToLoad'), { description: msg });
+    } finally {
+      setLoading(false);
+    }
+  }, [fileKind, readTextFile, t]);
 
   // Download to temp directory and open with OS default app
   const handleDownloadAndOpen = useCallback(async () => {
@@ -155,14 +237,44 @@ export function FileEditorView({
       <span className="font-mono text-muted-foreground truncate flex-1" title={filePath}>
         {filePath}
       </span>
+      {showSaveButton && (
+        <Select
+          value={encoding}
+          onValueChange={(value) => void handleEncodingChange(value)}
+        >
+          <SelectTrigger
+            data-testid="file-editor-encoding"
+            className="h-6 w-[132px] text-[11px]"
+            aria-label={t('fileEditorView.encodingLabel')}
+            title={t('fileEditorView.encodingTooltip')}
+          >
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent className="max-h-64">
+            {TEXT_ENCODINGS.map((item) => (
+              <SelectItem key={item.value} value={item.value}>
+                {item.label}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      )}
       {showSaveButton && dirty && (
         <span className="text-yellow-500 text-[10px] font-medium">{t('fileEditorView.modified')}</span>
+      )}
+      {showSaveButton && decodeHadErrors && (
+        <span
+          className="text-orange-500 text-[10px] font-medium"
+          title={t('fileEditorView.decodeReplacements')}
+        >
+          {t('fileEditorView.decodeReplacements')}
+        </span>
       )}
       <Button
         variant="ghost"
         size="sm"
         className="h-6 px-2"
-        onClick={loadFile}
+        onClick={() => void loadFile()}
         disabled={loading || imageLoading}
         title={t('fileEditorView.reload')}
       >
@@ -297,7 +409,7 @@ export function FileEditorView({
       <div className="h-full flex flex-col items-center justify-center text-muted-foreground gap-3">
         <FileWarning className="h-8 w-8 opacity-50" />
         <span>{t('fileEditorView.failedToLoadError', { error })}</span>
-        <Button variant="outline" size="sm" onClick={loadFile}>
+          <Button variant="outline" size="sm" onClick={() => void loadFile()}>
           <RefreshCw className="h-4 w-4 mr-1" /> {t('fileEditorView.retry')}
         </Button>
       </div>

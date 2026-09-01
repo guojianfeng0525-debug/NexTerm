@@ -2,11 +2,10 @@
 //! magic check → jd-core → ClassView) against a real JAR, including the
 //! scratch-directory file naming used by the command layer and the
 //! JD-GUI preference overrides (escapeUnicode / realign).
-use std::path::Path;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
-use nexterm_lib::{decompile, jar, jar_db};
+use nexterm_lib::{decompile, jar};
 
 #[test]
 #[ignore]
