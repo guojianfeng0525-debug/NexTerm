@@ -954,20 +954,28 @@ export function PtyTerminal({
     };
     const recoverFromOcclusion = () => {
       if (webglAddonRef.current && (terminalRef.current?.offsetWidth ?? 0) > 0) {
-        const glCanvas = terminalRef.current?.querySelector('canvas');
-        const gl =
-          (glCanvas as HTMLCanvasElement | null)?.getContext('webgl2') ??
-          (glCanvas as HTMLCanvasElement | null)?.getContext('webgl') ??
-          null;
-        if (gl?.isContextLost()) {
-          console.warn('[PTY Terminal] WebGL context lost while occluded, rebuilding renderer');
-          try { webglAddonRef.current.dispose(); } catch (_e) { /* already disposed */ }
-          webglAddonRef.current = null;
-          try {
-            attachWebglAddon();
-          } catch (e) {
-            rendererRef.current = 'canvas';
-            console.warn('[PTY Terminal] WebGL rebuild failed, staying on DOM renderer:', e);
+        // Scan all terminal canvases for one with a live GL context — the
+        // renderer canvas may be preceded by texture-atlas pages (2D
+        // contexts), which return null for both getContext calls below.
+        const canvases = terminalRef.current?.querySelectorAll('canvas') ?? [];
+        for (const canvas of canvases) {
+          const gl =
+            canvas.getContext('webgl2') ??
+            canvas.getContext('webgl') ??
+            null;
+          if (gl) {
+            if (gl.isContextLost()) {
+              console.warn('[PTY Terminal] WebGL context lost while occluded, rebuilding renderer');
+              try { webglAddonRef.current.dispose(); } catch (_e) { /* already disposed */ }
+              webglAddonRef.current = null;
+              try {
+                attachWebglAddon();
+              } catch (e) {
+                rendererRef.current = 'canvas';
+                console.warn('[PTY Terminal] WebGL rebuild failed, staying on DOM renderer:', e);
+              }
+            }
+            break;
           }
         }
       }
