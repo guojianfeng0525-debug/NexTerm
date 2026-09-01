@@ -69,6 +69,30 @@ regex = "1"
 # zip: keep only pure-Rust features so the Windows CI build has no native
 # (C) compression dependencies. JAR/WAR/EAR archives use deflate or store.
 zip = { version = "8.6.0", default-features = false, features = ["deflate", "deflate64", "bzip2-rs"] }
+# RDP client (remote desktop) — the IronRDP crate suite. The meta crate
+# re-exports pdu/connector/session/graphics/input/cliprdr/displaycontrol/…;
+# ironrdp-tokio provides the async Framed layer over tokio streams (works for
+# both direct TCP and the SSH jump-host channel stream), ironrdp-tls the TLS
+# upgrade step, and sspi the NLA/CredSSP authentication.
+#
+# Version pinning: 0.14+ of the suite needs crypto prereleases that conflict
+# with russh 0.62 (ecdsa/curve25519-dalek), and sspi 0.16.1 only compiles
+# against picky ≤ 7.0.0-rc.17 (rsa 0.9 era). ironrdp 0.13 + picky
+# 7.0.0-rc.17 (enforced via the lockfile) is the combination that resolves
+# and compiles alongside russh 0.62.
+ironrdp = { version = "0.13", features = [
+    "connector",
+    "session",
+    "graphics",
+    "input",
+    "cliprdr",
+    "displaycontrol",
+    "dvc",
+    "svc",
+] }
+ironrdp-tokio = "0.7"
+ironrdp-tls = { version = "0.2", features = ["rustls"] }
+bytes = "1"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

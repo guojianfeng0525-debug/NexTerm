@@ -1182,7 +1182,8 @@
     "failedToDisconnect": "Failed to disconnect",
     "desktopDisconnected": "Desktop Disconnected",
     "reconnect": "Reconnect",
-    "connectingTo": "Connecting to {{name}}..."
+    "connectingTo": "Connecting to {{name}}...",
+    "sessionEnded": "Remote desktop session ended"
   },
   "toolbox": {
     "title": "Toolbox",

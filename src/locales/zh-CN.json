@@ -1181,7 +1181,8 @@
     "failedToDisconnect": "断开连接失败",
     "desktopDisconnected": "桌面已断开",
     "reconnect": "重新连接",
-    "connectingTo": "正在连接到 {{name}}..."
+    "connectingTo": "正在连接到 {{name}}...",
+    "sessionEnded": "远程桌面会话已结束"
   },
   "toolbox": {
     "title": "工具箱",

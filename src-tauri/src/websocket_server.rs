@@ -1,4 +1,5 @@
 use crate::connection_manager::ConnectionManager;
+use crate::desktop_protocol::DesktopEvent;
 use crate::WEBSOCKET_PORT;
 use anyhow::Result;
 use futures::{SinkExt, StreamExt};
@@ -129,6 +130,10 @@ const CONTROL_SEND_TIMEOUT_MS: u64 = 100;
 /// Command byte that identifies a binary PTY output frame sent to the frontend.
 const BINARY_OUTPUT_CMD: u8 = 0x01;
 
+/// Command byte that identifies a binary desktop framebuffer update sent to
+/// the frontend.
+const BINARY_DESKTOP_FRAME_CMD: u8 = 0x03;
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -177,6 +182,31 @@ fn encode_output_frame(connection_id: &str, data: &[u8]) -> Vec<u8> {
     frame.extend_from_slice(&(id_len as u16).to_be_bytes());
     frame.extend_from_slice(&id_bytes[..id_len]);
     frame.extend_from_slice(data);
+    frame
+}
+
+/// Encode a binary desktop framebuffer update:
+///   [0x03][id_len: u16 BE][connection_id bytes]
+///   [x: u16 BE][y: u16 BE][width: u16 BE][height: u16 BE][rgba data]
+fn encode_desktop_frame(
+    connection_id: &str,
+    x: u16,
+    y: u16,
+    width: u16,
+    height: u16,
+    rgba_data: &[u8],
+) -> Vec<u8> {
+    let id_bytes = connection_id.as_bytes();
+    let id_len = id_bytes.len().min(u16::MAX as usize);
+    let mut frame = Vec::with_capacity(11 + id_len + rgba_data.len());
+    frame.push(BINARY_DESKTOP_FRAME_CMD);
+    frame.extend_from_slice(&(id_len as u16).to_be_bytes());
+    frame.extend_from_slice(&id_bytes[..id_len]);
+    frame.extend_from_slice(&x.to_be_bytes());
+    frame.extend_from_slice(&y.to_be_bytes());
+    frame.extend_from_slice(&width.to_be_bytes());
+    frame.extend_from_slice(&height.to_be_bytes());
+    frame.extend_from_slice(rgba_data);
     frame
 }
 
@@ -675,6 +705,86 @@ impl WebSocketServer {
                         height: h,
                     };
                     send_control(&tx, &started).await?;
+
+                    // Bridge the protocol client's event stream to this
+                    // WebSocket: frames as binary, clipboard/resize/terminate
+                    // as control messages. The task ends when the socket
+                    // closes, the session terminates, or cancellation fires.
+                    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+                    let cancel = CancellationToken::new();
+                    let cancel_for_task = cancel.clone();
+                    if let Err(e) = self
+                        .connection_manager
+                        .start_desktop_stream(&connection_id, event_tx, cancel.clone())
+                        .await
+                    {
+                        tracing::error!("Failed to start desktop stream: {}", e);
+                    } else {
+                        let ws_tx = tx.clone();
+                        let stream_connection_id = connection_id.clone();
+                        tokio::spawn(async move {
+                            loop {
+                                let event = tokio::select! {
+                                    () = cancel_for_task.cancelled() => break,
+                                    event = event_rx.recv() => match event {
+                                        Some(event) => event,
+                                        None => break,
+                                    },
+                                };
+                                match event {
+                                    DesktopEvent::Frame(frame) => {
+                                        let binary = encode_desktop_frame(
+                                            &stream_connection_id,
+                                            frame.x,
+                                            frame.y,
+                                            frame.width,
+                                            frame.height,
+                                            &frame.rgba_data,
+                                        );
+                                        if ws_tx.send(Message::Binary(binary.into())).await.is_err() {
+                                            break;
+                                        }
+                                    }
+                                    DesktopEvent::ClipboardText(text) => {
+                                        let message = WsMessage::ClipboardUpdate {
+                                            connection_id: stream_connection_id.clone(),
+                                            text,
+                                        };
+                                        if matches!(
+                                            send_control(&ws_tx, &message).await,
+                                            Ok(SendOutcome::Closed)
+                                        ) {
+                                            break;
+                                        }
+                                    }
+                                    DesktopEvent::Resized { width, height } => {
+                                        let message = WsMessage::DesktopStarted {
+                                            connection_id: stream_connection_id.clone(),
+                                            width,
+                                            height,
+                                        };
+                                        if matches!(
+                                            send_control(&ws_tx, &message).await,
+                                            Ok(SendOutcome::Closed)
+                                        ) {
+                                            break;
+                                        }
+                                    }
+                                    DesktopEvent::Terminated(reason) => {
+                                        tracing::info!(
+                                            "Desktop session {} terminated: {}",
+                                            stream_connection_id,
+                                            reason
+                                        );
+                                        let message = WsMessage::Error { message: reason };
+                                        let _ = send_control(&ws_tx, &message).await;
+                                        break;
+                                    }
+                                }
+                            }
+                            cancel.cancel();
+                        });
+                    }
                 } else {
                     let error = WsMessage::Error {
                         message: format!("Desktop connection not found: {}", connection_id),

@@ -5,9 +5,6 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 /// A decoded framebuffer update — a dirty rectangle with RGBA pixel data.
-// RDP/VNC frame pipeline: wired through `ConnectionManager::start_desktop_stream`
-// in the desktop-rendering batch; kept compiled until that batch lands.
-#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub struct FrameUpdate {
     pub x: u16,
@@ -18,23 +15,44 @@ pub struct FrameUpdate {
     pub rgba_data: Vec<u8>,
 }
 
+/// Events a desktop session pushes toward the frontend (WebSocket).
+#[derive(Debug)]
+pub enum DesktopEvent {
+    /// Dirty-rectangle framebuffer update.
+    Frame(FrameUpdate),
+    /// Text copied on the remote — forward to the local clipboard.
+    ClipboardText(String),
+    /// The remote desktop changed size (RDP deactivate/reactivate cycle).
+    Resized { width: u16, height: u16 },
+    /// The session ended; the string is a human-readable reason.
+    Terminated(String),
+}
+
 /// Unified trait for RDP and VNC remote desktop protocol clients.
 ///
 /// Both `RdpClient` and `VncClient` implement this trait so that the
 /// `ConnectionManager` and Tauri commands can work protocol-agnostically.
+///
+/// Pointer semantics shared by both protocols: `button_mask` uses the
+/// JavaScript `MouseEvent.buttons` convention — bit 0 (1) left, bit 1 (2)
+/// right, bit 2 (4) middle — plus wheel flags bit 3 (0x08) scroll-up and
+/// bit 4 (0x10) scroll-down (momentary, not part of the pressed state).
 #[async_trait]
 pub trait DesktopProtocol: Send + Sync {
-    /// Start the frame update loop, sending `FrameUpdate` messages via the
-    /// provided sender until the cancellation token is triggered.
-    // Pending the desktop-rendering batch (see `FrameUpdate` note above).
-    #[allow(dead_code)]
+    /// Start the event loop, forwarding [`DesktopEvent`]s via the provided
+    /// sender until the cancellation token is triggered. The protocol client
+    /// internally decodes frames and translates input events; this method
+    /// bridges the internal event channel to the WebSocket consumer.
     async fn start_frame_loop(
         &self,
-        frame_tx: mpsc::UnboundedSender<FrameUpdate>,
+        event_tx: mpsc::UnboundedSender<DesktopEvent>,
         cancel: CancellationToken,
     ) -> Result<()>;
 
     /// Send a keyboard event to the remote host.
+    ///
+    /// `key_code` is a JavaScript `KeyboardEvent.keyCode`; protocol clients
+    /// translate it to their wire format (RDP set-1 scancodes).
     async fn send_key(&self, key_code: u32, down: bool) -> Result<()>;
 
     /// Send a pointer (mouse) event to the remote host.
@@ -62,8 +80,25 @@ pub trait DesktopProtocol: Send + Sync {
 // Request / response data models shared between Tauri commands and WebSocket
 // ---------------------------------------------------------------------------
 
+/// SSH jump host (bastion) used to tunnel the desktop connection. This is the
+/// equivalent of OpenSSH's `ProxyJump` for RDP/VNC: the client first
+/// authenticates to the jump host, then opens a direct-tcpip channel to the
+/// real target and runs the desktop protocol inside it.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JumpHostConfig {
+    pub host: String,
+    pub port: Option<u16>,
+    pub username: Option<String>,
+    pub password: Option<String>,
+    /// Authenticate on the jump host with a key instead of a password.
+    pub use_key: Option<bool>,
+    pub key_path: Option<String>,
+}
+
 /// Request to establish an RDP or VNC connection.
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DesktopConnectRequest {
     pub protocol: String, // "RDP" or "VNC"
     pub host: String,
@@ -75,6 +110,8 @@ pub struct DesktopConnectRequest {
     pub resolution: Option<String>,
     /// VNC color depth: 24, 16, or 8
     pub color_depth: Option<u8>,
+    /// Optional SSH jump host tunnelling the desktop connection.
+    pub jump_host: Option<JumpHostConfig>,
 }
 
 /// Response after a successful desktop connection.
@@ -86,11 +123,8 @@ pub struct DesktopConnectResponse {
 
 // ---------------------------------------------------------------------------
 // Protocol-specific config structs (used internally by the clients).
-// `password`/`domain`/`color_depth` are part of the wire-level config surface
-// consumed by the desktop-rendering batch (see `FrameUpdate` note above).
 // ---------------------------------------------------------------------------
 
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct RdpConfig {
     pub host: String,
@@ -100,6 +134,7 @@ pub struct RdpConfig {
     pub domain: Option<String>,
     pub width: u16,
     pub height: u16,
+    pub jump_host: Option<JumpHostConfig>,
 }
 
 #[allow(dead_code)]
@@ -133,6 +168,7 @@ impl DesktopConnectRequest {
             domain: self.domain.clone(),
             width: w,
             height: h,
+            jump_host: self.jump_host.clone(),
         }
     }
 

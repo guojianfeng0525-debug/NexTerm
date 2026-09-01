@@ -74,6 +74,24 @@ interface ConnectionNode {
   isExpanded?: boolean;
 }
 
+/** Jump-host payload for desktop_connect requests (RDP/VNC via SSH bastion). */
+function buildDesktopJumpHost(source: {
+  jumpHost?: string;
+  jumpPort?: number;
+  jumpUsername?: string;
+  jumpPassword?: string;
+  jumpUseKey?: boolean;
+}) {
+  if (!source.jumpHost?.trim()) return null;
+  return {
+    host: source.jumpHost.trim(),
+    port: source.jumpPort ?? 22,
+    username: source.jumpUsername ?? null,
+    password: source.jumpPassword ?? null,
+    useKey: source.jumpUseKey ?? false,
+  };
+}
+
 function AppContent() {
   const { t } = useTranslation();
 
@@ -408,7 +426,8 @@ function AppContent() {
                   password: connectionData.password || '',
                   domain: connectionData.domain || null,
                   resolution: connectionData.rdpResolution || '1920x1080',
-                  color_depth: connectionData.vncColorDepth ? parseInt(connectionData.vncColorDepth) : 24,
+                  colorDepth: connectionData.vncColorDepth ? parseInt(connectionData.vncColorDepth) : 24,
+                  jumpHost: buildDesktopJumpHost(connectionData),
                 }
               }),
               CONNECT_TIMEOUT_MS,
@@ -1098,7 +1117,8 @@ function AppContent() {
               password: config.password || '',
               domain: config.domain || null,
               resolution: config.rdpResolution || '1920x1080',
-              color_depth: config.vncColorDepth ? parseInt(config.vncColorDepth) || 24 : 24,
+              colorDepth: config.vncColorDepth ? parseInt(config.vncColorDepth) : 24,
+              jumpHost: buildDesktopJumpHost(config),
             }
           });
           dispatch({ type: 'UPDATE_TAB_STATUS', tabId, status: 'connected' });
@@ -1136,7 +1156,8 @@ function AppContent() {
               password: config.password || '',
               domain: config.domain || null,
               resolution: config.rdpResolution || '1920x1080',
-              color_depth: config.vncColorDepth ? parseInt(config.vncColorDepth) || 24 : 24,
+              colorDepth: config.vncColorDepth ? parseInt(config.vncColorDepth) : 24,
+              jumpHost: buildDesktopJumpHost(config),
             }
           });
           ConnectionStorageManager.updateLastConnected(config.id || tabId);
@@ -1359,7 +1380,8 @@ function AppContent() {
               password: config.password || '',
               domain: config.domain || null,
               resolution: config.rdpResolution || '1920x1080',
-              color_depth: config.vncColorDepth ? parseInt(config.vncColorDepth) : 24,
+              colorDepth: config.vncColorDepth ? parseInt(config.vncColorDepth) : 24,
+              jumpHost: buildDesktopJumpHost(config),
             }
           });
           ConnectionStorageManager.updateLastConnected(config.id);

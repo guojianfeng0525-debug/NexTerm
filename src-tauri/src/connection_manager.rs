@@ -1,4 +1,4 @@
-use crate::desktop_protocol::{DesktopConnectRequest, DesktopProtocol, FrameUpdate};
+use crate::desktop_protocol::{DesktopConnectRequest, DesktopEvent, DesktopProtocol};
 use crate::ftp_client::FtpClient;
 use crate::os_detect::OsInfoCache;
 use crate::rdp_client::RdpClient;
@@ -414,13 +414,12 @@ impl ConnectionManager {
         Ok(())
     }
 
-    /// Start the frame update loop for a desktop connection.
-    // Pending the desktop-rendering batch (see desktop_protocol::FrameUpdate).
-    #[allow(dead_code)]
+    /// Start the frame update loop for a desktop connection. The caller keeps
+    /// the receiving half and forwards events to the WebSocket consumer.
     pub async fn start_desktop_stream(
         &self,
         connection_id: &str,
-        frame_tx: mpsc::UnboundedSender<FrameUpdate>,
+        event_tx: mpsc::UnboundedSender<DesktopEvent>,
         cancel: CancellationToken,
     ) -> Result<()> {
         let desktop = self.desktop_connections.read().await;
@@ -428,7 +427,7 @@ impl ConnectionManager {
             .get(connection_id)
             .ok_or_else(|| anyhow::anyhow!("Desktop connection not found: {}", connection_id))?;
         let client = client.read().await;
-        client.start_frame_loop(frame_tx, cancel).await
+        client.start_frame_loop(event_tx, cancel).await
     }
 }
 

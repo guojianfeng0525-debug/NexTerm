@@ -5,6 +5,7 @@ import { readText as readClipboardText, writeText as writeClipboardText } from '
 import { toast } from 'sonner';
 import { DesktopToolbar } from './desktop-toolbar';
 import { computeFitScale, translateCoordinates } from '@/lib/desktop-utils';
+import { drawFrameUpdate, parseDesktopFrame } from '@/lib/desktop-frame';
 import { Monitor, RefreshCw } from 'lucide-react';
 import { Button } from './ui/button';
 
@@ -30,8 +31,8 @@ export function DesktopViewer({
   const containerRef = useRef<HTMLDivElement>(null);
   const pressedKeysRef = useRef(new Set<number>());
 
-  const [desktopWidth] = useState(1024);
-  const [desktopHeight] = useState(768);
+  const [desktopWidth, setDesktopWidth] = useState(1024);
+  const [desktopHeight, setDesktopHeight] = useState(768);
   const [scalingMode, setScalingMode] = useState<'fit' | 'native'>('fit');
   const [isFullScreen, setIsFullScreen] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
@@ -74,6 +75,7 @@ export function DesktopViewer({
       if (cancelled) return;
 
       ws = new WebSocket(`ws://127.0.0.1:${wsPort}`);
+      ws.binaryType = 'arraybuffer';
       wsRef.current = ws;
 
       ws.onopen = () => {
@@ -85,23 +87,36 @@ export function DesktopViewer({
       };
 
       ws.onmessage = (event) => {
+        if (event.data instanceof ArrayBuffer) {
+          // Binary desktop framebuffer update.
+          const frame = parseDesktopFrame(event.data);
+          if (!frame || frame.connectionId !== connectionId) return;
+          const canvas = canvasRef.current;
+          const ctx = canvas?.getContext('2d');
+          if (!ctx) return;
+          drawFrameUpdate(ctx, frame);
+          setIsLoading(false);
+          return;
+        }
+
         try {
           const msg = JSON.parse(event.data);
           if (msg.type === 'DesktopStarted' && msg.connection_id === connectionId) {
+            if (typeof msg.width === 'number' && msg.width > 0) setDesktopWidth(msg.width);
+            if (typeof msg.height === 'number' && msg.height > 0) setDesktopHeight(msg.height);
             setIsLoading(false);
           } else if (msg.type === 'ClipboardUpdate' && msg.connection_id === connectionId) {
             // Write incoming remote clipboard text to local clipboard
             writeClipboardText(msg.text).catch(() => {
               // Clipboard write denied — silently ignore
             });
+          } else if (msg.type === 'Error') {
+            toast.error(t('desktopViewer.sessionEnded'), {
+              description: String(msg.message ?? ''),
+            });
           }
         } catch {
-          // Binary message (potential FrameUpdate) — handle frame data
-          // Frame updates will be binary: tag + connection_id_len + connection_id + x(u16) + y(u16) + w(u16) + h(u16) + rgba_data
-          // For now, mark as loaded when we receive any binary data
-          if (event.data instanceof Blob) {
-            setIsLoading(false);
-          }
+          // Not JSON and not binary — ignore.
         }
       };
 
@@ -242,8 +257,8 @@ export function DesktopViewer({
   const handleWheel = useCallback((e: React.WheelEvent) => {
     if (!isConnected) return;
     const { x, y } = getRemoteCoords(e);
-    // Scroll up = button 4 (0x08), scroll down = button 5 (0x10)
-    const buttonMask = e.deltaY < 0 ? 0x08 : 0x10;
+    // Keep currently-pressed buttons; wheel up = 0x08, wheel down = 0x10.
+    const buttonMask = (e.buttons & 0x07) | (e.deltaY < 0 ? 0x08 : 0x10);
     invoke('desktop_send_pointer', {
       connectionId,
       x,

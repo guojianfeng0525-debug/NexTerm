@@ -409,7 +409,9 @@ export function ConnectionDialog({
         return;
       }
     }
-    if ((config.protocol === 'SSH' || config.protocol === 'SFTP') && config.jumpHost?.trim() && !connectionConfig.jumpHostKeyFingerprint) {
+    const canJump = config.protocol === 'SSH' || config.protocol === 'SFTP'
+      || config.protocol === 'RDP' || config.protocol === 'VNC';
+    if (canJump && config.jumpHost?.trim() && !connectionConfig.jumpHostKeyFingerprint) {
       try {
         const { fingerprint } = await invoke<{ fingerprint: string }>('ssh_host_key_fingerprint', {
           request: { host: config.jumpHost, port: config.jumpPort || 22 },
@@ -1299,7 +1301,7 @@ const handleCancelConnectionAttempt = async () => {
               </CardContent>
             </Card>
 
-            {(config.protocol === 'SSH' || config.protocol === 'SFTP') && (
+            {(config.protocol === 'SSH' || config.protocol === 'SFTP' || config.protocol === 'RDP' || config.protocol === 'VNC') && (
               <Card>
                 <CardHeader>
                   <CardTitle className="flex items-center gap-2">
