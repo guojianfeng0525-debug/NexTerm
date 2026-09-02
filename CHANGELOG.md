@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+
+## [2.16.0] - 2026-09-02
+
+### Added
+
+- **VNC 远程桌面连接**（社区活跃库 `vnc-rs` 实现 RFB 协议）：支持 ZRLE/CopyRect/Raw 编码、VNC-Auth（DES 挑战响应）与无认证；键盘（JS keyCode → X11 keysym，含 Shift/CapsLock 处理）、鼠标（JS 按键掩码 → RFB 掩码、滚轮）、Latin-1 剪贴板。
+- **RDP 与 VNC 的 SSH 跳板机（堡垒机 / ProxyJump）隧道**：两协议共用同一传输层，支持任意跳板端口（含标准 22 端口）；经容器化夹具完成端到端验证（live 测试、隧道断开负向控制、应用内 UI 全流程及 /proc/net/tcp 内核级证据）。
+- **Docker 测试夹具**：`e2e/fixtures/vnc`（Xvfb + x11vnc + openbox + xterm）、`e2e/fixtures/ssh-jump`（sshd）。
+- **Live 集成测试**：`vnc_live.rs`（直连 + 跳板机）、`rdp_live.rs` 跳板机变体，均落盘合成帧用于视觉验证。
+
+### Changed
+
+- RDP 传输层抽入共享 `desktop_transport` 模块（两协议统一走直连 TCP 或 SSH direct-tcpip 通道）。
+
+### Fixed
+
+- _Add bug fixes here_
+
 - **SFTP 系统剪贴板文件互操作**：文件列表 Ctrl/Cmd+C 将选中远程文件下载到应用缓存并写入 macOS / Windows / Linux 系统剪贴板，可在 Finder / Explorer 粘贴；Ctrl/Cmd+V 在应用内虚拟剪贴板为空时读取本地文件引用并排队上传，虚拟剪贴板仍优先服务远程→远程复制/剪切。
 - **服务器文件在线编辑编码转换**：独立文本编辑器新增编码选择器，支持 UTF-8、GBK、GB18030、Big5、Shift_JIS、EUC-JP、EUC-KR、Windows-1252、ISO-8859-1。干净文件切换编码会按新编码重新解码；已修改文件切换编码会在保存时转换，且不可表示字符直接报错而非静默替换。
 - **文件列表右键菜单按类型分支**：文件行提供打开/编辑/日志监视/下载等文件动作；目录行提供打开文件夹与目录下载，避免目录与文件操作混用。
