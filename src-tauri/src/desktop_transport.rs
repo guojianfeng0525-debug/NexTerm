@@ -112,3 +112,50 @@ pub fn ssh_jump_config(jump: &JumpHostConfig) -> crate::ssh::JumpConfig {
         host_key_fingerprint: None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::desktop_protocol::JumpHostConfig;
+
+    fn config(port: Option<u16>, use_key: bool) -> JumpHostConfig {
+        JumpHostConfig {
+            host: "bastion".to_owned(),
+            port,
+            username: Some("jumpuser".to_owned()),
+            password: Some("secret".to_owned()),
+            use_key: Some(use_key),
+            key_path: None,
+        }
+    }
+
+    #[test]
+    fn jump_port_defaults_to_22_and_explicit_ports_pass_through() {
+        // No port configured (frontend omitted it): the standard SSH port 22.
+        assert_eq!(ssh_jump_config(&config(None, false)).port, 22);
+        // Explicit ports — including the standard 22 — must be honored as-is.
+        assert_eq!(ssh_jump_config(&config(Some(22), false)).port, 22);
+        assert_eq!(ssh_jump_config(&config(Some(22022), false)).port, 22022);
+    }
+
+    #[test]
+    fn jump_auth_maps_password_and_public_key() {
+        let password = ssh_jump_config(&config(Some(22), false));
+        assert!(matches!(
+            password.auth_method,
+            crate::ssh::AuthMethod::Password { ref password } if password == "secret"
+        ));
+        let key = ssh_jump_config(&config(Some(22), true));
+        assert!(matches!(
+            key.auth_method,
+            crate::ssh::AuthMethod::PublicKey { .. }
+        ));
+    }
+
+    #[test]
+    fn jump_host_and_username_map_verbatim() {
+        let mapped = ssh_jump_config(&config(Some(22), false));
+        assert_eq!(mapped.host, "bastion");
+        assert_eq!(mapped.username, "jumpuser");
+    }
+}
