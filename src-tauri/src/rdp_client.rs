@@ -4,20 +4,22 @@
 //! 1. Open a byte stream to the target — either a direct TCP connection or an
 //!    SSH jump-host tunnel (`crate::jump::connect_via_jump`, the equivalent of
 //!    OpenSSH's `ProxyJump`).
-//! 2. Drive the RDP connection sequence with `ironrdp-connector` (X.224
-//!    negotiation → TLS upgrade → NLA/CredSSP authentication → capability
-//!    exchange), with the CLIPRDR (clipboard) static channel and the DRDYNVC
-//!    dynamic-channel multiplexer (display control) attached up front.
+//! 2. Drive the RDP connection sequence with `ironrdp-tokio`'s official
+//!    helpers (`connect_begin` → TLS upgrade → `connect_finalize`; X.224
+//!    negotiation, NLA/CredSSP authentication and capability exchange), with
+//!    the CLIPRDR (clipboard) static channel and the DRDYNVC dynamic-channel
+//!    multiplexer (display control) attached up front.
 //! 3. Spawn the active-session task that decodes graphics updates into RGBA
 //!    dirty rectangles and forwards keyboard/mouse/clipboard events the
 //!    other way.
 //!
 //! The stream type is erased (`Box<dyn AsyncReadWrite>`) so the jump-host
-//! `ChannelStream` and `TcpStream` share one code path.
+//! `ChannelStream` and `TcpStream` share one code path. Since ironrdp-tokio
+//! 0.10, `TokioFramed`'s futures are `Send` for such streams, so the session
+//! task runs directly under `tokio::spawn`.
 
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
@@ -30,7 +32,7 @@ use ironrdp::cliprdr::pdu::{
 };
 use ironrdp::connector;
 use ironrdp::connector::connection_activation::ConnectionActivationState;
-use ironrdp::connector::{ConnectionResult, Sequence as _};
+use ironrdp::connector::ConnectionResult;
 use ironrdp::core::AsAny;
 use ironrdp::displaycontrol::client::DisplayControlClient;
 use ironrdp::dvc::DrdynvcClient;
@@ -39,10 +41,9 @@ use ironrdp::input::{MouseButton, MousePosition, Operation, Scancode, WheelRotat
 use ironrdp::pdu::gcc::KeyboardType;
 use ironrdp::pdu::rdp::capability_sets::MajorPlatformType;
 use ironrdp::pdu::rdp::client_info::{PerformanceFlags, TimezoneInfo};
-use ironrdp::pdu::WriteBuf;
 use ironrdp::session::fast_path;
 use ironrdp::session::image::DecodedImage;
-use ironrdp::session::{ActiveStage, ActiveStageOutput, SessionResult};
+use ironrdp::session::{ActiveStageBuilder, ActiveStageOutput, SessionResult};
 use ironrdp_tls as tls;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
@@ -75,14 +76,14 @@ type BoxedStream = Box<dyn AsyncReadWrite>;
 /// Open a byte stream to the RDP target — direct TCP or via the SSH jump host.
 async fn open_stream(config: &RdpConfig) -> Result<(BoxedStream, SocketAddr)> {
     if let Some(jump) = &config.jump_host {
-        let connection_timeout = Duration::from_secs(10);
+        let connection_timeout = std::time::Duration::from_secs(10);
         let tunnel = crate::jump::connect_via_jump(
             &ssh_jump_config(jump),
             &config.host,
             config.port,
             connection_timeout,
             // Keep the jump session alive during long idle desktop sessions.
-            Some(Duration::from_secs(15)),
+            Some(std::time::Duration::from_secs(15)),
             3,
             false,
         )
@@ -126,6 +127,10 @@ fn ssh_jump_config(jump: &JumpHostConfig) -> crate::ssh::JumpConfig {
         host_key_fingerprint: None,
     }
 }
+
+// ---------------------------------------------------------------------------
+// Network client for CredSSP/Kerberos
+// ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
 // Clipboard backend
@@ -431,9 +436,9 @@ impl RdpClient {
             .attach_static_channel(DrdynvcClient::new().with_dynamic_channel(display_control));
 
         // X.224 connection request / confirmation (mirrors
-        // `ironrdp_async::connect_begin`, driven manually over our
+        // `ironrdp_async::connect_begin`, driven manually over the
         // provably-Send framing — see `SendPduFramed` docs).
-        let mut buf = WriteBuf::new();
+        let mut buf = ironrdp::pdu::WriteBuf::new();
         while !connector.should_perform_security_upgrade() {
             step_sequence(&mut framed, &mut connector, &mut buf)
                 .await
@@ -456,7 +461,7 @@ impl RdpClient {
         // NLA/CredSSP + connection finalization (mirrors
         // `ironrdp_async::connect_finalize` without the Kerberos network
         // client, which is not needed for NTLM authentication).
-        let mut buf = WriteBuf::new();
+        let mut buf = ironrdp::pdu::WriteBuf::new();
         if connector.should_perform_credssp() {
             perform_credssp(
                 &mut upgraded_framed,
@@ -552,6 +557,8 @@ fn build_connector_config(config: &RdpConfig) -> connector::Config {
         client_build: 0,
         client_name: "NexTerm".to_owned(),
         client_dir: "C:\\Windows\\System32\\mstscax.dll".to_owned(),
+        alternate_shell: String::new(),
+        work_dir: String::new(),
         #[cfg(target_os = "macos")]
         platform: MajorPlatformType::MACINTOSH,
         #[cfg(target_os = "windows")]
@@ -568,11 +575,15 @@ fn build_connector_config(config: &RdpConfig) -> connector::Config {
         hardware_id: None,
         license_cache: None,
         timezone_info: TimezoneInfo::default(),
+        // Keep bulk compression off: the session crate has not wired
+        // slow-path decompression yet (see ironrdp-session's TODO).
+        compression_type: None,
+        multitransport_flags: None,
     }
 }
 
 // ---------------------------------------------------------------------------
-// Active session
+// Send-safe PDU framing
 // ---------------------------------------------------------------------------
 
 /// A PDU framing wrapper over a plain tokio stream half.
@@ -701,7 +712,7 @@ where
 async fn step_sequence<S>(
     framed: &mut SendPduFramed<S>,
     sequence: &mut dyn connector::Sequence,
-    buf: &mut WriteBuf,
+    buf: &mut ironrdp::pdu::WriteBuf,
 ) -> connector::ConnectorResult<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -731,7 +742,7 @@ where
 async fn perform_credssp<S>(
     framed: &mut SendPduFramed<S>,
     connector_handle: &mut connector::ClientConnector,
-    buf: &mut WriteBuf,
+    buf: &mut ironrdp::pdu::WriteBuf,
     server_name: connector::ServerName,
     server_public_key: Vec<u8>,
 ) -> connector::ConnectorResult<()>
@@ -796,9 +807,15 @@ where
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Active session
+// ---------------------------------------------------------------------------
+
 /// Mutable state shared by the session loop.
 struct SessionState {
-    active_stage: ActiveStage,
+    active_stage: ironrdp::session::ActiveStage,
+    /// Rebuilds the Deactivation-Reactivation sequence on server request.
+    activation_factory: connector::connection_activation::ConnectionActivationFactory,
     image: DecodedImage,
     width: u16,
     height: u16,
@@ -826,8 +843,22 @@ async fn run_session(
     let mut writer = SendPduFramed::new(write_half, bytes::BytesMut::new());
 
     let desktop_size = connection_result.desktop_size;
+    // Retain the factory before `connection_result` is consumed by the
+    // builder — it drives the Deactivation-Reactivation sequence later.
+    let activation_factory = connection_result.activation_factory;
     let mut state = SessionState {
-        active_stage: ActiveStage::new(connection_result),
+        active_stage: ActiveStageBuilder {
+            static_channels: connection_result.static_channels,
+            user_channel_id: connection_result.user_channel_id,
+            io_channel_id: connection_result.io_channel_id,
+            message_channel_id: connection_result.message_channel_id,
+            share_id: connection_result.share_id,
+            compression_type: connection_result.compression_type,
+            enable_server_pointer: connection_result.enable_server_pointer,
+            pointer_software_rendering: connection_result.pointer_software_rendering,
+        }
+        .build(),
+        activation_factory,
         image: DecodedImage::new(PixelFormat::RgbA32, desktop_size.width, desktop_size.height),
         width: desktop_size.width,
         height: desktop_size.height,
@@ -980,9 +1011,13 @@ async fn session_loop(
                 ActiveStageOutput::Terminate(_reason) => {
                     terminated = true;
                 }
-                ActiveStageOutput::DeactivateAll(sequence) => {
-                    reactivate(reader, writer, state, event_tx, *sequence).await?;
+                ActiveStageOutput::DeactivateAll => {
+                    reactivate(reader, writer, state, event_tx).await?;
                 }
+                // UDP multitransport and bandwidth auto-detection are not
+                // implemented; like the official client, we log and ignore.
+                ActiveStageOutput::MultitransportRequest(_) => {}
+                ActiveStageOutput::AutoDetect(_) => {}
             }
         }
         if terminated || stop {
@@ -1152,60 +1187,66 @@ fn cliprdr_operation(
     }
 }
 
-/// Drive the Deactivation-Reactivation sequence and rebuild session state.
+/// Drive the Deactivation-Reactivation sequence and rebuild session state
+/// (mirrors the official ironrdp-client crate's handling).
 async fn reactivate(
     reader: &mut SendPduFramed<tokio::io::ReadHalf<BoxedStream>>,
     writer: &mut SendPduFramed<tokio::io::WriteHalf<BoxedStream>>,
     state: &mut SessionState,
     event_tx: &mpsc::Sender<RdpEvent>,
-    mut sequence: ironrdp::connector::connection_activation::ConnectionActivationSequence,
 ) -> Result<(), String> {
-    let mut buf = WriteBuf::new();
+    // Manual sequence stepping (instead of `single_sequence_step_read`)
+    // keeps the concrete `ConnectionActivationSequence` type in the spawned
+    // task's future — passing `&mut dyn Sequence` across an await trips
+    // rustc's higher-ranked `Send` check (ironrdp-async's `FramedRead` GAT
+    // and `&dyn PduHint` lack Send bounds; see AGENTS.md #14).
+    use ironrdp::connector::Sequence as _;
+    let mut sequence = state.activation_factory.create();
+    let mut buf = ironrdp::pdu::WriteBuf::new();
     loop {
-        // Manual sequence stepping (instead of `single_sequence_step_read`)
-        // keeps the concrete `ConnectionActivationSequence` type in the
-        // spawned task's future — passing `&mut dyn Sequence` across the
-        // await trips rustc's higher-ranked `Send` check.
         buf.clear();
         let written = if let Some(hint) = sequence.next_pdu_hint() {
             let pdu = reader
                 .read_by_hint(hint)
                 .await
-                .map_err(|e| format!("read activation step: {e}"))?;
+                .map_err(|e| format!("read deactivation-reactivation step: {e}"))?;
             sequence
                 .step(&pdu, &mut buf)
-                .map_err(|e| format!("process activation step: {e}"))?
+                .map_err(|e| format!("process deactivation-reactivation step: {e}"))?
         } else {
             sequence
                 .step_no_input(&mut buf)
-                .map_err(|e| format!("process activation step: {e}"))?
+                .map_err(|e| format!("process deactivation-reactivation step: {e}"))?
         };
         if written.size().is_some() {
             writer
                 .write_all(buf.filled())
                 .await
-                .map_err(|e| format!("write activation step: {e}"))?;
+                .map_err(|e| format!("write deactivation-reactivation step: {e}"))?;
         }
         if let ConnectionActivationState::Finalized {
-            io_channel_id,
-            user_channel_id,
             desktop_size,
+            share_id,
             enable_server_pointer,
             pointer_software_rendering,
-        } = sequence.state
+        } = sequence.connection_activation_state()
         {
             state.width = desktop_size.width;
             state.height = desktop_size.height;
-            state.image = DecodedImage::new(PixelFormat::RgbA32, desktop_size.width, desktop_size.height);
-            state
-                .active_stage
-                .set_fastpath_processor(fast_path::ProcessorBuilder {
-                    io_channel_id,
-                    user_channel_id,
+            state.image =
+                DecodedImage::new(PixelFormat::RgbA32, desktop_size.width, desktop_size.height);
+            state.active_stage.set_fastpath_processor(
+                fast_path::ProcessorBuilder {
+                    io_channel_id: sequence.io_channel_id(),
+                    user_channel_id: sequence.user_channel_id(),
+                    share_id,
                     enable_server_pointer,
                     pointer_software_rendering,
+                    bulk_decompressor: None,
                 }
-                .build());
+                .build(),
+            );
+            state.active_stage.set_share_id(share_id);
             state.active_stage.set_enable_server_pointer(enable_server_pointer);
             tracing::debug!(width = desktop_size.width, height = desktop_size.height, "RDP reactivated");
             let _ = event_tx

@@ -3,7 +3,9 @@ mod clipboard_files;
 mod config_archive;
 mod connection_manager;
 pub mod db;
-mod desktop_protocol;
+/// Desktop (RDP/VNC) protocol layer. Public for live integration tests
+/// (`tests/rdp_live.rs`) that exercise the real connection pipeline.
+pub mod desktop_protocol;
 pub mod documents;
 mod ftp_client;
 mod jump;
@@ -15,7 +17,8 @@ mod postgres_catalog;
 mod postgres_design;
 mod sqlite;
 mod mysql;
-mod rdp_client;
+/// IronRDP-based RDP client. Public for live integration tests.
+pub mod rdp_client;
 mod sftp_client;
 pub mod ssh;
 mod toolbox;

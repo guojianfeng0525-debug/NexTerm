@@ -27,3 +27,6 @@ test-results/
 *.sln
 *.sw?
 dist.old/
+
+# DSH harness session artifacts
+.dsh-vision-toolkit/

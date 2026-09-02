@@ -10,6 +10,8 @@ use russh::{
 };
 use serde::{Deserialize, Serialize};
 use sha2_10::{Digest, Sha256};
+
+use crate::ssh::public_key_of;
 use std::collections::{HashMap, HashSet};
 use std::io::Cursor;
 use std::sync::Arc;
@@ -335,8 +337,8 @@ fn ssh_fingerprint(key: &PublicKey) -> String {
 impl client::Handler for FingerprintClient {
     type Error = russh::Error;
 
-    async fn check_server_key(&mut self, key: &PublicKey) -> Result<bool, Self::Error> {
-        let fingerprint = ssh_fingerprint(key);
+    async fn check_server_key(&mut self, key: &russh::keys::PublicKeyOrCertificate) -> Result<bool, Self::Error> {
+        let fingerprint = ssh_fingerprint(&public_key_of(key));
         if let Ok(mut observed) = self.observed.lock() {
             *observed = Some(fingerprint.clone());
         }
@@ -347,9 +349,9 @@ impl client::Handler for FingerprintClient {
 impl client::Handler for FingerprintProbeClient {
     type Error = russh::Error;
 
-    async fn check_server_key(&mut self, key: &PublicKey) -> Result<bool, Self::Error> {
+    async fn check_server_key(&mut self, key: &russh::keys::PublicKeyOrCertificate) -> Result<bool, Self::Error> {
         if let Ok(mut observed) = self.observed.lock() {
-            *observed = Some(ssh_fingerprint(key));
+            *observed = Some(ssh_fingerprint(&public_key_of(key)));
         }
         Ok(true)
     }

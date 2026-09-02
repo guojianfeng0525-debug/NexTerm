@@ -79,14 +79,26 @@ pub fn host_key_fingerprint(key: &keys::PublicKey) -> String {
     format!("SHA256:{}", STANDARD_NO_PAD.encode(Sha256::digest(key.public_key_bytes())))
 }
 
+/// Extract the plain public key from russh 0.63's key-or-certificate enum
+/// (SSH certificates authenticate against their embedded public key).
+/// Returns an owned key: the certificate arm rebuilds one from its KeyData.
+pub fn public_key_of(key: &russh::keys::PublicKeyOrCertificate) -> keys::PublicKey {
+    match key {
+        russh::keys::PublicKeyOrCertificate::PublicKey { key, .. } => key.clone(),
+        russh::keys::PublicKeyOrCertificate::Certificate(cert) => {
+            keys::PublicKey::from(cert.public_key().clone())
+        }
+    }
+}
+
 struct HostKeyProbeClient(Arc<std::sync::Mutex<Option<String>>>);
 
 impl client::Handler for HostKeyProbeClient {
     type Error = russh::Error;
 
-    async fn check_server_key(&mut self, key: &keys::PublicKey) -> Result<bool, Self::Error> {
+    async fn check_server_key(&mut self, key: &russh::keys::PublicKeyOrCertificate) -> Result<bool, Self::Error> {
         if let Ok(mut observed) = self.0.lock() {
-            *observed = Some(host_key_fingerprint(key));
+            *observed = Some(host_key_fingerprint(&public_key_of(key)));
         }
         Ok(true)
     }
@@ -208,12 +220,12 @@ impl client::Handler for Client {
 
     async fn check_server_key(
         &mut self,
-        server_public_key: &keys::PublicKey,
+        server_public_key: &russh::keys::PublicKeyOrCertificate,
     ) -> Result<bool, Self::Error> {
         if !self.verification_enabled {
             return Ok(true);
         }
-        let fingerprint = host_key_fingerprint(server_public_key);
+        let fingerprint = host_key_fingerprint(&public_key_of(server_public_key));
         // Existing unpinned connections remain usable while the frontend
         // performs its first-use confirmation. Once a fingerprint is stored,
         // a changed server key is always rejected before authentication.
