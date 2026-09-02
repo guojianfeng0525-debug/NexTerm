@@ -70,7 +70,12 @@ pub enum WsMessage {
     /// Start a desktop streaming session
     StartDesktop {
         connection_id: String,
+        /// Client viewport hint — currently advisory only: the server always
+        /// reports the negotiated desktop size via `DesktopStarted`. Defaults
+        /// are accepted because the frontend omits them.
+        #[serde(default)]
         width: u16,
+        #[serde(default)]
         height: u16,
     },
     /// Desktop session started confirmation
