@@ -251,6 +251,14 @@ async fn connects_to_xrdp_through_jump_host() {
     eprintln!("distinct byte values in composited screen: {distinct}");
     assert!(distinct >= 8, "screen looks uniform ({distinct} distinct bytes)");
 
+    // Dump the composited tunnel screen for PNG encoding + visual verification.
+    std::fs::write("/tmp/rdp-jump-frame.bin", &screen).expect("write frame dump");
+    std::fs::write(
+        "/tmp/rdp-jump-meta.json",
+        format!(r#"{{"width": {screen_w}, "height": {screen_h}, "frames": {frame_count}}}"#),
+    )
+    .expect("write meta");
+
     client.disconnect().await.expect("graceful disconnect");
     eprintln!("live RDP jump test PASSED ({screen_w}x{screen_h}, {frame_count} frames)");
 }
