@@ -100,6 +100,10 @@ jobs:
         uses: swatinem/rust-cache@v2
         with:
           workspaces: './src-tauri -> target'
+          # Shared with the warm-rust-cache workflow so tag builds (whose ref
+          # scope cannot read caches saved by previous tags) can restore the
+          # dependency artifacts warmed on the default branch.
+          shared-key: release-deps
 
       - name: Install dependencies (macOS)
         if: matrix.platform == 'macos-latest'

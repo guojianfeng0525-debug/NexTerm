@@ -1,0 +1,104 @@
+name: Warm Rust Cache
+
+# Dependency-artifact cache warmer for the Release workflow.
+#
+# GitHub Actions caches are ref-scoped: a run on refs/tags/vX can only read
+# caches saved on that same tag or on the default branch. Because releases
+# only ever build on fresh tags, the Rust cache saved by one release was
+# never readable by the next — every tag build recompiled all ~885 crates
+# from scratch (~24 min per job).
+#
+# This workflow compiles the release profile on the DEFAULT BRANCH with the
+# same matrix and the same rust-cache shared-key as the Release workflow, so
+# tag builds restore the warmed dependency artifacts and only compile the
+# app crate + link.
+#
+# No bundling, no release side effects — the only output is the cache.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src-tauri/**'
+      - '.github/workflows/warm-rust-cache.yml'
+  workflow_dispatch:
+  schedule:
+    # Weekly refresh (keeps toolchain-hash keys from going stale) — Mondays 03:30 UTC.
+    - cron: '30 3 * * 1'
+
+concurrency:
+  group: warm-rust-cache-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  warm:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest
+            rust_target: 'aarch64-apple-darwin'
+          - platform: macos-latest
+            rust_target: 'x86_64-apple-darwin'
+          - platform: ubuntu-latest
+            rust_target: ''
+          - platform: windows-latest
+            rust_target: ''
+          - platform: windows-latest
+            rust_target: 'i686-pc-windows-msvc'
+
+    runs-on: ${{ matrix.platform }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+          shared-key: release-deps
+
+      - name: Install dependencies (macOS)
+        if: matrix.platform == 'macos-latest'
+        run: brew install pkg-config
+
+      - name: Install dependencies (Linux)
+        if: matrix.platform == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev
+
+      - name: Build frontend (embedded assets)
+        run: |
+          pnpm install
+          pnpm build
+
+      # Compile the full release profile (dependencies + workspace crates).
+      # Bundling (msi/dmg/AppImage) is skipped — the goal is only to populate
+      # the cargo target dir for the cache.
+      - name: Compile release profile
+        working-directory: src-tauri
+        shell: bash
+        run: cargo build --release ${{ matrix.rust_target && format('--target {0}', matrix.rust_target) || '' }}
