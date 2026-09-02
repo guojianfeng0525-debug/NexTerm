@@ -137,13 +137,14 @@ pub struct RdpConfig {
     pub jump_host: Option<JumpHostConfig>,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct VncConfig {
     pub host: String,
     pub port: u16,
     pub password: Option<String>,
     pub color_depth: u8, // 24, 16, or 8
+    /// Optional SSH jump host tunnelling the VNC connection.
+    pub jump_host: Option<JumpHostConfig>,
 }
 
 impl DesktopConnectRequest {
@@ -179,6 +180,7 @@ impl DesktopConnectRequest {
             port: self.port,
             password: self.password.clone(),
             color_depth: self.color_depth.unwrap_or(24),
+            jump_host: self.jump_host.clone(),
         }
     }
 }

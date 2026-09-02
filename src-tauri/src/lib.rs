@@ -6,6 +6,7 @@ pub mod db;
 /// Desktop (RDP/VNC) protocol layer. Public for live integration tests
 /// (`tests/rdp_live.rs`) that exercise the real connection pipeline.
 pub mod desktop_protocol;
+pub mod desktop_transport;
 pub mod documents;
 mod ftp_client;
 mod jump;
@@ -22,7 +23,7 @@ pub mod rdp_client;
 mod sftp_client;
 pub mod ssh;
 mod toolbox;
-mod vnc_client;
+pub mod vnc_client;
 mod websocket_server;
 
 pub mod builder;

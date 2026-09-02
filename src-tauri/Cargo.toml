@@ -89,6 +89,12 @@ ironrdp = { version = "0.17", features = [
 ironrdp-tokio = "0.10"
 ironrdp-tls = { version = "0.2", features = ["rustls"] }
 ironrdp-cliprdr-native = "0.7"
+# VNC (RFB) client-side engine: async, tokio-based, works over any
+# AsyncRead+AsyncWrite stream (so the SSH jump-host tunnel plugs straight
+# in). Handles the RFB handshake, VNC-Auth DES challenge-response, and
+# ZRLE/CopyRect/Raw framebuffer decoding. Community-active alternative to
+# hand-rolling RFC 6143.
+vnc-rs = "0.5"
 # Pinned so the vendored picky/sspi patches below are always selected by the
 # resolver (see the comment on [patch.crates-io]).
 sspi = { version = "=0.21.3", default-features = false }

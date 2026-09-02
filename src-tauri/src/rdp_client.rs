@@ -18,10 +18,9 @@
 //! 0.10, `TokioFramed`'s futures are `Send` for such streams, so the session
 //! task runs directly under `tokio::spawn`.
 
-use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
-use anyhow::{Context as _, Result};
+use anyhow::Result;
 use async_trait::async_trait;
 use ironrdp::cliprdr;
 use ironrdp::cliprdr::backend::CliprdrBackend;
@@ -46,11 +45,10 @@ use ironrdp::session::image::DecodedImage;
 use ironrdp::session::{ActiveStageBuilder, ActiveStageOutput, SessionResult};
 use ironrdp_tls as tls;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::desktop_protocol::{DesktopEvent, DesktopProtocol, FrameUpdate, JumpHostConfig, RdpConfig};
+use crate::desktop_protocol::{DesktopEvent, DesktopProtocol, FrameUpdate, RdpConfig};
 
 /// Bound for the internal event channel. When the WebSocket consumer is
 /// slower than the RDP graphics pipeline, delta frames are dropped and a full
@@ -68,65 +66,11 @@ const WHEEL_DOWN: u8 = 0x10;
 // Transport
 // ---------------------------------------------------------------------------
 
-trait AsyncReadWrite: AsyncRead + AsyncWrite + Unpin + Send + Sync {}
-impl<T> AsyncReadWrite for T where T: AsyncRead + AsyncWrite + Unpin + Send + Sync {}
+// ---------------------------------------------------------------------------
+// Transport (shared with the VNC client — see `desktop_transport.rs`)
+// ---------------------------------------------------------------------------
 
-type BoxedStream = Box<dyn AsyncReadWrite>;
-
-/// Open a byte stream to the RDP target — direct TCP or via the SSH jump host.
-async fn open_stream(config: &RdpConfig) -> Result<(BoxedStream, SocketAddr)> {
-    if let Some(jump) = &config.jump_host {
-        let connection_timeout = std::time::Duration::from_secs(10);
-        let tunnel = crate::jump::connect_via_jump(
-            &ssh_jump_config(jump),
-            &config.host,
-            config.port,
-            connection_timeout,
-            // Keep the jump session alive during long idle desktop sessions.
-            Some(std::time::Duration::from_secs(15)),
-            3,
-            false,
-        )
-        .await
-        .context("Failed to establish the jump-host tunnel to the RDP server")?;
-
-        // The jump channel has no real socket address; the connector only
-        // uses the client address inside the Client Core Data PDU.
-        let client_addr: SocketAddr = "127.0.0.1:0".parse().expect("valid loopback addr");
-        Ok((Box::new(tunnel.stream), client_addr))
-    } else {
-        let stream = TcpStream::connect((config.host.as_str(), config.port))
-            .await
-            .with_context(|| format!("Failed to connect to {}:{}", config.host, config.port))?;
-        stream
-            .set_nodelay(true)
-            .context("Failed to set TCP_NODELAY")?;
-        let client_addr = stream.local_addr().context("Failed to get local address")?;
-        Ok((Box::new(stream), client_addr))
-    }
-}
-
-/// Map the frontend jump-host fields onto the SSH module's `JumpConfig`.
-fn ssh_jump_config(jump: &JumpHostConfig) -> crate::ssh::JumpConfig {
-    use crate::ssh::AuthMethod;
-    let auth_method = if jump.use_key.unwrap_or(false) {
-        AuthMethod::PublicKey {
-            key_path: jump.key_path.clone().unwrap_or_default(),
-            passphrase: None,
-        }
-    } else {
-        AuthMethod::Password {
-            password: jump.password.clone().unwrap_or_default(),
-        }
-    };
-    crate::ssh::JumpConfig {
-        host: jump.host.clone(),
-        port: jump.port.unwrap_or(22),
-        username: jump.username.clone().unwrap_or_else(|| "root".to_owned()),
-        auth_method,
-        host_key_fingerprint: None,
-    }
-}
+use crate::desktop_transport::{open_stream, BoxedStream};
 
 // ---------------------------------------------------------------------------
 // Network client for CredSSP/Kerberos
@@ -417,7 +361,9 @@ impl RdpClient {
             ));
         }
 
-        let (stream, client_addr) = open_stream(config).await?;
+        let opened = open_stream(&config.host, config.port, config.jump_host.as_ref()).await?;
+        let client_addr = opened.client_addr();
+        let stream: BoxedStream = opened.stream;
         let mut framed = SendPduFramed::new(stream, bytes::BytesMut::new());
 
         let connector_config = build_connector_config(config);

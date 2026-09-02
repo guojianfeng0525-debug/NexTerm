@@ -163,3 +163,94 @@ async fn connects_to_real_xrdp_and_renders_first_screen() {
     client.disconnect().await.expect("graceful disconnect");
     eprintln!("live RDP test PASSED ({screen_w}x{screen_h}, {frame_count} frames)");
 }
+
+/// RDP over an SSH jump-host tunnel: same assertions as the direct test,
+/// but the X.224/TLS/NLA traffic runs inside a direct-tcpip channel of the
+/// jump SSH session (OpenSSH `ProxyJump` equivalent).
+///
+/// Requires the jump fixture (`e2e/fixtures/ssh-jump`, jumpuser/jumppass)
+/// and the xRDP fixture reachable from inside the jump container — on Docker
+/// Desktop `host.docker.internal` resolves to the host that publishes :3389:
+///
+/// ```sh
+/// RDP_TEST_HOST=host.docker.internal RDP_TEST_USER=rdpuser RDP_TEST_PASS=rdppass \
+/// RDP_JUMP_HOST=127.0.0.1 RDP_JUMP_PORT=22022 RDP_JUMP_USER=jumpuser RDP_JUMP_PASS=jumppass \
+///   cargo test --test rdp_live jump -- --ignored --nocapture
+/// ```
+#[tokio::test]
+#[ignore = "requires a live xRDP server behind a jump host (see module docs)"]
+async fn connects_to_xrdp_through_jump_host() {
+    let host = std::env::var("RDP_TEST_HOST").unwrap_or_default();
+    if host.is_empty() {
+        eprintln!("RDP_TEST_HOST not set — skipping live RDP jump test");
+        return;
+    }
+    let jump_host = std::env::var("RDP_JUMP_HOST").unwrap_or_default();
+    if jump_host.is_empty() {
+        eprintln!("RDP_JUMP_HOST not set — skipping live RDP jump test");
+        return;
+    }
+    let port: u16 = env_or("RDP_TEST_PORT", "3389").parse().expect("valid RDP_TEST_PORT");
+
+    let config = nexterm_lib::desktop_protocol::RdpConfig {
+        host,
+        port,
+        username: env_or("RDP_TEST_USER", "rdpuser"),
+        password: env_or("RDP_TEST_PASS", "rdppass"),
+        domain: None,
+        width: 1280,
+        height: 720,
+        jump_host: Some(nexterm_lib::desktop_protocol::JumpHostConfig {
+            host: jump_host,
+            port: std::env::var("RDP_JUMP_PORT")
+                .ok()
+                .and_then(|p| p.parse::<u16>().ok())
+                .or(Some(22022)),
+            username: Some(env_or("RDP_JUMP_USER", "jumpuser")),
+            password: Some(env_or("RDP_JUMP_PASS", "jumppass")),
+            use_key: Some(false),
+            key_path: None,
+        }),
+    };
+
+    eprintln!("connecting via jump to {}:{} (NLA)", config.host, config.port);
+    let mut client = RdpClient::connect(&config)
+        .await
+        .expect("RDP connection through the jump-host tunnel");
+
+    let (screen_w, screen_h) = client.desktop_size();
+    eprintln!("connected; desktop size {screen_w}x{screen_h}");
+    assert!(screen_w >= 640 && screen_h >= 480, "unreasonable desktop size");
+
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel::<DesktopEvent>();
+    let cancel = CancellationToken::new();
+    client.start_frame_loop(event_tx, cancel.clone()).await.expect("start frame loop");
+
+    let mut screen = vec![0u8; screen_w as usize * screen_h as usize * 4];
+    let mut frame_count = 0usize;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    while tokio::time::Instant::now() < deadline {
+        let Ok(event) = tokio::time::timeout_at(deadline, event_rx.recv()).await else {
+            break;
+        };
+        match event {
+            Some(DesktopEvent::Frame(frame)) => {
+                blit(&mut screen, screen_w as usize, &frame);
+                frame_count += 1;
+            }
+            Some(DesktopEvent::Terminated(reason)) => panic!("session terminated early: {reason}"),
+            Some(_) => {}
+            None => break,
+        }
+    }
+    cancel.cancel();
+
+    eprintln!("received {frame_count} frame(s) through the tunnel");
+    assert!(frame_count > 0, "no graphics frames arrived within 15 s");
+    let distinct = distinct_byte_values(&screen);
+    eprintln!("distinct byte values in composited screen: {distinct}");
+    assert!(distinct >= 8, "screen looks uniform ({distinct} distinct bytes)");
+
+    client.disconnect().await.expect("graceful disconnect");
+    eprintln!("live RDP jump test PASSED ({screen_w}x{screen_h}, {frame_count} frames)");
+}
