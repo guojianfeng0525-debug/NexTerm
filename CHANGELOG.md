@@ -10,6 +10,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 
+## [2.16.1] - 2026-09-02
+
+### Fixed
+
+- VNC/RDP connections launched from the server list (connect, reconnect,
+  duplicate tab, session restore) no longer fail with "Disconnected" — they
+  now route to the desktop viewer path; legacy tabs missing `tabType` are
+  normalized to desktop tabs.
+- SSH host-key fingerprint probes for the target server now run through the
+  jump-host tunnel when a jump host is configured — previously the direct
+  probe timed out after 10s on targets unreachable from the client.
+- CapsLock can now switch letter case in remote desktop sessions: the VNC
+  client's caps latch (previously dead code) resolves keysym case from the
+  client's toggle state, and RDP emits toggle sync events (Windows hosts
+  track CapsLock/NumLock there rather than via raw scancodes).
+
+
 ## [2.16.0] - 2026-09-02
 
 ### Added
