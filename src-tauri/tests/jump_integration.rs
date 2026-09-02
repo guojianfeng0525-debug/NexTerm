@@ -77,3 +77,41 @@ async fn connect_through_jump_and_open_pty() {
     let _ = client.disconnect().await;
     println!("== done ==");
 }
+
+/// Probe the TARGET host's fingerprint through the jump fixture
+/// (e2e/fixtures/ssh-jump on 127.0.0.1:22022, jumpuser/jumppass).
+///
+/// The target is the jump container's own sshd on its Docker bridge IP
+/// (172.17.0.3:22) — reachable only from the Docker network, NOT from the
+/// host. This mirrors the real ProxyJump scenario: a direct probe times out
+/// while the jump-tunnelled probe succeeds.
+///
+/// Run with:
+///   docker run -d --name nexterm-ssh-jump -p 22022:22 nexterm-ssh-jump-fixture:local
+///   PROBE_JUMP_IP=172.17.0.3 cargo test --test jump_integration probe_target_fingerprint -- --ignored --nocapture
+#[tokio::test]
+#[ignore]
+async fn probe_target_fingerprint_through_jump() {
+    let target_ip = std::env::var("PROBE_JUMP_IP").unwrap_or_else(|_| "172.17.0.3".to_string());
+    let jump = JumpConfig {
+        host: "127.0.0.1".to_string(),
+        port: 22022,
+        username: "jumpuser".to_string(),
+        auth_method: AuthMethod::Password {
+            password: "jumppass".to_string(),
+        },
+        host_key_fingerprint: None,
+    };
+
+    // Direct probe to the Docker-bridge IP must fail — the host cannot route
+    // into the bridge network (this is the user-reported bug scenario).
+    let direct = nexterm_lib::ssh::probe_host_key(&target_ip, 22).await;
+    assert!(direct.is_err(), "direct probe unexpectedly succeeded: {:?}", direct);
+
+    // Through the jump tunnel it must succeed and return a fingerprint.
+    let via_jump = nexterm_lib::ssh::probe_host_key_via_jump(&target_ip, 22, &jump).await;
+    assert!(via_jump.is_ok(), "jump probe failed: {:?}", via_jump.as_ref().err());
+    let fingerprint = via_jump.unwrap();
+    assert!(!fingerprint.is_empty(), "empty fingerprint");
+    println!("target {target_ip}:22 fingerprint via jump: {fingerprint}");
+}

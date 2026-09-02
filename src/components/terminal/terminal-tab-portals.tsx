@@ -101,7 +101,12 @@ function TerminalTabContent({ tab, themeKey }: { tab: TerminalTab; themeKey: num
 
   let content: React.ReactNode;
 
-  if (tab.tabType === 'desktop') {
+  // Desktop protocols render the DesktopViewer even if a legacy/buggy
+  // workspace entry lacks tabType 'desktop' (protocol is authoritative).
+  const isDesktopTab =
+    tab.tabType === 'desktop' || tab.protocol === 'VNC' || tab.protocol === 'RDP';
+
+  if (isDesktopTab) {
     content = (
       <DesktopViewer
         connectionId={tab.id}

@@ -439,6 +439,13 @@ function AppContent() {
             }
 
             if (tabAlreadyExists) {
+              // Legacy/buggy workspace entries may carry a wrong tabType (or
+              // none) for desktop connections — normalize it so the terminal
+              // portal mounts DesktopViewer instead of PtyTerminal.
+              const existingRestoreTab = allTabs.find((t) => t.id === activeConn.connectionId);
+              if (existingRestoreTab && existingRestoreTab.tabType !== 'desktop') {
+                dispatch({ type: 'UPDATE_TAB_TYPE', tabId: activeConn.connectionId, tabType: 'desktop' });
+              }
               dispatch({ type: 'UPDATE_TAB_STATUS', tabId: activeConn.connectionId, status: 'connected' });
             } else {
               const newTab: TerminalTab = {
@@ -613,6 +620,10 @@ function AppContent() {
         tab.connectionStatus !== 'disconnected',
       );
       if (existingTab) {
+        // Normalize legacy desktop tabs (wrong/missing tabType) on activation
+        if ((connection.protocol === 'VNC' || connection.protocol === 'RDP') && existingTab.tabType !== 'desktop') {
+          dispatch({ type: 'UPDATE_TAB_TYPE', tabId: existingTab.id, tabType: 'desktop' });
+        }
         for (const group of Object.values(state.groups)) {
           if (group.tabs.some((t) => t.id === existingTab.id)) {
             dispatch({ type: 'ACTIVATE_GROUP', groupId: group.id });
@@ -633,14 +644,20 @@ function AppContent() {
       const isSftp = connectionData.protocol === 'SFTP';
       const isFtp = connectionData.protocol === 'FTP';
       const isFileBrowser = isSftp || isFtp;
+      const isDesktopProto = connectionData.protocol === 'RDP' || connectionData.protocol === 'VNC';
 
+      // Desktop protocols (RDP/VNC) connect with the credentials they have:
+      // VNC servers may legitimately run without any password (None-auth),
+      // so the missing-credentials dialog only applies to SSH/SFTP/FTP.
       const hasCredentials = isFileBrowser
         ? (connectionData.authMethod === 'anonymous' || connectionData.authMethod === 'password'
           ? (connectionData.authMethod === 'anonymous' || !!connectionData.password)
           : !!connectionData.privateKeyPath)
-        : (connectionData.authMethod === 'password'
-          ? !!connectionData.password
-          : !!connectionData.privateKeyPath);
+        : isDesktopProto
+          ? true
+          : (connectionData.authMethod === 'password'
+            ? !!connectionData.password
+            : !!connectionData.privateKeyPath);
 
       if (!hasCredentials) {
         setEditingConnection(toConnectionConfig(connectionData));
@@ -693,6 +710,51 @@ function AppContent() {
           toast.error(t('app.connectionFailed'), {
             description: error instanceof Error ? error.message : String(error),
           });
+        }
+      } else if (isDesktopProto) {
+        // RDP/VNC connect flow — mirrors the connection-dialog path
+        // (desktop tab + desktop_connect with the saved jump-host config).
+        const newTab: TerminalTab = {
+          id: sessionId,
+          name: connectionData.name,
+          tabType: 'desktop',
+          protocol: connectionData.protocol,
+          host: connectionData.host,
+          username: connectionData.username,
+          originalConnectionId: connection.id,
+          connectionStatus: 'connecting',
+          reconnectCount: 0,
+        };
+        dispatch({ type: 'ADD_TAB', groupId: state.activeGroupId, tab: newTab });
+
+        try {
+          await invoke('desktop_connect', {
+            connectionId: sessionId,
+            request: {
+              host: connectionData.host,
+              port: connectionData.port || (connectionData.protocol === 'RDP' ? 3389 : 5900),
+              protocol: connectionData.protocol.toLowerCase(),
+              username: connectionData.username || '',
+              password: connectionData.password || '',
+              domain: connectionData.domain || null,
+              resolution: connectionData.rdpResolution || '1920x1080',
+              colorDepth: connectionData.vncColorDepth ? parseInt(connectionData.vncColorDepth) : 24,
+              jumpHost: buildDesktopJumpHost(connectionData),
+            }
+          });
+          ConnectionStorageManager.updateLastConnected(connection.id);
+          dispatch({ type: 'UPDATE_TAB_STATUS', tabId: sessionId, status: 'connected' });
+          setSection('terminal');
+        } catch (error) {
+          dispatch({ type: 'UPDATE_TAB_STATUS', tabId: sessionId, status: 'disconnected' });
+          toast.error(t('app.connectionFailed'), {
+            description: error instanceof Error ? error.message : String(error),
+          });
+          // Reopen the dialog on the saved connection so the user can fix
+          // credentials/host without re-entering everything.
+          setEditingConnection(toConnectionConfig(connectionData));
+          setPendingConnectionId(connection.id);
+          setConnectionDialogOpen(true);
         }
       } else {
         // SSH connect flow — create a placeholder tab first (shows "Waiting for
@@ -778,12 +840,18 @@ function AppContent() {
     const isSftp = tabToDuplicate.protocol === 'SFTP' || connectionData.protocol === 'SFTP';
     const isFtp = tabToDuplicate.protocol === 'FTP' || connectionData.protocol === 'FTP';
     const isFileBrowser = isSftp || isFtp;
+    const isDesktopProto =
+      tabToDuplicate.tabType === 'desktop' ||
+      connectionData.protocol === 'RDP' ||
+      connectionData.protocol === 'VNC';
 
     const hasCredentials = isFileBrowser
       ? (connectionData.authMethod === 'anonymous' || !!connectionData.password || !!connectionData.privateKeyPath)
-      : (connectionData.authMethod === 'password'
-        ? !!connectionData.password
-        : !!connectionData.privateKeyPath);
+      : isDesktopProto
+        ? true
+        : (connectionData.authMethod === 'password'
+          ? !!connectionData.password
+          : !!connectionData.privateKeyPath);
 
     if (!hasCredentials) {
       toast.error(t('app.cannotDuplicate'), {
@@ -826,6 +894,46 @@ function AppContent() {
               }
             });
           }
+          dispatch({ type: 'UPDATE_TAB_STATUS', tabId: duplicateId, status: 'connected' });
+          toast.success(t('app.tabDuplicated'), {
+            description: t('app.tabDuplicatedDesc', { name: tabToDuplicate.name }),
+          });
+        } catch (error) {
+          dispatch({ type: 'UPDATE_TAB_STATUS', tabId: duplicateId, status: 'disconnected' });
+          toast.error(t('app.duplicationFailed'), {
+            description: error instanceof Error ? error.message : String(error),
+          });
+        }
+      } else if (isDesktopProto) {
+        // RDP/VNC duplicate flow
+        const duplicatedTab: TerminalTab = {
+          id: duplicateId,
+          name: tabToDuplicate.name,
+          tabType: 'desktop',
+          protocol: tabToDuplicate.protocol,
+          host: tabToDuplicate.host,
+          username: tabToDuplicate.username,
+          originalConnectionId,
+          connectionStatus: 'connecting',
+          reconnectCount: 0,
+        };
+        dispatch({ type: 'ADD_TAB', groupId: state.activeGroupId, tab: duplicatedTab });
+
+        try {
+          await invoke('desktop_connect', {
+            connectionId: duplicateId,
+            request: {
+              host: connectionData.host,
+              port: connectionData.port || (connectionData.protocol === 'RDP' ? 3389 : 5900),
+              protocol: connectionData.protocol.toLowerCase(),
+              username: connectionData.username || '',
+              password: connectionData.password || '',
+              domain: connectionData.domain || null,
+              resolution: connectionData.rdpResolution || '1920x1080',
+              colorDepth: connectionData.vncColorDepth ? parseInt(connectionData.vncColorDepth) : 24,
+              jumpHost: buildDesktopJumpHost(connectionData),
+            }
+          });
           dispatch({ type: 'UPDATE_TAB_STATUS', tabId: duplicateId, status: 'connected' });
           toast.success(t('app.tabDuplicated'), {
             description: t('app.tabDuplicatedDesc', { name: tabToDuplicate.name }),
@@ -892,12 +1000,20 @@ function AppContent() {
     const isSftp = tabToReconnect.protocol === 'SFTP' || connectionData.protocol === 'SFTP';
     const isFtp = tabToReconnect.protocol === 'FTP' || connectionData.protocol === 'FTP';
     const isFileBrowser = isSftp || isFtp;
+    const isDesktopProto =
+      tabToReconnect.tabType === 'desktop' ||
+      connectionData.protocol === 'RDP' ||
+      connectionData.protocol === 'VNC';
 
+    // Desktop protocols reconnect with whatever credentials are stored
+    // (VNC None-auth servers have no password at all).
     const hasCredentials = isFileBrowser
       ? (connectionData.authMethod === 'anonymous' || !!connectionData.password || !!connectionData.privateKeyPath)
-      : (connectionData.authMethod === 'password'
-        ? !!connectionData.password
-        : !!connectionData.privateKeyPath);
+      : isDesktopProto
+        ? true
+        : (connectionData.authMethod === 'password'
+          ? !!connectionData.password
+          : !!connectionData.privateKeyPath);
 
     if (!hasCredentials) {
       toast.error(t('app.cannotReconnect'), {
@@ -911,6 +1027,10 @@ function AppContent() {
 
     // Update tab status to connecting
     dispatch({ type: 'UPDATE_TAB_STATUS', tabId, status: 'connecting' });
+    // Normalize legacy desktop tabs so the portal mounts DesktopViewer
+    if (isDesktopProto && tabToReconnect.tabType !== 'desktop') {
+      dispatch({ type: 'UPDATE_TAB_TYPE', tabId, tabType: 'desktop' });
+    }
 
     try {
       if (isFileBrowser) {
@@ -940,6 +1060,37 @@ function AppContent() {
             }
           });
         }
+
+        if (!tabToReconnect.originalConnectionId) {
+          ConnectionStorageManager.updateLastConnected(originalConnectionId);
+        }
+        dispatch({ type: 'UPDATE_TAB_STATUS', tabId, status: 'connected' });
+        toast.success(t('app.reconnected'), {
+          description: t('app.reconnectedDesc', { name: tabToReconnect.name }),
+        });
+      } else if (isDesktopProto) {
+        // RDP/VNC reconnect — clean up the stale backend session (if any)
+        // and re-run desktop_connect with the stored config.
+        try {
+          await invoke('desktop_disconnect', { connectionId: tabId });
+        } catch {
+          // Ignore errors when disconnecting a possibly-dead session
+        }
+
+        await invoke('desktop_connect', {
+          connectionId: tabId,
+          request: {
+            host: connectionData.host,
+            port: connectionData.port || (connectionData.protocol === 'RDP' ? 3389 : 5900),
+            protocol: connectionData.protocol.toLowerCase(),
+            username: connectionData.username || '',
+            password: connectionData.password || '',
+            domain: connectionData.domain || null,
+            resolution: connectionData.rdpResolution || '1920x1080',
+            colorDepth: connectionData.vncColorDepth ? parseInt(connectionData.vncColorDepth) : 24,
+            jumpHost: buildDesktopJumpHost(connectionData),
+          }
+        });
 
         if (!tabToReconnect.originalConnectionId) {
           ConnectionStorageManager.updateLastConnected(originalConnectionId);
@@ -1504,7 +1655,9 @@ function AppContent() {
   // File-browser tabs don't need right sidebar (system monitor) or bottom panel (integrated file browser)
   const isFileBrowserTab = activeTab?.tabType === 'file-browser';
   // Desktop tabs (RDP/VNC) also don't need right sidebar or bottom panel
-  const isDesktopTab = activeTab?.tabType === 'desktop';
+  // (protocol check covers legacy tabs whose tabType predates 'desktop')
+  const isDesktopTab = activeTab?.tabType === 'desktop'
+    || activeTab?.protocol === 'VNC' || activeTab?.protocol === 'RDP';
   // Editor tabs are standalone — hide extra panels like file-browser/desktop tabs
   const isEditorTab = activeTab?.tabType === 'editor';
   const hideExtraPanels = isFileBrowserTab || isDesktopTab || isEditorTab;

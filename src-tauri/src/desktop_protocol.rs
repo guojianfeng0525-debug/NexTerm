@@ -53,7 +53,13 @@ pub trait DesktopProtocol: Send + Sync {
     ///
     /// `key_code` is a JavaScript `KeyboardEvent.keyCode`; protocol clients
     /// translate it to their wire format (RDP set-1 scancodes).
-    async fn send_key(&self, key_code: u32, down: bool) -> Result<()>;
+    ///
+    /// `caps_lock`/`num_lock` carry the client's toggle-state at the moment
+    /// of the event (`KeyboardEvent.getModifierState`), when the frontend
+    /// provides them. RDP uses them to emit sync events (Windows hosts track
+    /// toggles there rather than on raw CapsLock scancodes); VNC uses
+    /// `caps_lock` to case-resolve letter keysyms.
+    async fn send_key(&self, key_code: u32, down: bool, caps_lock: Option<bool>, num_lock: Option<bool>) -> Result<()>;
 
     /// Send a pointer (mouse) event to the remote host.
     async fn send_pointer(&self, x: u16, y: u16, button_mask: u8) -> Result<()>;

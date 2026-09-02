@@ -540,7 +540,7 @@ impl DesktopProtocol for VncClient {
         Ok(())
     }
 
-    async fn send_key(&self, key_code: u32, down: bool) -> Result<()> {
+    async fn send_key(&self, key_code: u32, down: bool, caps_lock: Option<bool>, _num_lock: Option<bool>) -> Result<()> {
         if self.terminated.load(Ordering::SeqCst) {
             return Err(anyhow::anyhow!("VNC session has ended"));
         }
@@ -550,7 +550,15 @@ impl DesktopProtocol for VncClient {
                 self.shift_down.store(down, Ordering::SeqCst);
             }
             20 if down => {
-                // CapsLock keydown toggles the latch; RFB has no lock state.
+                // CapsLock keydown: prefer the authoritative client toggle
+                // state (`getModifierState('CapsLock')`, already updated by
+                // the browser at event time); fall back to toggling our latch
+                // when the frontend doesn't provide it. RFB itself carries no
+                // lock state — the letter keysyms we send are case-resolved
+                // here, and X11 servers never lowercase an uppercase keysym,
+                // so their own lock state never double-applies.
+                let now = caps_lock.unwrap_or_else(|| !self.caps_lock.load(Ordering::SeqCst));
+                self.caps_lock.store(now, Ordering::SeqCst);
             }
             _ => {}
         }
@@ -675,6 +683,18 @@ fn is_modifier(keysym: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn caps_lock_resolves_letter_case() {
+        // Base 'a' keysym: plain, with Shift, with CapsLock, and both —
+        // CapsLock XOR Shift flips the case like gtk-vnc.
+        assert_eq!(apply_case(0x61, false, false), 0x61); // a
+        assert_eq!(apply_case(0x61, true, false), 0x41);  // A
+        assert_eq!(apply_case(0x61, false, true), 0x41);  // A (caps)
+        assert_eq!(apply_case(0x61, true, true), 0x61);   // a (shift+caps)
+        // Uppercase base passes through unchanged.
+        assert_eq!(apply_case(0x41, false, false), 0x41);
+    }
 
     #[test]
     fn js_letter_keysyms_use_lowercase_ascii() {

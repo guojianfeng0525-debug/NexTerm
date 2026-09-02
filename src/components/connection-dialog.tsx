@@ -395,8 +395,28 @@ export function ConnectionDialog({
     let connectionConfig = config;
     if ((config.protocol === 'SSH' || config.protocol === 'SFTP') && !config.hostKeyFingerprint) {
       try {
+        // When a jump host is configured the target is typically only
+        // reachable from the jump network — probe its host key through the
+        // jump tunnel instead of a direct (doomed) TCP connection.
+        // NOTE: nested request bodies are deserialized by serde as-is, so
+        // the keys must be snake_case (same as buildSshConnectRequest).
+        const jumpEnabled = !!config.jumpHost?.trim();
         const { fingerprint } = await invoke<{ fingerprint: string }>('ssh_host_key_fingerprint', {
-          request: { host: config.host, port: config.port || 22 },
+          request: {
+            host: config.host,
+            port: config.port || 22,
+            ...(jumpEnabled ? {
+              jump_host: config.jumpHost,
+              jump_port: config.jumpPort || 22,
+              jump_username: config.jumpUsername || '',
+              jump_password: config.jumpPassword || '',
+              jump_use_key: config.jumpUseKey ?? false,
+              ...(config.jumpUseKey ? {
+                key_path: config.privateKeyPath || '',
+                passphrase: config.passphrase || '',
+              } : {}),
+            } : {}),
+          },
         });
         if (!(await confirmHostKey(t('connectionDialog.hostKey.confirm', { host: config.host, port: config.port || 22, fingerprint })))) {
           resetConnectionState();

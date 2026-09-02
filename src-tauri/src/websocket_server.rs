@@ -89,6 +89,10 @@ pub enum WsMessage {
         connection_id: String,
         key_code: u32,
         down: bool,
+        /// Client toggle state at the moment of the event, when the frontend
+        /// provides it (see `KeyboardEvent.getModifierState`).
+        caps_lock: Option<bool>,
+        num_lock: Option<bool>,
     },
     /// Desktop pointer (mouse) event from frontend
     DesktopPointerEvent {
@@ -803,6 +807,8 @@ impl WebSocketServer {
                 connection_id,
                 key_code,
                 down,
+                caps_lock,
+                num_lock,
             } => {
                 if let Some(client) = self
                     .connection_manager
@@ -810,7 +816,7 @@ impl WebSocketServer {
                     .await
                 {
                     let c = client.read().await;
-                    if let Err(e) = c.send_key(key_code, down).await {
+                    if let Err(e) = c.send_key(key_code, down, caps_lock, num_lock).await {
                         tracing::error!("Failed to send desktop key event: {}", e);
                     }
                 }

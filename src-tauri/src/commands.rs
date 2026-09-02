@@ -145,6 +145,15 @@ pub async fn cancel_file_transfer(
 pub struct HostKeyProbeRequest {
     pub host: String,
     pub port: u16,
+    /// When set, the target host is probed through this SSH jump host —
+    /// required when the target is only reachable from the jump network.
+    pub jump_host: Option<String>,
+    pub jump_port: Option<u16>,
+    pub jump_username: Option<String>,
+    pub jump_password: Option<String>,
+    pub jump_use_key: Option<bool>,
+    pub key_path: Option<String>,
+    pub passphrase: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -154,8 +163,26 @@ pub struct HostKeyProbeResponse {
 
 #[tauri::command]
 pub async fn ssh_host_key_fingerprint(request: HostKeyProbeRequest) -> Result<HostKeyProbeResponse, String> {
-    crate::ssh::probe_host_key(&request.host, request.port)
-        .await
+    let use_jump = request.jump_host.as_deref().map_or(false, |h| !h.trim().is_empty());
+    let result = if use_jump {
+        match build_jump_fields(
+            &request.jump_host,
+            request.jump_port,
+            &request.jump_username,
+            &request.jump_password,
+            request.jump_use_key.unwrap_or(false),
+            &request.key_path,
+            &request.passphrase,
+            &None,
+        ) {
+            Ok(Some(jump)) => crate::ssh::probe_host_key_via_jump(&request.host, request.port, &jump).await,
+            Ok(None) => crate::ssh::probe_host_key(&request.host, request.port).await,
+            Err(e) => Err(anyhow::anyhow!(e)),
+        }
+    } else {
+        crate::ssh::probe_host_key(&request.host, request.port).await
+    };
+    result
         .map(|fingerprint| HostKeyProbeResponse { fingerprint })
         .map_err(|error| error.to_string())
 }
@@ -4207,6 +4234,8 @@ pub async fn desktop_send_key(
     connection_id: String,
     key_code: u32,
     down: bool,
+    caps_lock: Option<bool>,
+    num_lock: Option<bool>,
     state: State<'_, Arc<ConnectionManager>>,
 ) -> Result<(), String> {
     let client = state
@@ -4214,7 +4243,9 @@ pub async fn desktop_send_key(
         .await
         .ok_or_else(|| format!("Desktop connection not found: {}", connection_id))?;
     let c = client.read().await;
-    c.send_key(key_code, down).await.map_err(|e| e.to_string())
+    c.send_key(key_code, down, caps_lock, num_lock)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Send a mouse/pointer event to a remote desktop session

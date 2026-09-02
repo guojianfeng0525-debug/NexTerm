@@ -19,7 +19,7 @@ async function disconnectBackendSession(tab: TerminalTab): Promise<void> {
       } else if (tab.protocol === 'FTP') {
         await invoke('ftp_disconnect', { connection_id: tab.id });
       }
-    } else if (tab.tabType === 'desktop') {
+    } else if (tab.tabType === 'desktop' || tab.protocol === 'VNC' || tab.protocol === 'RDP') {
       await invoke('desktop_disconnect', { connectionId: tab.id });
     } else if (tab.tabType === undefined || tab.tabType === 'terminal') {
       await invoke('ssh_disconnect', { connectionId: tab.id });

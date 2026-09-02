@@ -122,12 +122,108 @@ pub async fn probe_host_key(host: &str, port: u16) -> Result<String> {
     .await
     .map_err(|_| anyhow::anyhow!("SSH host-key probe timed out"))??;
     let _ = session.disconnect(Disconnect::ByApplication, "", "English").await;
-    let fingerprint = observed
+    take_observed_fingerprint(&observed)
+}
+
+/// Probe a target server's host key through an SSH jump host: connect to the
+/// jump host, authenticate, open a direct-tcpip channel to the target, and run
+/// the probe handshake over that tunnel. This is required when the target is
+/// only reachable from the jump host's network (the direct probe would time
+/// out because the target is not routable from the client).
+pub async fn probe_host_key_via_jump(
+    host: &str,
+    port: u16,
+    jump: &JumpConfig,
+) -> Result<String> {
+    let observed = Arc::new(std::sync::Mutex::new(None));
+    let probe_config = Arc::new(client::Config {
+        preferred: russh::Preferred {
+            key: std::borrow::Cow::Borrowed(PREFERRED_HOST_KEY_ALGOS),
+            ..russh::Preferred::DEFAULT
+        },
+        nodelay: true,
+        ..client::Config::default()
+    });
+
+    // 1) Connect + authenticate on the jump host (mirrors SshClient::connect).
+    tracing::info!("[ssh] probing target host key {}:{} via jump {}:{}", host, port, jump.host, jump.port);
+    let mut jump_session = tokio::time::timeout(
+        Duration::from_secs(10),
+        client::connect(
+            Arc::new(client::Config {
+                nodelay: true,
+                ..client::Config::default()
+            }),
+            (&jump.host[..], jump.port),
+            Client::new(jump.host_key_fingerprint.clone(), false),
+        ),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("Jump host connection timed out while probing the target host key"))?
+    .map_err(|e| anyhow::anyhow!("Failed to connect to jump host {}:{}: {}", jump.host, jump.port, e))?;
+
+    let jump_authenticated = match &jump.auth_method {
+        AuthMethod::Password { password } => jump_session
+            .authenticate_password(&jump.username, password)
+            .await
+            .map_err(|e| anyhow::anyhow!("Jump host password authentication failed: {}", e))?
+            .success(),
+        AuthMethod::PublicKey { key_path, passphrase } => {
+            let key = load_private_key(key_path, passphrase.as_deref())?;
+            jump_session
+                .authenticate_publickey(
+                    &jump.username,
+                    keys::PrivateKeyWithHashAlg::new(
+                        Arc::new(key),
+                        Some(keys::HashAlg::Sha256),
+                    ),
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("Jump host public key authentication failed: {}", e))?
+                .success()
+        }
+    };
+    if !jump_authenticated {
+        return Err(anyhow::anyhow!(
+            "Jump host authentication failed. Please check the jump host credentials."
+        ));
+    }
+
+    // 2) Open a direct-tcpip channel to the target and probe through it.
+    let channel = tokio::time::timeout(
+        Duration::from_secs(10),
+        jump_session.channel_open_direct_tcpip(host, port as u32, "127.0.0.1", 0),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("Timed out opening the jump channel to {}:{} while probing", host, port))?
+    .map_err(|e| anyhow::anyhow!("Failed to open the jump channel to {}:{}: {}", host, port, e))?;
+
+    let session = tokio::time::timeout(
+        Duration::from_secs(10),
+        client::connect_stream(
+            probe_config,
+            channel.into_stream(),
+            HostKeyProbeClient(Arc::clone(&observed)),
+        ),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("SSH host-key probe timed out"))?
+    .map_err(|e| anyhow::anyhow!("Failed to probe {}:{} through the jump host: {}", host, port, e))?;
+    let _ = session.disconnect(Disconnect::ByApplication, "", "English").await;
+    let _ = jump_session
+        .disconnect(Disconnect::ByApplication, "", "English")
+        .await;
+    take_observed_fingerprint(&observed)
+}
+
+fn take_observed_fingerprint(
+    observed: &Arc<std::sync::Mutex<Option<String>>>,
+) -> Result<String> {
+    observed
         .lock()
         .map_err(|_| anyhow::anyhow!("SSH host-key probe failed"))?
         .clone()
-        .ok_or_else(|| anyhow::anyhow!("SSH server did not provide a host key"));
-    fingerprint
+        .ok_or_else(|| anyhow::anyhow!("SSH server did not provide a host key"))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

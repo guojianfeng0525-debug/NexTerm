@@ -58,6 +58,7 @@ export type TerminalGroupAction =
   | { type: 'MOVE_TAB_TO_NEW_GROUP'; groupId: string; tabId: string; direction: SplitDirection }
   | { type: 'UPDATE_TAB_STATUS'; tabId: string; status: 'connected' | 'connecting' | 'disconnected' | 'pending' }
   | { type: 'UPDATE_TAB_NAME'; tabId: string; name: string }
+  | { type: 'UPDATE_TAB_TYPE'; tabId: string; tabType: TerminalTab['tabType'] }
   | { type: 'UPDATE_TOOLS_VIEW'; tabId: string; view: import('./toolbox/toolbox-types').ToolboxViewId }
   | { type: 'RECONNECT_TAB'; tabId: string }
   | { type: 'UPDATE_GRID_SIZES'; path: number[]; sizes: number[] }

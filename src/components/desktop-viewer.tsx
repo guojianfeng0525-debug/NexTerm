@@ -190,6 +190,11 @@ export function DesktopViewer({
       connectionId,
       keyCode: e.keyCode,
       down: true,
+      // Toggle states let the backend mirror CapsLock/NumLock to the host
+      // (RDP sync events / VNC keysym casing). getModifierState reflects the
+      // state AFTER the toggle for lock keys on all major engines.
+      capsLock: e.getModifierState('CapsLock'),
+      numLock: e.getModifierState('NumLock'),
     }).catch(() => {/* ignore errors for input events */});
   }, [connectionId, isConnected]);
 
@@ -201,6 +206,8 @@ export function DesktopViewer({
       connectionId,
       keyCode: e.keyCode,
       down: false,
+      capsLock: e.getModifierState('CapsLock'),
+      numLock: e.getModifierState('NumLock'),
     }).catch(() => {});
   }, [connectionId, isConnected]);
 

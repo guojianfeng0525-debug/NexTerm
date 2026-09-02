@@ -193,7 +193,10 @@ fn encode_unicode_text(text: &str) -> Vec<u8> {
 #[derive(Debug)]
 enum RdpInput {
     /// Scancode (set-1 code + extended flag), translated from a JS keyCode.
-    Key { extended: bool, code: u8, down: bool },
+    /// `caps_lock`/`num_lock` carry the client toggle state when the event is
+    /// a lock key — Windows hosts track toggles via sync events, not raw
+    /// scancodes, so a CapsLock press also emits a synchronize event.
+    Key { extended: bool, code: u8, down: bool, caps_lock: Option<bool>, num_lock: Option<bool> },
     /// Pointer state — JS `MouseEvent.buttons` + wheel flags. See
     /// `DesktopProtocol` docs for the bit layout.
     Pointer { x: u16, y: u16, button_mask: u8 },
@@ -977,14 +980,24 @@ async fn session_loop(
 /// Translate a frontend input event into active-stage outputs.
 fn handle_input(state: &mut SessionState, input: RdpInput) -> SessionResult<Vec<ActiveStageOutput>> {
     match input {
-        RdpInput::Key { extended, code, down } => {
+        RdpInput::Key { extended, code, down, caps_lock, num_lock } => {
             let scancode = Scancode::from_u8(extended, code);
             let operation = if down {
                 Operation::KeyPressed(scancode)
             } else {
                 Operation::KeyReleased(scancode)
             };
-            let events = state.keyboard.apply(std::iter::once(operation));
+            let mut events = state.keyboard.apply(std::iter::once(operation));
+            // Lock keys: Windows hosts track CapsLock/NumLock toggles through
+            // sync events (mstsc behaviour), not raw scancodes. When the
+            // frontend supplies the fresh toggle state, mirror it to the host
+            // so the remote session can switch letter case.
+            if down && (code == 0x3A || code == 0x45) {
+                if let (Some(caps), Some(num)) = (caps_lock, num_lock) {
+                    let sync = ironrdp::input::synchronize_event(false, num, caps, false);
+                    events.push(sync);
+                }
+            }
             state
                 .active_stage
                 .process_fastpath_input(&mut state.image, &events)
@@ -1240,11 +1253,11 @@ impl DesktopProtocol for RdpClient {
         Ok(())
     }
 
-    async fn send_key(&self, key_code: u32, down: bool) -> Result<()> {
+    async fn send_key(&self, key_code: u32, down: bool, caps_lock: Option<bool>, num_lock: Option<bool>) -> Result<()> {
         let Some((extended, code)) = js_keycode_to_scancode(key_code) else {
             return Ok(());
         };
-        self.send_input(RdpInput::Key { extended, code, down })
+        self.send_input(RdpInput::Key { extended, code, down, caps_lock, num_lock })
     }
 
     async fn send_pointer(&self, x: u16, y: u16, button_mask: u8) -> Result<()> {
