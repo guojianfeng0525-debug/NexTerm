@@ -1414,7 +1414,6 @@ export function ToolPostgres() {
     sentRange?: SqlStatementRange | null,
   ) => {
     if (!tab) return;
-    patchTab(tab.id, { sql });
     const runId = runIdRef.current + 1;
     runIdRef.current = runId;
     activeRunIdRef.current = runId;

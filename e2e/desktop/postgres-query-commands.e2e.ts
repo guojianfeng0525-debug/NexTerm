@@ -5,9 +5,8 @@ import { unlockApp, waitForVisible } from './helpers/webkit';
  * B19 query commands + B20 keyboard scopes (native desktop E2E).
  * Requires the live PostgreSQL fixture on 127.0.0.1:55432.
  *
- * STATUS: DEFERRED (R9) — WDIO desktop runs are unstable in this session's
- * environment (same class as B17/B18 E2E). Selectors below were verified
- * against the real DOM/testids at authoring time:
+ * STATUS: READY — requires the live PostgreSQL fixture. Selectors below were
+ * verified against the real DOM/testids:
  *   postgres-run / postgres-stop / postgres-explain (toolbar)
  *   .cm-editor (CodeMirror query editor)
  *   postgres-workspace (workspace shell)
@@ -56,7 +55,77 @@ async function setEditorSql(sql: string) {
   await browser.pause(300);
 }
 
-describe('B19 query execution controls (native E2E, DEFERRED under R9)', () => {
+/** Current text of the visible CodeMirror document. */
+async function editorText(): Promise<string> {
+  return await browser.execute(
+    () => document.querySelector('.cm-content')?.textContent ?? '',
+  );
+}
+
+/**
+ * Selects one CodeMirror line by dragging from its left edge to its right edge.
+ * CodeMirror only reliably observes mouse/keyboard input; setting a DOM Range
+ * directly does not update the editor selection used by Run Selection.
+ */
+async function selectEditorLine(index: number) {
+  await browser.execute(
+    (lineIndex: number) => {
+      const content = document.querySelector('.cm-content');
+      const line = content?.querySelectorAll('.cm-line')[lineIndex];
+      if (!(content instanceof HTMLElement) || !(line instanceof HTMLElement)) return;
+      const rect = line.getBoundingClientRect();
+      const fire = (type: string, x: number) => {
+        content.dispatchEvent(new MouseEvent(type, {
+          bubbles: true,
+          cancelable: true,
+          clientX: x,
+          clientY: rect.top + rect.height / 2,
+          button: 0,
+        }));
+      };
+      content.focus();
+      fire('mousedown', rect.left + 2);
+      document.dispatchEvent(new MouseEvent('mousemove', {
+        bubbles: true,
+        cancelable: true,
+        clientX: rect.right - 2,
+        clientY: rect.top + rect.height / 2,
+        button: 0,
+      }));
+      document.dispatchEvent(new MouseEvent('mouseup', {
+        bubbles: true,
+        cancelable: true,
+        clientX: rect.right - 2,
+        clientY: rect.top + rect.height / 2,
+        button: 0,
+      }));
+    },
+    index,
+  );
+  await browser.pause(300);
+}
+
+/**
+ * WDIO's WebKit driver drops Ctrl for special keys such as Enter. The app-level
+ * shortcut is exercised with a synthetic bubbling KeyboardEvent; real user
+ * Ctrl+Enter/Cmd+Enter input remains unaffected.
+ */
+async function pressCtrlEnter() {
+  await browser.execute(() => {
+    document.querySelector('.cm-content')?.dispatchEvent(
+      new KeyboardEvent('keydown', {
+        key: 'Enter',
+        ctrlKey: true,
+        metaKey: true,
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+  });
+  await browser.pause(500);
+}
+
+describe('B19 query execution controls (native E2E)', () => {
   before(async () => {
     const maxAttempts = 4;
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
@@ -108,9 +177,27 @@ describe('B19 query execution controls (native E2E, DEFERRED under R9)', () => {
       { timeout: 15000, timeoutMsg: 'connection unusable after stop' },
     );
   });
+
+  it('executes selected SQL without replacing the unselected document text', async function () {
+    this.timeout(150000);
+    await $('[data-testid="postgres-new-query"]').click();
+    await setEditorSql('SELECT 11 AS selected;\nSELECT 22 AS unselected;');
+
+    await selectEditorLine(0);
+    await pressCtrlEnter();
+
+    const firstCell = await $(`${WORKSPACE_SELECTOR} tbody tr:first-child td:nth-child(2)`);
+    await firstCell.waitForDisplayed({ timeout: 15000 });
+    expect(await firstCell.getText()).toContain('11');
+
+    const text = await editorText();
+    expect(text).toContain('SELECT 11 AS selected');
+    expect(text).toContain('SELECT 22 AS unselected');
+    await browser.saveScreenshot('./test-results/database-visual/postgres-selection-executed.png');
+  });
 });
 
-describe('B20 keyboard scope routing (native E2E, DEFERRED under R9)', () => {
+describe('B20 keyboard scope routing (native E2E)', () => {
   it('Ctrl+R applies filter in DATA_GRID and is not hijacked in query editor', async function () {
     this.timeout(150000);
     // Fresh query tab so no result grid from the earlier cases lingers —

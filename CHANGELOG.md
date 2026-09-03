@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **PostgreSQL 执行选中 SQL 不再丢失未选中文本**：修复“运行选择/当前语句”把选区片段误写回整个编辑器导致未选中 SQL 被删除的问题；现在仅把片段发送到后端执行，编辑器完整文档保持不变，并新增原生桌面 E2E 回归覆盖。
+
 ## [2.16.4] - 2026-09-03
 
 ### Fixed
