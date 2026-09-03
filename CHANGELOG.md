@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.16.4] - 2026-09-03
+
+### Fixed
+
+- **VNC CapsLock 兼容性二段修复**：Windows WebView 的 CapsLock 状态可能滞后，现按实际生成字母反推有效状态，并让 CapsLock keydown 始终推进后端本地锁存；VNC 不再转发远端 `Caps_Lock` keysym，而是按 RFC 6143 直接发送已区分大小写的字母 keysym，避免兼容 RFC 的 VNC 服务器被二次翻转。
+
 ## [2.16.3] - 2026-09-03
 
 ### Fixed
