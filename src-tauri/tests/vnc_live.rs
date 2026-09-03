@@ -120,7 +120,10 @@ async fn connect_and_collect(config: &VncConfig, seconds: u64) -> Collected {
             .send_key(16, false, None, None)
             .await
             .expect("Shift release failed");
-        press(&client, 20, Some(true)).await; // CapsLock on
+        // Windows can report the stale pre-toggle value on CapsLock itself.
+        // The physical keydown advances the backend latch; the next derived
+        // letter state then keeps the client latch authoritative.
+        press(&client, 20, Some(false)).await; // CapsLock on
         press(&client, 65, Some(true)).await; // Caps+a -> A
         client
             .send_key(16, true, None, None)

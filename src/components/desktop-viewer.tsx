@@ -4,7 +4,11 @@ import { invoke } from '@tauri-apps/api/core';
 import { readText as readClipboardText, writeText as writeClipboardText } from '@tauri-apps/plugin-clipboard-manager';
 import { toast } from 'sonner';
 import { DesktopToolbar } from './desktop-toolbar';
-import { computeFitScale, translateCoordinates } from '@/lib/desktop-utils';
+import {
+  computeFitScale,
+  resolveCapsLockState,
+  translateCoordinates,
+} from '@/lib/desktop-utils';
 import { drawFrameUpdate, parseDesktopFrame } from '@/lib/desktop-frame';
 import { Monitor, RefreshCw } from 'lucide-react';
 import { Button } from './ui/button';
@@ -190,10 +194,10 @@ export function DesktopViewer({
       connectionId,
       keyCode: e.keyCode,
       down: true,
-      // Toggle states let the backend mirror CapsLock/NumLock to the host
-      // (RDP sync events / VNC keysym casing). getModifierState reflects the
-      // state AFTER the toggle for lock keys on all major engines.
-      capsLock: e.getModifierState('CapsLock'),
+      // Toggle states let the backend mirror CapsLock/NumLock to the host.
+      // Letters carry the authoritative CapsLock result on Windows WebViews,
+      // whose lock-state report can lag behind the physical toggle.
+      capsLock: resolveCapsLockState(e),
       numLock: e.getModifierState('NumLock'),
     }).catch(() => {/* ignore errors for input events */});
   }, [connectionId, isConnected]);
@@ -206,7 +210,7 @@ export function DesktopViewer({
       connectionId,
       keyCode: e.keyCode,
       down: false,
-      capsLock: e.getModifierState('CapsLock'),
+      capsLock: resolveCapsLockState(e),
       numLock: e.getModifierState('NumLock'),
     }).catch(() => {});
   }, [connectionId, isConnected]);

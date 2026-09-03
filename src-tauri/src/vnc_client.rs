@@ -251,35 +251,19 @@ fn resolve_vnc_keysym(key_code: u32, shift_down: bool, caps_lock: bool) -> Optio
 
 /// Update the mirrored client CapsLock state.
 ///
-/// The frontend reports `KeyboardEvent.getModifierState('CapsLock')` with
-/// every event. Using that authoritative value for ordinary keys is important
-/// when the viewer receives focus while the client OS already has CapsLock
-/// enabled: there is no prior CapsLock key event from which to initialize the
-/// backend latch. The toggle fallback preserves callers that do not provide
-/// lock state.
+/// The frontend reports the effective CapsLock state with every event. Ordinary
+/// keys use that value directly, which initializes the latch when the viewer
+/// receives focus while the client OS already has CapsLock enabled. The
+/// physical CapsLock keydown is always toggled locally because Windows WebView
+/// can report the pre-toggle state.
 fn next_caps_lock_state(current: bool, key_code: u32, down: bool, caps_lock: Option<bool>) -> bool {
-    if let Some(state) = caps_lock {
-        return state;
-    }
     if key_code == 20 && down {
         return !current;
     }
+    if let Some(state) = caps_lock {
+        return state;
+    }
     current
-}
-
-/// Compensate for x11vnc/XKB servers that apply their own CapsLock state to
-/// an explicitly cased letter keysym. RFC 6143 says servers should interpret
-/// the case directly, but x11vnc flips it when its remote lock is enabled, so
-/// send the opposite letter keysym while the remote lock is mirrored.
-fn compensate_remote_caps_lock(keysym: u32, remote_caps_lock: bool) -> u32 {
-    if !remote_caps_lock {
-        return keysym;
-    }
-    match keysym {
-        0x61..=0x7A => keysym - 0x20,
-        0x41..=0x5A => keysym + 0x20,
-        other => other,
-    }
 }
 
 /// Convert a JavaScript button mask to the RFB button mask (no wheel).
@@ -308,9 +292,6 @@ pub struct VncClient {
     /// character, so Shift must be applied locally).
     shift_down: AtomicBool,
     caps_lock: AtomicBool,
-    /// Best-effort mirror of the server's CapsLock state. x11vnc toggles it
-    /// when `Caps_Lock` is forwarded, then applies it again to cased keysyms.
-    remote_caps_lock: AtomicBool,
     /// Set once the frame loop terminates; later input calls fail fast.
     terminated: Arc<AtomicBool>,
 }
@@ -378,7 +359,6 @@ impl VncClient {
             desktop_height: height,
             shift_down: AtomicBool::new(false),
             caps_lock: AtomicBool::new(false),
-            remote_caps_lock: AtomicBool::new(false),
             terminated: Arc::new(AtomicBool::new(false)),
         })
     }
@@ -614,17 +594,6 @@ impl DesktopProtocol for VncClient {
         );
         self.caps_lock.store(client_caps_lock, Ordering::SeqCst);
 
-        // CapsLock is the one lock key we forward. Track the server-side
-        // toggle it causes so ordinary letter keysyms can compensate below.
-        if key_code == 20 && down {
-            // Always track the actual server toggle, even when the client
-            // supplied its own state: the client may have entered focus with
-            // CapsLock already on while the server lock was still off.
-            let mirrored_remote_state = !self.remote_caps_lock.load(Ordering::SeqCst);
-            self.remote_caps_lock
-                .store(mirrored_remote_state, Ordering::SeqCst);
-        }
-
         let Some(resolved_keysym) = resolve_vnc_keysym(
             key_code,
             self.shift_down.load(Ordering::SeqCst),
@@ -633,14 +602,19 @@ impl DesktopProtocol for VncClient {
             tracing::debug!("VNC: unmapped keyCode {key_code}");
             return Ok(());
         };
-        let keysym = compensate_remote_caps_lock(
-            resolved_keysym,
-            self.remote_caps_lock.load(Ordering::SeqCst),
-        );
+        // RFC 6143 explicitly recommends interpreting cased keysyms directly
+        // and ignoring lock keys. Some servers (notably x11vnc/XKB) toggle a
+        // second remote CapsLock and invert that explicit case. Keep CapsLock
+        // client-side and do not forward `Caps_Lock`; the cased keysym below
+        // then works on both RFC-compliant servers and x11vnc.
+        if key_code == 20 {
+            return Ok(());
+        }
+
         Self::engine_input(
             &self.engine,
             X11Event::KeyEvent(vnc::ClientKeyEvent {
-                keycode: keysym,
+                keycode: resolved_keysym,
                 down,
             }),
         )
@@ -850,21 +824,11 @@ mod tests {
         // the first event may then be an ordinary letter, not CapsLock itself.
         assert!(next_caps_lock_state(false, 65, true, Some(true)));
         assert!(!next_caps_lock_state(true, 65, true, Some(false)));
-        // Legacy callers without modifier state still toggle on CapsLock down.
-        assert!(next_caps_lock_state(false, 20, true, None));
+        // Windows WebView can report the stale pre-toggle value. The physical
+        // CapsLock keydown must still advance the local latch.
+        assert!(next_caps_lock_state(false, 20, true, Some(false)));
+        assert!(!next_caps_lock_state(true, 20, true, Some(true)));
         assert!(!next_caps_lock_state(true, 20, true, None));
-        assert!(next_caps_lock_state(true, 20, false, None));
-    }
-
-    #[test]
-    fn remote_caps_lock_does_not_flip_explicit_letter_case() {
-        // x11vnc applies its own CapsLock to cased keysyms, so the wire keysym
-        // is inverted while the mirrored remote lock is on.
-        assert_eq!(compensate_remote_caps_lock(0x61, false), 0x61);
-        assert_eq!(compensate_remote_caps_lock(0x41, false), 0x41);
-        assert_eq!(compensate_remote_caps_lock(0x61, true), 0x41);
-        assert_eq!(compensate_remote_caps_lock(0x41, true), 0x61);
-        assert_eq!(compensate_remote_caps_lock(0x31, true), 0x31);
     }
 
     #[test]
