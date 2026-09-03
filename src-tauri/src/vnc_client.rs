@@ -133,8 +133,10 @@ impl Framebuffer {
 pub fn js_keycode_to_keysym(key_code: u32) -> Option<u32> {
     let kc = key_code as u8;
     Some(match key_code {
-        // Letters (keyCode is the uppercase ASCII regardless of shift state)
-        65..=90 => key_code,               // 'A'..'Z' keysym base; case handled by caller
+        // JS keyCode uses the uppercase ASCII code for letters. VNC keysyms
+        // must start from the lowercase character because Shift/CapsLock are
+        // resolved below; sending 'A' unconditionally would force uppercase.
+        65..=90 => key_code + 0x20,        // 'a'..'z' keysym base
         // Digits
         48..=57 => key_code,               // '0'..'9'
         // Whitespace / editing
@@ -143,13 +145,18 @@ pub fn js_keycode_to_keysym(key_code: u32) -> Option<u32> {
         9 => 0xFF09,                       // Tab
         32 => 0x0020,                      // Space
         27 => 0xFF1B,                      // Escape
+        19 => 0xFF13,                      // Pause
         // Modifiers
         16 => 0xFFE1,                      // Shift_L
         17 => 0xFFE3,                      // Control_L
         18 => 0xFFE9,                      // Alt_L (Option on macOS)
         20 => 0xFFE5,                      // Caps_Lock
         91 => 0xFFEB,                      // Super_L (Meta/Win/Cmd)
-        93 => 0xFF67,                      // Menu
+        92 => 0xFFEC,                      // Super_R (right Meta/Win)
+        93 => 0xFF68,                      // Menu
+        144 => 0xFF7F,                     // Num_Lock
+        145 => 0xFF14,                     // Scroll_Lock
+        44 => 0xFF61,                      // Print
         // Navigation
         33 => 0xFF55,                      // Prior (PageUp)
         34 => 0xFF56,                      // Next (PageDown)
@@ -162,7 +169,7 @@ pub fn js_keycode_to_keysym(key_code: u32) -> Option<u32> {
         45 => 0xFF63,                      // Insert
         46 => 0xFFFF,                      // Delete
         // Function keys
-        112..=123 => 0xFFBE + (key_code - 112), // F1..F12
+        112..=135 => 0xFFBE + (key_code - 112), // F1..F24
         // Punctuation (US layout)
         186 => 0x003B,                     // ;:
         187 => 0x003D,                     // =+
@@ -231,6 +238,50 @@ fn apply_case(base: u32, shift: bool, caps_lock: bool) -> u32 {
     }
 }
 
+/// Resolve the keysym actually sent for a key event, applying the client's
+/// modifier state to the base character.
+fn resolve_vnc_keysym(key_code: u32, shift_down: bool, caps_lock: bool) -> Option<u32> {
+    let base = js_keycode_to_keysym(key_code)?;
+    Some(if is_modifier(base) {
+        base
+    } else {
+        apply_case(base, shift_down, caps_lock)
+    })
+}
+
+/// Update the mirrored client CapsLock state.
+///
+/// The frontend reports `KeyboardEvent.getModifierState('CapsLock')` with
+/// every event. Using that authoritative value for ordinary keys is important
+/// when the viewer receives focus while the client OS already has CapsLock
+/// enabled: there is no prior CapsLock key event from which to initialize the
+/// backend latch. The toggle fallback preserves callers that do not provide
+/// lock state.
+fn next_caps_lock_state(current: bool, key_code: u32, down: bool, caps_lock: Option<bool>) -> bool {
+    if let Some(state) = caps_lock {
+        return state;
+    }
+    if key_code == 20 && down {
+        return !current;
+    }
+    current
+}
+
+/// Compensate for x11vnc/XKB servers that apply their own CapsLock state to
+/// an explicitly cased letter keysym. RFC 6143 says servers should interpret
+/// the case directly, but x11vnc flips it when its remote lock is enabled, so
+/// send the opposite letter keysym while the remote lock is mirrored.
+fn compensate_remote_caps_lock(keysym: u32, remote_caps_lock: bool) -> u32 {
+    if !remote_caps_lock {
+        return keysym;
+    }
+    match keysym {
+        0x61..=0x7A => keysym - 0x20,
+        0x41..=0x5A => keysym + 0x20,
+        other => other,
+    }
+}
+
 /// Convert a JavaScript button mask to the RFB button mask (no wheel).
 fn js_buttons_to_rfb(mask: u8) -> u8 {
     let mut rfb = 0;
@@ -257,6 +308,9 @@ pub struct VncClient {
     /// character, so Shift must be applied locally).
     shift_down: AtomicBool,
     caps_lock: AtomicBool,
+    /// Best-effort mirror of the server's CapsLock state. x11vnc toggles it
+    /// when `Caps_Lock` is forwarded, then applies it again to cased keysyms.
+    remote_caps_lock: AtomicBool,
     /// Set once the frame loop terminates; later input calls fail fast.
     terminated: Arc<AtomicBool>,
 }
@@ -324,6 +378,7 @@ impl VncClient {
             desktop_height: height,
             shift_down: AtomicBool::new(false),
             caps_lock: AtomicBool::new(false),
+            remote_caps_lock: AtomicBool::new(false),
             terminated: Arc::new(AtomicBool::new(false)),
         })
     }
@@ -549,29 +604,39 @@ impl DesktopProtocol for VncClient {
             16 => {
                 self.shift_down.store(down, Ordering::SeqCst);
             }
-            20 if down => {
-                // CapsLock keydown: prefer the authoritative client toggle
-                // state (`getModifierState('CapsLock')`, already updated by
-                // the browser at event time); fall back to toggling our latch
-                // when the frontend doesn't provide it. RFB itself carries no
-                // lock state — the letter keysyms we send are case-resolved
-                // here, and X11 servers never lowercase an uppercase keysym,
-                // so their own lock state never double-applies.
-                let now = caps_lock.unwrap_or_else(|| !self.caps_lock.load(Ordering::SeqCst));
-                self.caps_lock.store(now, Ordering::SeqCst);
-            }
             _ => {}
         }
-        let Some(base) = js_keycode_to_keysym(key_code) else {
+        let client_caps_lock = next_caps_lock_state(
+            self.caps_lock.load(Ordering::SeqCst),
+            key_code,
+            down,
+            caps_lock,
+        );
+        self.caps_lock.store(client_caps_lock, Ordering::SeqCst);
+
+        // CapsLock is the one lock key we forward. Track the server-side
+        // toggle it causes so ordinary letter keysyms can compensate below.
+        if key_code == 20 && down {
+            // Always track the actual server toggle, even when the client
+            // supplied its own state: the client may have entered focus with
+            // CapsLock already on while the server lock was still off.
+            let mirrored_remote_state = !self.remote_caps_lock.load(Ordering::SeqCst);
+            self.remote_caps_lock
+                .store(mirrored_remote_state, Ordering::SeqCst);
+        }
+
+        let Some(resolved_keysym) = resolve_vnc_keysym(
+            key_code,
+            self.shift_down.load(Ordering::SeqCst),
+            self.caps_lock.load(Ordering::SeqCst),
+        ) else {
             tracing::debug!("VNC: unmapped keyCode {key_code}");
             return Ok(());
         };
-        let shift = self.shift_down.load(Ordering::SeqCst);
-        let keysym = if is_modifier(base) {
-            base
-        } else {
-            apply_case(base, shift, self.caps_lock.load(Ordering::SeqCst))
-        };
+        let keysym = compensate_remote_caps_lock(
+            resolved_keysym,
+            self.remote_caps_lock.load(Ordering::SeqCst),
+        );
         Self::engine_input(
             &self.engine,
             X11Event::KeyEvent(vnc::ClientKeyEvent {
@@ -673,7 +738,10 @@ impl DesktopProtocol for VncClient {
 /// Whether the keysym is a modifier (modifiers pass through unchanged —
 /// their keysym names the key, not a character).
 fn is_modifier(keysym: u32) -> bool {
-    matches!(keysym, 0xFFE1 | 0xFFE3 | 0xFFE9 | 0xFFE5 | 0xFFEB | 0xFF67)
+    matches!(
+        keysym,
+        0xFFE1 | 0xFFE3 | 0xFFE9 | 0xFFE5 | 0xFFEB | 0xFFEC | 0xFF68
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -697,11 +765,24 @@ mod tests {
     }
 
     #[test]
+    fn vnc_letter_events_send_lower_and_upper_case_keysyms() {
+        // The complete JS keyCode -> base keysym -> cased keysym path must be
+        // exercised together. Regression: returning uppercase as the base made
+        // every letter uppercase regardless of Shift/CapsLock.
+        assert_eq!(resolve_vnc_keysym(65, false, false), Some(0x61)); // a
+        assert_eq!(resolve_vnc_keysym(65, true, false), Some(0x41)); // Shift+a -> A
+        assert_eq!(resolve_vnc_keysym(65, false, true), Some(0x41)); // Caps+a -> A
+        assert_eq!(resolve_vnc_keysym(65, true, true), Some(0x61)); // Shift+Caps+a -> a
+        assert_eq!(resolve_vnc_keysym(90, false, false), Some(0x7A)); // z
+        assert_eq!(resolve_vnc_keysym(90, true, false), Some(0x5A)); // Shift+z -> Z
+    }
+
+    #[test]
     fn js_letter_keysyms_use_lowercase_ascii() {
         // keyCode 'A' key (65) maps to keysym 'a' (0x61) — case is applied
         // separately from Shift state.
-        assert_eq!(js_keycode_to_keysym(65), Some(0x41));
-        assert_eq!(js_keycode_to_keysym(90), Some(0x5A));
+        assert_eq!(js_keycode_to_keysym(65), Some(0x61));
+        assert_eq!(js_keycode_to_keysym(90), Some(0x7A));
     }
 
     #[test]
@@ -710,22 +791,86 @@ mod tests {
         assert_eq!(js_keycode_to_keysym(57), Some(0x39)); // '9'
         assert_eq!(js_keycode_to_keysym(112), Some(0xFFBE)); // F1
         assert_eq!(js_keycode_to_keysym(123), Some(0xFFC9)); // F12
+        assert_eq!(js_keycode_to_keysym(124), Some(0xFFCA)); // F13
+        assert_eq!(js_keycode_to_keysym(135), Some(0xFFD5)); // F24
     }
 
     #[test]
     fn js_editing_and_navigation_keys_map() {
         assert_eq!(js_keycode_to_keysym(13), Some(0xFF0D)); // Enter
         assert_eq!(js_keycode_to_keysym(8), Some(0xFF08)); // Backspace
+        assert_eq!(js_keycode_to_keysym(9), Some(0xFF09)); // Tab
+        assert_eq!(js_keycode_to_keysym(33), Some(0xFF55)); // PageUp
+        assert_eq!(js_keycode_to_keysym(34), Some(0xFF56)); // PageDown
+        assert_eq!(js_keycode_to_keysym(35), Some(0xFF57)); // End
+        assert_eq!(js_keycode_to_keysym(36), Some(0xFF50)); // Home
         assert_eq!(js_keycode_to_keysym(37), Some(0xFF51)); // Left
+        assert_eq!(js_keycode_to_keysym(38), Some(0xFF52)); // Up
+        assert_eq!(js_keycode_to_keysym(39), Some(0xFF53)); // Right
         assert_eq!(js_keycode_to_keysym(40), Some(0xFF54)); // Down
+        assert_eq!(js_keycode_to_keysym(45), Some(0xFF63)); // Insert
         assert_eq!(js_keycode_to_keysym(46), Some(0xFFFF)); // Delete
         assert_eq!(js_keycode_to_keysym(16), Some(0xFFE1)); // Shift
     }
 
     #[test]
+    fn js_numpad_and_punctuation_keys_map() {
+        assert_eq!(js_keycode_to_keysym(96), Some(0xFFB0)); // KP_0
+        assert_eq!(js_keycode_to_keysym(97), Some(0xFFB1)); // KP_1
+        assert_eq!(js_keycode_to_keysym(105), Some(0xFFB9)); // KP_9
+        assert_eq!(js_keycode_to_keysym(106), Some(0xFFAA)); // KP_*
+        assert_eq!(js_keycode_to_keysym(107), Some(0xFFAB)); // KP_+
+        assert_eq!(js_keycode_to_keysym(109), Some(0xFFAD)); // KP_-
+        assert_eq!(js_keycode_to_keysym(110), Some(0xFFAE)); // KP_.
+        assert_eq!(js_keycode_to_keysym(111), Some(0xFFAF)); // KP_/
+        assert_eq!(js_keycode_to_keysym(186), Some(0x003B)); // ;:
+        assert_eq!(js_keycode_to_keysym(191), Some(0x002F)); // /?
+        assert_eq!(js_keycode_to_keysym(220), Some(0x005C)); // \|
+        assert_eq!(js_keycode_to_keysym(222), Some(0x0027)); // '"
+    }
+
+    #[test]
+    fn js_modifier_lock_and_system_keys_map() {
+        assert_eq!(js_keycode_to_keysym(16), Some(0xFFE1)); // Shift_L
+        assert_eq!(js_keycode_to_keysym(17), Some(0xFFE3)); // Control_L
+        assert_eq!(js_keycode_to_keysym(18), Some(0xFFE9)); // Alt_L
+        assert_eq!(js_keycode_to_keysym(20), Some(0xFFE5)); // Caps_Lock
+        assert_eq!(js_keycode_to_keysym(91), Some(0xFFEB)); // Super_L
+        assert_eq!(js_keycode_to_keysym(92), Some(0xFFEC)); // Super_R
+        assert_eq!(js_keycode_to_keysym(93), Some(0xFF68)); // Menu
+        assert_eq!(js_keycode_to_keysym(144), Some(0xFF7F)); // Num_Lock
+        assert_eq!(js_keycode_to_keysym(145), Some(0xFF14)); // Scroll_Lock
+        assert_eq!(js_keycode_to_keysym(44), Some(0xFF61)); // Print
+        assert_eq!(js_keycode_to_keysym(19), Some(0xFF13)); // Pause
+    }
+
+    #[test]
+    fn caps_lock_state_is_synced_on_ordinary_key_events() {
+        // Windows can already have CapsLock on when the viewer gets focus;
+        // the first event may then be an ordinary letter, not CapsLock itself.
+        assert!(next_caps_lock_state(false, 65, true, Some(true)));
+        assert!(!next_caps_lock_state(true, 65, true, Some(false)));
+        // Legacy callers without modifier state still toggle on CapsLock down.
+        assert!(next_caps_lock_state(false, 20, true, None));
+        assert!(!next_caps_lock_state(true, 20, true, None));
+        assert!(next_caps_lock_state(true, 20, false, None));
+    }
+
+    #[test]
+    fn remote_caps_lock_does_not_flip_explicit_letter_case() {
+        // x11vnc applies its own CapsLock to cased keysyms, so the wire keysym
+        // is inverted while the mirrored remote lock is on.
+        assert_eq!(compensate_remote_caps_lock(0x61, false), 0x61);
+        assert_eq!(compensate_remote_caps_lock(0x41, false), 0x41);
+        assert_eq!(compensate_remote_caps_lock(0x61, true), 0x41);
+        assert_eq!(compensate_remote_caps_lock(0x41, true), 0x61);
+        assert_eq!(compensate_remote_caps_lock(0x31, true), 0x31);
+    }
+
+    #[test]
     fn js_unmapped_keys_return_none() {
         assert_eq!(js_keycode_to_keysym(0), None);
-        assert_eq!(js_keycode_to_keysym(44), None); // PrintScreen region
+        assert_eq!(js_keycode_to_keysym(43), None);
         assert_eq!(js_keycode_to_keysym(200), None);
     }
 

@@ -100,8 +100,14 @@ async fn connects_to_real_xrdp_and_renders_first_screen() {
 
     // Exercise the input path: press/release "A" and move the pointer into
     // the xterm window area. The session must survive these.
-    client.send_key(0x41, true).await.expect("key press");
-    client.send_key(0x41, false).await.expect("key release");
+    client
+        .send_key(0x41, true, None, None)
+        .await
+        .expect("key press");
+    client
+        .send_key(0x41, false, None, None)
+        .await
+        .expect("key release");
     client.send_pointer(400, 300, 0).await.expect("pointer move");
 
     // Collect frames for up to 15 s; openbox + xterm should paint quickly.

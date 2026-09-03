@@ -80,6 +80,61 @@ async fn connect_and_collect(config: &VncConfig, seconds: u64) -> Collected {
     let (width, height) = client.desktop_size();
     println!("connected, desktop size {width}x{height}");
 
+    // Exercise the complete keyboard path before requesting framebuffer
+    // updates. The fixture's focused xterm should echo `aAAaa`:
+    // plain a, Shift+a, Caps+a, Shift+Caps+a, then Caps off + a.
+    async fn press(client: &VncClient, key_code: u32, caps_lock: Option<bool>) {
+        client
+            .send_key(key_code, true, caps_lock, None)
+            .await
+            .expect("key press failed");
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        client
+            .send_key(key_code, false, caps_lock, None)
+            .await
+            .expect("key release failed");
+        tokio::time::sleep(Duration::from_millis(40)).await;
+    }
+
+    if config.jump_host.is_some() {
+        // Clear any keyboard text left by an earlier run against the same
+        // fixture (Ctrl+C), making the echoed sequence deterministic.
+        client
+            .send_key(17, true, None, None)
+            .await
+            .expect("Control press failed");
+        press(&client, 67, None).await; // Ctrl+C
+        client
+            .send_key(17, false, None, None)
+            .await
+            .expect("Control release failed");
+        tokio::time::sleep(Duration::from_millis(120)).await;
+
+        press(&client, 65, None).await; // a
+        client
+            .send_key(16, true, None, None)
+            .await
+            .expect("Shift press failed");
+        press(&client, 65, None).await; // Shift+a -> A
+        client
+            .send_key(16, false, None, None)
+            .await
+            .expect("Shift release failed");
+        press(&client, 20, Some(true)).await; // CapsLock on
+        press(&client, 65, Some(true)).await; // Caps+a -> A
+        client
+            .send_key(16, true, None, None)
+            .await
+            .expect("Shift press failed");
+        press(&client, 65, Some(true)).await; // Shift+Caps+a -> a
+        client
+            .send_key(16, false, None, None)
+            .await
+            .expect("Shift release failed");
+        press(&client, 20, Some(false)).await; // CapsLock off
+        press(&client, 65, Some(false)).await; // a
+    }
+
     let (tx, mut rx) = mpsc::unbounded_channel();
     let cancel = CancellationToken::new();
     client
