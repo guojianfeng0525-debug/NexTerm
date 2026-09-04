@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.16.5] - 2026-09-04
+
 ### Security
 
 - **RDP/VNC 跳板机主机密钥强制 pin**：`desktop_connect` 现在携带用户已确认的跳板机指纹、key path 与 passphrase；后端缺失指纹即拒绝建隧道，指纹变化继续 fail-closed，修复“UI 确认过但实际连接未验证”的 MITM 风险。
