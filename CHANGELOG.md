@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### 安全
 
 - **修复生产依赖高危漏洞**：将 `xlsx` 从 npm 上的老旧 `0.18.5` 升级到 SheetJS 官方发布的 `0.20.3`，并通过 pnpm override 把 Recharts 传递依赖 `lodash` 从 `4.17.21` 提升到 `4.18.1`，消除已知的 Prototype Pollution / Code Injection / ReDoS 攻击面；配置导出/导入、密码库 Excel、PostgreSQL/MySQL/SQLite 结果导出相关测试通过。
+- **修复 FTP 与 MySQL 相关 Rust 依赖漏洞**：`suppaftp` 从 `6.3.0` 升级到 `10.0.2` 并迁移到 Tokio 实现，修复 FTP 命令 CRLF 注入；`mysql_async` 升级到 `0.37.1`，移除存在 use-after-free 风险的旧 `lru` 传递依赖。
 
 ### 变更
 

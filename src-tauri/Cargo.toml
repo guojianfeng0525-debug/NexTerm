@@ -44,8 +44,7 @@ tokio-postgres-rustls = "0.13"
 rustls = "0.23"
 rustls-native-certs = "0.8"
 rustls-pemfile = "2"
-suppaftp = { version = "6", features = ["async-native-tls"] }
-async-std = "1"
+suppaftp = { version = "10.0.2", features = ["tokio-async-native-tls"] }
 dirs = "6"
 open = "5"
 base64 = "0.22"
@@ -53,7 +52,7 @@ encoding_rs = "0.8"
 sys-locale = "0.3"
 reqwest = { version = "0.12", features = ["json", "stream", "blocking", "multipart"] }
 rusqlite = { version = "0.32", features = ["bundled", "backup"] }
-mysql_async = "0.36"
+mysql_async = "0.37"
 betteroffice-docx = "0.1.0"
 betteroffice-xlsx = "0.1.0"
 docx-parse = { package = "betteroffice-docx-parse", version = "0.1.0" }

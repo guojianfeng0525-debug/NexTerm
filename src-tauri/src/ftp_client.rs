@@ -1,8 +1,8 @@
 use anyhow::Result;
-use async_std::io::ReadExt;
-use async_std::io::WriteExt;
 use serde::Deserialize;
 use std::time::Duration;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::time::timeout;
 
 use crate::sftp_client::{FileEntry, FileEntryType};
 
@@ -19,8 +19,8 @@ pub struct FtpConfig {
 
 /// Wrapper enum to handle both plain and TLS FTP streams.
 enum FtpStreamKind {
-    Plain(suppaftp::AsyncFtpStream),
-    Secure(suppaftp::AsyncNativeTlsFtpStream),
+    Plain(suppaftp::tokio::AsyncFtpStream),
+    Secure(suppaftp::tokio::AsyncNativeTlsFtpStream),
 }
 
 /// Dispatch a method call to whichever stream variant is active.
@@ -66,13 +66,13 @@ impl FtpClient {
             config.anonymous
         );
 
-        // Use async_std timeout since suppaftp uses async_std internally
+        // 使用 Tokio timeout，与 Tauri 命令和 suppaftp 10 的异步运行时保持一致。
         let timeout_duration = Duration::from_secs(15);
 
         let mut stream_kind = if config.ftps_enabled {
-            let ftp_stream = async_std::future::timeout(
+            let ftp_stream = timeout(
                 timeout_duration,
-                suppaftp::AsyncNativeTlsFtpStream::connect(&addr),
+                suppaftp::tokio::AsyncNativeTlsFtpStream::connect(&addr),
             )
             .await
             .map_err(|_| {
@@ -92,7 +92,7 @@ impl FtpClient {
             let tls_connector = suppaftp::async_native_tls::TlsConnector::new();
             let secure_stream = ftp_stream
                 .into_secure(
-                    suppaftp::AsyncNativeTlsConnector::from(tls_connector),
+                    suppaftp::tokio::AsyncNativeTlsConnector::from(tls_connector),
                     &config.host,
                 )
                 .await
@@ -101,9 +101,9 @@ impl FtpClient {
             tracing::info!("FTPS TLS handshake complete");
             FtpStreamKind::Secure(secure_stream)
         } else {
-            let ftp_stream = async_std::future::timeout(
+            let ftp_stream = timeout(
                 timeout_duration,
-                suppaftp::AsyncFtpStream::connect(&addr),
+                suppaftp::tokio::AsyncFtpStream::connect(&addr),
             )
             .await
             .map_err(|_| {
