@@ -11,6 +11,11 @@ import { invoke } from '@tauri-apps/api/core';
 import { cn } from '@/lib/utils';
 import { readText as readClipboardText, writeText as writeClipboardText } from '@tauri-apps/plugin-clipboard-manager';
 import { loadAppearanceSettings, getThemeAwareTerminalOptions, getThemeAwareTerminalTheme, terminalThemes, defaultTerminalTheme } from '../lib/terminal-config';
+import {
+  clearSharedTextureAtlas,
+  disposeWebglAddon,
+  registerTerminalForAtlasRefresh,
+} from '../lib/webgl-lifecycle';
 import { TerminalContextMenu } from './terminal/terminal-context-menu';
 import { TerminalSearchBar, type TerminalSearchState } from './terminal/terminal-search-bar';
 import { toast } from 'sonner';
@@ -318,6 +323,10 @@ export function PtyTerminal({
   const containerRef = React.useRef<HTMLDivElement | null>(null);
   const initialIsActiveRef = React.useRef(isActive);
   const wasActiveRef = React.useRef(isActive);
+  // Terminal creation already applies current appearance options. The update
+  // effect below must not run its first-time texture-atlas clear: a newly
+  // mounted tab shares the atlas with existing tabs and would invalidate them.
+  const hasInitializedAppearanceRef = React.useRef(false);
   
   // Search bar state
   const [searchVisible, setSearchVisible] = React.useState(false);
@@ -925,6 +934,7 @@ export function PtyTerminal({
     clipboardAddonRef.current = clipboardAddon;
     
     term.open(terminalRef.current);
+    const unregisterAtlasRefresh = registerTerminalForAtlasRefresh(term);
     
     // --- WebGL renderer setup + occlusion (花屏) recovery ---------------
     // WKWebView (Tauri on macOS) can discard the drawing buffer — and
@@ -939,7 +949,7 @@ export function PtyTerminal({
     //      context died and force a full-row repaint.
     const fallBackFromWebgl = () => {
       if (webglAddonRef.current) {
-        try { webglAddonRef.current.dispose(); } catch (_e) { /* already disposed */ }
+        disposeWebglAddon(webglAddonRef.current);
         webglAddonRef.current = null;
       }
       rendererRef.current = 'canvas';
@@ -966,7 +976,7 @@ export function PtyTerminal({
           if (gl) {
             if (gl.isContextLost()) {
               console.warn('[PTY Terminal] WebGL context lost while occluded, rebuilding renderer');
-              try { webglAddonRef.current.dispose(); } catch (_e) { /* already disposed */ }
+              disposeWebglAddon(webglAddonRef.current);
               webglAddonRef.current = null;
               try {
                 attachWebglAddon();
@@ -1875,13 +1885,14 @@ export function PtyTerminal({
       // Dispose WebGL addon FIRST so GPU textures are released before the
       // terminal canvas is removed from the DOM.
       if (webglAddonRef.current) {
-        try { webglAddonRef.current.dispose(); } catch (_e) { /* already disposed */ }
+        disposeWebglAddon(webglAddonRef.current);
         webglAddonRef.current = null;
       }
       if (clipboardAddonRef.current) {
         try { clipboardAddonRef.current.dispose(); } catch (_e) { /* already disposed */ }
         clipboardAddonRef.current = null;
       }
+      unregisterAtlasRefresh();
       term.reset(); // clear scrollback + viewport so GC can reclaim xterm buffers sooner
       term.dispose();
     };
@@ -1898,6 +1909,10 @@ export function PtyTerminal({
   React.useEffect(() => {
     const term = xtermRef.current;
     if (!term) return;
+    if (!hasInitializedAppearanceRef.current) {
+      hasInitializedAppearanceRef.current = true;
+      return;
+    }
     const currentAppearance = loadAppearanceSettings();
     const opts = getThemeAwareTerminalOptions(currentAppearance);
     term.options.theme = opts.theme;
@@ -1913,9 +1928,7 @@ export function PtyTerminal({
     // the app between light/dark repaints immediately instead of leaving a
     // dark terminal inside a light window (or vice versa).
     // Test doubles may omit this renderer-specific API.
-    if (typeof term.clearTextureAtlas === "function") {
-      term.clearTextureAtlas();
-    }
+    clearSharedTextureAtlas(term);
     term.refresh(0, Math.max(0, term.rows - 1));
   }, [themeKey, appearanceKey]);
 

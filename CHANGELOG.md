@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Windows 终端不定期花屏修复**：确认并修复两个 WebGL 生命周期根因。首先，`@xterm/addon-webgl` 0.19 的 `dispose()` 只移除 canvas、不释放 WebGL context，终端标签长期开关后会累积僵尸 context，Chromium/WebView2 到上限时强制驱逐仍在显示的终端并出现花屏；现在销毁 addon 时显式调用 `WEBGL_lose_context.loseContext()`。其次，新终端挂载时首跑外观 effect 会清空共享 glyph atlas，使仍存活的兄弟终端保留过期纹理坐标；现在跳过首跑清空，并在确实需要清空时刷新所有共享 atlas 的终端。E2E 将浏览器 context 上限压到 2 并连续开关 5 个标签，验证保留终端无驱逐警告且像素完全不变。
 - **PostgreSQL 执行选中 SQL 不再丢失未选中文本**：修复“运行选择/当前语句”把选区片段误写回整个编辑器导致未选中 SQL 被删除的问题；现在仅把片段发送到后端执行，编辑器完整文档保持不变，并新增原生桌面 E2E 回归覆盖。
 - **RDP/VNC 跳板机公钥认证修复**：跳板机复用目标私钥时完整传递 key path 与 passphrase，不再退化为空 key path。
 - **远程桌面会话结束状态修复**：后端 `Terminated/Error` 或 WebSocket 意断后立即切换到可重连的断开视图；组件卸载时也会关闭仍在 CONNECTING 的 WebSocket，避免孤儿连接。
