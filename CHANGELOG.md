@@ -5,9 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [未发布]
 
-### Fixed
+### 安全
+
+- **修复 SheetJS 生产依赖高危漏洞**：将 `xlsx` 从 npm 上的老旧 `0.18.5` 升级到 SheetJS 官方发布的 `0.20.3`，消除已知的 Prototype Pollution 与 ReDoS 高危攻击面；配置导出/导入、密码库 Excel、PostgreSQL/MySQL/SQLite 结果导出相关测试通过。
+
+### 变更
+
+- **删除未使用的旧终端组件**：移除没有任何生产引用的 `src/components/terminal.tsx`，保留唯一的真实 SSH/PTY 终端实现 `pty-terminal.tsx`，避免两套终端行为继续分叉。
+
+### 修复
 
 - **Linux 剪贴板远程文件 URI 修复**：解析 `text/uri-list` 时不再把 `file://remote/path` 的 host 截掉后误认为本地路径；现在只接受空 host 的 `file:///absolute/path`，远程 URI 会被忽略，避免把远程文件当作本地文件粘贴。
 

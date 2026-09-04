@@ -197,8 +197,8 @@ async function canvasChangeRatio(
       beforeData.height !== afterData.height
     ) return Number.POSITIVE_INFINITY;
 
-    // Compare all rows except the prompt/cursor blink region. The startup
-    // banner above it must remain pixel-stable while unrelated tabs churn.
+    // 除提示符/光标闪烁区域外比较所有行。无关标签开关期间，上方启动信息
+    // 必须保持像素稳定。
     const comparableRows = Math.floor((beforeData.height * 21) / 24);
     const width = beforeData.width;
     let changed = 0;
@@ -223,9 +223,9 @@ async function canvasChangeRatio(
   });
 }
 
-// Two live contexts are enough for the active tab and the retained previous
-// tab. A disposed-but-unreleased context makes the third create call exceed
-// this cap, reproducing the Windows WebView2 eviction path deterministically.
+// 两个存活 context 足够覆盖活动标签和保留的旧标签。若已销毁但未释放的
+// context 仍占用配额，第三次创建会越过上限，从而确定性复现 Windows
+// WebView2 的驱逐路径。
 test('terminal tab churn keeps a live WebGL terminal stable', async ({ page }) => {
   test.setTimeout(120_000);
 

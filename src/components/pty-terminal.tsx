@@ -323,9 +323,8 @@ export function PtyTerminal({
   const containerRef = React.useRef<HTMLDivElement | null>(null);
   const initialIsActiveRef = React.useRef(isActive);
   const wasActiveRef = React.useRef(isActive);
-  // Terminal creation already applies current appearance options. The update
-  // effect below must not run its first-time texture-atlas clear: a newly
-  // mounted tab shares the atlas with existing tabs and would invalidate them.
+  // 终端创建时已经应用当前外观配置。下方更新 effect 不能在首次执行时清空
+  // texture atlas：新挂载标签与既有标签共享 atlas，首跑清空会让既有标签失效。
   const hasInitializedAppearanceRef = React.useRef(false);
   
   // Search bar state
@@ -1882,8 +1881,7 @@ export function PtyTerminal({
       }
       if (fitTimer) clearTimeout(fitTimer);
       
-      // Dispose WebGL addon FIRST so GPU textures are released before the
-      // terminal canvas is removed from the DOM.
+      // 必须先销毁 WebGL addon，确保终端 canvas 移出 DOM 前释放 GPU 纹理。
       if (webglAddonRef.current) {
         disposeWebglAddon(webglAddonRef.current);
         webglAddonRef.current = null;
