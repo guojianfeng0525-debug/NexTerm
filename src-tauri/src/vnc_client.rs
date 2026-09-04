@@ -118,7 +118,15 @@ impl Framebuffer {
 
     /// Copy `src` rect pixels into the `dst` rect (RFB CopyRect). Returns
     /// the materialised pixels of the destination.
-    fn copy_rect(&mut self, dst_x: u16, dst_y: u16, src_x: u16, src_y: u16, w: u16, h: u16) -> Vec<u8> {
+    fn copy_rect(
+        &mut self,
+        dst_x: u16,
+        dst_y: u16,
+        src_x: u16,
+        src_y: u16,
+        w: u16,
+        h: u16,
+    ) -> Vec<u8> {
         let pixels = self.extract(src_x, src_y, w, h);
         self.blit(dst_x, dst_y, w, h, &pixels);
         pixels
@@ -136,60 +144,60 @@ pub fn js_keycode_to_keysym(key_code: u32) -> Option<u32> {
         // JS keyCode uses the uppercase ASCII code for letters. VNC keysyms
         // must start from the lowercase character because Shift/CapsLock are
         // resolved below; sending 'A' unconditionally would force uppercase.
-        65..=90 => key_code + 0x20,        // 'a'..'z' keysym base
+        65..=90 => key_code + 0x20, // 'a'..'z' keysym base
         // Digits
-        48..=57 => key_code,               // '0'..'9'
+        48..=57 => key_code, // '0'..'9'
         // Whitespace / editing
-        13 => 0xFF0D,                      // Return
-        8 => 0xFF08,                       // BackSpace
-        9 => 0xFF09,                       // Tab
-        32 => 0x0020,                      // Space
-        27 => 0xFF1B,                      // Escape
-        19 => 0xFF13,                      // Pause
+        13 => 0xFF0D, // Return
+        8 => 0xFF08,  // BackSpace
+        9 => 0xFF09,  // Tab
+        32 => 0x0020, // Space
+        27 => 0xFF1B, // Escape
+        19 => 0xFF13, // Pause
         // Modifiers
-        16 => 0xFFE1,                      // Shift_L
-        17 => 0xFFE3,                      // Control_L
-        18 => 0xFFE9,                      // Alt_L (Option on macOS)
-        20 => 0xFFE5,                      // Caps_Lock
-        91 => 0xFFEB,                      // Super_L (Meta/Win/Cmd)
-        92 => 0xFFEC,                      // Super_R (right Meta/Win)
-        93 => 0xFF68,                      // Menu
-        144 => 0xFF7F,                     // Num_Lock
-        145 => 0xFF14,                     // Scroll_Lock
-        44 => 0xFF61,                      // Print
+        16 => 0xFFE1,  // Shift_L
+        17 => 0xFFE3,  // Control_L
+        18 => 0xFFE9,  // Alt_L (Option on macOS)
+        20 => 0xFFE5,  // Caps_Lock
+        91 => 0xFFEB,  // Super_L (Meta/Win/Cmd)
+        92 => 0xFFEC,  // Super_R (right Meta/Win)
+        93 => 0xFF68,  // Menu
+        144 => 0xFF7F, // Num_Lock
+        145 => 0xFF14, // Scroll_Lock
+        44 => 0xFF61,  // Print
         // Navigation
-        33 => 0xFF55,                      // Prior (PageUp)
-        34 => 0xFF56,                      // Next (PageDown)
-        35 => 0xFF57,                      // End
-        36 => 0xFF50,                      // Home
-        37 => 0xFF51,                      // Left
-        38 => 0xFF52,                      // Up
-        39 => 0xFF53,                      // Right
-        40 => 0xFF54,                      // Down
-        45 => 0xFF63,                      // Insert
-        46 => 0xFFFF,                      // Delete
+        33 => 0xFF55, // Prior (PageUp)
+        34 => 0xFF56, // Next (PageDown)
+        35 => 0xFF57, // End
+        36 => 0xFF50, // Home
+        37 => 0xFF51, // Left
+        38 => 0xFF52, // Up
+        39 => 0xFF53, // Right
+        40 => 0xFF54, // Down
+        45 => 0xFF63, // Insert
+        46 => 0xFFFF, // Delete
         // Function keys
         112..=135 => 0xFFBE + (key_code - 112), // F1..F24
         // Punctuation (US layout)
-        186 => 0x003B,                     // ;:
-        187 => 0x003D,                     // =+
-        188 => 0x002C,                     // ,<
-        189 => 0x002D,                     // -_
-        190 => 0x002E,                     // .>
-        191 => 0x002F,                     // /?
-        192 => 0x0060,                     // `~
-        219 => 0x005B,                     // [{
-        220 => 0x005C,                     // \|
-        221 => 0x005D,                     // ]}
-        222 => 0x0027,                     // '"
+        186 => 0x003B, // ;:
+        187 => 0x003D, // =+
+        188 => 0x002C, // ,<
+        189 => 0x002D, // -_
+        190 => 0x002E, // .>
+        191 => 0x002F, // /?
+        192 => 0x0060, // `~
+        219 => 0x005B, // [{
+        220 => 0x005C, // \|
+        221 => 0x005D, // ]}
+        222 => 0x0027, // '"
         // Numeric keypad
-        96 => 0xFFB0,                      // KP_0
+        96 => 0xFFB0,                         // KP_0
         97..=105 => 0xFFB1 + (key_code - 97), // KP_1..KP_9
-        106 => 0xFFAA,                     // KP_*
-        107 => 0xFFAB,                     // KP_+
-        109 => 0xFFAD,                     // KP_-
-        110 => 0xFFAE,                     // KP_.
-        111 => 0xFFAF,                     // KP_/
+        106 => 0xFFAA,                        // KP_*
+        107 => 0xFFAB,                        // KP_+
+        109 => 0xFFAD,                        // KP_-
+        110 => 0xFFAE,                        // KP_.
+        111 => 0xFFAF,                        // KP_/
         _ => {
             let _ = kc;
             return None;
@@ -204,7 +212,11 @@ fn apply_case(base: u32, shift: bool, caps_lock: bool) -> u32 {
         // Letters: shift and caps both flip the case of the base (lowercase)
         0x61..=0x7A => {
             let upper = shift ^ caps_lock;
-            if upper { base - 0x20 } else { base }
+            if upper {
+                base - 0x20
+            } else {
+                base
+            }
         }
         // Digits and punctuation shift variants (US layout)
         0x30..=0x39 if shift => match base {
@@ -304,13 +316,10 @@ impl VncClient {
             return Err(anyhow::anyhow!("VNC host cannot be empty"));
         }
 
-        let opened = desktop_transport::open_stream(
-            &config.host,
-            config.port,
-            config.jump_host.as_ref(),
-        )
-        .await
-        .context("Failed to open the VNC transport")?;
+        let opened =
+            desktop_transport::open_stream(&config.host, config.port, config.jump_host.as_ref())
+                .await
+                .context("Failed to open the VNC transport")?;
 
         let password = config.password.clone().unwrap_or_default();
         let pixel_format = pixel_format_for_depth(config.color_depth);
@@ -516,9 +525,8 @@ impl DesktopProtocol for VncClient {
         // pumps events between them and the WebSocket consumer, and keeps
         // the RFB client-driven refresh going.
         tokio::spawn(async move {
-            let mut refresh = tokio::time::interval(std::time::Duration::from_millis(
-                REFRESH_INTERVAL_MS,
-            ));
+            let mut refresh =
+                tokio::time::interval(std::time::Duration::from_millis(REFRESH_INTERVAL_MS));
             refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             let mut last_refresh_was_full = false;
 
@@ -575,16 +583,19 @@ impl DesktopProtocol for VncClient {
         Ok(())
     }
 
-    async fn send_key(&self, key_code: u32, down: bool, caps_lock: Option<bool>, _num_lock: Option<bool>) -> Result<()> {
+    async fn send_key(
+        &self,
+        key_code: u32,
+        down: bool,
+        caps_lock: Option<bool>,
+        _num_lock: Option<bool>,
+    ) -> Result<()> {
         if self.terminated.load(Ordering::SeqCst) {
             return Err(anyhow::anyhow!("VNC session has ended"));
         }
         // Track Shift/CapsLock so letter keysyms encode the right case.
-        match key_code {
-            16 => {
-                self.shift_down.store(down, Ordering::SeqCst);
-            }
-            _ => {}
+        if key_code == 16 {
+            self.shift_down.store(down, Ordering::SeqCst);
         }
         let client_caps_lock = next_caps_lock_state(
             self.caps_lock.load(Ordering::SeqCst),
@@ -731,10 +742,10 @@ mod tests {
         // Base 'a' keysym: plain, with Shift, with CapsLock, and both —
         // CapsLock XOR Shift flips the case like gtk-vnc.
         assert_eq!(apply_case(0x61, false, false), 0x61); // a
-        assert_eq!(apply_case(0x61, true, false), 0x41);  // A
-        assert_eq!(apply_case(0x61, false, true), 0x41);  // A (caps)
-        assert_eq!(apply_case(0x61, true, true), 0x61);   // a (shift+caps)
-        // Uppercase base passes through unchanged.
+        assert_eq!(apply_case(0x61, true, false), 0x41); // A
+        assert_eq!(apply_case(0x61, false, true), 0x41); // A (caps)
+        assert_eq!(apply_case(0x61, true, true), 0x61); // a (shift+caps)
+                                                        // 大写基础 keysym 保持不变。
         assert_eq!(apply_case(0x41, false, false), 0x41);
     }
 
@@ -874,14 +885,14 @@ mod tests {
         // Paint a 2x2 red block at (1,1)
         let red = [255u8, 0, 0, 255].repeat(4);
         fb.blit(1, 1, 2, 2, &red);
-        assert_eq!(fb.pixels[(1 * 4 + 1) * 4], 255);
+        assert_eq!(fb.pixels[(4 + 1) * 4], 255);
         // Copy it to (3,0) — the extract carries the full 2x2 source, the
         // blit clips to the single visible column at x=3.
         let pixels = fb.copy_rect(3, 0, 1, 1, 2, 2);
         assert_eq!(pixels.len(), 2 * 2 * 4);
         assert_eq!(pixels[0], 255);
         // Destination got painted
-        assert_eq!(fb.pixels[(0 * 4 + 3) * 4], 255);
+        assert_eq!(fb.pixels[3 * 4], 255);
     }
 
     #[test]

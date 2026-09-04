@@ -336,14 +336,12 @@ pub fn import_xlsx(
 /// Export a document to OOXML bytes from the canonical model.
 pub fn export(state: &DbState, doc_id: &str, version: Option<i64>) -> Result<Vec<u8>, String> {
     let (ver, model_json) = state
-        .documents_read_model(doc_id, version)
-        .map_err(|e| e)?
+        .documents_read_model(doc_id, version)?
         .ok_or_else(|| "document or version not found".to_string())?;
 
     // Kind from the document row.
     let kind = state
-        .documents_kind(doc_id)
-        .map_err(|e| e)?
+        .documents_kind(doc_id)?
         .ok_or_else(|| "document not found".to_string())?;
 
     match kind.as_str() {
@@ -380,7 +378,7 @@ fn export_docx(
     let wire: Wire = serde_json::from_str(model_json).map_err(|e| format!("model json: {e}"))?;
 
     // Rebuild the package bottom from the BLOB resources.
-    let resources = state.documents_resources(doc_id).map_err(|e| e)?;
+    let resources = state.documents_resources(doc_id)?;
     let bottom = zip_blobs(&resources);
 
     let request = docx_parse::serializer::S13SaveRequest {
@@ -416,8 +414,7 @@ pub fn save_edited(
     bytes: &[u8],
 ) -> Result<i64, String> {
     let kind = state
-        .documents_kind(doc_id)
-        .map_err(|e| e)?
+        .documents_kind(doc_id)?
         .ok_or_else(|| "document not found".to_string())?;
 
     let (model, resources, size): (String, Vec<ResourceRow>, i64) = match kind.as_str() {
@@ -454,8 +451,7 @@ pub fn save_edited(
 
     let model_hash = sha256_hex(model.as_bytes());
     let head = state
-        .documents_read_model(doc_id, None)
-        .map_err(|e| e)?
+        .documents_read_model(doc_id, None)?
         .map(|(v, _)| v)
         .unwrap_or(0);
     let next = head + 1;
@@ -509,8 +505,6 @@ fn mime_for_part(path: &str) -> String {
         "font/ttf".into()
     } else if lower.ends_with(".xml") || lower.ends_with(".rels") {
         "application/xml".into()
-    } else if lower.ends_with(".bin") {
-        "application/octet-stream".into()
     } else {
         "application/octet-stream".into()
     }

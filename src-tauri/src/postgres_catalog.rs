@@ -241,10 +241,7 @@ async fn resolve_object_oid(
 
 /// Counts objects that depend on the given oid (normal dependencies only),
 /// sampling up to 5 names for the confirmation dialog (security §2.2).
-async fn dependent_summary(
-    client: &Client,
-    oid: i64,
-) -> Result<(i64, Vec<String>), String> {
+async fn dependent_summary(client: &Client, oid: i64) -> Result<(i64, Vec<String>), String> {
     let count_rows = timeout(
         QUERY_TIMEOUT,
         client.query(
@@ -284,16 +281,12 @@ async fn dependent_summary(
 fn map_ddl_privilege_error(kind: &str, schema: &str, name: &str, error_text: &str) -> String {
     let lower = error_text.to_lowercase();
     if lower.contains("insufficient privilege") || lower.contains("permission denied") {
-        format!(
-            "insufficient privilege to view definition of {kind} {schema}.{name}"
-        )
+        format!("insufficient privilege to view definition of {kind} {schema}.{name}")
     } else {
         // Log the raw catalog error for diagnostics without exposing it over
         // IPC (security §1.2: never pass underlying error text to the UI).
-        tracing::warn!(
-            "catalog definition error for {kind} {schema}.{name}: {error_text}"
-        );
-        format!("Failed to load definition")
+        tracing::warn!("catalog definition error for {kind} {schema}.{name}: {error_text}");
+        "Failed to load definition".to_string()
     }
 }
 fn truncate_ddl(ddl: String) -> (String, bool) {
@@ -327,12 +320,24 @@ async fn sequence_ddl(client: &Client, schema: &str, name: &str) -> Result<Strin
     let row = rows
         .first()
         .ok_or_else(|| format!("Sequence {schema}.{name} does not exist"))?;
-    let start: i64 = row.try_get(0).map_err(|e| format!("Failed to decode sequence: {e}"))?;
-    let increment: i64 = row.try_get(1).map_err(|e| format!("Failed to decode sequence: {e}"))?;
-    let max: i64 = row.try_get(2).map_err(|e| format!("Failed to decode sequence: {e}"))?;
-    let min: i64 = row.try_get(3).map_err(|e| format!("Failed to decode sequence: {e}"))?;
-    let cache: i64 = row.try_get(4).map_err(|e| format!("Failed to decode sequence: {e}"))?;
-    let cycle: bool = row.try_get(5).map_err(|e| format!("Failed to decode sequence: {e}"))?;
+    let start: i64 = row
+        .try_get(0)
+        .map_err(|e| format!("Failed to decode sequence: {e}"))?;
+    let increment: i64 = row
+        .try_get(1)
+        .map_err(|e| format!("Failed to decode sequence: {e}"))?;
+    let max: i64 = row
+        .try_get(2)
+        .map_err(|e| format!("Failed to decode sequence: {e}"))?;
+    let min: i64 = row
+        .try_get(3)
+        .map_err(|e| format!("Failed to decode sequence: {e}"))?;
+    let cache: i64 = row
+        .try_get(4)
+        .map_err(|e| format!("Failed to decode sequence: {e}"))?;
+    let cycle: bool = row
+        .try_get(5)
+        .map_err(|e| format!("Failed to decode sequence: {e}"))?;
     let mut ddl = format!(
         "CREATE SEQUENCE {}.{}\n    START WITH {}\n    INCREMENT BY {}\n    MINVALUE {}\n    MAXVALUE {}\n    CACHE {}",
         quote_identifier(schema),
@@ -390,11 +395,21 @@ async fn table_ddl(client: &Client, schema: &str, name: &str) -> Result<String, 
     // `COMMENT ON COLUMN` statements after the CREATE TABLE (index-order).
     let mut column_comments: Vec<(String, String)> = Vec::new();
     for row in &columns {
-        let column_name: String = row.try_get(0).map_err(|e| format!("Failed to decode column: {e}"))?;
-        let data_type: String = row.try_get(1).map_err(|e| format!("Failed to decode column type: {e}"))?;
-        let nullable: bool = row.try_get(2).map_err(|e| format!("Failed to decode nullability: {e}"))?;
-        let default: Option<String> = row.try_get(3).map_err(|e| format!("Failed to decode default: {e}"))?;
-        let comment: Option<String> = row.try_get(4).map_err(|e| format!("Failed to decode column comment: {e}"))?;
+        let column_name: String = row
+            .try_get(0)
+            .map_err(|e| format!("Failed to decode column: {e}"))?;
+        let data_type: String = row
+            .try_get(1)
+            .map_err(|e| format!("Failed to decode column type: {e}"))?;
+        let nullable: bool = row
+            .try_get(2)
+            .map_err(|e| format!("Failed to decode nullability: {e}"))?;
+        let default: Option<String> = row
+            .try_get(3)
+            .map_err(|e| format!("Failed to decode default: {e}"))?;
+        let comment: Option<String> = row
+            .try_get(4)
+            .map_err(|e| format!("Failed to decode column comment: {e}"))?;
         let mut fragment = format!("    {} {}", quote_identifier(&column_name), data_type);
         if let Some(default) = default.filter(|value| !value.is_empty()) {
             fragment.push_str(&format!(" DEFAULT {default}"));
@@ -408,8 +423,12 @@ async fn table_ddl(client: &Client, schema: &str, name: &str) -> Result<String, 
         }
     }
     for row in &constraints {
-        let constraint_name: String = row.try_get(0).map_err(|e| format!("Failed to decode constraint: {e}"))?;
-        let definition: String = row.try_get(1).map_err(|e| format!("Failed to decode constraint def: {e}"))?;
+        let constraint_name: String = row
+            .try_get(0)
+            .map_err(|e| format!("Failed to decode constraint: {e}"))?;
+        let definition: String = row
+            .try_get(1)
+            .map_err(|e| format!("Failed to decode constraint def: {e}"))?;
         body.push(format!(
             "    CONSTRAINT {} {}",
             quote_identifier(&constraint_name),
@@ -423,7 +442,9 @@ async fn table_ddl(client: &Client, schema: &str, name: &str) -> Result<String, 
         body.join(",\n")
     );
     for row in &indexes {
-        let indexdef: String = row.try_get(0).map_err(|e| format!("Failed to decode index def: {e}"))?;
+        let indexdef: String = row
+            .try_get(0)
+            .map_err(|e| format!("Failed to decode index def: {e}"))?;
         ddl.push('\n');
         ddl.push_str(&indexdef);
         ddl.push(';');
@@ -484,10 +505,7 @@ async fn view_ddl(
 ) -> Result<String, String> {
     let def = timeout(
         QUERY_TIMEOUT,
-        client.query_one(
-            "SELECT pg_get_viewdef($1::text::oid)",
-            &[&oid_param(oid)],
-        ),
+        client.query_one("SELECT pg_get_viewdef($1::text::oid)", &[&oid_param(oid)]),
     )
     .await
     .map_err(|_| "Catalog query timed out")?
@@ -552,13 +570,10 @@ pub async fn postgres_catalog_objects(
     let limit = CATALOG_GROUP_LIMIT;
     let rows = match request.kind.as_str() {
         "functions" | "sequences" => {
-            timeout(
-                QUERY_TIMEOUT,
-                client.query(sql, &[&request.schema, &limit]),
-            )
-            .await
-            .map_err(|_| "Catalog query timed out")?
-            .map_err(|error| format!("Failed to list catalog objects: {error}"))?
+            timeout(QUERY_TIMEOUT, client.query(sql, &[&request.schema, &limit]))
+                .await
+                .map_err(|_| "Catalog query timed out")?
+                .map_err(|error| format!("Failed to list catalog objects: {error}"))?
         }
         _ => {
             let relation = request
@@ -668,7 +683,12 @@ pub async fn postgres_object_props(
                 request.signature.as_deref(),
             )
             .await?
-            .ok_or_else(|| format!("Function {}.{} does not exist", request.schema, request.name))?;
+            .ok_or_else(|| {
+                format!(
+                    "Function {}.{} does not exist",
+                    request.schema, request.name
+                )
+            })?;
             props.push(PostgresObjectProp {
                 key: "signature".into(),
                 value: request.signature.unwrap_or_default(),
@@ -684,21 +704,40 @@ pub async fn postgres_object_props(
             .map_err(|_| "Catalog query timed out")?
             .map_err(|error| map_ddl_privilege_error("function", &request.schema, &request.name, &error.to_string()))?;
             if let Ok(signature) = definition.try_get::<_, String>(0) {
-                props.push(PostgresObjectProp { key: "identityArguments".into(), value: signature });
+                props.push(PostgresObjectProp {
+                    key: "identityArguments".into(),
+                    value: signature,
+                });
             }
             if let Ok(result) = definition.try_get::<_, String>(1) {
-                props.push(PostgresObjectProp { key: "returns".into(), value: result });
+                props.push(PostgresObjectProp {
+                    key: "returns".into(),
+                    value: result,
+                });
             }
             if let Ok(volatility) = definition.try_get::<_, String>(2) {
-                props.push(PostgresObjectProp { key: "volatility".into(), value: volatility });
+                props.push(PostgresObjectProp {
+                    key: "volatility".into(),
+                    value: volatility,
+                });
             }
             let def_rows = timeout(
                 QUERY_TIMEOUT,
-                client.query_one("SELECT pg_get_functiondef($1::text::oid)", &[&oid_param(oid)]),
+                client.query_one(
+                    "SELECT pg_get_functiondef($1::text::oid)",
+                    &[&oid_param(oid)],
+                ),
             )
             .await
             .map_err(|_| "Catalog query timed out")?
-            .map_err(|error| map_ddl_privilege_error("function", &request.schema, &request.name, &error.to_string()))?;
+            .map_err(|error| {
+                map_ddl_privilege_error(
+                    "function",
+                    &request.schema,
+                    &request.name,
+                    &error.to_string(),
+                )
+            })?;
             if let Ok(definition) = def_rows.try_get::<_, String>(0) {
                 ddl = Some(definition);
             }
@@ -713,7 +752,12 @@ pub async fn postgres_object_props(
                 None,
             )
             .await?
-            .ok_or_else(|| format!("Sequence {}.{} does not exist", request.schema, request.name))?;
+            .ok_or_else(|| {
+                format!(
+                    "Sequence {}.{} does not exist",
+                    request.schema, request.name
+                )
+            })?;
             let seq = timeout(
                 QUERY_TIMEOUT,
                 client.query_one(
@@ -733,7 +777,10 @@ pub async fn postgres_object_props(
                 ("cache", 5),
             ] {
                 if let Ok(value) = seq.try_get::<_, String>(index) {
-                    props.push(PostgresObjectProp { key: key.into(), value });
+                    props.push(PostgresObjectProp {
+                        key: key.into(),
+                        value,
+                    });
                 }
             }
             if let Ok(cycle) = seq.try_get::<_, bool>(6) {
@@ -774,16 +821,12 @@ pub async fn postgres_object_props(
             ddl = Some(sequence_ddl(&client, &request.schema, &request.name).await?);
         }
         "index" => {
-            let oid = resolve_object_oid(
-                &client,
-                "index",
-                &request.schema,
-                &request.name,
-                None,
-                None,
-            )
-            .await?
-            .ok_or_else(|| format!("Index {}.{} does not exist", request.schema, request.name))?;
+            let oid =
+                resolve_object_oid(&client, "index", &request.schema, &request.name, None, None)
+                    .await?
+                    .ok_or_else(|| {
+                        format!("Index {}.{} does not exist", request.schema, request.name)
+                    })?;
             let indexdef = timeout(
                 QUERY_TIMEOUT,
                 client.query_one("SELECT pg_get_indexdef($1::text::oid), i.indisunique FROM pg_index i WHERE i.indexrelid = $1::text::oid", &[&oid_param(oid)]),
@@ -811,7 +854,12 @@ pub async fn postgres_object_props(
                 None,
             )
             .await?
-            .ok_or_else(|| format!("Constraint {}.{} does not exist", request.schema, request.name))?;
+            .ok_or_else(|| {
+                format!(
+                    "Constraint {}.{} does not exist",
+                    request.schema, request.name
+                )
+            })?;
             let con = timeout(
                 QUERY_TIMEOUT,
                 client.query_one(
@@ -823,7 +871,10 @@ pub async fn postgres_object_props(
             .map_err(|_| "Catalog query timed out")?
             .map_err(|error| format!("Failed to load constraint: {error}"))?;
             if let Ok(contype) = con.try_get::<_, String>(0) {
-                props.push(PostgresObjectProp { key: "type".into(), value: contype });
+                props.push(PostgresObjectProp {
+                    key: "type".into(),
+                    value: contype,
+                });
             }
             if let Ok(def) = con.try_get::<_, String>(1) {
                 ddl = Some(def);
@@ -842,11 +893,21 @@ pub async fn postgres_object_props(
             .ok_or_else(|| format!("Trigger {}.{} does not exist", request.schema, request.name))?;
             let def = timeout(
                 QUERY_TIMEOUT,
-                client.query_one("SELECT pg_get_triggerdef($1::text::oid)", &[&oid_param(oid)]),
+                client.query_one(
+                    "SELECT pg_get_triggerdef($1::text::oid)",
+                    &[&oid_param(oid)],
+                ),
             )
             .await
             .map_err(|_| "Catalog query timed out")?
-            .map_err(|error| map_ddl_privilege_error("trigger", &request.schema, &request.name, &error.to_string()))?;
+            .map_err(|error| {
+                map_ddl_privilege_error(
+                    "trigger",
+                    &request.schema,
+                    &request.name,
+                    &error.to_string(),
+                )
+            })?;
             if let Ok(definition) = def.try_get::<_, String>(0) {
                 ddl = Some(definition);
             }
@@ -887,13 +948,22 @@ pub async fn postgres_object_props(
                 ("comment", 4, "option-string"),
             ] {
                 let value = match kind {
-                    "i64" => col.try_get::<_, i64>(index).ok().map(|value| value.to_string()),
+                    "i64" => col
+                        .try_get::<_, i64>(index)
+                        .ok()
+                        .map(|value| value.to_string()),
                     "string" => col.try_get::<_, String>(index).ok(),
-                    "bool" => col.try_get::<_, bool>(index).ok().map(|value| value.to_string()),
+                    "bool" => col
+                        .try_get::<_, bool>(index)
+                        .ok()
+                        .map(|value| value.to_string()),
                     _ => col.try_get::<_, Option<String>>(index).ok().flatten(),
                 };
                 if let Some(value) = value {
-                    props.push(PostgresObjectProp { key: key.into(), value });
+                    props.push(PostgresObjectProp {
+                        key: key.into(),
+                        value,
+                    });
                 }
             }
         }
@@ -942,9 +1012,19 @@ pub async fn postgres_object_ddl(
             )
             .await?
             .ok_or_else(|| {
-                format!("{} {}.{} does not exist", request.object_type, request.schema, request.name)
+                format!(
+                    "{} {}.{} does not exist",
+                    request.object_type, request.schema, request.name
+                )
             })?;
-            view_ddl(&client, &request.object_type, &request.schema, &request.name, oid).await?
+            view_ddl(
+                &client,
+                &request.object_type,
+                &request.schema,
+                &request.name,
+                oid,
+            )
+            .await?
         }
         "function" => {
             let oid = resolve_object_oid(
@@ -956,36 +1036,49 @@ pub async fn postgres_object_ddl(
                 request.signature.as_deref(),
             )
             .await?
-            .ok_or_else(|| format!("Function {}.{} does not exist", request.schema, request.name))?;
+            .ok_or_else(|| {
+                format!(
+                    "Function {}.{} does not exist",
+                    request.schema, request.name
+                )
+            })?;
             let def = timeout(
                 QUERY_TIMEOUT,
-                client.query_one("SELECT pg_get_functiondef($1::text::oid)", &[&oid_param(oid)]),
+                client.query_one(
+                    "SELECT pg_get_functiondef($1::text::oid)",
+                    &[&oid_param(oid)],
+                ),
             )
             .await
             .map_err(|_| "Catalog query timed out")?
-            .map_err(|error| map_ddl_privilege_error("function", &request.schema, &request.name, &error.to_string()))?;
+            .map_err(|error| {
+                map_ddl_privilege_error(
+                    "function",
+                    &request.schema,
+                    &request.name,
+                    &error.to_string(),
+                )
+            })?;
             def.try_get::<_, String>(0)
                 .map_err(|error| format!("Failed to decode function definition: {error}"))?
         }
         "sequence" => sequence_ddl(&client, &request.schema, &request.name).await?,
         "index" => {
-            let oid = resolve_object_oid(
-                &client,
-                "index",
-                &request.schema,
-                &request.name,
-                None,
-                None,
-            )
-            .await?
-            .ok_or_else(|| format!("Index {}.{} does not exist", request.schema, request.name))?;
+            let oid =
+                resolve_object_oid(&client, "index", &request.schema, &request.name, None, None)
+                    .await?
+                    .ok_or_else(|| {
+                        format!("Index {}.{} does not exist", request.schema, request.name)
+                    })?;
             let def = timeout(
                 QUERY_TIMEOUT,
                 client.query_one("SELECT pg_get_indexdef($1::text::oid)", &[&oid_param(oid)]),
             )
             .await
             .map_err(|_| "Catalog query timed out")?
-            .map_err(|error| map_ddl_privilege_error("index", &request.schema, &request.name, &error.to_string()))?;
+            .map_err(|error| {
+                map_ddl_privilege_error("index", &request.schema, &request.name, &error.to_string())
+            })?;
             def.try_get::<_, String>(0)
                 .map_err(|error| format!("Failed to decode index definition: {error}"))?
         }
@@ -999,14 +1092,29 @@ pub async fn postgres_object_ddl(
                 None,
             )
             .await?
-            .ok_or_else(|| format!("Constraint {}.{} does not exist", request.schema, request.name))?;
+            .ok_or_else(|| {
+                format!(
+                    "Constraint {}.{} does not exist",
+                    request.schema, request.name
+                )
+            })?;
             let def = timeout(
                 QUERY_TIMEOUT,
-                client.query_one("SELECT pg_get_constraintdef($1::text::oid)", &[&oid_param(oid)]),
+                client.query_one(
+                    "SELECT pg_get_constraintdef($1::text::oid)",
+                    &[&oid_param(oid)],
+                ),
             )
             .await
             .map_err(|_| "Catalog query timed out")?
-            .map_err(|error| map_ddl_privilege_error("constraint", &request.schema, &request.name, &error.to_string()))?;
+            .map_err(|error| {
+                map_ddl_privilege_error(
+                    "constraint",
+                    &request.schema,
+                    &request.name,
+                    &error.to_string(),
+                )
+            })?;
             def.try_get::<_, String>(0)
                 .map_err(|error| format!("Failed to decode constraint definition: {error}"))?
         }
@@ -1023,11 +1131,21 @@ pub async fn postgres_object_ddl(
             .ok_or_else(|| format!("Trigger {}.{} does not exist", request.schema, request.name))?;
             let def = timeout(
                 QUERY_TIMEOUT,
-                client.query_one("SELECT pg_get_triggerdef($1::text::oid)", &[&oid_param(oid)]),
+                client.query_one(
+                    "SELECT pg_get_triggerdef($1::text::oid)",
+                    &[&oid_param(oid)],
+                ),
             )
             .await
             .map_err(|_| "Catalog query timed out")?
-            .map_err(|error| map_ddl_privilege_error("trigger", &request.schema, &request.name, &error.to_string()))?;
+            .map_err(|error| {
+                map_ddl_privilege_error(
+                    "trigger",
+                    &request.schema,
+                    &request.name,
+                    &error.to_string(),
+                )
+            })?;
             def.try_get::<_, String>(0)
                 .map_err(|error| format!("Failed to decode trigger definition: {error}"))?
         }
@@ -1060,10 +1178,18 @@ pub async fn postgres_object_ddl(
             .await
             .map_err(|_| "Catalog query timed out")?
             .map_err(|error| format!("Failed to load column definition: {error}"))?;
-            let column_name: String = def.try_get(0).map_err(|e| format!("Failed to decode column: {e}"))?;
-            let data_type: String = def.try_get(1).map_err(|e| format!("Failed to decode column type: {e}"))?;
-            let nullable: bool = def.try_get(2).map_err(|e| format!("Failed to decode nullability: {e}"))?;
-            let default: Option<String> = def.try_get(3).map_err(|e| format!("Failed to decode default: {e}"))?;
+            let column_name: String = def
+                .try_get(0)
+                .map_err(|e| format!("Failed to decode column: {e}"))?;
+            let data_type: String = def
+                .try_get(1)
+                .map_err(|e| format!("Failed to decode column type: {e}"))?;
+            let nullable: bool = def
+                .try_get(2)
+                .map_err(|e| format!("Failed to decode nullability: {e}"))?;
+            let default: Option<String> = def
+                .try_get(3)
+                .map_err(|e| format!("Failed to decode default: {e}"))?;
             let mut fragment = format!(
                 "ALTER TABLE {}.{} ADD COLUMN {} {}",
                 quote_identifier(&request.schema),
@@ -1307,12 +1433,8 @@ mod tests {
         );
         assert!(!mapped.contains("12345"));
         // Non-privilege errors stay generic and never echo the raw text.
-        let other = map_ddl_privilege_error(
-            "index",
-            "public",
-            "idx",
-            "syntax error at or near \"DROP\"",
-        );
+        let other =
+            map_ddl_privilege_error("index", "public", "idx", "syntax error at or near \"DROP\"");
         assert_eq!(other, "Failed to load definition");
         assert!(!other.contains("DROP"));
     }
@@ -1323,7 +1445,10 @@ mod tests {
         // here we assert quote_identifier hardening that they rely on.
         assert_eq!(quote_identifier("orders"), "\"orders\"");
         assert_eq!(quote_identifier("Users"), "\"Users\"");
-        assert_eq!(quote_identifier("weird\"; DROP TABLE x; --"), "\"weird\"\"; DROP TABLE x; --\"");
+        assert_eq!(
+            quote_identifier("weird\"; DROP TABLE x; --"),
+            "\"weird\"\"; DROP TABLE x; --\""
+        );
     }
 
     #[test]

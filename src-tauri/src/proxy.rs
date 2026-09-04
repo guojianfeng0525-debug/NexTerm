@@ -689,7 +689,7 @@ mod tests {
         let server = tokio::spawn(async move {
             let (mut sock, _) = listener.accept().await.unwrap();
             let mut buf = [0u8; 128];
-            sock.read(&mut buf).await.unwrap();
+            sock.read_exact(&mut buf[..9]).await.unwrap();
             sock.write_all(&[0x00, 0x5b, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
                 .await
                 .unwrap();

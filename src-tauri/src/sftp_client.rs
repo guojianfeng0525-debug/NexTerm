@@ -153,7 +153,14 @@ impl StandaloneSftpClient {
             jump_handle = Some(tunnel.session);
             tokio::time::timeout(
                 connection_timeout,
-                client::connect_stream(Arc::new(ssh_config), tunnel.stream, Client::new(config.host_key_fingerprint.clone(), config.host_key_verification)),
+                client::connect_stream(
+                    Arc::new(ssh_config),
+                    tunnel.stream,
+                    Client::new(
+                        config.host_key_fingerprint.clone(),
+                        config.host_key_verification,
+                    ),
+                ),
             )
             .await
             .map_err(|_| {
@@ -175,7 +182,10 @@ impl StandaloneSftpClient {
                 client::connect(
                     Arc::new(ssh_config),
                     (&config.host[..], config.port),
-                    Client::new(config.host_key_fingerprint.clone(), config.host_key_verification),
+                    Client::new(
+                        config.host_key_fingerprint.clone(),
+                        config.host_key_verification,
+                    ),
                 ),
             )
             .await

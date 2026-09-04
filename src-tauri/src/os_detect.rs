@@ -217,7 +217,7 @@ fn classify_family(id: &str, id_like: &str, uname: &str) -> OsFamily {
     }
 
     // Fallback to uname
-    match uname.as_ref() {
+    match uname {
         "darwin" => OsFamily::MacOS,
         "freebsd" | "openbsd" | "netbsd" => OsFamily::Bsd,
         "linux" => OsFamily::GenericLinux,

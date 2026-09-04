@@ -13,7 +13,7 @@
 use std::collections::BTreeSet;
 
 use docx_parse::serializer::{
-    S13SaveOptions, S13SaveRequest, SerializerDeterminism, write_docx_s13,
+    write_docx_s13, S13SaveOptions, S13SaveRequest, SerializerDeterminism,
 };
 use docx_parse::NumberingDefinitions;
 use docx_parse::{DocumentBody, HeaderFooter, Note, Relationship};
@@ -55,14 +55,22 @@ fn docx_wire_roundtrip_keeps_content_media_and_headers() {
             blobs.push((name.clone(), data.clone()));
         }
     }
-    assert!(blobs.iter().any(|(n, _)| n.contains("word/media/")), "media blob kept");
-    assert!(blobs.iter().any(|(n, _)| n == "[Content_Types].xml"), "content types kept");
+    assert!(
+        blobs.iter().any(|(n, _)| n.contains("word/media/")),
+        "media blob kept"
+    );
+    assert!(
+        blobs.iter().any(|(n, _)| n == "[Content_Types].xml"),
+        "content types kept"
+    );
 
     // 3. Rebuild: BLOBs → package bottom zip, wire JSON → S13 request.
     let bottom = zip_blobs(&blobs);
     let body: DocumentBody = serde_json::from_str(&body_json).expect("body from json");
-    let headers: Vec<(String, HeaderFooter)> = serde_json::from_str(&headers_json).expect("headers");
-    let footers: Vec<(String, HeaderFooter)> = serde_json::from_str(&footers_json).expect("footers");
+    let headers: Vec<(String, HeaderFooter)> =
+        serde_json::from_str(&headers_json).expect("headers");
+    let footers: Vec<(String, HeaderFooter)> =
+        serde_json::from_str(&footers_json).expect("footers");
     let footnotes: Vec<Note> = serde_json::from_str(&footnotes_json).expect("footnotes");
     let endnotes: Vec<Note> = serde_json::from_str(&endnotes_json).expect("endnotes");
     let rels: Vec<(String, Relationship)> = serde_json::from_str(&rels_json).expect("rels");
@@ -71,7 +79,10 @@ fn docx_wire_roundtrip_keeps_content_media_and_headers() {
     // seed must be a SHA-256 hex digest; now = ISO-ish timestamp string.
     let seed = hex_of_sha256(b"nexterm-docx-wire-poc");
     let request = S13SaveRequest {
-        determinism: SerializerDeterminism { seed, now: "2026-01-01T00:00:00.000Z".to_owned() },
+        determinism: SerializerDeterminism {
+            seed,
+            now: "2026-01-01T00:00:00.000Z".to_owned(),
+        },
         document: body,
         header_entries: headers,
         footer_entries: footers,
@@ -91,8 +102,7 @@ fn docx_wire_roundtrip_keeps_content_media_and_headers() {
 
     // 4. Verify.
     let out_parts = ooxml_opc::unzip_parts(&exported).expect("unzip exported");
-    let out_map: std::collections::HashMap<String, Vec<u8>> =
-        out_parts.into_iter().collect();
+    let out_map: std::collections::HashMap<String, Vec<u8>> = out_parts.into_iter().collect();
 
     // Media bytes identical to the original.
     for (name, data) in &blobs {
@@ -103,7 +113,10 @@ fn docx_wire_roundtrip_keeps_content_media_and_headers() {
     // Content survives.
     let doc2 = betteroffice_docx::Document::open(&exported).expect("reopen exported");
     let all_text: String = doc2.paragraphs().iter().map(|p| docx_text(p)).collect();
-    assert!(all_text.contains("测试文档标题"), "heading survives wire rebuild");
+    assert!(
+        all_text.contains("测试文档标题"),
+        "heading survives wire rebuild"
+    );
     assert!(all_text.contains("加粗斜体文本"), "run survives");
     assert!(!doc2.tables().is_empty(), "table survives");
     // Header/footer survive.
@@ -114,7 +127,8 @@ fn docx_wire_roundtrip_keeps_content_media_and_headers() {
 fn zip_blobs(blobs: &[(String, Vec<u8>)]) -> Vec<u8> {
     let cursor = std::io::Cursor::new(Vec::new());
     let mut zip = zip::ZipWriter::new(cursor);
-    let opts = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+    let opts = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
     for (name, data) in blobs {
         zip.start_file(name, opts).expect("start_file");
         use std::io::Write;
@@ -128,12 +142,10 @@ fn docx_text(p: &betteroffice_docx::Paragraph) -> String {
     use betteroffice_docx::{ParagraphContent, RunContent};
     let mut s = String::new();
     for content in &p.content {
-        if let ParagraphContent::Inline(inline) = content {
-            if let betteroffice_docx::InlineNode::Run(r) = inline {
-                for rc in &r.content {
-                    if let RunContent::Text { text, .. } = rc {
-                        s.push_str(text);
-                    }
+        if let ParagraphContent::Inline(betteroffice_docx::InlineNode::Run(r)) = content {
+            for rc in &r.content {
+                if let RunContent::Text { text, .. } = rc {
+                    s.push_str(text);
                 }
             }
         }
@@ -152,5 +164,9 @@ fn hex_of_sha256(data: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(data);
-    hasher.finalize().iter().map(|b| format!("{b:02x}")).collect()
+    hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }

@@ -169,22 +169,11 @@ pub fn find_java_public() -> Result<std::path::PathBuf, String> {
 /// - `escape_unicode`: ClassFileDecompilerPreferences.escapeUnicodeCharacters
 /// - `realign`:        ClassFileDecompilerPreferences.realignLineNumbers
 /// - `line_numbers`:   ClassFileSaverPreferences.writeLineNumbers
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct DecompileOptions {
     pub escape_unicode: bool,
     pub realign: bool,
     pub line_numbers: bool,
-}
-
-impl Default for DecompileOptions {
-    fn default() -> Self {
-        // JD-GUI ClassFilePage display defaults.
-        DecompileOptions {
-            escape_unicode: false,
-            realign: false,
-            line_numbers: false,
-        }
-    }
 }
 
 impl DecompileOptions {

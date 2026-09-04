@@ -229,7 +229,7 @@ pub fn parse_class_pool(bytes: &[u8]) -> Result<ClassPool, String> {
                     string_name[i] = Some(idx);
                 }
             }
-            9 | 10 | 11 => {
+            9..=11 => {
                 // ref: class_index + name_and_type_index
                 let ci = read_u2(&mut off)? as usize;
                 let nt = read_u2(&mut off)? as usize;
@@ -675,7 +675,7 @@ pub fn class_members(bytes: &[u8]) -> ClassMembers {
                 {
                     {
                         let astart = off;
-                        let aend = astart + len as usize;
+                        let aend = astart + len;
                         let num = read_u2(&mut off)? as usize;
                         let mut remaining = len.saturating_sub(2);
                         for _ in 0..num {
@@ -694,8 +694,8 @@ pub fn class_members(bytes: &[u8]) -> ClassMembers {
                             remaining = remaining.saturating_sub(2);
                         }
                         let consumed = off.saturating_sub(astart);
-                        if consumed < len as usize {
-                            skip(&mut off, len as usize - consumed)?;
+                        if consumed < len {
+                            skip(&mut off, len - consumed)?;
                         }
                     }
                 } else {
@@ -805,7 +805,7 @@ pub fn class_members(bytes: &[u8]) -> ClassMembers {
                 || attr_name == "RuntimeInvisibleAnnotations"
             {
                 let astart = off;
-                let aend = astart + len as usize;
+                let aend = astart + len;
                 let num = read_u2(&mut off)? as usize;
                 let mut remaining = len.saturating_sub(2);
                 for _ in 0..num {
@@ -824,8 +824,8 @@ pub fn class_members(bytes: &[u8]) -> ClassMembers {
                     remaining = remaining.saturating_sub(2);
                 }
                 let consumed = off.saturating_sub(astart);
-                if consumed < len as usize {
-                    skip(&mut off, len as usize - consumed)?;
+                if consumed < len {
+                    skip(&mut off, len - consumed)?;
                 }
             } else {
                 skip(&mut off, len)?;
@@ -923,10 +923,9 @@ pub fn module_name_from_bytes(bytes: &[u8]) -> Option<String> {
                             | "static"
                             | "java"
                     )
+                    && best.as_ref().map(|b| s.len() > b.len()).unwrap_or(true)
                 {
-                    if best.as_ref().map(|b| s.len() > b.len()).unwrap_or(true) {
-                        best = Some(s);
-                    }
+                    best = Some(s);
                 }
             }
             7 | 8 | 16 | 19 | 20 => {
@@ -969,14 +968,18 @@ fn class_name_from_path(path: &str) -> String {
         .iter()
         .find_map(|p| without_ext.strip_prefix(p))
         .unwrap_or(without_ext);
-    stripped.replace('/', ".").replace('\\', ".")
+    stripped.replace(['/', '\\'], ".")
 }
 
 /// Resolve a JVM internal name to the physical entry path in the same archive
 /// source root as `declaring_path`. A Spring Boot class lives at
 /// `BOOT-INF/classes/com/example/Foo.class`, while its InnerClasses metadata
 /// refers to it only as `com/example/Foo`.
-fn entry_path_for_internal_name(declaring_path: &str, declaring_internal_name: &str, internal_name: &str) -> Option<String> {
+fn entry_path_for_internal_name(
+    declaring_path: &str,
+    declaring_internal_name: &str,
+    internal_name: &str,
+) -> Option<String> {
     let suffix = format!("{declaring_internal_name}.class");
     let prefix = declaring_path.strip_suffix(&suffix)?;
     Some(format!("{prefix}{internal_name}.class"))
@@ -1139,7 +1142,7 @@ pub fn extract_and_index_nested(
             let main_jar = main_jar.to_path_buf();
             let scratch_root = scratch_root.to_path_buf();
             std::thread::spawn(move || {
-                let safe = ename.replace('/', "__").replace('\\', "__");
+                let safe = ename.replace(['/', '\\'], "__");
                 let dest = scratch_root.join(format!("{i}-{safe}"));
                 if extract_entry(&main_jar, &ename, &dest).is_err() {
                     return None;

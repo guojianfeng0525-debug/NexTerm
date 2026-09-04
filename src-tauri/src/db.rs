@@ -27,6 +27,9 @@ use serde_json::{Map as JsonMap, Value as JsonValue};
 use std::sync::{Arc, Mutex};
 use tauri::State;
 
+type DocumentResourceRow = (String, String, String, Vec<u8>);
+type DocumentListRow = (String, String, String, i64, i64, i64, i64);
+
 /// Allow-listed normalized tables. Table names are validated against this
 /// list before being interpolated into SQL, so no injection is possible.
 pub const TABLES: [&str; 40] = [
@@ -245,6 +248,7 @@ impl DbState {
 
     /// Write a document version atomically: metadata row + model version +
     /// resources (BLOBs). `expect_head` guards optimistic concurrency.
+    #[allow(clippy::too_many_arguments)] // Domain transaction parameters mirror the document package format.
     pub fn documents_write(
         &self,
         id: &str,
@@ -515,10 +519,7 @@ impl DbState {
     }
 
     /// All resources for a document (resource_id, kind, mime, data).
-    pub fn documents_resources(
-        &self,
-        doc_id: &str,
-    ) -> Result<Vec<(String, String, String, Vec<u8>)>, String> {
+    pub fn documents_resources(&self, doc_id: &str) -> Result<Vec<DocumentResourceRow>, String> {
         let conn = self
             .conn
             .lock()
@@ -575,9 +576,7 @@ impl DbState {
     }
 
     /// Metadata rows for the documents list.
-    pub fn documents_list(
-        &self,
-    ) -> Result<Vec<(String, String, String, i64, i64, i64, i64)>, String> {
+    pub fn documents_list(&self) -> Result<Vec<DocumentListRow>, String> {
         let conn = self
             .conn
             .lock()
@@ -781,9 +780,9 @@ fn upsert_row(
     table: &str,
     row: &JsonMap<String, JsonValue>,
 ) -> Result<(), String> {
-    validate_table(&table)?;
-    let pk = pk_column(&table)?.to_string();
-    let columns = table_columns(&conn, &table)?;
+    validate_table(table)?;
+    let pk = pk_column(table)?.to_string();
+    let columns = table_columns(conn, table)?;
 
     let mut names: Vec<String> = Vec::new();
     let mut params: Vec<SqlValue> = Vec::new();
@@ -794,7 +793,7 @@ fn upsert_row(
                 has_pk = true;
                 // Primary keys may be numeric (e.g. `id: 1` for single-row
                 // tables) or strings. Only null / empty strings are invalid.
-                let pk_invalid = v.is_null() || v.as_str().map_or(false, |s| s.is_empty());
+                let pk_invalid = v.is_null() || v.as_str().is_some_and(|s| s.is_empty());
                 if pk_invalid {
                     return Err(format!("primary key '{}' must be non-empty", pk));
                 }
@@ -1611,8 +1610,8 @@ mod upsert_tests {
             COUNTER.fetch_add(1, Ordering::Relaxed),
         ));
         let _ = std::fs::remove_file(&path);
-        let state = DbState::open(&path).expect("open test db");
-        state
+
+        DbState::open(&path).expect("open test db")
     }
 
     fn upsert_raw(

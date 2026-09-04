@@ -8,9 +8,11 @@ use crate::vnc_client::VncClient;
 use anyhow::Result;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{mpsc, Mutex};
 use tokio::sync::RwLock;
+use tokio::sync::{mpsc, Mutex};
 use tokio_util::sync::CancellationToken;
+
+type DesktopConnectionMap = HashMap<String, Arc<RwLock<Box<dyn DesktopProtocol>>>>;
 
 pub struct ConnectionManager {
     connections: Arc<RwLock<HashMap<String, Arc<RwLock<SshClient>>>>>,
@@ -25,7 +27,7 @@ pub struct ConnectionManager {
     /// FTP/FTPS connections
     ftp_connections: Arc<RwLock<HashMap<String, FtpClient>>>,
     /// Remote desktop (RDP/VNC) connections
-    desktop_connections: Arc<RwLock<HashMap<String, Arc<RwLock<Box<dyn DesktopProtocol>>>>>>,
+    desktop_connections: Arc<RwLock<DesktopConnectionMap>>,
     /// Track protocol type per connection ID ("SSH", "SFTP", "FTP", "RDP", "VNC")
     connection_types: Arc<RwLock<HashMap<String, String>>>,
     /// Cached OS info per SSH connection (auto-detected on first monitoring call)
@@ -48,7 +50,11 @@ impl ConnectionManager {
         }
     }
 
-    pub async fn register_transfer(&self, connection_id: &str, transfer_id: &str) -> Result<CancellationToken> {
+    pub async fn register_transfer(
+        &self,
+        connection_id: &str,
+        transfer_id: &str,
+    ) -> Result<CancellationToken> {
         let mut transfers = self.active_transfers.lock().await;
         let key = (connection_id.to_string(), transfer_id.to_string());
         if transfers.contains_key(&key) {
@@ -60,12 +66,19 @@ impl ConnectionManager {
     }
 
     pub async fn finish_transfer(&self, connection_id: &str, transfer_id: &str) {
-        self.active_transfers.lock().await.remove(&(connection_id.to_string(), transfer_id.to_string()));
+        self.active_transfers
+            .lock()
+            .await
+            .remove(&(connection_id.to_string(), transfer_id.to_string()));
     }
 
     pub async fn cancel_transfer(&self, connection_id: &str, transfer_id: &str) -> bool {
-        let token = self.active_transfers.lock().await
-            .get(&(connection_id.to_string(), transfer_id.to_string())).cloned();
+        let token = self
+            .active_transfers
+            .lock()
+            .await
+            .get(&(connection_id.to_string(), transfer_id.to_string()))
+            .cloned();
         if let Some(token) = token {
             token.cancel();
             true

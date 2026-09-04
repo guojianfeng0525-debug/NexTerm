@@ -105,15 +105,16 @@ pub fn detect_jdk() -> JdkInfo {
 ///   path/File.java:5: warning: [deprecation] Foo in Bar has been deprecated
 fn parse_diagnostics(stderr: &str, base_dir: &Path) -> Vec<CompileDiagnostic> {
     let mut out = Vec::new();
+    // 该模式跨行不变；在循环外一次性编译，避免每次迭代重复构造。
+    let re = regex::Regex::new(
+        r#"^(?P<file>(?:[A-Za-z]:)?[^:]+):(?P<line>\d+)(?::(?P<col>\d+))?:\s*(?P<level>error|warning):\s*(?P<msg>.+)$"#,
+    )
+    .expect("javac diagnostic regex must be valid");
     for line in stderr.lines() {
         let line = line.trim();
         // Pattern: <file>:<line>: <level>: <message>   or   <file>:<line>:<col>: <level>: <message>
         // The file may carry a Windows drive prefix ("C:\..."), whose colon
         // must not be mistaken for the line separator.
-        let re = regex::Regex::new(
-            r#"^(?P<file>(?:[A-Za-z]:)?[^:]+):(?P<line>\d+)(?::(?P<col>\d+))?:\s*(?P<level>error|warning):\s*(?P<msg>.+)$"#,
-        )
-        .unwrap();
         if let Some(caps) = re.captures(line) {
             let file = caps.name("file").unwrap().as_str().to_string();
             // Resolve relative to base dir for display.
@@ -260,10 +261,7 @@ mod tests {
         // Windows host (Path only treats drive prefixes as absolute there),
         // so the file assertion checks the suffix instead of equality.
         let base = std::path::Path::new(r"C:\work");
-        let errs = parse_diagnostics(
-            r"C:\work\src\Foo.java:3: error: ';' expected",
-            base,
-        );
+        let errs = parse_diagnostics(r"C:\work\src\Foo.java:3: error: ';' expected", base);
         assert_eq!(errs.len(), 1, "drive-colon path must parse at all");
         assert_eq!(errs[0].line, 3);
         assert_eq!(errs[0].level, "error");

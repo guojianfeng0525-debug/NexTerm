@@ -16,14 +16,34 @@ fn decompile_command_flow() {
     // Build a real jar.
     let src_dir = dir.join("src/demo");
     std::fs::create_dir_all(&src_dir).unwrap();
-    std::fs::write(src_dir.join("Test.java"), "package demo;\npublic class Test { public String msg() { return \"你好\"; } }\n").unwrap();
+    std::fs::write(
+        src_dir.join("Test.java"),
+        "package demo;\npublic class Test { public String msg() { return \"你好\"; } }\n",
+    )
+    .unwrap();
     let jdk = nexterm_lib::compile::detect_jdk();
     assert!(jdk.found);
     let out = dir.join("out");
     std::fs::create_dir_all(&out).unwrap();
-    assert!(std::process::Command::new(jdk.javac_path.as_deref().unwrap()).arg("-d").arg(&out).arg(src_dir.join("Test.java")).status().unwrap().success());
+    assert!(
+        std::process::Command::new(jdk.javac_path.as_deref().unwrap())
+            .arg("-d")
+            .arg(&out)
+            .arg(src_dir.join("Test.java"))
+            .status()
+            .unwrap()
+            .success()
+    );
     let jar_path = dir.join("test.jar");
-    assert!(std::process::Command::new("jar").arg("cf").arg(&jar_path).arg("-C").arg(&out).arg(".").status().unwrap().success());
+    assert!(std::process::Command::new("jar")
+        .arg("cf")
+        .arg(&jar_path)
+        .arg("-C")
+        .arg(&out)
+        .arg(".")
+        .status()
+        .unwrap()
+        .success());
 
     // Index.
     let idx = jar::index_jar(&jar_path).unwrap();
@@ -49,10 +69,22 @@ fn decompile_command_flow() {
     println!("DECOMPILE CMD FLOW PASS; source={} chars", source.len());
 
     // Preferences override: escapeUnicode=true must produce \uXXXX escapes.
-    let opts = decompile::DecompileOptions { escape_unicode: true, realign: true, line_numbers: false };
-    let esc = decompile::decompile_class_with_options(&class_file, &jd, "", "demo/Test", opts, None).unwrap();
-    assert!(!esc.contains("你好"), "escapeUnicode=true must escape non-ASCII: {esc}");
-    assert!(esc.contains("\\u4F60\\u597D"), "escapeUnicode=true should emit \\u4F60\\u597D: {esc}");
+    let opts = decompile::DecompileOptions {
+        escape_unicode: true,
+        realign: true,
+        line_numbers: false,
+    };
+    let esc =
+        decompile::decompile_class_with_options(&class_file, &jd, "", "demo/Test", opts, None)
+            .unwrap();
+    assert!(
+        !esc.contains("你好"),
+        "escapeUnicode=true must escape non-ASCII: {esc}"
+    );
+    assert!(
+        esc.contains("\\u4F60\\u597D"),
+        "escapeUnicode=true should emit \\u4F60\\u597D: {esc}"
+    );
     println!("ESCAPE-UNICODE PREF PASS");
 
     std::fs::remove_dir_all(&dir).ok();

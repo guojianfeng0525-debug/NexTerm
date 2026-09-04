@@ -1665,7 +1665,7 @@ pub async fn extract_app_icon(path: String) -> Result<String, String> {
         }
         let bytes = std::fs::read(&tmp).map_err(|e| e.to_string())?;
         let _ = std::fs::remove_file(&tmp);
-        return Ok(data_url(&bytes));
+        Ok(data_url(&bytes))
     }
 
     #[cfg(windows)]

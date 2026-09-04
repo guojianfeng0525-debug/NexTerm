@@ -63,10 +63,7 @@ pub struct PostgresState {
 
 impl PostgresState {
     /// Shared lookup used by the catalog-domain commands in `postgres_catalog.rs`.
-    pub(crate) async fn client(
-        &self,
-        connection_id: &str,
-    ) -> Result<Arc<Client>, String> {
+    pub(crate) async fn client(&self, connection_id: &str) -> Result<Arc<Client>, String> {
         self.clients
             .read()
             .await
@@ -337,7 +334,10 @@ fn ssh_fingerprint(key: &PublicKey) -> String {
 impl client::Handler for FingerprintClient {
     type Error = russh::Error;
 
-    async fn check_server_key(&mut self, key: &russh::keys::PublicKeyOrCertificate) -> Result<bool, Self::Error> {
+    async fn check_server_key(
+        &mut self,
+        key: &russh::keys::PublicKeyOrCertificate,
+    ) -> Result<bool, Self::Error> {
         let fingerprint = ssh_fingerprint(&public_key_of(key));
         if let Ok(mut observed) = self.observed.lock() {
             *observed = Some(fingerprint.clone());
@@ -349,7 +349,10 @@ impl client::Handler for FingerprintClient {
 impl client::Handler for FingerprintProbeClient {
     type Error = russh::Error;
 
-    async fn check_server_key(&mut self, key: &russh::keys::PublicKeyOrCertificate) -> Result<bool, Self::Error> {
+    async fn check_server_key(
+        &mut self,
+        key: &russh::keys::PublicKeyOrCertificate,
+    ) -> Result<bool, Self::Error> {
         if let Ok(mut observed) = self.observed.lock() {
             *observed = Some(ssh_fingerprint(&public_key_of(key)));
         }
@@ -757,11 +760,7 @@ async fn settle_within_grace(future: impl std::future::Future<Output = ()>) -> b
 /// aborts the in-flight query plus any open transaction (security constraint
 /// §3.1 item 3: teardown is the only reliable fallback). `reason` explains
 /// the reset in the returned error.
-async fn teardown_connection(
-    state: &PostgresState,
-    connection_id: &str,
-    reason: &str,
-) -> String {
+async fn teardown_connection(state: &PostgresState, connection_id: &str, reason: &str) -> String {
     state.clients.write().await.remove(connection_id);
     if let Ok(mut backends) = state.backends.write() {
         backends.remove(connection_id);
@@ -815,9 +814,7 @@ pub async fn postgres_execute(
     tokio::pin!(cancel_future);
     let query_sql = request.sql.clone();
     let query_client = Arc::clone(&client);
-    let mut query_task = tokio::spawn(async move {
-        query_client.simple_query(&query_sql).await
-    });
+    let mut query_task = tokio::spawn(async move { query_client.simple_query(&query_sql).await });
     let outcome = {
         let race = std::future::poll_fn(|cx| {
             if cancel_future.as_mut().poll(cx).is_ready() {
@@ -826,9 +823,7 @@ pub async fn postgres_execute(
             use std::future::Future;
             let task = std::pin::pin!(&mut query_task);
             match task.poll(cx) {
-                std::task::Poll::Ready(joined) => {
-                    std::task::Poll::Ready(Ok(joined))
-                }
+                std::task::Poll::Ready(joined) => std::task::Poll::Ready(Ok(joined)),
                 std::task::Poll::Pending => std::task::Poll::Pending,
             }
         });
@@ -856,8 +851,7 @@ pub async fn postgres_execute(
             let settle = async {
                 let _ = (&mut query_task).await;
             };
-            match cancel_and_settle(&request.connection_id, &token, settle).await
-            {
+            match cancel_and_settle(&request.connection_id, &token, settle).await {
                 Ok(()) => return Err(reason),
                 Err(reset) => {
                     query_task.abort();
@@ -1142,9 +1136,9 @@ const MAX_ORDER_BY_COLUMNS: usize = 8;
 /// type names; allowing them would open `--`, `/*`, and string escapes.
 fn validate_cast_type(data_type: &str) -> Result<(), String> {
     if data_type.is_empty()
-        || !data_type.bytes().all(|b| {
-            b.is_ascii_alphanumeric() || b" _(),[]\".".contains(&b)
-        })
+        || !data_type
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b" _(),[]\".".contains(&b))
     {
         return Err("Unsafe column type name from catalog".into());
     }
@@ -1171,8 +1165,7 @@ fn build_where_clause(
     if filter.conditions.len() > MAX_FILTER_CONDITIONS {
         return Err(format!(
             "Too many filter conditions (max {MAX_FILTER_CONDITIONS})"
-        )
-        .into());
+        ));
     }
     let logic = match filter.logic.as_str() {
         "AND" => " AND ",
@@ -1190,10 +1183,7 @@ fn build_where_clause(
         let predicate = match condition.operator.as_str() {
             "eq" | "neq" | "gt" | "gte" | "lt" | "lte" | "like" => {
                 let value = condition.value.as_ref().ok_or_else(|| {
-                    format!(
-                        "Filter operator {} requires a value",
-                        condition.operator
-                    )
+                    format!("Filter operator {} requires a value", condition.operator)
                 })?;
                 if value.len() > MAX_FILTER_VALUE_LEN {
                     return Err("Filter value exceeds the maximum length".into());
@@ -1219,7 +1209,12 @@ fn build_where_clause(
             }
             "isNull" => format!("{column} IS NULL"),
             "isNotNull" => format!("{column} IS NOT NULL"),
-            _ => return Err(format!("Unsupported filter operator: {}", condition.operator)),
+            _ => {
+                return Err(format!(
+                    "Unsupported filter operator: {}",
+                    condition.operator
+                ))
+            }
         };
         predicates.push(predicate);
     }
@@ -1237,8 +1232,7 @@ fn build_order_by_clause(
     if order_by.len() > MAX_ORDER_BY_COLUMNS {
         return Err(format!(
             "Too many ORDER BY columns (max {MAX_ORDER_BY_COLUMNS})"
-        )
-        .into());
+        ));
     }
     let mut clauses = Vec::new();
     for clause in order_by {
@@ -1250,7 +1244,11 @@ fn build_order_by_clause(
             "desc" => "DESC",
             _ => return Err(format!("Unsupported sort direction: {}", clause.direction)),
         };
-        clauses.push(format!("{} {}", quote_identifier(&clause.column), direction));
+        clauses.push(format!(
+            "{} {}",
+            quote_identifier(&clause.column),
+            direction
+        ));
     }
     for key in primary_key_columns {
         clauses.push(format!("{} ASC", quote_identifier(key)));
@@ -1430,9 +1428,7 @@ fn reject_untracked_transaction_control(sql: &str) -> Result<(), String> {
             keyword.as_str(),
             "BEGIN" | "START" | "COMMIT" | "ROLLBACK" | "SAVEPOINT" | "RELEASE"
         ) {
-            return Err(
-                "Transaction control must use the PostgreSQL transaction toolbar".into(),
-            );
+            return Err("Transaction control must use the PostgreSQL transaction toolbar".into());
         }
     }
     Ok(())
@@ -1705,13 +1701,10 @@ pub async fn postgres_table_data(
         limit + 1,
         offset
     );
-    let fetched = tokio::time::timeout(
-        QUERY_TIMEOUT,
-        client.query(&statement, &params),
-    )
-    .await
-    .map_err(|_| "PostgreSQL table data query timed out")?
-    .map_err(|error| format!("Failed to load table data: {error}"))?;
+    let fetched = tokio::time::timeout(QUERY_TIMEOUT, client.query(&statement, &params))
+        .await
+        .map_err(|_| "PostgreSQL table data query timed out")?
+        .map_err(|error| format!("Failed to load table data: {error}"))?;
     let truncated = fetched.len() > limit;
     let rows = fetched
         .into_iter()
@@ -1722,10 +1715,7 @@ pub async fn postgres_table_data(
                 .collect::<Vec<_>>()
         })
         .collect::<Vec<_>>();
-    let columns: Vec<String> = metadata
-        .iter()
-        .map(|(name, _, _)| name.clone())
-        .collect();
+    let columns: Vec<String> = metadata.iter().map(|(name, _, _)| name.clone()).collect();
     let column_types: Vec<String> = columns
         .iter()
         .map(|name| types.get(name).cloned().unwrap_or_default())
@@ -1898,9 +1888,7 @@ pub async fn postgres_table_insert(
             primary_key_values.insert(key.clone(), value);
         }
     }
-    Ok(PostgresTableInsertResult {
-        primary_key_values,
-    })
+    Ok(PostgresTableInsertResult { primary_key_values })
 }
 
 #[tauri::command]
@@ -1948,9 +1936,9 @@ async fn rollback_save(client: &Client, root: String) -> String {
     let rb = tokio::time::timeout(QUERY_TIMEOUT, client.batch_execute("ROLLBACK")).await;
     match rb {
         Ok(Ok(_)) => root,
-        Ok(Err(rb_err)) => format!(
-            "{root}; ROLLBACK also failed: {rb_err} (connection should be reset)"
-        ),
+        Ok(Err(rb_err)) => {
+            format!("{root}; ROLLBACK also failed: {rb_err} (connection should be reset)")
+        }
         Err(_) => format!("{root}; ROLLBACK timed out (connection should be reset)"),
     }
 }
@@ -2023,7 +2011,9 @@ pub async fn postgres_save_table_changes(
         let outcome = match step.kind.as_str() {
             "update" => {
                 if step.changes.is_empty() {
-                    Err(format!("Save step {index}: update requires at least one changed value"))
+                    Err(format!(
+                        "Save step {index}: update requires at least one changed value"
+                    ))
                 } else if primary_keys.is_empty()
                     || primary_keys
                         .iter()
@@ -2079,13 +2069,11 @@ pub async fn postgres_save_table_changes(
                         assignments.join(", "),
                         predicates.join(" AND ")
                     );
-                    let row_count = tokio::time::timeout(
-                        QUERY_TIMEOUT,
-                        client.execute(&statement, &params),
-                    )
-                    .await
-                    .map_err(|_| "PostgreSQL save timed out on an UPDATE")?
-                    .map_err(|error| format!("Failed to update table row: {error}"))?;
+                    let row_count =
+                        tokio::time::timeout(QUERY_TIMEOUT, client.execute(&statement, &params))
+                            .await
+                            .map_err(|_| "PostgreSQL save timed out on an UPDATE")?
+                            .map_err(|error| format!("Failed to update table row: {error}"))?;
                     // M3: affected-row validation — a concurrent delete/change
                     // must not silently lose this edit.
                     if row_count != 1 {
@@ -2103,7 +2091,9 @@ pub async fn postgres_save_table_changes(
             }
             "insert" => {
                 if step.values.is_empty() {
-                    Err(format!("Save step {index}: insert requires at least one column value"))
+                    Err(format!(
+                        "Save step {index}: insert requires at least one column value"
+                    ))
                 } else {
                     let (statement, params) = build_insert_statement(
                         &request.schema,
@@ -2264,10 +2254,7 @@ pub async fn postgres_cancel(
 /// (security §4.3.1): SQL text <= 4 MiB, <= 256 bound parameters, each
 /// value <= 1 MiB. Pure function so the bounds are unit-testable without a
 /// live PostgreSQL client.
-fn validate_parameterized_request(
-    sql: &str,
-    params: &[Option<String>],
-) -> Result<(), String> {
+fn validate_parameterized_request(sql: &str, params: &[Option<String>]) -> Result<(), String> {
     if sql.trim().is_empty() {
         return Err("SQL cannot be empty".into());
     }
@@ -2279,11 +2266,9 @@ fn validate_parameterized_request(
             "Too many bound parameters (max {MAX_PARAMETER_COUNT})"
         ));
     }
-    for value in params {
-        if let Some(text) = value {
-            if text.len() > MAX_PARAMETER_VALUE_LEN {
-                return Err("A bound parameter exceeds the maximum length".into());
-            }
+    for text in params.iter().flatten() {
+        if text.len() > MAX_PARAMETER_VALUE_LEN {
+            return Err("A bound parameter exceeds the maximum length".into());
         }
     }
     Ok(())
@@ -2391,7 +2376,10 @@ pub async fn postgres_catalog_search(
         .ok_or_else(|| "PostgreSQL connection is not active".to_string())?;
     // Completion defaults to 100 matches; the navigator passes a larger
     // explicit limit so full object listings are never truncated.
-    let limit = request.limit.unwrap_or(100).clamp(1, CATALOG_SEARCH_LIMIT_MAX) as i64;
+    let limit = request
+        .limit
+        .unwrap_or(100)
+        .clamp(1, CATALOG_SEARCH_LIMIT_MAX) as i64;
     let prefix = format!("{}%", request.prefix.unwrap_or_default());
     let rows = match request.kind.as_str() {
         "relation" => client.query(
@@ -2575,9 +2563,9 @@ mod tests {
     use super::{
         build_delete_statement, build_insert_statement, build_order_by_clause,
         build_set_search_path_statement, build_where_clause, fingerprint_matches,
-        reject_untracked_transaction_control, single_statement,
-        split_sql_statements, validate_parameterized_request, validate_read_only_sql,
-        PostgresFilterCondition, PostgresSortClause, PostgresTableFilter,
+        reject_untracked_transaction_control, single_statement, split_sql_statements,
+        validate_parameterized_request, validate_read_only_sql, PostgresFilterCondition,
+        PostgresSortClause, PostgresTableFilter,
     };
     use std::collections::{HashMap, HashSet};
 
@@ -2714,10 +2702,7 @@ mod tests {
             ],
         };
         let (clause, params) = build_where_clause(&filter, &column_types()).unwrap();
-        assert_eq!(
-            clause,
-            " WHERE \"note\" IS NULL AND \"name\" IS NOT NULL"
-        );
+        assert_eq!(clause, " WHERE \"note\" IS NULL AND \"name\" IS NOT NULL");
         assert!(params.is_empty());
     }
 
@@ -2904,8 +2889,7 @@ mod tests {
 
     #[test]
     fn order_by_whitelists_columns_and_directions() {
-        let valid: HashSet<String> =
-            HashSet::from(["name".to_string(), "score".to_string()]);
+        let valid: HashSet<String> = HashSet::from(["name".to_string(), "score".to_string()]);
         let clauses = vec![
             PostgresSortClause {
                 column: "score".to_string(),
@@ -2958,9 +2942,7 @@ mod tests {
 
     #[test]
     fn order_by_rejects_too_many_columns() {
-        let valid: HashSet<String> = (0..10)
-            .map(|index| format!("col{index}"))
-            .collect();
+        let valid: HashSet<String> = (0..10).map(|index| format!("col{index}")).collect();
         let clauses: Vec<PostgresSortClause> = (0..9)
             .map(|index| PostgresSortClause {
                 column: format!("col{index}"),
@@ -3039,13 +3021,7 @@ mod tests {
     fn insert_statement_rejects_unknown_column() {
         let mut values = HashMap::new();
         values.insert("missing".to_string(), Some("x".to_string()));
-        let result = build_insert_statement(
-            "public",
-            "users",
-            &values,
-            &HashMap::new(),
-            &[],
-        );
+        let result = build_insert_statement("public", "users", &values, &HashMap::new(), &[]);
         assert!(result.is_err());
     }
 
@@ -3078,7 +3054,10 @@ mod tests {
         assert!(build_delete_statement(
             "public",
             "users",
-            &[("id".to_string(), "integer".to_string()), ("tenant".to_string(), "integer".to_string())],
+            &[
+                ("id".to_string(), "integer".to_string()),
+                ("tenant".to_string(), "integer".to_string())
+            ],
             &keys,
         )
         .is_err());
@@ -3124,7 +3103,10 @@ mod tests {
         let sql = "SELECT 1 /* outer /* inner */ still outer */; SELECT 2";
         let ranges = split_sql_statements(sql);
         assert_eq!(ranges.len(), 2);
-        assert_eq!(&sql[ranges[0].0..ranges[0].1], "SELECT 1 /* outer /* inner */ still outer */");
+        assert_eq!(
+            &sql[ranges[0].0..ranges[0].1],
+            "SELECT 1 /* outer /* inner */ still outer */"
+        );
         assert_eq!(&sql[ranges[1].0..ranges[1].1], "SELECT 2");
     }
 

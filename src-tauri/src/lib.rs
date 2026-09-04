@@ -1,5 +1,5 @@
-mod commands;
 mod clipboard_files;
+mod commands;
 mod config_archive;
 mod connection_manager;
 pub mod db;
@@ -11,16 +11,16 @@ pub mod documents;
 mod ftp_client;
 mod jump;
 mod ls_parser;
+mod mysql;
 mod os_detect;
-mod proxy;
 mod postgres;
 mod postgres_catalog;
 mod postgres_design;
-mod sqlite;
-mod mysql;
+mod proxy;
 /// IronRDP-based RDP client. Public for live integration tests.
 pub mod rdp_client;
 mod sftp_client;
+mod sqlite;
 pub mod ssh;
 mod toolbox;
 pub mod vnc_client;
@@ -76,13 +76,13 @@ fn build_app_menu<F: Fn(&str) -> String>(
     let servers_menu = Submenu::with_id_and_items(
         app,
         "m_servers",
-        &t("menuBar.servers"),
+        t("menuBar.servers"),
         true,
         &[
             &MenuItem::with_id(
                 app,
                 "new_connection",
-                &t("menuBar.newConnection"),
+                t("menuBar.newConnection"),
                 true,
                 Some("CmdOrCtrl+N"),
             )?,
@@ -90,19 +90,19 @@ fn build_app_menu<F: Fn(&str) -> String>(
             &MenuItem::with_id(
                 app,
                 "save_connection",
-                &t("menuBar.saveConnection"),
+                t("menuBar.saveConnection"),
                 true,
                 Some("CmdOrCtrl+S"),
             )?,
             &MenuItem::with_id(
                 app,
                 "close_connection",
-                &t("menuBar.closeTab"),
+                t("menuBar.closeTab"),
                 true,
                 Some("CmdOrCtrl+W"),
             )?,
             &PredefinedMenuItem::separator(app)?,
-            &MenuItem::with_id(app, "settings", &t("menuBar.options"), true, None::<&str>)?,
+            &MenuItem::with_id(app, "settings", t("menuBar.options"), true, None::<&str>)?,
         ],
     )?;
 
@@ -110,38 +110,38 @@ fn build_app_menu<F: Fn(&str) -> String>(
     let terminal_menu = Submenu::with_id_and_items(
         app,
         "m_terminal",
-        &t("menuBar.terminal"),
+        t("menuBar.terminal"),
         true,
         &[
             &MenuItem::with_id(
                 app,
                 "new_tab",
-                &t("menuBar.newTab"),
+                t("menuBar.newTab"),
                 true,
                 Some("CmdOrCtrl+T"),
             )?,
             &MenuItem::with_id(
                 app,
                 "clone_tab",
-                &t("menuBar.duplicateTab"),
+                t("menuBar.duplicateTab"),
                 true,
                 Some("CmdOrCtrl+D"),
             )?,
             &PredefinedMenuItem::separator(app)?,
-            &MenuItem::with_id(app, "next_tab", &t("menuBar.nextTab"), true, None::<&str>)?,
+            &MenuItem::with_id(app, "next_tab", t("menuBar.nextTab"), true, None::<&str>)?,
             &MenuItem::with_id(
                 app,
                 "prev_tab",
-                &t("menuBar.previousTab"),
+                t("menuBar.previousTab"),
                 true,
                 None::<&str>,
             )?,
             &PredefinedMenuItem::separator(app)?,
-            &MenuItem::with_id(app, "reconnect", &t("menuBar.reconnect"), true, Some("F5"))?,
+            &MenuItem::with_id(app, "reconnect", t("menuBar.reconnect"), true, Some("F5"))?,
             &MenuItem::with_id(
                 app,
                 "disconnect",
-                &t("menuBar.disconnect"),
+                t("menuBar.disconnect"),
                 true,
                 None::<&str>,
             )?,
@@ -152,7 +152,7 @@ fn build_app_menu<F: Fn(&str) -> String>(
     let edit_menu = Submenu::with_id_and_items(
         app,
         "m_edit",
-        &t("menuBar.edit"),
+        t("menuBar.edit"),
         true,
         &[
             &PredefinedMenuItem::undo(app, Some(&t("menuBar.undo")))?,
@@ -164,11 +164,11 @@ fn build_app_menu<F: Fn(&str) -> String>(
             &PredefinedMenuItem::separator(app)?,
             &PredefinedMenuItem::select_all(app, Some(&t("menuBar.selectAll")))?,
             &PredefinedMenuItem::separator(app)?,
-            &MenuItem::with_id(app, "find", &t("menuBar.find"), true, Some("CmdOrCtrl+F"))?,
+            &MenuItem::with_id(app, "find", t("menuBar.find"), true, Some("CmdOrCtrl+F"))?,
             &MenuItem::with_id(
                 app,
                 "clear_screen",
-                &t("menuBar.clearScreen"),
+                t("menuBar.clearScreen"),
                 true,
                 Some("CmdOrCtrl+L"),
             )?,
@@ -179,7 +179,7 @@ fn build_app_menu<F: Fn(&str) -> String>(
     let window_menu = Submenu::with_id_and_items(
         app,
         "m_window",
-        &t("menuBar.window"),
+        t("menuBar.window"),
         true,
         &[
             &PredefinedMenuItem::minimize(app, Some(&t("menuBar.minimize")))?,
@@ -327,14 +327,12 @@ pub fn run() {
     let builder: tauri::Builder<tauri::Wry> = if e2e_mode {
         builder
     } else {
-        builder.plugin(tauri_plugin_single_instance::init(
-            |app, _args, _cwd| {
-                if let Some(window) = app.get_webview_window("main") {
-                    let _ = window.set_focus();
-                    let _ = window.unminimize();
-                }
-            },
-        ))
+        builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.set_focus();
+                let _ = window.unminimize();
+            }
+        }))
     };
     builder
         .plugin(tauri_plugin_dialog::init())
@@ -348,7 +346,7 @@ pub fn run() {
                 // Register native macOS menu and forward item events to the frontend
                 #[cfg(target_os = "macos")]
                 {
-                    match build_app_menu(&app.handle(), default_menu_text) {
+                    match build_app_menu(app.handle(), default_menu_text) {
                         Ok(menu) => {
                             if let Err(e) = app.set_menu(menu) {
                                 tracing::warn!("Failed to set native menu: {}", e);
@@ -497,9 +495,9 @@ pub fn run() {
         })
         .manage(connection_manager)
         .manage(toolbox::ToolboxState::default())
-            .manage(postgres::PostgresState::default())
-            .manage(sqlite::SqliteState::default())
-            .manage(mysql::MysqlState::default())
+        .manage(postgres::PostgresState::default())
+        .manage(sqlite::SqliteState::default())
+        .manage(mysql::MysqlState::default())
         .invoke_handler(tauri::generate_handler![
             commands::ssh_connect,
             commands::ssh_host_key_fingerprint,

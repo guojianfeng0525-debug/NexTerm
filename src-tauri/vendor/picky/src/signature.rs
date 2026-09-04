@@ -5,7 +5,7 @@ use crate::key::ec::{EcComponent, EcCurve, NamedEcCurve};
 use crate::key::{KeyError, PrivateKey, PublicKey};
 
 use picky_asn1_x509::{AlgorithmIdentifier, oids};
-use rsa::signature::{SignatureEncoding as _, Signer};
+use rsa::signature::Signer;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 

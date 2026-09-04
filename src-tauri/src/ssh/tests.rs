@@ -1,5 +1,5 @@
 #[cfg(test)]
-mod tests {
+mod ssh_contract_tests {
     use crate::ssh::{AuthMethod, SshClient, SshConfig};
     use std::sync::Arc;
     use tokio::sync::RwLock;
@@ -574,7 +574,10 @@ Byby5sb2NhbAECAw==
             host_key_verification: false,
         };
         let mut client = SshClient::new();
-        client.connect(&config).await.expect("connect Docker SSH fixture");
+        client
+            .connect(&config)
+            .await
+            .expect("connect Docker SSH fixture");
         let pty = client
             .create_pty_session(80, 24, None)
             .await
@@ -583,7 +586,10 @@ Byby5sb2NhbAECAw==
         let temp = tempfile::NamedTempFile::new().expect("create upload fixture");
         std::fs::write(temp.path(), vec![b'x'; 8 * 1024 * 1024]).expect("write upload fixture");
         client
-            .upload_file(temp.path().to_str().expect("UTF-8 temp path"), "/home/test/nexterm-transfer-test.bin")
+            .upload_file(
+                temp.path().to_str().expect("UTF-8 temp path"),
+                "/home/test/nexterm-transfer-test.bin",
+            )
             .await
             .expect("upload while PTY is active");
 

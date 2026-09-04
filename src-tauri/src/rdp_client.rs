@@ -158,7 +158,11 @@ impl CliprdrBackend for TextClipboardBackend {
 
     fn on_unlock(&mut self, _data_id: LockDataId) {}
 
-    fn on_process_negotiated_capabilities(&mut self, _capabilities: ClipboardGeneralCapabilityFlags) {}
+    fn on_process_negotiated_capabilities(
+        &mut self,
+        _capabilities: ClipboardGeneralCapabilityFlags,
+    ) {
+    }
 }
 
 /// Decode UTF-16LE clipboard bytes (NUL-terminated) into a Rust string.
@@ -196,14 +200,27 @@ enum RdpInput {
     /// `caps_lock`/`num_lock` carry the client toggle state when the event is
     /// a lock key — Windows hosts track toggles via sync events, not raw
     /// scancodes, so a CapsLock press also emits a synchronize event.
-    Key { extended: bool, code: u8, down: bool, caps_lock: Option<bool>, num_lock: Option<bool> },
+    Key {
+        extended: bool,
+        code: u8,
+        down: bool,
+        caps_lock: Option<bool>,
+        num_lock: Option<bool>,
+    },
     /// Pointer state — JS `MouseEvent.buttons` + wheel flags. See
     /// `DesktopProtocol` docs for the bit layout.
-    Pointer { x: u16, y: u16, button_mask: u8 },
+    Pointer {
+        x: u16,
+        y: u16,
+        button_mask: u8,
+    },
     /// Local clipboard text changed.
     SetClipboard(String),
     /// Display resize request (display-control channel).
-    Resize { width: u16, height: u16 },
+    Resize {
+        width: u16,
+        height: u16,
+    },
     Close,
 }
 
@@ -319,8 +336,8 @@ pub fn js_keycode_to_scancode(key_code: u32) -> Option<(bool, u8)> {
         0x6F => Some((true, 0x35)),  // Numpad /
         // Function keys.
         0x70..=0x79 => Some((false, (key_code - 0x70 + 0x3B) as u8)), // F1-F10
-        0x7A => Some((false, 0x57)), // F11
-        0x7B => Some((false, 0x58)), // F12
+        0x7A => Some((false, 0x57)),                                  // F11
+        0x7B => Some((false, 0x58)),                                  // F12
         // Modifiers.
         0xA0 => Some((false, 0x2A)), // Left Shift
         0xA1 => Some((false, 0x36)), // Right Shift
@@ -376,13 +393,14 @@ impl RdpClient {
         // multiplexer (display-control resize support) before the connection
         // sequence so the channels are negotiated up front.
         let (cliprdr_events_tx, cliprdr_events_rx) = mpsc::unbounded_channel();
-        connector.attach_static_channel(cliprdr::CliprdrClient::new(Box::new(TextClipboardBackend {
-            events: cliprdr_events_tx,
-        })));
+        connector.attach_static_channel(cliprdr::CliprdrClient::new(Box::new(
+            TextClipboardBackend {
+                events: cliprdr_events_tx,
+            },
+        )));
         let display_control =
             DisplayControlClient::new(|_capabilities| Ok::<_, ironrdp::pdu::PduError>(Vec::new()));
-        connector
-            .attach_static_channel(DrdynvcClient::new().with_dynamic_channel(display_control));
+        connector.attach_static_channel(DrdynvcClient::new().with_dynamic_channel(display_control));
 
         // X.224 connection request / confirmation (mirrors
         // `ironrdp_async::connect_begin`, driven manually over the
@@ -550,7 +568,10 @@ struct SendPduFramed<S> {
 
 impl<S> SendPduFramed<S> {
     fn new(stream: S, leftover: bytes::BytesMut) -> Self {
-        Self { stream, buf: leftover }
+        Self {
+            stream,
+            buf: leftover,
+        }
     }
 
     /// Splits the wrapper back into the raw stream and the unread buffer.
@@ -579,8 +600,11 @@ where
             if self.buf.len() >= length {
                 return Ok(self.buf.split_to(length));
             }
-            self.buf
-                .reserve(length.checked_sub(self.buf.len()).expect("length > buf.len()"));
+            self.buf.reserve(
+                length
+                    .checked_sub(self.buf.len())
+                    .expect("length > buf.len()"),
+            );
             let len = self.read_more().await?;
             if len == 0 {
                 return Err(std::io::Error::new(
@@ -699,7 +723,9 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     let selected_protocol = match connector_handle.state {
-        connector::ClientConnectorState::Credssp { selected_protocol, .. } => selected_protocol,
+        connector::ClientConnectorState::Credssp {
+            selected_protocol, ..
+        } => selected_protocol,
         _ => {
             return Err(connector::general_err!(
                 "invalid connector state for CredSSP sequence"
@@ -839,7 +865,10 @@ async fn run_session(
 /// `DecodedImage::data_for_rect` returns a strided slice that includes the
 /// gap between the rectangle's right edge and the end of each row; the
 /// frontend expects `width × height × 4` tightly-packed bytes.
-fn compact_rect(image: &DecodedImage, rect: &ironrdp::pdu::geometry::InclusiveRectangle) -> Vec<u8> {
+fn compact_rect(
+    image: &DecodedImage,
+    rect: &ironrdp::pdu::geometry::InclusiveRectangle,
+) -> Vec<u8> {
     use ironrdp::pdu::geometry::Rectangle as _;
 
     const BPP: usize = 4; // PixelFormat::RgbA32
@@ -978,9 +1007,18 @@ async fn session_loop(
 }
 
 /// Translate a frontend input event into active-stage outputs.
-fn handle_input(state: &mut SessionState, input: RdpInput) -> SessionResult<Vec<ActiveStageOutput>> {
+fn handle_input(
+    state: &mut SessionState,
+    input: RdpInput,
+) -> SessionResult<Vec<ActiveStageOutput>> {
     match input {
-        RdpInput::Key { extended, code, down, caps_lock, num_lock } => {
+        RdpInput::Key {
+            extended,
+            code,
+            down,
+            caps_lock,
+            num_lock,
+        } => {
             let scancode = Scancode::from_u8(extended, code);
             let operation = if down {
                 Operation::KeyPressed(scancode)
@@ -1062,7 +1100,9 @@ fn handle_input(state: &mut SessionState, input: RdpInput) -> SessionResult<Vec<
                     Ok(Vec::new())
                 }
                 None => {
-                    tracing::debug!("RDP display-control channel unavailable; keeping current size");
+                    tracing::debug!(
+                        "RDP display-control channel unavailable; keeping current size"
+                    );
                     Ok(Vec::new())
                 }
             }
@@ -1119,9 +1159,8 @@ fn cliprdr_operation(
             return Ok(Vec::new());
         };
         let result = match operation {
-            CliprdrOperation::Advertise => cliprdr_client.initiate_copy(&[ClipboardFormat::new(
-                ClipboardFormatId::CF_UNICODETEXT,
-            )]),
+            CliprdrOperation::Advertise => cliprdr_client
+                .initiate_copy(&[ClipboardFormat::new(ClipboardFormatId::CF_UNICODETEXT)]),
             CliprdrOperation::SubmitLocal(text) => {
                 let response = OwnedFormatDataResponse::new_data(encode_unicode_text(&text));
                 cliprdr_client.submit_format_data(response)
@@ -1138,7 +1177,9 @@ fn cliprdr_operation(
             }
         }
     };
-    let frame = state.active_stage.process_svc_processor_messages(messages)?;
+    let frame = state
+        .active_stage
+        .process_svc_processor_messages(messages)?;
     if frame.is_empty() {
         Ok(Vec::new())
     } else {
@@ -1206,13 +1247,18 @@ async fn reactivate(
                 .build(),
             );
             state.active_stage.set_share_id(share_id);
-            state.active_stage.set_enable_server_pointer(enable_server_pointer);
-            tracing::debug!(width = desktop_size.width, height = desktop_size.height, "RDP reactivated");
-            let _ = event_tx
-                .try_send(RdpEvent::Resized {
-                    width: desktop_size.width,
-                    height: desktop_size.height,
-                });
+            state
+                .active_stage
+                .set_enable_server_pointer(enable_server_pointer);
+            tracing::debug!(
+                width = desktop_size.width,
+                height = desktop_size.height,
+                "RDP reactivated"
+            );
+            let _ = event_tx.try_send(RdpEvent::Resized {
+                width: desktop_size.width,
+                height: desktop_size.height,
+            });
             return Ok(());
         }
     }
@@ -1253,11 +1299,23 @@ impl DesktopProtocol for RdpClient {
         Ok(())
     }
 
-    async fn send_key(&self, key_code: u32, down: bool, caps_lock: Option<bool>, num_lock: Option<bool>) -> Result<()> {
+    async fn send_key(
+        &self,
+        key_code: u32,
+        down: bool,
+        caps_lock: Option<bool>,
+        num_lock: Option<bool>,
+    ) -> Result<()> {
         let Some((extended, code)) = js_keycode_to_scancode(key_code) else {
             return Ok(());
         };
-        self.send_input(RdpInput::Key { extended, code, down, caps_lock, num_lock })
+        self.send_input(RdpInput::Key {
+            extended,
+            code,
+            down,
+            caps_lock,
+            num_lock,
+        })
     }
 
     async fn send_pointer(&self, x: u16, y: u16, button_mask: u8) -> Result<()> {

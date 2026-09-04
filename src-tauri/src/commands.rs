@@ -42,7 +42,9 @@ pub struct ConnectRequest {
     pub host_key_verification: bool,
 }
 
-fn default_host_key_verification() -> bool { true }
+fn default_host_key_verification() -> bool {
+    true
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct MemoryStats {
@@ -79,7 +81,11 @@ fn format_kib(kib: u64) -> String {
         value /= 1024.0;
         unit += 1;
     }
-    if unit == 0 { format!("{kib}K") } else { format!("{value:.1}{}", UNITS[unit]) }
+    if unit == 0 {
+        format!("{kib}K")
+    } else {
+        format!("{value:.1}{}", UNITS[unit])
+    }
 }
 
 /// Parse one POSIX `df -kP` row. The command is locale-neutral and avoids
@@ -97,7 +103,10 @@ fn parse_disk_stats(output: &str) -> Option<DiskStats> {
         let total = fields.get(capacity_index - 3)?.parse::<u64>().ok()?;
         let used = fields.get(capacity_index - 2)?.parse::<u64>().ok()?;
         let free = fields.get(capacity_index - 1)?.parse::<u64>().ok()?;
-        let use_percent = fields[capacity_index].trim_end_matches('%').parse::<f64>().ok()?;
+        let use_percent = fields[capacity_index]
+            .trim_end_matches('%')
+            .parse::<f64>()
+            .ok()?;
         return Some(DiskStats {
             is_available: true,
             total: format_kib(total),
@@ -162,8 +171,13 @@ pub struct HostKeyProbeResponse {
 }
 
 #[tauri::command]
-pub async fn ssh_host_key_fingerprint(request: HostKeyProbeRequest) -> Result<HostKeyProbeResponse, String> {
-    let use_jump = request.jump_host.as_deref().map_or(false, |h| !h.trim().is_empty());
+pub async fn ssh_host_key_fingerprint(
+    request: HostKeyProbeRequest,
+) -> Result<HostKeyProbeResponse, String> {
+    let use_jump = request
+        .jump_host
+        .as_deref()
+        .is_some_and(|h| !h.trim().is_empty());
     let result = if use_jump {
         match build_jump_fields(
             &request.jump_host,
@@ -175,7 +189,9 @@ pub async fn ssh_host_key_fingerprint(request: HostKeyProbeRequest) -> Result<Ho
             &request.passphrase,
             &None,
         ) {
-            Ok(Some(jump)) => crate::ssh::probe_host_key_via_jump(&request.host, request.port, &jump).await,
+            Ok(Some(jump)) => {
+                crate::ssh::probe_host_key_via_jump(&request.host, request.port, &jump).await
+            }
             Ok(None) => crate::ssh::probe_host_key(&request.host, request.port).await,
             Err(e) => Err(anyhow::anyhow!(e)),
         }
@@ -511,7 +527,10 @@ pub async fn probe_all_server_stats(
             let server_id = server_id.clone();
             match tokio::time::timeout(PROBE_TIMEOUT, probe).await {
                 Ok((id, value)) => (id.clone(), value),
-                Err(_) => (server_id, serde_json::json!({ "error": "probe timed out after 15 seconds" })),
+                Err(_) => (
+                    server_id,
+                    serde_json::json!({ "error": "probe timed out after 15 seconds" }),
+                ),
             }
         })
         .buffer_unordered(MAX_CONCURRENT)
@@ -564,6 +583,7 @@ fn build_jump(request: &ConnectRequest) -> Result<Option<JumpConfig>, String> {
 }
 
 /// Shared jump-host builder used by both the SSH and SFTP connect paths.
+#[allow(clippy::too_many_arguments)] // One field per wire-contract property keeps call sites explicit.
 fn build_jump_fields(
     jump_host: &Option<String>,
     jump_port: Option<u16>,
@@ -899,7 +919,9 @@ pub async fn sftp_download_file(
         // Download to a sibling staging file so a cancelled or failed transfer
         // never exposes a partial destination file.
         let staging_path = transfer_staging_path(&request.local_path, None);
-        let result = client.download_file(&request.remote_path, &staging_path).await;
+        let result = client
+            .download_file(&request.remote_path, &staging_path)
+            .await;
         drop(client);
         let result = match result {
             Ok(bytes) => match publish_staged_download(&staging_path, &request.local_path).await {
@@ -952,7 +974,14 @@ pub async fn sftp_upload_file(
         }
     };
     let result = match result {
-        Ok(bytes) => match rename_remote_file(state.inner(), &request.connection_id, &staging_path, &request.remote_path).await {
+        Ok(bytes) => match rename_remote_file(
+            state.inner(),
+            &request.connection_id,
+            &staging_path,
+            &request.remote_path,
+        )
+        .await
+        {
             Ok(()) => Ok(bytes),
             Err(error) => {
                 remove_remote_file(state.inner(), &request.connection_id, &staging_path).await;
@@ -3040,7 +3069,9 @@ async fn download_remote_file_to_path(
         }
         Some("FTP") => {
             let ftp_map = state.get_ftp_connection().await;
-            let config = ftp_map.read().await
+            let config = ftp_map
+                .read()
+                .await
                 .get(connection_id)
                 .ok_or("FTP connection not found".to_string())?
                 .transfer_config()
@@ -3058,8 +3089,8 @@ async fn download_remote_file_to_path(
         }
         Some(other) => return Err(format!("Unsupported protocol: {}", other)),
         None => {
-            // Fallback: try SSH connection (integrated file browser uses SSH connections
-            // which are not registered in connection_types)
+            // 回退到 SSH 连接（集成文件浏览器使用的 SSH 连接不会登记在
+            // connection_types 中）。
             let connection = state
                 .get_connection(connection_id)
                 .await
@@ -3067,9 +3098,11 @@ async fn download_remote_file_to_path(
             let client = connection.read().await;
             let mut last = std::time::Instant::now();
             let ch2 = on_progress.clone();
-            client.download_file_with_progress(remote_path, local_path, move |total, done| {
-                send_progress(&ch2, total, done, &mut last);
-            }).await
+            client
+                .download_file_with_progress(remote_path, local_path, move |total, done| {
+                    send_progress(&ch2, total, done, &mut last);
+                })
+                .await
         }
     };
 
@@ -3126,23 +3159,36 @@ async fn rename_remote_file(
         Some("SFTP") => {
             let connections = state.get_sftp_connection().await;
             let connections = connections.read().await;
-            let client = connections.get(connection_id)
+            let client = connections
+                .get(connection_id)
                 .ok_or_else(|| "SFTP connection not found".to_string())?;
-            client.rename(old_path, new_path).await.map_err(|e| e.to_string())
+            client
+                .rename(old_path, new_path)
+                .await
+                .map_err(|e| e.to_string())
         }
         Some("FTP") => {
             let connections = state.get_ftp_connection().await;
             let mut connections = connections.write().await;
-            let client = connections.get_mut(connection_id)
+            let client = connections
+                .get_mut(connection_id)
                 .ok_or_else(|| "FTP connection not found".to_string())?;
-            client.rename(old_path, new_path).await.map_err(|e| e.to_string())
+            client
+                .rename(old_path, new_path)
+                .await
+                .map_err(|e| e.to_string())
         }
         Some(other) => Err(format!("Unsupported protocol: {}", other)),
         None => {
-            let connection = state.get_connection(connection_id).await
+            let connection = state
+                .get_connection(connection_id)
+                .await
                 .ok_or_else(|| format!("No connection found for '{}'", connection_id))?;
             let client = connection.read().await;
-            client.rename_remote_file(old_path, new_path).await.map_err(|e| e.to_string())
+            client
+                .rename_remote_file(old_path, new_path)
+                .await
+                .map_err(|e| e.to_string())
         }
     }
 }
@@ -3187,7 +3233,12 @@ pub async fn download_remote_file(
     state: State<'_, Arc<ConnectionManager>>,
 ) -> Result<FileTransferResponse, String> {
     let cancel = match transfer_id.as_deref() {
-        Some(id) => Some(state.register_transfer(&connection_id, id).await.map_err(|e| e.to_string())?),
+        Some(id) => Some(
+            state
+                .register_transfer(&connection_id, id)
+                .await
+                .map_err(|e| e.to_string())?,
+        ),
         None => None,
     };
     let staging_path = transfer_staging_path(&local_path, transfer_id.as_deref());
@@ -3207,13 +3258,20 @@ pub async fn download_remote_file(
         transfer.await
     };
     let result = match result {
-        Ok(response) if response.success => match publish_staged_download(&staging_path, &local_path).await {
-            Ok(()) => Ok(response),
-            Err(error) => {
-                remove_staged_download(&staging_path).await;
-                Ok(FileTransferResponse { success: false, bytes_transferred: None, data: None, error: Some(error) })
+        Ok(response) if response.success => {
+            match publish_staged_download(&staging_path, &local_path).await {
+                Ok(()) => Ok(response),
+                Err(error) => {
+                    remove_staged_download(&staging_path).await;
+                    Ok(FileTransferResponse {
+                        success: false,
+                        bytes_transferred: None,
+                        data: None,
+                        error: Some(error),
+                    })
+                }
             }
-        },
+        }
         result => {
             remove_staged_download(&staging_path).await;
             result
@@ -3226,6 +3284,7 @@ pub async fn download_remote_file(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)] // Stable IPC contract; grouping would break the frontend payload shape.
 pub async fn download_remote_file_confined(
     connection_id: String,
     remote_root: String,
@@ -3255,7 +3314,12 @@ pub async fn download_remote_file_confined(
     };
 
     let cancel = match transfer_id.as_deref() {
-        Some(id) => Some(state.register_transfer(&connection_id, id).await.map_err(|e| e.to_string())?),
+        Some(id) => Some(
+            state
+                .register_transfer(&connection_id, id)
+                .await
+                .map_err(|e| e.to_string())?,
+        ),
         None => None,
     };
     let staging_path = transfer_staging_path(local_path, transfer_id.as_deref());
@@ -3275,13 +3339,20 @@ pub async fn download_remote_file_confined(
         transfer.await
     };
     let result = match result {
-        Ok(response) if response.success => match publish_staged_download(&staging_path, local_path).await {
-            Ok(()) => Ok(response),
-            Err(error) => {
-                remove_staged_download(&staging_path).await;
-                Ok(FileTransferResponse { success: false, bytes_transferred: None, data: None, error: Some(error) })
+        Ok(response) if response.success => {
+            match publish_staged_download(&staging_path, local_path).await {
+                Ok(()) => Ok(response),
+                Err(error) => {
+                    remove_staged_download(&staging_path).await;
+                    Ok(FileTransferResponse {
+                        success: false,
+                        bytes_transferred: None,
+                        data: None,
+                        error: Some(error),
+                    })
+                }
             }
-        },
+        }
         result => {
             remove_staged_download(&staging_path).await;
             result
@@ -3303,59 +3374,68 @@ pub async fn upload_remote_file(
     state: State<'_, Arc<ConnectionManager>>,
 ) -> Result<FileTransferResponse, String> {
     let cancel = match transfer_id.as_deref() {
-        Some(id) => Some(state.register_transfer(&connection_id, id).await.map_err(|e| e.to_string())?),
+        Some(id) => Some(
+            state
+                .register_transfer(&connection_id, id)
+                .await
+                .map_err(|e| e.to_string())?,
+        ),
         None => None,
     };
     let conn_type = state.get_connection_type(&connection_id).await;
     let staging_path = transfer_staging_path(&remote_path, transfer_id.as_deref());
 
     let transfer = async {
-    match conn_type.as_deref() {
-        Some("SFTP") => {
-            let sftp_map = state.get_sftp_connection().await;
-            let connections = sftp_map.read().await;
-            let client = connections
-                .get(&connection_id)
-                .ok_or_else(|| anyhow::anyhow!("SFTP connection not found"))?;
-            let mut last = std::time::Instant::now();
-            let ch2 = on_progress.clone();
-            client
-                .upload_file_with_progress(&local_path, &staging_path, move |total, done| {
-                    send_progress(&ch2, total, done, &mut last);
-                })
-                .await
+        match conn_type.as_deref() {
+            Some("SFTP") => {
+                let sftp_map = state.get_sftp_connection().await;
+                let connections = sftp_map.read().await;
+                let client = connections
+                    .get(&connection_id)
+                    .ok_or_else(|| anyhow::anyhow!("SFTP connection not found"))?;
+                let mut last = std::time::Instant::now();
+                let ch2 = on_progress.clone();
+                client
+                    .upload_file_with_progress(&local_path, &staging_path, move |total, done| {
+                        send_progress(&ch2, total, done, &mut last);
+                    })
+                    .await
+            }
+            Some("FTP") => {
+                let ftp_map = state.get_ftp_connection().await;
+                let config = ftp_map
+                    .read()
+                    .await
+                    .get(&connection_id)
+                    .ok_or_else(|| anyhow::anyhow!("FTP connection not found"))?
+                    .transfer_config()?;
+                let mut client = crate::ftp_client::FtpClient::connect(&config).await?;
+                let mut last = std::time::Instant::now();
+                let ch2 = on_progress.clone();
+                client
+                    .upload_file_with_progress(&local_path, &staging_path, move |total, done| {
+                        send_progress(&ch2, total, done, &mut last);
+                    })
+                    .await
+            }
+            Some(other) => Err(anyhow::anyhow!("Unsupported protocol: {}", other)),
+            None => {
+                // 回退到 SSH 连接（集成文件浏览器使用的 SSH 连接不会登记在
+                // connection_types 中）。
+                let connection = state.get_connection(&connection_id).await.ok_or_else(|| {
+                    anyhow::anyhow!("No connection found for '{}'", connection_id)
+                })?;
+                let client = connection.read().await;
+                let mut last = std::time::Instant::now();
+                let ch2 = on_progress.clone();
+                client
+                    .upload_file_with_progress(&local_path, &staging_path, move |total, done| {
+                        send_progress(&ch2, total, done, &mut last);
+                    })
+                    .await
+            }
         }
-        Some("FTP") => {
-            let ftp_map = state.get_ftp_connection().await;
-            let config = ftp_map.read().await
-                .get(&connection_id)
-                .ok_or_else(|| anyhow::anyhow!("FTP connection not found"))?
-                .transfer_config()?;
-            let mut client = crate::ftp_client::FtpClient::connect(&config).await?;
-            let mut last = std::time::Instant::now();
-            let ch2 = on_progress.clone();
-            client
-                .upload_file_with_progress(&local_path, &staging_path, move |total, done| {
-                    send_progress(&ch2, total, done, &mut last);
-                })
-                .await
-        }
-        Some(other) => return Err(anyhow::anyhow!("Unsupported protocol: {}", other)),
-        None => {
-            // Fallback: try SSH connection (integrated file browser uses SSH connections
-            // which are not registered in connection_types)
-            let connection = state
-                .get_connection(&connection_id)
-                .await
-                .ok_or_else(|| anyhow::anyhow!("No connection found for '{}'", connection_id))?;
-            let client = connection.read().await;
-            let mut last = std::time::Instant::now();
-            let ch2 = on_progress.clone();
-            client.upload_file_with_progress(&local_path, &staging_path, move |total, done| {
-                send_progress(&ch2, total, done, &mut last);
-            }).await
-        }
-    }};
+    };
     let result = if let Some(cancel) = cancel {
         tokio::select! {
             result = transfer => result,
@@ -3365,13 +3445,17 @@ pub async fn upload_remote_file(
         transfer.await
     };
     let result = match result {
-        Ok(bytes) => match rename_remote_file(state.inner(), &connection_id, &staging_path, &remote_path).await {
-            Ok(()) => Ok(bytes),
-            Err(error) => {
-                remove_remote_file(state.inner(), &connection_id, &staging_path).await;
-                Err(anyhow::anyhow!(error))
+        Ok(bytes) => {
+            match rename_remote_file(state.inner(), &connection_id, &staging_path, &remote_path)
+                .await
+            {
+                Ok(()) => Ok(bytes),
+                Err(error) => {
+                    remove_remote_file(state.inner(), &connection_id, &staging_path).await;
+                    Err(anyhow::anyhow!(error))
+                }
             }
-        },
+        }
         Err(error) => {
             remove_remote_file(state.inner(), &connection_id, &staging_path).await;
             Err(error)

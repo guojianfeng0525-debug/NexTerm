@@ -7,6 +7,8 @@
 //! user's own edits are persisted.
 
 use rusqlite::{params, Connection, OptionalExtension};
+
+pub type JarBuildRow = (String, i64, String, Option<String>);
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -327,10 +329,7 @@ pub fn insert_build(
     Ok(())
 }
 
-pub fn list_builds(
-    conn: &Connection,
-    project_id: &str,
-) -> Result<Vec<(String, i64, String, Option<String>)>, String> {
+pub fn list_builds(conn: &Connection, project_id: &str) -> Result<Vec<JarBuildRow>, String> {
     let mut stmt = conn
         .prepare("SELECT output_path, built_at, result, detail FROM jar_builds WHERE project_id = ?1 ORDER BY built_at DESC LIMIT 50")
         .map_err(|e| format!("prepare builds: {e}"))?;
@@ -405,98 +404,6 @@ CREATE TABLE IF NOT EXISTS "jar_symbols" (
   signature TEXT NOT NULL DEFAULT ''
 );
 "#;
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::atomic::{AtomicU32, Ordering};
-    static COUNTER: AtomicU32 = AtomicU32::new(0);
-
-    fn test_conn() -> Connection {
-        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-        let path = std::env::temp_dir().join(format!("jar-db-test-{}-{n}.db", std::process::id()));
-        let conn = open(&path).unwrap();
-        conn.execute_batch(TEST_DDL).unwrap();
-        conn
-    }
-
-    #[test]
-    fn project_crud() {
-        let conn = test_conn();
-        let p = JarProject {
-            id: "p1".into(),
-            name: "app.jar".into(),
-            jar_path: "/tmp/app.jar".into(),
-            jar_hash: "abc".into(),
-            size: 100,
-            class_count: 2,
-            resource_count: 1,
-            created_at: 1,
-            updated_at: 1,
-        };
-        upsert_project(&conn, &p).unwrap();
-        let got = get_project(&conn, "p1").unwrap().unwrap();
-        assert_eq!(got.name, "app.jar");
-        assert_eq!(list_projects(&conn).unwrap().len(), 1);
-        delete_project(&conn, "p1").unwrap();
-        assert!(get_project(&conn, "p1").unwrap().is_none());
-    }
-
-    #[test]
-    fn class_modification_crud() {
-        let conn = test_conn();
-        let p = JarProject {
-            id: "p1".into(),
-            name: "app.jar".into(),
-            jar_path: "/tmp/app.jar".into(),
-            jar_hash: "abc".into(),
-            size: 100,
-            class_count: 1,
-            resource_count: 0,
-            created_at: 1,
-            updated_at: 1,
-        };
-        upsert_project(&conn, &p).unwrap();
-        let c = JarClassRow {
-            id: "p1:com/example/Foo.class".into(),
-            project_id: "p1".into(),
-            library_id: "".into(),
-            entry_path: "com/example/Foo.class".into(),
-            class_name: "com.example.Foo".into(),
-            package_name: "com.example".into(),
-            kind: "class".into(),
-            is_inner_class: false,
-            modified_source: None,
-            modified: false,
-            compile_status: "none".into(),
-            compile_output: None,
-            compile_timestamp: None,
-            source_hash: None,
-        };
-        upsert_class(&conn, &c).unwrap();
-        assert_eq!(list_classes(&conn, "p1").unwrap().len(), 1);
-        assert!(list_modified_classes(&conn, "p1").unwrap().is_empty());
-
-        // Save a modified source → the row is marked modified.
-        let c2 = JarClassRow {
-            modified_source: Some("public class Foo { int x; }".into()),
-            modified: true,
-            compile_status: "stale".into(),
-            source_hash: Some(crate::jar::sha256_bytes(b"public class Foo { int x; }")),
-            ..c.clone()
-        };
-        upsert_class(&conn, &c2).unwrap();
-        let got = get_class(&conn, "p1", "com/example/Foo.class")
-            .unwrap()
-            .unwrap();
-        assert!(got.modified);
-        assert_eq!(
-            got.modified_source.as_deref(),
-            Some("public class Foo { int x; }")
-        );
-        assert_eq!(list_modified_classes(&conn, "p1").unwrap().len(), 1);
-    }
-}
 
 // ── Jar libraries (dependency jars) ───────────────────────────────────────
 
@@ -787,4 +694,96 @@ pub fn list_super_names(
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| format!("collect supers: {e}"))?;
     Ok(rows)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+
+    fn test_conn() -> Connection {
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let path = std::env::temp_dir().join(format!("jar-db-test-{}-{n}.db", std::process::id()));
+        let conn = open(&path).unwrap();
+        conn.execute_batch(TEST_DDL).unwrap();
+        conn
+    }
+
+    #[test]
+    fn project_crud() {
+        let conn = test_conn();
+        let p = JarProject {
+            id: "p1".into(),
+            name: "app.jar".into(),
+            jar_path: "/tmp/app.jar".into(),
+            jar_hash: "abc".into(),
+            size: 100,
+            class_count: 2,
+            resource_count: 1,
+            created_at: 1,
+            updated_at: 1,
+        };
+        upsert_project(&conn, &p).unwrap();
+        let got = get_project(&conn, "p1").unwrap().unwrap();
+        assert_eq!(got.name, "app.jar");
+        assert_eq!(list_projects(&conn).unwrap().len(), 1);
+        delete_project(&conn, "p1").unwrap();
+        assert!(get_project(&conn, "p1").unwrap().is_none());
+    }
+
+    #[test]
+    fn class_modification_crud() {
+        let conn = test_conn();
+        let p = JarProject {
+            id: "p1".into(),
+            name: "app.jar".into(),
+            jar_path: "/tmp/app.jar".into(),
+            jar_hash: "abc".into(),
+            size: 100,
+            class_count: 1,
+            resource_count: 0,
+            created_at: 1,
+            updated_at: 1,
+        };
+        upsert_project(&conn, &p).unwrap();
+        let c = JarClassRow {
+            id: "p1:com/example/Foo.class".into(),
+            project_id: "p1".into(),
+            library_id: "".into(),
+            entry_path: "com/example/Foo.class".into(),
+            class_name: "com.example.Foo".into(),
+            package_name: "com.example".into(),
+            kind: "class".into(),
+            is_inner_class: false,
+            modified_source: None,
+            modified: false,
+            compile_status: "none".into(),
+            compile_output: None,
+            compile_timestamp: None,
+            source_hash: None,
+        };
+        upsert_class(&conn, &c).unwrap();
+        assert_eq!(list_classes(&conn, "p1").unwrap().len(), 1);
+        assert!(list_modified_classes(&conn, "p1").unwrap().is_empty());
+
+        // 保存修改后的源码后，对应行应标记为已修改。
+        let c2 = JarClassRow {
+            modified_source: Some("public class Foo { int x; }".into()),
+            modified: true,
+            compile_status: "stale".into(),
+            source_hash: Some(crate::jar::sha256_bytes(b"public class Foo { int x; }")),
+            ..c.clone()
+        };
+        upsert_class(&conn, &c2).unwrap();
+        let got = get_class(&conn, "p1", "com/example/Foo.class")
+            .unwrap()
+            .unwrap();
+        assert!(got.modified);
+        assert_eq!(
+            got.modified_source.as_deref(),
+            Some("public class Foo { int x; }")
+        );
+        assert_eq!(list_modified_classes(&conn, "p1").unwrap().len(), 1);
+    }
 }

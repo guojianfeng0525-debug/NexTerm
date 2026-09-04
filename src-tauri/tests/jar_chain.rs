@@ -39,9 +39,22 @@ fn command_chain() {
     let javac = jdk.javac_path.unwrap();
     let classes = dir.join("classes");
     std::fs::create_dir_all(&classes).unwrap();
-    assert!(run(std::process::Command::new(&javac).arg("-d").arg(&classes).arg(src.join("App.java")).arg(src.join("Helper.java"))).status.success());
+    assert!(run(std::process::Command::new(&javac)
+        .arg("-d")
+        .arg(&classes)
+        .arg(src.join("App.java"))
+        .arg(src.join("Helper.java")))
+    .status
+    .success());
     let jar_path = dir.join("app.jar");
-    assert!(run(std::process::Command::new("jar").arg("cf").arg(&jar_path).arg("-C").arg(&classes).arg(".")).status.success());
+    assert!(run(std::process::Command::new("jar")
+        .arg("cf")
+        .arg(&jar_path)
+        .arg("-C")
+        .arg(&classes)
+        .arg("."))
+    .status
+    .success());
 
     // DB.
     let db_path = dir.join("test.db");
@@ -90,7 +103,10 @@ fn command_chain() {
     }
     let all_classes = jar_db::list_classes(&conn, &id).unwrap();
     assert_eq!(all_classes.iter().filter(|c| c.kind == "class").count(), 2);
-    assert_eq!(all_classes.iter().filter(|c| c.kind == "meta-inf").count(), 1);
+    assert_eq!(
+        all_classes.iter().filter(|c| c.kind == "meta-inf").count(),
+        1
+    );
 
     // 2) Decompile App via CFR (JD-GUI: re-decompile, never cached in DB).
     let jd = decompile::find_decompiler_jar().unwrap();
@@ -131,7 +147,13 @@ fn command_chain() {
     )
     .unwrap();
     assert!(res.success, "compile failed: {:?}", res.diagnostics);
-    let new_bytes = res.classes.iter().find(|(p, _)| p == "com/app/App.class").unwrap().1.clone();
+    let new_bytes = res
+        .classes
+        .iter()
+        .find(|(p, _)| p == "com/app/App.class")
+        .unwrap()
+        .1
+        .clone();
 
     // 5) Build new jar (compile output in memory, no versions table involved).
     let out_jar = dir.join("app-modified.jar");
@@ -146,7 +168,10 @@ fn command_chain() {
     assert_ne!(orig, new);
     let orig_helper = jar::read_entry_bytes(&jar_path, "com/app/Helper.class").unwrap();
     let new_helper = jar::read_entry_bytes(&out_jar, "com/app/Helper.class").unwrap();
-    assert_eq!(orig_helper, new_helper, "unmodified Helper must be byte-identical");
+    assert_eq!(
+        orig_helper, new_helper,
+        "unmodified Helper must be byte-identical"
+    );
     assert_eq!(jar_db::list_builds(&conn, &id).unwrap().len(), 1);
 
     std::fs::remove_dir_all(&dir).ok();

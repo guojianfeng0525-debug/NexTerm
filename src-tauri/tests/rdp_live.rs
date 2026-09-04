@@ -27,7 +27,7 @@ fn env_or(key: &str, default: &str) -> String {
 }
 
 /// Compose dirty frames into a full-screen RGBA buffer.
-fn blit(buffer: &mut Vec<u8>, screen_w: usize, frame: &nexterm_lib::desktop_protocol::FrameUpdate) {
+fn blit(buffer: &mut [u8], screen_w: usize, frame: &nexterm_lib::desktop_protocol::FrameUpdate) {
     let fw = frame.width as usize;
     let fh = frame.height as usize;
     for row in 0..fh {

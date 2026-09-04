@@ -2,10 +2,10 @@ use crate::proxy::ProxyConfig;
 use anyhow::Result;
 use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine as _};
 use russh::keys::{self, decode_secret_key, PublicKeyBase64};
-use sha2_10::{Digest, Sha256};
 use russh::*;
 use russh_sftp::client::SftpSession;
 use serde::{Deserialize, Serialize};
+use sha2_10::{Digest, Sha256};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -76,7 +76,10 @@ pub(crate) fn bash_shell_integration_command(version: BashVersion) -> Vec<u8> {
 
 /// Canonical OpenSSH-compatible SHA-256 host-key fingerprint.
 pub fn host_key_fingerprint(key: &keys::PublicKey) -> String {
-    format!("SHA256:{}", STANDARD_NO_PAD.encode(Sha256::digest(key.public_key_bytes())))
+    format!(
+        "SHA256:{}",
+        STANDARD_NO_PAD.encode(Sha256::digest(key.public_key_bytes()))
+    )
 }
 
 /// Extract the plain public key from russh 0.63's key-or-certificate enum
@@ -96,7 +99,10 @@ struct HostKeyProbeClient(Arc<std::sync::Mutex<Option<String>>>);
 impl client::Handler for HostKeyProbeClient {
     type Error = russh::Error;
 
-    async fn check_server_key(&mut self, key: &russh::keys::PublicKeyOrCertificate) -> Result<bool, Self::Error> {
+    async fn check_server_key(
+        &mut self,
+        key: &russh::keys::PublicKeyOrCertificate,
+    ) -> Result<bool, Self::Error> {
         if let Ok(mut observed) = self.0.lock() {
             *observed = Some(host_key_fingerprint(&public_key_of(key)));
         }
@@ -117,11 +123,17 @@ pub async fn probe_host_key(host: &str, port: u16) -> Result<String> {
     });
     let session = tokio::time::timeout(
         Duration::from_secs(10),
-        client::connect(config, (host, port), HostKeyProbeClient(Arc::clone(&observed))),
+        client::connect(
+            config,
+            (host, port),
+            HostKeyProbeClient(Arc::clone(&observed)),
+        ),
     )
     .await
     .map_err(|_| anyhow::anyhow!("SSH host-key probe timed out"))??;
-    let _ = session.disconnect(Disconnect::ByApplication, "", "English").await;
+    let _ = session
+        .disconnect(Disconnect::ByApplication, "", "English")
+        .await;
     take_observed_fingerprint(&observed)
 }
 
@@ -130,11 +142,7 @@ pub async fn probe_host_key(host: &str, port: u16) -> Result<String> {
 /// the probe handshake over that tunnel. This is required when the target is
 /// only reachable from the jump host's network (the direct probe would time
 /// out because the target is not routable from the client).
-pub async fn probe_host_key_via_jump(
-    host: &str,
-    port: u16,
-    jump: &JumpConfig,
-) -> Result<String> {
+pub async fn probe_host_key_via_jump(host: &str, port: u16, jump: &JumpConfig) -> Result<String> {
     let observed = Arc::new(std::sync::Mutex::new(None));
     let probe_config = Arc::new(client::Config {
         preferred: russh::Preferred {
@@ -146,7 +154,13 @@ pub async fn probe_host_key_via_jump(
     });
 
     // 1) Connect + authenticate on the jump host (mirrors SshClient::connect).
-    tracing::info!("[ssh] probing target host key {}:{} via jump {}:{}", host, port, jump.host, jump.port);
+    tracing::info!(
+        "[ssh] probing target host key {}:{} via jump {}:{}",
+        host,
+        port,
+        jump.host,
+        jump.port
+    );
     let mut jump_session = tokio::time::timeout(
         Duration::from_secs(10),
         client::connect(
@@ -159,8 +173,17 @@ pub async fn probe_host_key_via_jump(
         ),
     )
     .await
-    .map_err(|_| anyhow::anyhow!("Jump host connection timed out while probing the target host key"))?
-    .map_err(|e| anyhow::anyhow!("Failed to connect to jump host {}:{}: {}", jump.host, jump.port, e))?;
+    .map_err(|_| {
+        anyhow::anyhow!("Jump host connection timed out while probing the target host key")
+    })?
+    .map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to connect to jump host {}:{}: {}",
+            jump.host,
+            jump.port,
+            e
+        )
+    })?;
 
     let jump_authenticated = match &jump.auth_method {
         AuthMethod::Password { password } => jump_session
@@ -168,15 +191,15 @@ pub async fn probe_host_key_via_jump(
             .await
             .map_err(|e| anyhow::anyhow!("Jump host password authentication failed: {}", e))?
             .success(),
-        AuthMethod::PublicKey { key_path, passphrase } => {
+        AuthMethod::PublicKey {
+            key_path,
+            passphrase,
+        } => {
             let key = load_private_key(key_path, passphrase.as_deref())?;
             jump_session
                 .authenticate_publickey(
                     &jump.username,
-                    keys::PrivateKeyWithHashAlg::new(
-                        Arc::new(key),
-                        Some(keys::HashAlg::Sha256),
-                    ),
+                    keys::PrivateKeyWithHashAlg::new(Arc::new(key), Some(keys::HashAlg::Sha256)),
                 )
                 .await
                 .map_err(|e| anyhow::anyhow!("Jump host public key authentication failed: {}", e))?
@@ -195,8 +218,21 @@ pub async fn probe_host_key_via_jump(
         jump_session.channel_open_direct_tcpip(host, port as u32, "127.0.0.1", 0),
     )
     .await
-    .map_err(|_| anyhow::anyhow!("Timed out opening the jump channel to {}:{} while probing", host, port))?
-    .map_err(|e| anyhow::anyhow!("Failed to open the jump channel to {}:{}: {}", host, port, e))?;
+    .map_err(|_| {
+        anyhow::anyhow!(
+            "Timed out opening the jump channel to {}:{} while probing",
+            host,
+            port
+        )
+    })?
+    .map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to open the jump channel to {}:{}: {}",
+            host,
+            port,
+            e
+        )
+    })?;
 
     let session = tokio::time::timeout(
         Duration::from_secs(10),
@@ -208,17 +244,24 @@ pub async fn probe_host_key_via_jump(
     )
     .await
     .map_err(|_| anyhow::anyhow!("SSH host-key probe timed out"))?
-    .map_err(|e| anyhow::anyhow!("Failed to probe {}:{} through the jump host: {}", host, port, e))?;
-    let _ = session.disconnect(Disconnect::ByApplication, "", "English").await;
+    .map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to probe {}:{} through the jump host: {}",
+            host,
+            port,
+            e
+        )
+    })?;
+    let _ = session
+        .disconnect(Disconnect::ByApplication, "", "English")
+        .await;
     let _ = jump_session
         .disconnect(Disconnect::ByApplication, "", "English")
         .await;
     take_observed_fingerprint(&observed)
 }
 
-fn take_observed_fingerprint(
-    observed: &Arc<std::sync::Mutex<Option<String>>>,
-) -> Result<String> {
+fn take_observed_fingerprint(observed: &Arc<std::sync::Mutex<Option<String>>>) -> Result<String> {
     observed
         .lock()
         .map_err(|_| anyhow::anyhow!("SSH host-key probe failed"))?
@@ -304,7 +347,10 @@ pub struct Client {
 
 impl Client {
     pub fn new(expected_fingerprint: Option<String>, verification_enabled: bool) -> Self {
-        Self { expected_fingerprint, verification_enabled }
+        Self {
+            expected_fingerprint,
+            verification_enabled,
+        }
     }
 }
 
@@ -325,7 +371,10 @@ impl client::Handler for Client {
         // Existing unpinned connections remain usable while the frontend
         // performs its first-use confirmation. Once a fingerprint is stored,
         // a changed server key is always rejected before authentication.
-        Ok(self.expected_fingerprint.as_ref().is_none_or(|expected| expected == &fingerprint))
+        Ok(self
+            .expected_fingerprint
+            .as_ref()
+            .is_none_or(|expected| expected == &fingerprint))
     }
 
     async fn disconnected(
@@ -349,6 +398,12 @@ impl client::Handler for Client {
             }
         }
         Ok(())
+    }
+}
+
+impl Default for SshClient {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -708,13 +763,20 @@ impl SshClient {
             // Bash sessions start the login shell through an exec request
             // after changing directory instead: the setup command never
             // reaches readline, while ~/.bash_profile semantics are retained.
-            let default_directory = default_directory.map(str::trim).filter(|dir| !dir.is_empty());
+            let default_directory = default_directory
+                .map(str::trim)
+                .filter(|dir| !dir.is_empty());
             if let (Some(dir), Some(_)) = (default_directory, bash_version) {
                 let escaped = dir.replace('\'', "'\\''");
                 channel
-                    .exec(true, format!("cd -- '{}' && exec \"${{SHELL:-/bin/bash}}\" -l", escaped))
+                    .exec(
+                        true,
+                        format!("cd -- '{}' && exec \"${{SHELL:-/bin/bash}}\" -l", escaped),
+                    )
                     .await
-                    .map_err(|e| anyhow::anyhow!("Failed to start shell in default directory: {e}"))?;
+                    .map_err(|e| {
+                        anyhow::anyhow!("Failed to start shell in default directory: {e}")
+                    })?;
             } else {
                 channel
                     .request_shell(true)
@@ -831,7 +893,8 @@ impl SshClient {
     }
 
     pub async fn download_file(&self, remote_path: &str, local_path: &str) -> Result<u64> {
-        self.download_file_with_progress(remote_path, local_path, |_, _| {}).await
+        self.download_file_with_progress(remote_path, local_path, |_, _| {})
+            .await
     }
 
     pub async fn download_file_with_progress(
@@ -849,7 +912,9 @@ impl SshClient {
             // Open remote file for reading
             let mut remote_file = sftp.open(remote_path).await?;
 
-            let total_bytes = remote_file.metadata().await
+            let total_bytes = remote_file
+                .metadata()
+                .await
                 .map(|metadata| metadata.size.unwrap_or(0))
                 .unwrap_or(0);
             let mut local_file = tokio::fs::File::create(local_path).await?;
@@ -901,7 +966,8 @@ impl SshClient {
     }
 
     pub async fn upload_file(&self, local_path: &str, remote_path: &str) -> Result<u64> {
-        self.upload_file_with_progress(local_path, remote_path, |_, _| {}).await
+        self.upload_file_with_progress(local_path, remote_path, |_, _| {})
+            .await
     }
 
     pub async fn upload_file_with_progress(

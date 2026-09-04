@@ -49,7 +49,10 @@ fn xlsx_import_model_content_and_formula() {
     assert!(sales.freeze_pane.is_some(), "freeze pane preserved");
     assert!(!sales.col_widths.is_empty(), "column widths preserved");
     assert!(!sales.row_heights.is_empty(), "row heights preserved");
-    assert!(model.sheet_by_name("数据").is_some(), "second sheet present");
+    assert!(
+        model.sheet_by_name("数据").is_some(),
+        "second sheet present"
+    );
 }
 
 #[test]
@@ -67,8 +70,14 @@ fn xlsx_roundtrip_keeps_content_styles_and_structure() {
     assert!(m2.sheet_by_name("销售").is_some(), "sheet survives");
 
     let (_id, sales) = m2.sheet_by_name("销售").expect("销售 sheet after rt");
-    let d2 = sales.cell(CellRef::parse_a1("D2").unwrap()).expect("D2 after rt");
-    assert_eq!(d2.formula.as_deref(), Some("B2*C2"), "formula text survives");
+    let d2 = sales
+        .cell(CellRef::parse_a1("D2").unwrap())
+        .expect("D2 after rt");
+    assert_eq!(
+        d2.formula.as_deref(),
+        Some("B2*C2"),
+        "formula text survives"
+    );
     assert!(!sales.merges.is_empty(), "merges survive");
     assert!(sales.freeze_pane.is_some(), "freeze survives");
     assert!(!sales.col_widths.is_empty(), "col widths survive");
@@ -76,9 +85,18 @@ fn xlsx_roundtrip_keeps_content_styles_and_structure() {
 
     // All worksheet parts must still exist in the exported package.
     let parts = zip_part_names(&out);
-    assert!(parts.iter().any(|p| p.contains("xl/worksheets/")), "worksheet parts present");
-    assert!(parts.iter().any(|p| p.contains("xl/styles.xml")), "styles part present");
-    assert!(parts.iter().any(|p| p.contains("xl/workbook.xml")), "workbook part present");
+    assert!(
+        parts.iter().any(|p| p.contains("xl/worksheets/")),
+        "worksheet parts present"
+    );
+    assert!(
+        parts.iter().any(|p| p.contains("xl/styles.xml")),
+        "styles part present"
+    );
+    assert!(
+        parts.iter().any(|p| p.contains("xl/workbook.xml")),
+        "workbook part present"
+    );
 }
 
 #[test]
@@ -101,8 +119,14 @@ fn xlsx_edit_cell_export_and_reopen() {
     let out = rebuilt.save().expect("save");
     let wb2 = Workbook::open(&out).expect("reopen");
     let (_id2, s2) = wb2.model().sheet_by_name("销售").expect("sheet");
-    let b2 = s2.cell(CellRef::parse_a1("B2").unwrap()).expect("B2 edited");
-    assert_eq!(b2.value, CellValue::Number { value: 99.0 }, "edited value persisted");
+    let b2 = s2
+        .cell(CellRef::parse_a1("B2").unwrap())
+        .expect("B2 edited");
+    assert_eq!(
+        b2.value,
+        CellValue::Number { value: 99.0 },
+        "edited value persisted"
+    );
 }
 
 #[test]
@@ -132,9 +156,20 @@ fn docx_rewrite_keeps_content_and_media() {
     assert!(!doc2.tables().is_empty(), "table survives");
 
     let parts = zip_part_names(&out);
-    assert!(parts.iter().any(|p| p.contains("word/document.xml")), "document.xml present");
-    assert!(parts.iter().any(|p| p.contains("word/media/")), "media (image) present");
-    assert!(parts.iter().any(|p| p.contains("word/header") || p.contains("word/footer")), "header/footer parts present");
+    assert!(
+        parts.iter().any(|p| p.contains("word/document.xml")),
+        "document.xml present"
+    );
+    assert!(
+        parts.iter().any(|p| p.contains("word/media/")),
+        "media (image) present"
+    );
+    assert!(
+        parts
+            .iter()
+            .any(|p| p.contains("word/header") || p.contains("word/footer")),
+        "header/footer parts present"
+    );
 }
 
 #[test]
@@ -147,19 +182,20 @@ fn docx_edit_in_place_and_export() {
     let out = doc.save().expect("save after edit");
     let doc2 = betteroffice_docx::Document::open(&out).expect("reopen");
     let all_text: String = doc2.paragraphs().iter().map(|p| docx_text(p)).collect();
-    assert!(all_text.contains("测试文档标题") || all_text.contains("已编辑的标题内容"), "text preserved after edit");
+    assert!(
+        all_text.contains("测试文档标题") || all_text.contains("已编辑的标题内容"),
+        "text preserved after edit"
+    );
 }
 
 fn docx_text(p: &betteroffice_docx::Paragraph) -> String {
     use betteroffice_docx::{ParagraphContent, RunContent};
     let mut s = String::new();
     for content in &p.content {
-        if let ParagraphContent::Inline(inline) = content {
-            if let betteroffice_docx::InlineNode::Run(r) = inline {
-                for rc in &r.content {
-                    if let RunContent::Text { text, .. } = rc {
-                        s.push_str(text);
-                    }
+        if let ParagraphContent::Inline(betteroffice_docx::InlineNode::Run(r)) = content {
+            for rc in &r.content {
+                if let RunContent::Text { text, .. } = rc {
+                    s.push_str(text);
                 }
             }
         }

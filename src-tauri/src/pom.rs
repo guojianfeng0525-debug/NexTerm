@@ -92,19 +92,14 @@ fn extract_tag<'a>(xml: &'a str, tag: &str) -> Option<&'a str> {
 fn extract_dependency_blocks(xml: &str) -> Vec<String> {
     let mut blocks = Vec::new();
     let mut rest = xml;
-    loop {
+    while let Some(deps_open) = find_dependencies_open(rest) {
         // Find the next `<dependencies>` open (not inside dependencyManagement).
-        let deps_open = match find_dependencies_open(rest) {
-            Some(i) => i,
-            None => break,
-        };
         let after_open = &rest[deps_open + "<dependencies>".len()..];
         // Find its closing `</dependencies>`.
-        let close = after_open.find("</dependencies>");
-        let deps_body = match close {
-            Some(c) => &after_open[..c],
-            None => break,
+        let Some(close) = after_open.find("</dependencies>") else {
+            break;
         };
+        let deps_body = &after_open[..close];
         // Extract every <dependency> block inside.
         let mut inner = deps_body;
         while let Some(s) = inner.find("<dependency>") {
@@ -117,7 +112,7 @@ fn extract_dependency_blocks(xml: &str) -> Vec<String> {
             inner = &after_d[e + "</dependency>".len()..];
         }
         // Continue after this dependencies block.
-        rest = &after_open[close.unwrap() + "</dependencies>".len()..];
+        rest = &after_open[close + "</dependencies>".len()..];
     }
     blocks
 }
@@ -141,9 +136,9 @@ fn find_dependencies_open(xml: &str) -> Option<usize> {
         }
         // Skip past this management block.
         let after = &xml[open..];
-        search_from = match after.find("</dependencyManagement>") {
-            Some(c) => open + c + "</dependencyManagement>".len(),
-            None => return None,
+        search_from = {
+            let c = after.find("</dependencyManagement>")?;
+            open + c + "</dependencyManagement>".len()
         };
     }
 }

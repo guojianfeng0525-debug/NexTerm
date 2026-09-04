@@ -937,7 +937,7 @@ mod tests {
     /// Before the fix, SELinux-context listings produced:
     ///   - name = "12:32 dev", "2000 Pacman", "2000 gamelist.xml"
     ///   - modified = bogus dates parsed from misaligned size/perms tokens
-    /// After the fix, every field is correctly extracted.
+    ///     修复后每个字段都能被正确提取。
     #[test]
     fn test_parse_ftp_list_line_user_scenario_arcade_box() {
         let lines = [

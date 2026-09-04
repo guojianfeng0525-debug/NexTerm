@@ -3,7 +3,11 @@
 
 use rusqlite::{types::ValueRef, Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, path::Path, sync::{Arc, Mutex}};
+use std::{
+    collections::HashMap,
+    path::Path,
+    sync::{Arc, Mutex},
+};
 
 const MAX_QUERY_ROWS: usize = 1_000;
 
@@ -59,7 +63,8 @@ fn open_existing(path: &str, read_only: bool) -> Result<Connection, String> {
     if path.as_os_str().is_empty() {
         return Err("SQLite database file is required".into());
     }
-    let metadata = std::fs::metadata(path).map_err(|error| format!("Unable to access SQLite database file: {error}"))?;
+    let metadata = std::fs::metadata(path)
+        .map_err(|error| format!("Unable to access SQLite database file: {error}"))?;
     if !metadata.is_file() {
         return Err("SQLite database path must be an existing file".into());
     }
@@ -68,7 +73,8 @@ fn open_existing(path: &str, read_only: bool) -> Result<Connection, String> {
     } else {
         OpenFlags::SQLITE_OPEN_READ_WRITE
     };
-    Connection::open_with_flags(path, flags).map_err(|error| format!("Unable to open SQLite database: {error}"))
+    Connection::open_with_flags(path, flags)
+        .map_err(|error| format!("Unable to open SQLite database: {error}"))
 }
 
 fn value_to_string(value: ValueRef<'_>) -> Result<Option<String>, String> {
@@ -84,33 +90,65 @@ fn value_to_string(value: ValueRef<'_>) -> Result<Option<String>, String> {
 }
 
 #[tauri::command]
-pub fn sqlite_connect(request: SqliteConnectRequest, state: tauri::State<'_, SqliteState>) -> Result<SqliteConnectionStatus, String> {
+pub fn sqlite_connect(
+    request: SqliteConnectRequest,
+    state: tauri::State<'_, SqliteState>,
+) -> Result<SqliteConnectionStatus, String> {
     if request.connection_id.trim().is_empty() {
         return Err("SQLite connection ID is required".into());
     }
     // Open outside the map lock: opening a large/corrupt file can take a while.
     let connection = open_existing(&request.file_path, request.read_only)?;
-    state.connections.lock().map_err(|_| "SQLite session state is unavailable")?
-        .insert(request.connection_id.clone(), Arc::new(Mutex::new(connection)));
-    Ok(SqliteConnectionStatus { connection_id: request.connection_id, connected: true })
+    state
+        .connections
+        .lock()
+        .map_err(|_| "SQLite session state is unavailable")?
+        .insert(
+            request.connection_id.clone(),
+            Arc::new(Mutex::new(connection)),
+        );
+    Ok(SqliteConnectionStatus {
+        connection_id: request.connection_id,
+        connected: true,
+    })
 }
 
 #[tauri::command]
-pub fn sqlite_disconnect(connection_id: String, state: tauri::State<'_, SqliteState>) -> Result<(), String> {
-    state.connections.lock().map_err(|_| "SQLite session state is unavailable")?.remove(&connection_id);
+pub fn sqlite_disconnect(
+    connection_id: String,
+    state: tauri::State<'_, SqliteState>,
+) -> Result<(), String> {
+    state
+        .connections
+        .lock()
+        .map_err(|_| "SQLite session state is unavailable")?
+        .remove(&connection_id);
     Ok(())
 }
 
 #[tauri::command]
-pub fn sqlite_catalog_objects(connection_id: String, state: tauri::State<'_, SqliteState>) -> Result<Vec<SqliteCatalogItem>, String> {
+pub fn sqlite_catalog_objects(
+    connection_id: String,
+    state: tauri::State<'_, SqliteState>,
+) -> Result<Vec<SqliteCatalogItem>, String> {
     let connection = {
-        let connections = state.connections.lock().map_err(|_| "SQLite session state is unavailable")?;
-        Arc::clone(connections.get(&connection_id).ok_or_else(|| "SQLite connection is not active".to_string())?)
+        let connections = state
+            .connections
+            .lock()
+            .map_err(|_| "SQLite session state is unavailable")?;
+        Arc::clone(
+            connections
+                .get(&connection_id)
+                .ok_or_else(|| "SQLite connection is not active".to_string())?,
+        )
     };
-    let connection = connection.lock().map_err(|_| "SQLite session state is unavailable")?;
+    let connection = connection
+        .lock()
+        .map_err(|_| "SQLite session state is unavailable")?;
     let mut statement = connection.prepare("SELECT name FROM sqlite_schema WHERE type IN ('table', 'view') AND name NOT LIKE 'sqlite_%' ORDER BY name")
         .map_err(|error| format!("Failed to list SQLite objects: {error}"))?;
-    let items = statement.query_map([], |row| Ok(SqliteCatalogItem { name: row.get(0)? }))
+    let items = statement
+        .query_map([], |row| Ok(SqliteCatalogItem { name: row.get(0)? }))
         .map_err(|error| format!("Failed to list SQLite objects: {error}"))?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| format!("Failed to decode SQLite objects: {error}"))?;
@@ -118,32 +156,78 @@ pub fn sqlite_catalog_objects(connection_id: String, state: tauri::State<'_, Sql
 }
 
 #[tauri::command]
-pub fn sqlite_execute(request: SqliteExecuteRequest, state: tauri::State<'_, SqliteState>) -> Result<SqliteQueryResult, String> {
-    if request.sql.trim().is_empty() { return Err("SQL cannot be empty".into()); }
-    let limit = request.max_rows.unwrap_or(MAX_QUERY_ROWS).clamp(1, MAX_QUERY_ROWS);
-    let connection = {
-        let connections = state.connections.lock().map_err(|_| "SQLite session state is unavailable")?;
-        Arc::clone(connections.get(&request.connection_id).ok_or_else(|| "SQLite connection is not active".to_string())?)
-    };
-    let connection = connection.lock().map_err(|_| "SQLite session state is unavailable")?;
-    let mut statement = connection.prepare(&request.sql).map_err(|error| format!("SQLite query failed: {error}"))?;
-    let columns = statement.column_names().iter().map(ToString::to_string).collect::<Vec<_>>();
-    if columns.is_empty() {
-        let changed = statement.execute([]).map_err(|error| format!("SQLite command failed: {error}"))?;
-        return Ok(SqliteQueryResult { columns, rows: Vec::new(), command_tags: vec![format!("{changed} rows affected")], truncated: false });
+pub fn sqlite_execute(
+    request: SqliteExecuteRequest,
+    state: tauri::State<'_, SqliteState>,
+) -> Result<SqliteQueryResult, String> {
+    if request.sql.trim().is_empty() {
+        return Err("SQL cannot be empty".into());
     }
-    let mut rows = statement.query([]).map_err(|error| format!("SQLite query failed: {error}"))?;
+    let limit = request
+        .max_rows
+        .unwrap_or(MAX_QUERY_ROWS)
+        .clamp(1, MAX_QUERY_ROWS);
+    let connection = {
+        let connections = state
+            .connections
+            .lock()
+            .map_err(|_| "SQLite session state is unavailable")?;
+        Arc::clone(
+            connections
+                .get(&request.connection_id)
+                .ok_or_else(|| "SQLite connection is not active".to_string())?,
+        )
+    };
+    let connection = connection
+        .lock()
+        .map_err(|_| "SQLite session state is unavailable")?;
+    let mut statement = connection
+        .prepare(&request.sql)
+        .map_err(|error| format!("SQLite query failed: {error}"))?;
+    let columns = statement
+        .column_names()
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    if columns.is_empty() {
+        let changed = statement
+            .execute([])
+            .map_err(|error| format!("SQLite command failed: {error}"))?;
+        return Ok(SqliteQueryResult {
+            columns,
+            rows: Vec::new(),
+            command_tags: vec![format!("{changed} rows affected")],
+            truncated: false,
+        });
+    }
+    let mut rows = statement
+        .query([])
+        .map_err(|error| format!("SQLite query failed: {error}"))?;
     let mut values = Vec::new();
     let mut truncated = false;
-    while let Some(row) = rows.next().map_err(|error| format!("SQLite query failed: {error}"))? {
-        if values.len() == limit { truncated = true; break; }
+    while let Some(row) = rows
+        .next()
+        .map_err(|error| format!("SQLite query failed: {error}"))?
+    {
+        if values.len() == limit {
+            truncated = true;
+            break;
+        }
         let mut result_row = Vec::with_capacity(columns.len());
         for index in 0..columns.len() {
-            result_row.push(value_to_string(row.get_ref(index).map_err(|error| format!("Failed to decode SQLite value: {error}"))?)?);
+            result_row
+                .push(value_to_string(row.get_ref(index).map_err(|error| {
+                    format!("Failed to decode SQLite value: {error}")
+                })?)?);
         }
         values.push(result_row);
     }
-    Ok(SqliteQueryResult { columns, rows: values, command_tags: Vec::new(), truncated })
+    Ok(SqliteQueryResult {
+        columns,
+        rows: values,
+        command_tags: Vec::new(),
+        truncated,
+    })
 }
 
 #[cfg(test)]
@@ -157,7 +241,14 @@ mod tests {
         let connection = open_existing(file.path().to_str().unwrap(), false).unwrap();
         connection.execute_batch("CREATE TABLE users (id INTEGER, name TEXT); INSERT INTO users VALUES (9007199254740993, NULL);").unwrap();
         let mut statement = connection.prepare("SELECT id, name FROM users").unwrap();
-        let row = statement.query_row([], |row| Ok((value_to_string(row.get_ref(0)?).unwrap(), value_to_string(row.get_ref(1)?).unwrap()))).unwrap();
+        let row = statement
+            .query_row([], |row| {
+                Ok((
+                    value_to_string(row.get_ref(0)?).unwrap(),
+                    value_to_string(row.get_ref(1)?).unwrap(),
+                ))
+            })
+            .unwrap();
         assert_eq!(row.0.as_deref(), Some("9007199254740993"));
         assert_eq!(row.1, None);
     }

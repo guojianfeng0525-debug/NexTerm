@@ -114,9 +114,11 @@ impl MemoryIndex {
             let internal_name = entry.class_name.replace('.', "/");
             let destination = dest_root.join(format!("{internal_name}.class"));
             if let Some(parent) = destination.parent() {
-                std::fs::create_dir_all(parent).map_err(|e| format!("create classpath directory: {e}"))?;
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| format!("create classpath directory: {e}"))?;
             }
-            std::fs::write(destination, bytes).map_err(|e| format!("write classpath entry: {e}"))?;
+            std::fs::write(destination, bytes)
+                .map_err(|e| format!("write classpath entry: {e}"))?;
         }
         Ok(())
     }
@@ -322,10 +324,16 @@ fn source_unit_fallback_entries(index: &MemoryIndex, entry_path: &str) -> Vec<St
         if index
             .entries
             .iter()
-            .find(|entry| entry.kind == "class" && entry.class_name.replace('.', "/") == internal_name && entry.is_inner_class)
+            .find(|entry| {
+                entry.kind == "class"
+                    && entry.class_name.replace('.', "/") == internal_name
+                    && entry.is_inner_class
+            })
             .is_some()
         {
-            if let Some(entry) = index.entries.iter().find(|entry| entry.kind == "class" && entry.class_name.replace('.', "/") == internal_name) {
+            if let Some(entry) = index.entries.iter().find(|entry| {
+                entry.kind == "class" && entry.class_name.replace('.', "/") == internal_name
+            }) {
                 entries.push(entry.entry_path.clone());
             }
         }
@@ -569,9 +577,9 @@ pub async fn jar_project_delete(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error),
     })
-        .await
-        .map_err(|e| e.to_string())?
-        .map_err(|e| format!("remove project scratch: {e}"))?;
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| format!("remove project scratch: {e}"))?;
     Ok(())
 }
 
@@ -788,8 +796,6 @@ pub async fn jar_method_location(
     _descriptor: Option<String>, // reserved for descriptor-accurate matching
     state: State<'_, JarState>,
 ) -> Result<serde_json::Value, String> {
-    
-
     // Resolve the declaring class: walk the super chain from the named type
     // (JD-GUI searchTypeHavingMember) against the in-memory index.
     fn resolve_member(
@@ -981,11 +987,9 @@ pub async fn jar_type_hierarchy(
             return;
         };
         let Some(bytes) = read(ix, e) else { return };
-        if let Ok((sup, _)) = jar::class_super(&bytes) {
-            if let Some(p) = sup {
-                out.push(p.clone());
-                ancestors(ix, read, &p, out, visited);
-            }
+        if let Ok((Some(parent), _)) = jar::class_super(&bytes) {
+            out.push(parent.clone());
+            ancestors(ix, read, &parent, out, visited);
         }
     }
     let mut parent_chain: Vec<String> = Vec::new();
@@ -1078,7 +1082,7 @@ fn simple_internal_name(internal: &str) -> &str {
 
 fn entry_path_to_class_name(entry_path: &str) -> String {
     let without_ext = entry_path.strip_suffix(".class").unwrap_or(entry_path);
-    without_ext.replace('/', ".").replace('\\', ".")
+    without_ext.replace(['/', '\\'], ".")
 }
 
 fn entry_path_to_package(entry_path: &str) -> String {
@@ -1207,11 +1211,9 @@ pub async fn jar_constant_search(
                                 }
                             }
                         }
-                        if want_module && name.ends_with("module-info.class") {
-                            if re.is_match(&name) {
-                                matches
-                                    .push(serde_json::json!({ "kind": "module", "value": name }));
-                            }
+                        if want_module && name.ends_with("module-info.class") && re.is_match(&name)
+                        {
+                            matches.push(serde_json::json!({ "kind": "module", "value": name }));
                         }
                     }
                     if !matches.is_empty() {
@@ -1376,7 +1378,6 @@ pub async fn jar_resource_read(
     String::from_utf8(bytes).map_err(|_| "Resource is binary, not UTF-8 text.".into())
 }
 
-
 #[tauri::command]
 pub async fn jar_library_index(
     project_id: String,
@@ -1540,11 +1541,12 @@ pub async fn jar_resource_bytes(
     Ok(serde_json::json!({
         "bytes": base64::engine::general_purpose::STANDARD.encode(&bytes),
         "size": bytes.len(),
-        "isText": bytes.iter().all(|&b| b == b'\n' || b == b'\r' || b == b'\t' || (b >= 0x20 && b < 0x7f) || b >= 0x80),
+        "isText": bytes.iter().all(|&b| b == b'\n' || b == b'\r' || b == b'\t' || (0x20..0x7f).contains(&b) || b >= 0x80),
     }))
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)] // Export options are one IPC property each to keep the payload stable.
 pub async fn jar_export_all(
     project_id: String,
     output_dir: String,
@@ -1580,15 +1582,7 @@ pub async fn jar_export_all(
         (items, ix.jar_path.clone(), grouped_inner_class_entries)
     };
     let item_count = export_items.len();
-    emit_export_progress(
-        &app,
-        &project_id,
-        "preparing",
-        0,
-        item_count,
-        None,
-        None,
-    );
+    emit_export_progress(&app, &project_id, "preparing", 0, item_count, None, None);
     let decompiler_jar = state.decompiler_jar()?;
     let cancel = state.cancel_flag(&project_id);
     cancel.store(false, Ordering::Relaxed);
@@ -1667,7 +1661,15 @@ pub async fn jar_export_all(
                     Ok(bytes) => bytes,
                     Err(error) => {
                         failed.push(entry.clone());
-                        emit_export_progress(&app, &project_id, "failed", completed + 1, item_count, Some(entry.clone()), Some(error));
+                        emit_export_progress(
+                            &app,
+                            &project_id,
+                            "failed",
+                            completed + 1,
+                            item_count,
+                            Some(entry.clone()),
+                            Some(error),
+                        );
                         continue;
                     }
                 };
@@ -1682,10 +1684,26 @@ pub async fn jar_export_all(
                     }
                     Err(error) => {
                         failed.push(entry.clone());
-                        emit_export_progress(&app, &project_id, "failed", completed + 1, item_count, Some(entry.clone()), Some(format!("copy resource: {error}")));
+                        emit_export_progress(
+                            &app,
+                            &project_id,
+                            "failed",
+                            completed + 1,
+                            item_count,
+                            Some(entry.clone()),
+                            Some(format!("copy resource: {error}")),
+                        );
                     }
                 }
-                emit_export_progress(&app, &project_id, "decompiling", completed + 1, item_count, Some(entry.clone()), None);
+                emit_export_progress(
+                    &app,
+                    &project_id,
+                    "decompiling",
+                    completed + 1,
+                    item_count,
+                    Some(entry.clone()),
+                    None,
+                );
                 continue;
             }
 
@@ -1814,10 +1832,12 @@ pub async fn jar_export_all(
                     class_name,
                     fallback_entries,
                 } if failed.contains(class_name) => {
-                    let fallback_entries = write_fallback_classes(&ix, fallback_entries, &fallback_root);
+                    let fallback_entries =
+                        write_fallback_classes(&ix, fallback_entries, &fallback_root);
                     failures.push(ExportFailure {
                         entry_path: entry_path.clone(),
-                        reason: "Source decompilation or write failed; original bytecode preserved".into(),
+                        reason: "Source decompilation or write failed; original bytecode preserved"
+                            .into(),
                         fallback_entries,
                     });
                 }

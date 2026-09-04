@@ -27,7 +27,13 @@ fn docx_bytes() -> Vec<u8> {
 }
 
 fn import_doc(state: &DbState, bytes: &[u8], name: &str) -> String {
-    let id = format!("doc-test-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
+    let id = format!(
+        "doc-test-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
     if name.ends_with(".xlsx") {
         let _ = Arc::new(());
         // call through the module API directly
@@ -47,7 +53,10 @@ fn xlsx_import_export_roundtrip() {
     let id = import_doc(&db, &bytes, "报表.xlsx");
 
     // Model persisted, head version 1.
-    let (v, model) = db.documents_read_model(&id, None).expect("read model").expect("exists");
+    let (v, model) = db
+        .documents_read_model(&id, None)
+        .expect("read model")
+        .expect("exists");
     assert_eq!(v, 1);
     assert!(model.contains("\"sheets\""), "model has sheets: {model}");
 
@@ -56,8 +65,14 @@ fn xlsx_import_export_roundtrip() {
     let wb = betteroffice_xlsx::Workbook::open(&exported).expect("reopen exported");
     let m = wb.model();
     let (_sid, sheet) = m.sheet_by_name("销售").expect("sheet");
-    let d2 = sheet.cell(betteroffice_xlsx::CellRef::parse_a1("D2").unwrap()).expect("D2");
-    assert_eq!(d2.formula.as_deref(), Some("B2*C2"), "formula survives sqlite round-trip");
+    let d2 = sheet
+        .cell(betteroffice_xlsx::CellRef::parse_a1("D2").unwrap())
+        .expect("D2");
+    assert_eq!(
+        d2.formula.as_deref(),
+        Some("B2*C2"),
+        "formula survives sqlite round-trip"
+    );
 }
 
 #[test]
@@ -66,12 +81,20 @@ fn docx_import_export_roundtrip() {
     let bytes = docx_bytes();
     let id = import_doc(&db, &bytes, "文档.docx");
 
-    let (v, model) = db.documents_read_model(&id, None).expect("read model").expect("exists");
+    let (v, model) = db
+        .documents_read_model(&id, None)
+        .expect("read model")
+        .expect("exists");
     assert_eq!(v, 1);
     assert!(model.contains("\"body\""), "model has body");
 
     let resources = db.documents_resources(&id).expect("resources");
-    assert!(resources.iter().any(|(r, _, _, _)| r.contains("word/media/")), "media blob stored");
+    assert!(
+        resources
+            .iter()
+            .any(|(r, _, _, _)| r.contains("word/media/")),
+        "media blob stored"
+    );
 
     let exported = documents::export(&db, &id, None).expect("export");
     let doc = betteroffice_docx::Document::open(&exported).expect("reopen exported");
@@ -81,8 +104,14 @@ fn docx_import_export_roundtrip() {
 
     // Media byte-identical between stored blob and exported package.
     let out_parts = ooxml_opc::unzip_parts(&exported).expect("unzip");
-    let media = resources.into_iter().find(|(r, _, _, _)| r.contains("word/media/")).expect("media");
-    let out_media = out_parts.iter().find(|(n, _)| *n == media.0).expect("media in export");
+    let media = resources
+        .into_iter()
+        .find(|(r, _, _, _)| r.contains("word/media/"))
+        .expect("media");
+    let out_media = out_parts
+        .iter()
+        .find(|(n, _)| *n == media.0)
+        .expect("media in export");
     assert_eq!(out_media.1, media.3, "media bytes identical");
 }
 
@@ -96,7 +125,10 @@ fn docx_save_creates_new_version() {
     let next = documents::save_edited(&db, &id, 1, "文档.docx", &bytes).expect("save");
     assert_eq!(next, 2);
 
-    let (v, _) = db.documents_read_model(&id, None).expect("read").expect("exists");
+    let (v, _) = db
+        .documents_read_model(&id, None)
+        .expect("read")
+        .expect("exists");
     assert_eq!(v, 2, "head advanced");
 
     let versions = db.documents_versions(&id).expect("versions");
@@ -107,12 +139,10 @@ fn docx_text(p: &betteroffice_docx::Paragraph) -> String {
     use betteroffice_docx::{ParagraphContent, RunContent};
     let mut s = String::new();
     for content in &p.content {
-        if let ParagraphContent::Inline(inline) = content {
-            if let betteroffice_docx::InlineNode::Run(r) = inline {
-                for rc in &r.content {
-                    if let RunContent::Text { text, .. } = rc {
-                        s.push_str(text);
-                    }
+        if let ParagraphContent::Inline(betteroffice_docx::InlineNode::Run(r)) = content {
+            for rc in &r.content {
+                if let RunContent::Text { text, .. } = rc {
+                    s.push_str(text);
                 }
             }
         }
@@ -146,8 +176,13 @@ fn legacy_documents_table_migrates() {
     let db = DbState::open(&path).expect("open triggers migration");
 
     let bytes = xlsx_bytes();
-    let id = documents::import_xlsx(&db, &bytes, "旧表.xlsx", "doc-legacy-1").expect("import after migration").id;
-    let (v, model) = db.documents_read_model(id.as_str(), None).expect("read").expect("exists");
+    let id = documents::import_xlsx(&db, &bytes, "旧表.xlsx", "doc-legacy-1")
+        .expect("import after migration")
+        .id;
+    let (v, model) = db
+        .documents_read_model(id.as_str(), None)
+        .expect("read")
+        .expect("exists");
     assert_eq!(v, 1);
     assert!(model.contains("\"sheets\""), "model persisted: {model}");
     let _ = std::fs::remove_file(&path);
@@ -160,7 +195,8 @@ fn legacy_doc_rejected_without_hanging() {
     let ole: Vec<u8> = vec![0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1, 0, 0, 0, 0];
     let err = documents::detect_ooxml_kind(&ole, "report.doc").expect_err("must reject .doc");
     assert!(err.contains("legacy OLE"), "got: {err}");
-    let err2 = documents::detect_ooxml_kind(&ole, "report.docx").expect_err("must reject even with docx name");
+    let err2 = documents::detect_ooxml_kind(&ole, "report.docx")
+        .expect_err("must reject even with docx name");
     assert!(err2.contains("legacy OLE"), "got: {err2}");
 
     // Random garbage is also rejected.

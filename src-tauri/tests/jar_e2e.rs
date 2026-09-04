@@ -45,24 +45,30 @@ fn full_pipeline() {
 
     let out_dir = dir.join("classes");
     std::fs::create_dir_all(&out_dir).unwrap();
-    let status = run(
-        std::process::Command::new(&javac)
-            .arg("-d")
-            .arg(&out_dir)
-            .arg(src_dir.join("Greeter.java"))
-            .arg(src_dir.join("Util.java")),
-    )
+    let status = run(std::process::Command::new(&javac)
+        .arg("-d")
+        .arg(&out_dir)
+        .arg(src_dir.join("Greeter.java"))
+        .arg(src_dir.join("Util.java")))
     .status;
     assert!(status.success(), "javac failed");
 
     // Pack the JAR (include a resource + META-INF).
     let jar_path = dir.join("demo.jar");
-    let jar_status = run(std::process::Command::new("jar").arg("cf").arg(&jar_path).arg("-C").arg(&out_dir).arg("."));
+    let jar_status = run(std::process::Command::new("jar")
+        .arg("cf")
+        .arg(&jar_path)
+        .arg("-C")
+        .arg(&out_dir)
+        .arg("."));
     assert!(jar_status.status.success(), "jar failed");
     // ── 1) Index. ──
     let idx = jar::index_jar(&jar_path).unwrap();
     assert_eq!(idx.class_count, 2);
-    assert!(idx.entries.iter().any(|e| e.entry_path == "com/demo/Greeter.class"));
+    assert!(idx
+        .entries
+        .iter()
+        .any(|e| e.entry_path == "com/demo/Greeter.class"));
 
     // ── 2) Decompile Greeter with CFR. ──
     let jd = decompile::find_decompiler_jar().unwrap();
@@ -81,7 +87,6 @@ fn full_pipeline() {
     let modified = source
         .replace("\"Hello\"", "\"Hi\"")
         .replace("public String greet(", "public String greet2(")
-        .replace("this.prefix", "this.prefix")
         .replace("+ \", \" + ", "+ \"~\" + ");
 
     // ── 4) Compile the modified source with the original jar on classpath. ──
@@ -93,7 +98,11 @@ fn full_pipeline() {
         &comp_dir,
     )
     .unwrap();
-    assert!(result.success, "modified compile failed: {:?}", result.diagnostics);
+    assert!(
+        result.success,
+        "modified compile failed: {:?}",
+        result.diagnostics
+    );
     let greeter_class = result
         .classes
         .iter()
@@ -111,17 +120,26 @@ fn full_pipeline() {
     // ── 6) Verify: original JAR untouched, new JAR has modified class. ──
     let orig_greeter = jar::read_entry_bytes(&jar_path, "com/demo/Greeter.class").unwrap();
     let new_greeter = jar::read_entry_bytes(&out_jar, "com/demo/Greeter.class").unwrap();
-    assert_ne!(orig_greeter, new_greeter, "class should differ after modification");
+    assert_ne!(
+        orig_greeter, new_greeter,
+        "class should differ after modification"
+    );
     // Util unchanged.
     let orig_util = jar::read_entry_bytes(&jar_path, "com/demo/Util.class").unwrap();
     let new_util = jar::read_entry_bytes(&out_jar, "com/demo/Util.class").unwrap();
-    assert_eq!(orig_util, new_util, "unmodified class must be byte-identical");
+    assert_eq!(
+        orig_util, new_util,
+        "unmodified class must be byte-identical"
+    );
 
     // ── 7) Decompile the rebuilt class → confirm modification persisted. ──
     let new_class_file = scratch.join("GreeterNew.class");
     std::fs::write(&new_class_file, &new_greeter).unwrap();
     let redec = decompile::decompile_class(&new_class_file, &jd, "com/demo/Greeter", None).unwrap();
-    assert!(redec.contains("\"Hi\""), "modified value not in re-decompiled: {redec}");
+    assert!(
+        redec.contains("\"Hi\""),
+        "modified value not in re-decompiled: {redec}"
+    );
     assert!(redec.contains("greet2"), "added method missing: {redec}");
 
     std::fs::remove_dir_all(&dir).ok();
