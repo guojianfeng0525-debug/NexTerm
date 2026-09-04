@@ -1,18 +1,6 @@
-// Terminal configuration and utilities
+// 终端外观配置与工具函数。
 import { ITerminalOptions, ITheme } from '@xterm/xterm';
 import { prefGet, prefSet } from './preferences';
-
-export interface TerminalConfig {
-  rendererType: 'webgl' | 'canvas' | 'dom';
-  enableFlowControl: boolean;
-  enableUnicode: boolean;
-  enableSixel: boolean;
-  flowControl: {
-    limit: number;
-    highWater: number;
-    lowWater: number;
-  };
-}
 
 export interface TerminalAppearanceSettings {
   fontSize: number;
@@ -393,37 +381,6 @@ export function saveAppearanceSettings(settings: TerminalAppearanceSettings): vo
   }
 }
 
-export const defaultConfig: TerminalConfig = {
-  rendererType: 'webgl',
-  enableFlowControl: true,
-  enableUnicode: true,
-  enableSixel: false,
-  flowControl: {
-    limit: 200000,
-    highWater: 10,
-    lowWater: 4,
-  },
-};
-
-export function parseAnsiCodes(text: string): string {
-  // Basic ANSI code handling
-  return text;
-}
-
-export function measureText(text: string, fontSize: number, fontFamily: string): number {
-  const canvas = document.createElement('canvas');
-  const context = canvas.getContext('2d');
-  if (!context) return text.length * fontSize * 0.6;
-  
-  context.font = `${fontSize}px ${fontFamily}`;
-  return context.measureText(text).width;
-}
-
-export function getOptimalFontSize(containerWidth: number, cols: number): number {
-  const charWidth = containerWidth / cols;
-  // Monospace fonts typically have width = fontSize * 0.6
-  return Math.floor(charWidth / 0.6);
-}
 
 export function getThemeAwareTerminalTheme(settings: TerminalAppearanceSettings): ITheme {
   const isDark = document.documentElement.classList.contains('dark');

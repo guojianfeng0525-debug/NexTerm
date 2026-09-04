@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### 变更
 
 - **删除未使用的旧终端组件**：移除没有任何生产引用的 `src/components/terminal.tsx`，保留唯一的真实 SSH/PTY 终端实现 `pty-terminal.tsx`，避免两套终端行为继续分叉。
+- **删除终端配置死代码**：移除从未被读取的 `TerminalConfig/defaultConfig` 以及无实际行为的 ANSI/字号辅助函数，终端配置收敛到当前真实使用的 appearance 设置。
 
 ### 修复
 
