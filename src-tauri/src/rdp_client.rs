@@ -174,10 +174,12 @@ fn decode_unicode_text(mut data: &[u8]) -> Option<String> {
     if data.len().is_multiple_of(2) && data.ends_with(&[0, 0]) {
         data = &data[..data.len() - 2];
     }
-    let units: Vec<u16> = data
-        .chunks_exact(2)
-        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
-        .collect();
+    let mut units = Vec::with_capacity(data.len() / 2);
+    let mut offset = 0;
+    while offset + 1 < data.len() {
+        units.push(u16::from_le_bytes([data[offset], data[offset + 1]]));
+        offset += 2;
+    }
     String::from_utf16(&units).ok()
 }
 

@@ -11,11 +11,12 @@
 //!   shows a hint when the desktop environment does not publish file URIs).
 
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "macos")]
 use std::time::Duration;
 
-/// Timeout for hopping to the macOS main thread. Pasteboard round-trips are
-/// fast; if the main thread is blocked longer than this we report an error
-/// instead of deadlocking the command.
+/// 跳转到 macOS 主线程的超时时间。Pasteboard 往返通常很快；如果主线程阻塞
+/// 超过该时长，返回错误而不是让命令死锁。
+#[cfg(target_os = "macos")]
 const MAIN_THREAD_TIMEOUT: Duration = Duration::from_secs(5);
 
 // ─────────────────────────────────────────────────────────────────────────────
