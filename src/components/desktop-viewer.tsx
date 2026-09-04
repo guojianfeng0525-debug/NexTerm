@@ -138,12 +138,9 @@ export function DesktopViewer({
 
     return () => {
       cancelled = true;
-      if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({
-          type: 'CloseDesktop',
-          connection_id: connectionId,
-        }));
-      }
+      // 后端桌面会话由明确的所有者关闭（工具栏断开、关闭标签、重连清理）。
+      // 这里不能按 connection_id 发送 CloseDesktop：React cleanup 与同 ID
+      // 重连并发时，迟到的旧 WebSocket 消息会关掉刚创建的新 VNC/RDP 会话。
       if (
         ws &&
         (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)
