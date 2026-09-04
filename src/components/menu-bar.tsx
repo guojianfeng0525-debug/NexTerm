@@ -45,6 +45,7 @@ import {
   ArrowLeftRight,
   Server,
   StickyNote,
+  Network,
 } from 'lucide-react';
 import type { ToolboxViewId } from '@/lib/toolbox/toolbox-types';
 
@@ -381,6 +382,18 @@ export function MenuBar({
           <DropdownMenuItem onClick={() => onOpenTool?.('notes')}>
             <StickyNote className="mr-2 h-4 w-4" />
             {t('toolbox.notes.open')}
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
+
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <Button variant="ghost" size="sm">{t('toolbox.topology.title')}</Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="start">
+          <DropdownMenuItem onClick={() => onOpenTool?.('topology')}>
+            <Network className="mr-2 h-4 w-4" />
+            {t('toolbox.topology.open')}
           </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>

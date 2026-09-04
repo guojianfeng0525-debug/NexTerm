@@ -514,6 +514,207 @@ done
             format!("ls -la {}", quoted_path)
         }
     }
+
+    // ── Network topology probe commands ───────────────────────────────────────
+    // 只读探测（READ-ONLY）：下面所有命令都是查询类命令，绝不包含
+    //   · `>` / `>>` 重定向写文件
+    //   · 包管理命令（apt / yum / apk / …）
+    //   · `iptables -A/-F`、`firewall-cmd --add-*`、`systemctl start/stop`
+    //     、`ufw enable/disable` 等任何变更操作
+    // 零安装（ZERO-INSTALL）：只使用系统自带工具；工具缺失时对应分段输出
+    // `NT_UNAVAILABLE:<段名>`，由解析层标记 `unavailable` 而不是判定为失败，
+    // 且任一分段失败都不会中断后续分段（脚本内不使用 `set -e`）。
+
+    /// Hostname probe — `hostname -f` first, then plain `hostname`, then `uname -n`.
+    pub fn hostname_probe_cmd(&self) -> &'static str {
+        "{ hostname -f 2>/dev/null || hostname 2>/dev/null || uname -n 2>/dev/null || echo \"NT_UNAVAILABLE:hostname\"; } | head -n 1"
+    }
+
+    /// OS release probe — `/etc/os-release` on Linux, `sw_vers` on macOS.
+    pub fn os_release_probe_cmd(&self) -> &'static str {
+        match self.family {
+            OsFamily::MacOS => {
+                "{ sw_vers 2>/dev/null; uname -sr 2>/dev/null; } || echo \"NT_UNAVAILABLE:os\""
+            }
+            OsFamily::Bsd => {
+                "{ uname -sr 2>/dev/null; freebsd-version 2>/dev/null; } || echo \"NT_UNAVAILABLE:os\""
+            }
+            _ => {
+                "{ grep -E '^(ID|PRETTY_NAME)=' /etc/os-release 2>/dev/null; uname -sr 2>/dev/null; } || echo \"NT_UNAVAILABLE:os\""
+            }
+        }
+    }
+
+    /// Interface probe — `ip -o addr` on Linux, `ifconfig -a` on BSD/macOS.
+    pub fn interfaces_probe_cmd(&self) -> &'static str {
+        match self.family {
+            OsFamily::MacOS | OsFamily::Bsd => {
+                "ifconfig -a 2>/dev/null || echo \"NT_UNAVAILABLE:interfaces\""
+            }
+            _ => {
+                "ip -o addr 2>/dev/null || ifconfig -a 2>/dev/null || echo \"NT_UNAVAILABLE:interfaces\""
+            }
+        }
+    }
+
+    /// Routing table probe — `ip route` on Linux, `netstat -rn` on BSD/macOS.
+    pub fn routes_probe_cmd(&self) -> &'static str {
+        match self.family {
+            OsFamily::MacOS | OsFamily::Bsd => {
+                "netstat -rn -f inet 2>/dev/null || netstat -rn 2>/dev/null || echo \"NT_UNAVAILABLE:routes\""
+            }
+            _ => "ip route 2>/dev/null || netstat -rn 2>/dev/null || echo \"NT_UNAVAILABLE:routes\"",
+        }
+    }
+
+    /// Listening-port probe — `ss -tulpnH` (with `-H` fallback for old
+    /// iproute2), then `netstat -tulpn`; BSD/macOS use `netstat -an -p`.
+    ///
+    /// NOTE: `-p` needs root; without it the process columns stay empty but
+    /// the listening state is still exact (the parser marks the section
+    /// `partial` rather than dropping it).
+    pub fn ports_probe_cmd(&self) -> &'static str {
+        match self.family {
+            OsFamily::MacOS | OsFamily::Bsd => {
+                "{ netstat -an -p tcp 2>/dev/null | grep -i listen; netstat -an -p udp 2>/dev/null; } | head -n 200"
+            }
+            _ if self.has_ss => {
+                "{ ss -tulpnH 2>/dev/null || ss -tulpn 2>/dev/null || netstat -tulpn 2>/dev/null || echo \"NT_UNAVAILABLE:ports\"; } | head -n 200"
+            }
+            _ => {
+                "{ netstat -tulpn 2>/dev/null || echo \"NT_UNAVAILABLE:ports\"; } | head -n 200"
+            }
+        }
+    }
+
+    /// Established-connection probe — only ESTABLISHED rows are kept, because
+    /// they are the sole input for topology-relationship inference.
+    pub fn peers_probe_cmd(&self) -> &'static str {
+        match self.family {
+            OsFamily::MacOS | OsFamily::Bsd => {
+                "{ netstat -an -p tcp 2>/dev/null | grep -i established || echo \"NT_UNAVAILABLE:peers\"; } | head -n 200"
+            }
+            _ if self.has_ss => {
+                "{ ss -tunpH state established 2>/dev/null || ss -tunp 2>/dev/null | grep -i established || netstat -tnp 2>/dev/null | grep -i established || echo \"NT_UNAVAILABLE:peers\"; } | head -n 200"
+            }
+            _ => {
+                "{ netstat -tnp 2>/dev/null | grep -i established || echo \"NT_UNAVAILABLE:peers\"; } | head -n 200"
+            }
+        }
+    }
+
+    /// Firewall type / state probe.
+    ///
+    /// Emits `FW=<type>`, `FW_STATE=…`, `FW_VERSION=…`, an `FW_ZONES_BEGIN` …
+    /// `FW_ZONES_END` block, and an `FW_POLICY_BEGIN` … `FW_POLICY_END` block
+    /// holding the iptables chain policies. `FW_RAW=` carries the first raw
+    /// line (including stderr) so the parser can turn `Permission denied`
+    /// into a `需要 root 权限` note instead of a hard failure.
+    pub fn firewall_probe_cmd(&self) -> String {
+        let mut s = String::from(
+            "if command -v firewall-cmd >/dev/null 2>&1; then\n\
+             echo \"FW=firewalld\"\n\
+             echo \"FW_STATE=$(firewall-cmd --state 2>&1 | head -n 1)\"\n\
+             echo \"FW_VERSION=$(firewall-cmd --version 2>&1 | head -n 1)\"\n\
+             echo \"FW_RAW=$(firewall-cmd --state 2>&1 | head -n 1)\"\n\
+             echo \"FW_ZONES_BEGIN\"\n\
+             firewall-cmd --get-active-zones 2>&1 | head -n 20\n\
+             echo \"FW_ZONES_END\"\n\
+             elif command -v ufw >/dev/null 2>&1; then\n\
+             echo \"FW=ufw\"\n\
+             echo \"FW_STATE=$(ufw status 2>&1 | head -n 1)\"\n\
+             echo \"FW_VERSION=$(ufw version 2>&1 | head -n 1)\"\n\
+             echo \"FW_RAW=$(ufw status 2>&1 | head -n 1)\"\n\
+             echo \"FW_ZONES_BEGIN\"\n\
+             echo \"FW_ZONES_END\"\n\
+             elif command -v nft >/dev/null 2>&1; then\n\
+             echo \"FW=nftables\"\n\
+             if nft list ruleset >/dev/null 2>&1; then echo \"FW_STATE=running\"; else echo \"FW_STATE=not running\"; fi\n\
+             echo \"FW_VERSION=$(nft --version 2>&1 | head -n 1)\"\n\
+             echo \"FW_RAW=$(nft list ruleset 2>&1 | head -n 1)\"\n\
+             echo \"FW_ZONES_BEGIN\"\n\
+             echo \"FW_ZONES_END\"\n\
+             elif command -v iptables >/dev/null 2>&1; then\n\
+             echo \"FW=iptables\"\n\
+             if iptables -S >/dev/null 2>&1; then echo \"FW_STATE=running\"; else echo \"FW_STATE=not running\"; fi\n\
+             echo \"FW_VERSION=$(iptables --version 2>&1 | head -n 1)\"\n\
+             echo \"FW_RAW=$(iptables -S 2>&1 | head -n 1)\"\n\
+             echo \"FW_ZONES_BEGIN\"\n\
+             echo \"FW_ZONES_END\"\n",
+        );
+        if matches!(self.family, OsFamily::MacOS | OsFamily::Bsd) {
+            s.push_str(
+                "elif command -v pfctl >/dev/null 2>&1; then\n\
+                 echo \"FW=pf\"\n\
+                 echo \"FW_STATE=$(pfctl -s info 2>&1 | grep -i '^Status' | head -n 1)\"\n\
+                 echo \"FW_VERSION=\"\n\
+                 echo \"FW_RAW=$(pfctl -s info 2>&1 | head -n 1)\"\n\
+                 echo \"FW_ZONES_BEGIN\"\n\
+                 echo \"FW_ZONES_END\"\n",
+            );
+        }
+        s.push_str(
+            "else\n\
+             echo \"FW=none\"\n\
+             fi\n\
+             echo \"FW_POLICY_BEGIN\"\n\
+             iptables -S 2>&1 | grep -E '^-P ' | head -n 6\n\
+             echo \"FW_POLICY_END\"\n",
+        );
+        s
+    }
+
+    /// Firewall rule dump — one block per available backend, each prefixed
+    /// with a `##RULE_FMT:<backend>##` marker so the parser can dispatch on
+    /// the exact output format it is looking at.
+    pub fn firewall_rules_probe_cmd(&self) -> String {
+        let mut s = String::from(
+            "if command -v firewall-cmd >/dev/null 2>&1; then echo \"##RULE_FMT:firewalld##\"; firewall-cmd --list-all-zones 2>&1 | head -n 120; fi\n\
+             if command -v ufw >/dev/null 2>&1; then echo \"##RULE_FMT:ufw##\"; ufw status verbose 2>&1 | head -n 80; fi\n\
+             if command -v nft >/dev/null 2>&1; then echo \"##RULE_FMT:nft##\"; nft list ruleset 2>&1 | head -n 120; fi\n\
+             if command -v iptables >/dev/null 2>&1; then echo \"##RULE_FMT:iptables##\"; iptables -S 2>&1 | head -n 120; fi\n",
+        );
+        if matches!(self.family, OsFamily::MacOS | OsFamily::Bsd) {
+            s.push_str(
+                "if command -v pfctl >/dev/null 2>&1; then echo \"##RULE_FMT:pf##\"; pfctl -sr 2>&1 | head -n 80; fi\n",
+            );
+        }
+        s
+    }
+
+    /// Single read-only shell script that emits EVERY topology section in one
+    /// SSH round-trip, each wrapped in a `###NT:<name>###` marker.
+    ///
+    /// Section order is fixed: `hostname` → `os` → `interfaces` → `routes` →
+    /// `firewall` → `rules` → `ports` → `peers`. One exec instead of eight
+    /// keeps the connection read-lock hold time (and the 30s per-command
+    /// timeout exposure) at a single round-trip.
+    pub fn topology_probe_cmd(&self) -> String {
+        let mut s = String::new();
+        s.push_str("# NexTerm network topology probe — READ-ONLY / ZERO-INSTALL.\n");
+        s.push_str("# Every command below is a pure query: no redirection to a file, no\n");
+        s.push_str("# package manager, no iptables -A/-F, no systemctl start/stop, no\n");
+        s.push_str("# credential handling. `set -e` is deliberately absent so that one\n");
+        s.push_str("# failing section can never abort the remaining ones.\n");
+        s.push_str("echo \"###NT:hostname###\"; ");
+        s.push_str(self.hostname_probe_cmd());
+        s.push_str("\necho \"###NT:os###\"; ");
+        s.push_str(self.os_release_probe_cmd());
+        s.push_str("\necho \"###NT:interfaces###\"; ");
+        s.push_str(self.interfaces_probe_cmd());
+        s.push_str("\necho \"###NT:routes###\"; ");
+        s.push_str(self.routes_probe_cmd());
+        s.push_str("\necho \"###NT:firewall###\";\n");
+        s.push_str(&self.firewall_probe_cmd());
+        s.push_str("echo \"###NT:rules###\";\n");
+        s.push_str(&self.firewall_rules_probe_cmd());
+        s.push_str("echo \"###NT:ports###\"; ");
+        s.push_str(self.ports_probe_cmd());
+        s.push_str("\necho \"###NT:peers###\"; ");
+        s.push_str(self.peers_probe_cmd());
+        s.push_str("\necho \"###NT:end###\"");
+        s
+    }
 }
 
 #[cfg(test)]
@@ -649,6 +850,146 @@ mod tests {
             info.list_files_cmd("/tmp/dir's folder"),
             "ls -la --time-style=long-iso '/tmp/dir'\"'\"'s folder'"
         );
+    }
+
+    #[test]
+    fn test_topology_probe_cmd_section_order() {
+        let script = OsInfo::default().topology_probe_cmd();
+        let order = [
+            "###NT:hostname###",
+            "###NT:os###",
+            "###NT:interfaces###",
+            "###NT:routes###",
+            "###NT:firewall###",
+            "###NT:rules###",
+            "###NT:ports###",
+            "###NT:peers###",
+            "###NT:end###",
+        ];
+        let mut cursor = 0usize;
+        for marker in order {
+            let at = script[cursor..]
+                .find(marker)
+                .unwrap_or_else(|| panic!("missing {marker} after offset {cursor}"));
+            cursor += at + marker.len();
+        }
+    }
+
+    #[test]
+    fn test_topology_probe_cmd_is_read_only() {
+        let script = OsInfo::default().topology_probe_cmd();
+        // Only inspect executable lines — the header comment deliberately
+        // *mentions* the constructs it promises never to use.
+        let code: String = script
+            .lines()
+            .filter(|l| !l.trim_start().starts_with('#'))
+            .collect::<Vec<_>>()
+            .join("\n");
+        // 只读保证：不得出现任何写文件重定向、包管理或服务变更命令。
+        for forbidden in [
+            "set -e",
+            " > ",
+            ">>",
+            "apt ",
+            "yum ",
+            "apk ",
+            "dnf ",
+            "iptables -A",
+            "iptables -F",
+            "iptables -I",
+            "systemctl start",
+            "systemctl stop",
+            "ufw enable",
+            "ufw disable",
+            "firewall-cmd --add",
+            "firewall-cmd --remove",
+        ] {
+            assert!(
+                !code.contains(forbidden),
+                "probe script must stay read-only, found {forbidden:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_topology_probe_cmd_prefers_iproute2_on_linux() {
+        let script = OsInfo {
+            family: OsFamily::Debian,
+            has_ss: true,
+            ..Default::default()
+        }
+        .topology_probe_cmd();
+        assert!(script.contains("ip -o addr"));
+        assert!(script.contains("ip route"));
+        assert!(script.contains("ss -tulpnH"));
+    }
+
+    #[test]
+    fn test_topology_probe_cmd_busybox_and_macos_fallbacks() {
+        let script = OsInfo {
+            family: OsFamily::Alpine,
+            has_ss: false,
+            has_gnu_coreutils: false,
+            ..Default::default()
+        }
+        .topology_probe_cmd();
+        assert!(script.contains("netstat -tulpn"));
+
+        let macos = OsInfo {
+            family: OsFamily::MacOS,
+            ..Default::default()
+        }
+        .topology_probe_cmd();
+        assert!(macos.contains("ifconfig -a"));
+        assert!(macos.contains("netstat -rn -f inet"));
+        assert!(macos.contains("pfctl"));
+    }
+
+    #[test]
+    fn test_firewall_cmd_emits_markers() {
+        let cmd = OsInfo::default().firewall_probe_cmd();
+        for marker in [
+            "FW=firewalld",
+            "FW_ZONES_BEGIN",
+            "FW_ZONES_END",
+            "FW_POLICY_BEGIN",
+            "FW_POLICY_END",
+            "FW=none",
+        ] {
+            assert!(cmd.contains(marker), "missing {marker}");
+        }
+    }
+
+    #[test]
+    fn test_firewall_rules_cmd_emits_format_markers() {
+        let cmd = OsInfo::default().firewall_rules_probe_cmd();
+        for marker in [
+            "##RULE_FMT:firewalld##",
+            "##RULE_FMT:ufw##",
+            "##RULE_FMT:nft##",
+            "##RULE_FMT:iptables##",
+        ] {
+            assert!(cmd.contains(marker), "missing {marker}");
+        }
+        assert!(!cmd.contains("##RULE_FMT:pf##"));
+    }
+
+    #[test]
+    fn test_peers_cmd_only_established() {
+        for info in [
+            OsInfo {
+                family: OsFamily::Debian,
+                has_ss: true,
+                ..Default::default()
+            },
+            OsInfo {
+                family: OsFamily::RedHat,
+                has_ss: false,
+                ..Default::default()
+            },
+        ] {
+            assert!(info.peers_probe_cmd().contains("established"));
+        }
     }
 }
 

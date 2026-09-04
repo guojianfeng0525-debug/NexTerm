@@ -45,7 +45,16 @@ export type DbTable =
   | 'documents'
   | 'jar_preferences'
   | 'jar_recent_files'
-  | 'jar_find_history';
+  | 'jar_find_history'
+  /* ── network topology & diagnostics (see docs/network-topology-design.md §3) ── */
+  | 'net_nodes'
+  | 'net_interfaces'
+  | 'net_routes'
+  | 'net_firewalls'
+  | 'net_firewall_rules'
+  | 'net_ports'
+  | 'net_port_probes'
+  | 'net_links';
 
 export type Row = Record<string, unknown>;
 
