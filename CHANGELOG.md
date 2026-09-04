@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Linux 剪贴板远程文件 URI 修复**：解析 `text/uri-list` 时不再把 `file://remote/path` 的 host 截掉后误认为本地路径；现在只接受空 host 的 `file:///absolute/path`，远程 URI 会被忽略，避免把远程文件当作本地文件粘贴。
+
 ## [2.16.5] - 2026-09-04
 
 ### Security

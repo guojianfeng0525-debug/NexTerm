@@ -439,11 +439,11 @@ fn percent_decode(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-/// Parse a `text/uri-list` payload into local file paths.
+/// 将 `text/uri-list` 内容解析为本地文件路径。
 ///
-/// Per the freedesktop spec: lines starting with `#` are comments; each other
-/// line is a URI; `file://` URIs are decoded to absolute paths, and non-file
-/// schemes (http://, ...) are ignored.
+/// 按 freedesktop 规范处理：以 `#` 开头的行是注释；其余每行是一个 URI。
+/// 只接受空 host 的 `file://` URI（即 `file:///absolute/path`），并解码成
+/// 绝对路径；远程 host URI 与非 `file` scheme 都必须忽略。
 #[cfg(target_os = "linux")]
 pub(crate) fn parse_uri_list(text: &str) -> Vec<String> {
     let mut paths = Vec::new();
@@ -453,17 +453,18 @@ pub(crate) fn parse_uri_list(text: &str) -> Vec<String> {
             continue;
         }
         if let Some(rest) = line.strip_prefix("file://") {
-            // file://host/path — only local (empty host) URIs are usable.
-            let path_part = match rest.find('/') {
-                Some(idx) => &rest[idx..], // strip host, keep "/..."
-                None => continue,          // file://name without path — ignore
-            };
+            // `file://remote/path` 表示远程 host，不能当成本地路径截取。
+            // 本地路径必须紧随 `file://` 后以 `/` 开头。
+            if !rest.starts_with('/') {
+                continue;
+            }
+            let path_part = rest;
             let decoded = percent_decode(path_part);
             if decoded.starts_with('/') && !decoded.is_empty() {
                 paths.push(decoded);
             }
         }
-        // Other schemes intentionally ignored.
+        // 其他 scheme 有意忽略。
     }
     paths
 }
@@ -518,7 +519,7 @@ mod tests {
 
     #[test]
     fn parse_ignores_remote_host_uris() {
-        // file://remote/share/f is a remote URI, not a local path — skipped.
+        // `file://remote/share/f` 是远程 URI，不是本地路径，必须跳过。
         let text = "file://nas/data/file.bin\r\nfile:///local/file.bin\r\n";
         assert_eq!(parse_uri_list(text), vec!["/local/file.bin".to_string()]);
     }
