@@ -339,6 +339,9 @@ pub struct TunnelStartRequest {
     pub jump_port: Option<u16>,
     pub jump_username: Option<String>,
     pub jump_password: Option<String>,
+    /// User-approved SSH host-key fingerprint. Jump tunnels fail closed when
+    /// this is missing; unauthenticated first-use connections are not allowed.
+    pub jump_host_key_fingerprint: Option<String>,
 }
 
 /// Map the tunnel request's jump fields into a `JumpConfig`, or `None` when
@@ -353,6 +356,11 @@ fn build_tunnel_jump(request: &TunnelStartRequest) -> Result<Option<JumpConfig>,
         .clone()
         .filter(|u| !u.trim().is_empty())
         .ok_or("Jump host username is required")?;
+    let host_key_fingerprint = request
+        .jump_host_key_fingerprint
+        .clone()
+        .filter(|fingerprint| !fingerprint.trim().is_empty())
+        .ok_or("Jump host SSH fingerprint is required before starting the tunnel")?;
     Ok(Some(JumpConfig {
         host,
         port: request.jump_port.unwrap_or(22),
@@ -363,7 +371,7 @@ fn build_tunnel_jump(request: &TunnelStartRequest) -> Result<Option<JumpConfig>,
                 .clone()
                 .ok_or("Jump host password is required")?,
         },
-        host_key_fingerprint: None,
+        host_key_fingerprint: Some(host_key_fingerprint),
     }))
 }
 
@@ -400,12 +408,20 @@ pub async fn tunnel_start(
     let task_jump = build_tunnel_jump(&request)?;
 
     // Stop any existing tunnel with the same id now that the new listener is ready.
-    {
+    let old_tunnel = {
         let mut tunnels = state.tunnels.lock().expect("tunnel state poisoned");
-        if let Some(old) = tunnels.remove(&request.id) {
-            old.token.cancel();
-            old.task.abort();
+        tunnels.remove(&request.id)
+    };
+    if let Some(old) = old_tunnel {
+        old.token.cancel();
+        // The connection-task mutex is async; waiting here removes the
+        // try-lock race that could leave active forwards behind.
+        let tasks = old.conn_tasks.lock().await;
+        for task in tasks.iter() {
+            task.abort();
         }
+        drop(tasks);
+        old.task.abort();
     }
 
     let remote_addr = format!("{}:{}", request.remote_host, request.remote_port);
@@ -444,6 +460,7 @@ pub async fn tunnel_start(
                             let jump = task_jump.clone();
                             let rhost = task_remote_host.clone();
                             let rport = task_remote_port;
+                            let conn_cancel = task_token.clone();
                             let conn = tauri::async_runtime::spawn(async move {
                                 let _ = e_app.emit(
                                     "tunnel://activity",
@@ -452,45 +469,54 @@ pub async fn tunnel_start(
                                         message: format!("{} connected ← {}", remote, client_peer(&client)),
                                     },
                                 );
-                                let result = match jump {
-                                    Some(jump) => {
-                                        // Tunnel through the jump host. The session
-                                        // handle is kept alive for the whole copy.
-                                        match crate::jump::connect_via_jump(
-                                            &jump,
-                                            &rhost,
-                                            rport,
-                                            Duration::from_secs(3),
-                                            Some(Duration::from_secs(60)),
-                                            3,
-                                            false,
-                                        )
-                                        .await
-                                        {
-                                            Ok(mut tunnel) => {
-                                                let _session = tunnel.session;
-                                                tokio::io::copy_bidirectional(
-                                                    &mut client,
-                                                    &mut tunnel.stream,
-                                                )
-                                                .await
-                                                .map(|_| ())
-                                            }
-                                            Err(e) => Err(std::io::Error::other(e.to_string())),
-                                        }
-                                    }
-                                    None => {
-                                        match TcpStream::connect(&remote).await {
-                                            Ok(mut server) => {
-                                                tokio::io::copy_bidirectional(&mut client, &mut server)
+                                let operation = async {
+                                    match jump {
+                                        Some(jump) => {
+                                            // Tunnel through the jump host. The session
+                                            // handle is kept alive for the whole copy.
+                                            match crate::jump::connect_via_jump(
+                                                &jump,
+                                                &rhost,
+                                                rport,
+                                                Duration::from_secs(3),
+                                                Some(Duration::from_secs(60)),
+                                                3,
+                                                true,
+                                            )
+                                            .await
+                                            {
+                                                Ok(mut tunnel) => {
+                                                    let _session = tunnel.session;
+                                                    tokio::io::copy_bidirectional(
+                                                        &mut client,
+                                                        &mut tunnel.stream,
+                                                    )
                                                     .await
                                                     .map(|_| ())
+                                                }
+                                                Err(e) => Err(std::io::Error::other(e.to_string())),
                                             }
-                                            Err(e) => Err(e),
+                                        }
+                                        None => {
+                                            match TcpStream::connect(&remote).await {
+                                                Ok(mut server) => {
+                                                    tokio::io::copy_bidirectional(&mut client, &mut server)
+                                                        .await
+                                                        .map(|_| ())
+                                                }
+                                                Err(e) => Err(e),
+                                            }
                                         }
                                     }
                                 };
-                                if let Err(e) = result {
+                                // The tunnel token is shared with every accepted
+                                // connection so shutdown_all/tunnel_stop can cancel
+                                // in-flight copies without relying on task-abort races.
+                                let result = tokio::select! {
+                                    _ = conn_cancel.cancelled() => None,
+                                    result = operation => Some(result),
+                                };
+                                if let Some(Err(e)) = result {
                                     let _ = e_app.emit(
                                         "tunnel://error",
                                         TunnelEventPayload {
@@ -560,11 +586,11 @@ pub async fn tunnel_stop(id: String, state: State<'_, ToolboxState>) -> Result<(
             handle.token.cancel();
             // Cancel in-flight connection tasks too — otherwise copy_bidirectional
             // keeps forwarding on open sockets after the tunnel is stopped.
-            if let Ok(tasks) = handle.conn_tasks.try_lock() {
-                for t in tasks.iter() {
-                    t.abort();
-                }
+            let tasks = handle.conn_tasks.lock().await;
+            for task in tasks.iter() {
+                task.abort();
             }
+            drop(tasks);
             handle.task.abort();
             Ok(())
         }
@@ -1064,7 +1090,9 @@ where
             _ = cancellation.cancelled() => return Err("Request cancelled".to_string()),
             chunk = stream.next() => chunk,
         };
-        let Some(chunk) = chunk else { break; };
+        let Some(chunk) = chunk else {
+            break;
+        };
         let chunk = chunk.map_err(|error| format!("Failed to read response body: {error}"))?;
         let chunk = chunk.as_ref();
         let remaining = limit.saturating_sub(bytes.len());
@@ -1092,26 +1120,51 @@ where
 
 /// Send an HTTP request from the API debugger.
 #[tauri::command]
-pub async fn api_request(request: ApiRequest, state: State<'_, ToolboxState>) -> Result<ApiResponse, String> {
+pub async fn api_request(
+    request: ApiRequest,
+    state: State<'_, ToolboxState>,
+) -> Result<ApiResponse, String> {
     let request_id = request.request_id.clone().unwrap_or_else(|| {
-        format!("api-{}", NEXT_API_REQUEST_ID.fetch_add(1, Ordering::Relaxed))
+        format!(
+            "api-{}",
+            NEXT_API_REQUEST_ID.fetch_add(1, Ordering::Relaxed)
+        )
     });
     let cancellation = CancellationToken::new();
-    state.api_requests.lock().map_err(|_| "api request state poisoned".to_string())?.insert(request_id.clone(), cancellation.clone());
+    state
+        .api_requests
+        .lock()
+        .map_err(|_| "api request state poisoned".to_string())?
+        .insert(request_id.clone(), cancellation.clone());
     let result = api_request_inner(request, cancellation.clone()).await;
-    state.api_requests.lock().map_err(|_| "api request state poisoned".to_string())?.remove(&request_id);
+    state
+        .api_requests
+        .lock()
+        .map_err(|_| "api request state poisoned".to_string())?
+        .remove(&request_id);
     result
 }
 
 #[tauri::command]
-pub fn api_request_cancel(request_id: String, state: State<'_, ToolboxState>) -> Result<(), String> {
-    if let Some(token) = state.api_requests.lock().map_err(|_| "api request state poisoned".to_string())?.get(&request_id) {
+pub fn api_request_cancel(
+    request_id: String,
+    state: State<'_, ToolboxState>,
+) -> Result<(), String> {
+    if let Some(token) = state
+        .api_requests
+        .lock()
+        .map_err(|_| "api request state poisoned".to_string())?
+        .get(&request_id)
+    {
         token.cancel();
     }
     Ok(())
 }
 
-async fn api_request_inner(request: ApiRequest, cancellation: CancellationToken) -> Result<ApiResponse, String> {
+async fn api_request_inner(
+    request: ApiRequest,
+    cancellation: CancellationToken,
+) -> Result<ApiResponse, String> {
     let response_limit = response_size_limit(request.response_size_limit_bytes)?;
     let client = reqwest::Client::builder()
         .danger_accept_invalid_certs(request.insecure_skip_tls_verify.unwrap_or(false))
@@ -1201,7 +1254,8 @@ async fn api_request_inner(request: ApiRequest, cancellation: CancellationToken)
         .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
         .collect();
 
-    let (bytes, mut truncated) = read_response_preview(resp.bytes_stream(), response_limit, &cancellation).await?;
+    let (bytes, mut truncated) =
+        read_response_preview(resp.bytes_stream(), response_limit, &cancellation).await?;
     truncated |= content_length.is_some_and(|length| length > response_limit as u64);
     let duration_ms = start.elapsed().as_millis() as u64;
     let body_size_bytes = bytes.len();
@@ -1251,7 +1305,9 @@ mod api_request_tests {
             Ok::<_, &'static str>(b"abc".to_vec()),
             Ok(b"def".to_vec()),
         ]);
-        let (body, truncated) = read_response_preview(stream, 4, &CancellationToken::new()).await.unwrap();
+        let (body, truncated) = read_response_preview(stream, 4, &CancellationToken::new())
+            .await
+            .unwrap();
         assert_eq!(body, b"abcd");
         assert!(truncated);
     }
@@ -1259,7 +1315,9 @@ mod api_request_tests {
     #[tokio::test]
     async fn response_preview_marks_exact_complete_body() {
         let stream = futures::stream::iter(vec![Ok::<_, &'static str>(b"abcd".to_vec())]);
-        let (body, truncated) = read_response_preview(stream, 4, &CancellationToken::new()).await.unwrap();
+        let (body, truncated) = read_response_preview(stream, 4, &CancellationToken::new())
+            .await
+            .unwrap();
         assert_eq!(body, b"abcd");
         assert!(!truncated);
     }
@@ -1703,6 +1761,7 @@ mod tunnel_jump_tests {
             jump_port: None,
             jump_username: Some("jumpuser".into()),
             jump_password: Some("jumppass".into()),
+            jump_host_key_fingerprint: Some("SHA256:test".into()),
         }
     }
 
@@ -1724,6 +1783,7 @@ mod tunnel_jump_tests {
             crate::ssh::AuthMethod::Password { password } => assert_eq!(password, "jumppass"),
             _ => panic!("expected password auth"),
         }
+        assert_eq!(jump.host_key_fingerprint.as_deref(), Some("SHA256:test"));
     }
 
     #[test]
@@ -1748,6 +1808,14 @@ mod tunnel_jump_tests {
         req.jump_port = Some(2222);
         let jump = build_tunnel_jump(&req).unwrap().unwrap();
         assert_eq!(jump.port, 2222);
+    }
+
+    #[test]
+    fn requires_jump_fingerprint() {
+        let mut req = request(Some("bastion.example.com"));
+        req.jump_host_key_fingerprint = None;
+        let error = build_tunnel_jump(&req).unwrap_err();
+        assert!(error.contains("fingerprint is required"));
     }
 }
 

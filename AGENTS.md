@@ -269,6 +269,17 @@ VS Code-like resizable panel layout with presets:
 
 18. **Desktop jump-host tunneling shares one transport** (`desktop_transport.rs`): RDP and VNC both open their stream through `open_stream(host, port, jump)` — direct TCP (nodelay) or an SSH direct-tcpip channel via `jump.rs` (russh), which is the OpenSSH `ProxyJump` equivalent. russh's channel stream keeps its own reference to the session handle internally, but `OpenedStream` still carries the `Handle` so the tunnel's lifetime is explicit. The jump-host UI lives on the dialog's 代理 (proxy) tab: toggling 启用跳板机 reveals the fields, and the first connect probes the jump host's key fingerprint and pops a confirm dialog before `desktop_connect` fires — automated UI flows must answer it. Fixture containers: `e2e/fixtures/vnc` (Alpine Xvfb+x11vnc VNC-Auth `vncpass`, port 5900) and `e2e/fixtures/ssh-jump` (Debian sshd `jumpuser`/`jumppass`, port 22; containers reach host-published ports via `host.docker.internal`). Live tests: `tests/vnc_live.rs` (direct + jump) and `tests/rdp_live.rs` (direct + jump), all `#[ignore]`d behind env vars.
 
+   Jump tunnels are fail-closed: the approved fingerprint must travel with both
+   `desktop_connect` and `tunnel_start`, and the backend must call
+   `connect_via_jump(..., host_key_verification=true)`. Never reintroduce
+   `host_key_fingerprint: None` or `danger_accept_invalid_*` on these paths.
+
+19. **FTPS must authenticate the server**: `ftp_client.rs` uses the normal
+    native-TLS connector so certificates validate against the platform trust
+    store. Do not add `danger_accept_invalid_certs(true)`. Self-signed servers
+    must be handled through an explicit trust/CA flow if that feature is added,
+    not through a silent global bypass.
+
 ---
 
 ## Debugging

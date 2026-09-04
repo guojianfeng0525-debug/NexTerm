@@ -425,9 +425,16 @@ export function IntegratedFileBrowser({ connectionId, host: _host, isConnected, 
     if (batch.pending.size > 0) return;
     clipboardBatchRef.current = null;
     if (batch.collected.length === 0) return;
-    invoke<void>('clipboard_write_files', { paths: batch.collected })
+      invoke<void>('clipboard_write_files', { paths: batch.collected })
       .then(() => {
         toast.success(t('fileBrowser.toast.clipboardCopied', { count: batch.collected.length }));
+        // The system clipboard now owns the latest batch. Remove every older
+        // staged download while keeping the paths just published to Finder/
+        // Explorer usable.
+        void invoke<void>('clipboard_cleanup_cache', {
+          excludePaths: batch.collected,
+          maxAgeSecs: 0,
+        }).catch(() => undefined);
       })
       .catch((err) => {
         console.error('clipboard_write_files failed:', err);

@@ -10,6 +10,7 @@
 //! - Linux: `text/uri-list` via `arboard` (graceful degradation; the frontend
 //!   shows a hint when the desktop environment does not publish file URIs).
 
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// Timeout for hopping to the macOS main thread. Pasteboard round-trips are
@@ -56,9 +57,113 @@ pub fn get_clipboard_cache_dir(app: tauri::AppHandle) -> Result<String, String> 
         .join("clipboard-downloads");
     std::fs::create_dir_all(&dir)
         .map_err(|e| format!("failed to create clipboard cache dir {:?}: {e}", dir))?;
+    // Prevent long-lived sensitive downloads from accumulating forever. The
+    // active clipboard batch is protected by the explicit cleanup call below;
+    // this startup/path-acquisition pass only removes files older than a day.
+    if let Err(error) = cleanup_clipboard_cache_dir(&dir, &[], Some(86_400)) {
+        tracing::warn!("failed to prune clipboard cache {:?}: {error}", dir);
+    }
     dir.to_str()
         .map(|s| s.to_string())
         .ok_or_else(|| "clipboard cache dir is not valid UTF-8".to_string())
+}
+
+/// Remove cached clipboard downloads except `exclude_paths`.
+///
+/// `max_age_secs` protects recently created files when called opportunistically;
+/// the frontend passes zero after replacing the system clipboard, so every
+/// previous batch is removed while the newly written paths are excluded.
+#[tauri::command]
+pub fn clipboard_cleanup_cache(
+    app: tauri::AppHandle,
+    exclude_paths: Vec<String>,
+    max_age_secs: Option<u64>,
+) -> Result<Vec<String>, String> {
+    use tauri::Manager;
+    let dir = app
+        .path()
+        .app_cache_dir()
+        .map_err(|e| format!("failed to resolve app cache dir: {e}"))?
+        .join("clipboard-downloads");
+    let excluded = exclude_paths
+        .into_iter()
+        .map(PathBuf::from)
+        .filter_map(|path| std::fs::canonicalize(&path).ok())
+        .collect::<Vec<_>>();
+    cleanup_clipboard_cache_dir(&dir, &excluded, max_age_secs)
+}
+
+fn cleanup_clipboard_cache_dir(
+    dir: &Path,
+    excluded: &[PathBuf],
+    max_age_secs: Option<u64>,
+) -> Result<Vec<String>, String> {
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+    let mut removed = Vec::new();
+    cleanup_dir_recursive(dir, excluded, max_age_secs, &mut removed)?;
+    Ok(removed)
+}
+
+fn cleanup_dir_recursive(
+    dir: &Path,
+    excluded: &[PathBuf],
+    max_age_secs: Option<u64>,
+    removed: &mut Vec<String>,
+) -> Result<(), String> {
+    let entries = std::fs::read_dir(dir)
+        .map_err(|e| format!("failed to read clipboard cache dir {:?}: {e}", dir))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("failed to read clipboard cache entry: {e}"))?;
+        let path = entry.path();
+        let metadata = std::fs::symlink_metadata(&path)
+            .map_err(|e| format!("failed to inspect clipboard cache entry {path:?}: {e}"))?;
+
+        if metadata.is_dir() && !metadata.file_type().is_symlink() {
+            cleanup_dir_recursive(&path, excluded, max_age_secs, removed)?;
+            if std::fs::read_dir(&path)
+                .map_err(|e| format!("failed to read clipboard cache dir {path:?}: {e}"))?
+                .next()
+                .is_none()
+            {
+                std::fs::remove_dir(&path)
+                    .map_err(|e| format!("failed to remove clipboard cache dir {path:?}: {e}"))?;
+                if let Some(text) = path.to_str() {
+                    removed.push(text.to_owned());
+                }
+            }
+            continue;
+        }
+
+        let canonical = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+        if excluded.iter().any(|excluded| excluded == &canonical) {
+            continue;
+        }
+        if let Some(max_age) = max_age_secs {
+            let modified = metadata
+                .modified()
+                .map_err(|e| format!("failed to read clipboard cache mtime {path:?}: {e}"))?;
+            let age = modified
+                .elapsed()
+                .map_err(|e| format!("invalid clipboard cache mtime {path:?}: {e}"))?;
+            if age.as_secs() < max_age {
+                continue;
+            }
+        }
+
+        if metadata.file_type().is_symlink() {
+            std::fs::remove_file(&path)
+                .map_err(|e| format!("failed to remove clipboard cache symlink {path:?}: {e}"))?;
+        } else {
+            std::fs::remove_file(&path)
+                .map_err(|e| format!("failed to remove clipboard cache file {path:?}: {e}"))?;
+        }
+        if let Some(text) = path.to_str() {
+            removed.push(text.to_owned());
+        }
+    }
+    Ok(())
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -83,9 +188,7 @@ fn write_files_platform(app: &tauri::AppHandle, paths: &[String]) -> Result<(), 
     let (tx, rx) = std::sync::mpsc::channel::<Result<(), String>>();
     let paths = paths.to_vec();
     app.run_on_main_thread(move || {
-        let result = objc2::rc::autoreleasepool(|_| unsafe {
-            ns_pasteboard_write_files(&paths)
-        });
+        let result = objc2::rc::autoreleasepool(|_| unsafe { ns_pasteboard_write_files(&paths) });
         let _ = tx.send(result);
     })
     .map_err(|e| format!("failed to hop to main thread: {e}"))?;
@@ -111,9 +214,7 @@ unsafe fn ns_pasteboard_read_files() -> Result<Vec<String>, String> {
         &[NSNumber::new_bool(true).as_ref()],
     );
 
-    let objects = unsafe {
-        pb.readObjectsForClasses_options(&class_array, Some(&options))
-    };
+    let objects = unsafe { pb.readObjectsForClasses_options(&class_array, Some(&options)) };
 
     let mut out = Vec::new();
     if let Some(array) = objects {
@@ -147,10 +248,7 @@ unsafe fn ns_pasteboard_write_files(paths: &[String]) -> Result<(), String> {
         .map(|p| {
             let ns_path = NSString::from_str(p);
             let is_dir = std::path::Path::new(p).is_dir();
-            ProtocolObject::from_retained(NSURL::fileURLWithPath_isDirectory(
-                &ns_path,
-                is_dir,
-            ))
+            ProtocolObject::from_retained(NSURL::fileURLWithPath_isDirectory(&ns_path, is_dir))
         })
         .collect();
 
@@ -169,9 +267,7 @@ unsafe fn ns_pasteboard_write_files(paths: &[String]) -> Result<(), String> {
 
 #[cfg(windows)]
 fn read_files_platform(_app: &tauri::AppHandle) -> Result<Vec<String>, String> {
-    use windows::Win32::System::DataExchange::{
-        CloseClipboard, GetClipboardData, OpenClipboard,
-    };
+    use windows::Win32::System::DataExchange::{CloseClipboard, GetClipboardData, OpenClipboard};
     use windows::Win32::System::Ole::CF_HDROP;
     use windows::Win32::UI::Shell::{DragQueryFileW, HDROP};
 
@@ -181,7 +277,9 @@ fn read_files_platform(_app: &tauri::AppHandle) -> Result<Vec<String>, String> {
         struct CloseGuard;
         impl Drop for CloseGuard {
             fn drop(&mut self) {
-                unsafe { let _ = CloseClipboard(); }
+                unsafe {
+                    let _ = CloseClipboard();
+                }
             }
         }
         let _guard = CloseGuard;
@@ -232,13 +330,11 @@ fn write_files_platform(_app: &tauri::AppHandle, paths: &[String]) -> Result<(),
     let wide: Vec<Vec<u16>> = paths.iter().map(|p| p.encode_utf16().collect()).collect();
     let header = std::mem::size_of::<DROPFILES>();
     // Each path: its chars + NUL. Then one extra NUL terminating the whole list.
-    let total = header
-        + wide.iter().map(|w| (w.len() + 1) * 2).sum::<usize>()
-        + 2;
+    let total = header + wide.iter().map(|w| (w.len() + 1) * 2).sum::<usize>() + 2;
 
     unsafe {
-        let hglobal = GlobalAlloc(GMEM_MOVEABLE, total)
-            .map_err(|e| format!("GlobalAlloc failed: {e}"))?;
+        let hglobal =
+            GlobalAlloc(GMEM_MOVEABLE, total).map_err(|e| format!("GlobalAlloc failed: {e}"))?;
         let ptr = GlobalLock(hglobal);
         if ptr.is_null() {
             let _ = windows::Win32::Foundation::GlobalFree(Some(hglobal));
@@ -267,7 +363,9 @@ fn write_files_platform(_app: &tauri::AppHandle, paths: &[String]) -> Result<(),
         struct CloseGuard;
         impl Drop for CloseGuard {
             fn drop(&mut self) {
-                unsafe { let _ = CloseClipboard(); }
+                unsafe {
+                    let _ = CloseClipboard();
+                }
             }
         }
         let _guard = CloseGuard;
@@ -292,8 +390,8 @@ fn write_files_platform(_app: &tauri::AppHandle, paths: &[String]) -> Result<(),
 
 #[cfg(target_os = "linux")]
 fn read_files_platform(_app: &tauri::AppHandle) -> Result<Vec<String>, String> {
-    let mut clipboard = arboard::Clipboard::new()
-        .map_err(|e| format!("failed to open clipboard: {e}"))?;
+    let mut clipboard =
+        arboard::Clipboard::new().map_err(|e| format!("failed to open clipboard: {e}"))?;
     let text = clipboard
         .get_text()
         .map_err(|e| format!("failed to read clipboard text: {e}"))?;
@@ -309,8 +407,8 @@ fn read_files_platform(_app: &tauri::AppHandle) -> Result<Vec<String>, String> {
 #[cfg(target_os = "linux")]
 fn write_files_platform(_app: &tauri::AppHandle, paths: &[String]) -> Result<(), String> {
     let payload = build_uri_list(paths);
-    let mut clipboard = arboard::Clipboard::new()
-        .map_err(|e| format!("failed to open clipboard: {e}"))?;
+    let mut clipboard =
+        arboard::Clipboard::new().map_err(|e| format!("failed to open clipboard: {e}"))?;
     clipboard
         .set_text(payload)
         .map_err(|e| format!("failed to write clipboard text: {e}"))
@@ -413,7 +511,8 @@ mod tests {
 
     #[test]
     fn parse_skips_comments_blank_and_non_file() {
-        let text = "# comment\r\n\r\nfile:///a.txt\r\nhttps://example.com/x\r\nfile://remote/share/f";
+        let text =
+            "# comment\r\n\r\nfile:///a.txt\r\nhttps://example.com/x\r\nfile://remote/share/f";
         assert_eq!(parse_uri_list(text), vec!["/a.txt".to_string()]);
     }
 
@@ -438,7 +537,10 @@ mod tests {
 
     #[test]
     fn roundtrip_uri_list() {
-        let paths = vec!["/home/user/my file.txt".to_string(), "/tmp/ünïcode/".to_string()];
+        let paths = vec![
+            "/home/user/my file.txt".to_string(),
+            "/tmp/ünïcode/".to_string(),
+        ];
         let payload = build_uri_list(&paths);
         assert_eq!(parse_uri_list(&payload), paths);
     }
@@ -459,5 +561,40 @@ mod tests {
     fn percent_decode_keeps_literal_percent_without_hex() {
         assert_eq!(percent_decode("100% done"), "100% done");
         assert_eq!(percent_decode("%zz"), "%zz");
+    }
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::*;
+
+    #[test]
+    fn cleanup_removes_previous_batches_and_keeps_excluded_paths() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("clipboard-downloads");
+        let nested = dir.join("old-batch");
+        std::fs::create_dir_all(&nested).unwrap();
+        let current = dir.join("current.txt");
+        let old = nested.join("old.txt");
+        std::fs::write(&current, b"current").unwrap();
+        std::fs::write(&old, b"old").unwrap();
+
+        let excluded = vec![std::fs::canonicalize(&current).unwrap()];
+        let removed = cleanup_clipboard_cache_dir(&dir, &excluded, None).unwrap();
+
+        assert!(current.exists());
+        assert!(!old.exists());
+        assert!(!nested.exists());
+        assert_eq!(removed.len(), 2);
+    }
+
+    #[test]
+    fn cleanup_accepts_missing_directory() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(
+            cleanup_clipboard_cache_dir(&root.path().join("missing"), &[], None)
+                .unwrap()
+                .is_empty()
+        );
     }
 }

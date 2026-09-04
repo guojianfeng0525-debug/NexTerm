@@ -64,7 +64,9 @@ async fn connects_to_real_xrdp_and_renders_first_screen() {
         eprintln!("RDP_TEST_HOST not set — skipping live RDP test");
         return;
     }
-    let port: u16 = env_or("RDP_TEST_PORT", "3389").parse().expect("valid RDP_TEST_PORT");
+    let port: u16 = env_or("RDP_TEST_PORT", "3389")
+        .parse()
+        .expect("valid RDP_TEST_PORT");
     let username = env_or("RDP_TEST_USER", "rdpuser");
     let password = env_or("RDP_TEST_PASS", "rdppass");
     let width: u16 = 1280;
@@ -108,7 +110,10 @@ async fn connects_to_real_xrdp_and_renders_first_screen() {
         .send_key(0x41, false, None, None)
         .await
         .expect("key release");
-    client.send_pointer(400, 300, 0).await.expect("pointer move");
+    client
+        .send_pointer(400, 300, 0)
+        .await
+        .expect("pointer move");
 
     // Collect frames for up to 15 s; openbox + xterm should paint quickly.
     let mut screen = vec![0u8; screen_w as usize * screen_h as usize * 4];
@@ -116,9 +121,7 @@ async fn connects_to_real_xrdp_and_renders_first_screen() {
     let mut saw_clipboard_cap = false;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     while tokio::time::Instant::now() < deadline {
-        let Ok(event) =
-            tokio::time::timeout_at(deadline, event_rx.recv()).await
-        else {
+        let Ok(event) = tokio::time::timeout_at(deadline, event_rx.recv()).await else {
             break;
         };
         match event {
@@ -163,7 +166,10 @@ async fn connects_to_real_xrdp_and_renders_first_screen() {
 
     // Clipboard advertise → remote paste request round-trip must not break
     // the session (verified implicitly: disconnect afterwards succeeds).
-    client.set_clipboard("NexTerm RDP live test ✓".to_owned()).await.expect("set clipboard");
+    client
+        .set_clipboard("NexTerm RDP live test ✓".to_owned())
+        .await
+        .expect("set clipboard");
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     client.disconnect().await.expect("graceful disconnect");
@@ -196,7 +202,19 @@ async fn connects_to_xrdp_through_jump_host() {
         eprintln!("RDP_JUMP_HOST not set — skipping live RDP jump test");
         return;
     }
-    let port: u16 = env_or("RDP_TEST_PORT", "3389").parse().expect("valid RDP_TEST_PORT");
+    let port: u16 = env_or("RDP_TEST_PORT", "3389")
+        .parse()
+        .expect("valid RDP_TEST_PORT");
+
+    let jump_port: u16 = std::env::var("RDP_JUMP_PORT")
+        .ok()
+        .and_then(|p| p.parse::<u16>().ok())
+        .unwrap_or(22022);
+    // Live integration tests pin the current fixture key before authentication;
+    // product code obtains this consent through the connection dialog.
+    let jump_fingerprint = nexterm_lib::ssh::probe_host_key(&jump_host, jump_port)
+        .await
+        .expect("probe jump-host key");
 
     let config = nexterm_lib::desktop_protocol::RdpConfig {
         host,
@@ -208,29 +226,37 @@ async fn connects_to_xrdp_through_jump_host() {
         height: 720,
         jump_host: Some(nexterm_lib::desktop_protocol::JumpHostConfig {
             host: jump_host,
-            port: std::env::var("RDP_JUMP_PORT")
-                .ok()
-                .and_then(|p| p.parse::<u16>().ok())
-                .or(Some(22022)),
+            port: Some(jump_port),
             username: Some(env_or("RDP_JUMP_USER", "jumpuser")),
             password: Some(env_or("RDP_JUMP_PASS", "jumppass")),
             use_key: Some(false),
             key_path: None,
+            passphrase: None,
+            host_key_fingerprint: Some(jump_fingerprint),
         }),
     };
 
-    eprintln!("connecting via jump to {}:{} (NLA)", config.host, config.port);
+    eprintln!(
+        "connecting via jump to {}:{} (NLA)",
+        config.host, config.port
+    );
     let mut client = RdpClient::connect(&config)
         .await
         .expect("RDP connection through the jump-host tunnel");
 
     let (screen_w, screen_h) = client.desktop_size();
     eprintln!("connected; desktop size {screen_w}x{screen_h}");
-    assert!(screen_w >= 640 && screen_h >= 480, "unreasonable desktop size");
+    assert!(
+        screen_w >= 640 && screen_h >= 480,
+        "unreasonable desktop size"
+    );
 
     let (event_tx, mut event_rx) = mpsc::unbounded_channel::<DesktopEvent>();
     let cancel = CancellationToken::new();
-    client.start_frame_loop(event_tx, cancel.clone()).await.expect("start frame loop");
+    client
+        .start_frame_loop(event_tx, cancel.clone())
+        .await
+        .expect("start frame loop");
 
     let mut screen = vec![0u8; screen_w as usize * screen_h as usize * 4];
     let mut frame_count = 0usize;
@@ -255,7 +281,10 @@ async fn connects_to_xrdp_through_jump_host() {
     assert!(frame_count > 0, "no graphics frames arrived within 15 s");
     let distinct = distinct_byte_values(&screen);
     eprintln!("distinct byte values in composited screen: {distinct}");
-    assert!(distinct >= 8, "screen looks uniform ({distinct} distinct bytes)");
+    assert!(
+        distinct >= 8,
+        "screen looks uniform ({distinct} distinct bytes)"
+    );
 
     // Dump the composited tunnel screen for PNG encoding + visual verification.
     std::fs::write("/tmp/rdp-jump-frame.bin", &screen).expect("write frame dump");

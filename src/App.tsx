@@ -81,6 +81,9 @@ function buildDesktopJumpHost(source: {
   jumpUsername?: string;
   jumpPassword?: string;
   jumpUseKey?: boolean;
+  privateKeyPath?: string;
+  passphrase?: string;
+  jumpHostKeyFingerprint?: string;
 }) {
   if (!source.jumpHost?.trim()) return null;
   return {
@@ -89,6 +92,9 @@ function buildDesktopJumpHost(source: {
     username: source.jumpUsername ?? null,
     password: source.jumpPassword ?? null,
     useKey: source.jumpUseKey ?? false,
+    keyPath: source.jumpUseKey ? (source.privateKeyPath || null) : null,
+    passphrase: source.jumpUseKey ? (source.passphrase || null) : null,
+    hostKeyFingerprint: source.jumpHostKeyFingerprint || null,
   };
 }
 

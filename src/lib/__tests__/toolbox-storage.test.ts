@@ -49,11 +49,17 @@ describe('toolbox storage', () => {
       listenPort: 3306,
       remoteHost: 'db.example.com',
       remotePort: 3306,
+      jumpHost: 'bastion.example.com',
+      jumpPort: 22,
+      jumpUsername: 'jumpuser',
+      jumpPassword: 'secret',
+      jumpHostKeyFingerprint: 'SHA256:tunnel-key',
       createdAt: 1,
       updatedAt: 1,
     };
     TunnelsStorage.upsert(tunnel);
     expect(TunnelsStorage.load()[0].remoteHost).toBe('db.example.com');
+    expect(TunnelsStorage.load()[0].jumpHostKeyFingerprint).toBe('SHA256:tunnel-key');
   });
 
   it('services: round-trips configs', () => {

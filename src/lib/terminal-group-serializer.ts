@@ -1,5 +1,5 @@
 import type { TerminalGroupState, TerminalGroup, TerminalTab, GridNode } from './terminal-group-types';
-import { rowList, rowUpsert, rowClear, legacyDbGet, type Row } from './toolbox/db';
+import { rowList, workspaceReplace, legacyDbGet, type Row } from './toolbox/db';
 
 /** Coerce an unknown DB value to string ('' when absent). */
 function str(v: unknown): string {
@@ -171,38 +171,30 @@ function buildGridChild(row: Row): GridNode {
 
 /** Persist the whole workspace state (clear + rewrite all four tables). */
 async function persistWorkspace(state: TerminalGroupState): Promise<void> {
-  await Promise.all([
-    rowClear('workspace_meta'),
-    rowClear('workspace_groups'),
-    rowClear('workspace_tabs'),
-    rowClear('workspace_grid_nodes'),
-  ]);
-
-  await rowUpsert('workspace_meta', {
+  const meta = {
     id: 1,
     active_group_id: state.activeGroupId,
     next_group_id: state.nextGroupId,
     updated_at: Date.now(),
-  });
+  };
 
   const groupIds = Object.keys(state.groups);
-  await Promise.all(
-    groupIds.map(async (groupId, index) => {
-      const group = state.groups[groupId];
-      await rowUpsert('workspace_groups', {
-        group_id: groupId,
-        position: index,
-        active_tab_id: group.activeTabId ?? null,
-      });
-      await Promise.all(
-        group.tabs.map((tab, tabIndex) => rowUpsert('workspace_tabs', tabToRow(groupId, tabIndex, tab))),
-      );
-    }),
-  );
+  const groups = groupIds.map((groupId, index) => {
+    const group = state.groups[groupId];
+    return {
+      group_id: groupId,
+      position: index,
+      active_tab_id: group.activeTabId ?? null,
+    };
+  });
+  const tabs = groupIds.flatMap((groupId) => {
+    const group = state.groups[groupId];
+    return group.tabs.map((tab, tabIndex) => tabToRow(groupId, tabIndex, tab));
+  });
 
   const gridRows: Row[] = [];
   flattenGrid(state.gridLayout, '0', null, 0, 1, gridRows);
-  await Promise.all(gridRows.map(row => rowUpsert('workspace_grid_nodes', row)));
+  await workspaceReplace({ meta, groups, tabs, gridNodes: gridRows });
 }
 
 /** Rebuild a TerminalGroupState from the normalized workspace tables. */

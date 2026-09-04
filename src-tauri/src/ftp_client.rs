@@ -49,7 +49,10 @@ impl FtpClient {
     /// layer currently goes through the `*_with_progress` variants.
     #[allow(dead_code)]
     pub fn new() -> Self {
-        Self { stream: None, config: None }
+        Self {
+            stream: None,
+            config: None,
+        }
     }
 
     /// Connect to an FTP server, authenticate, and switch to binary transfer mode.
@@ -83,8 +86,10 @@ impl FtpClient {
 
             tracing::info!("FTPS TCP connected, starting TLS handshake...");
 
-            let tls_connector =
-                suppaftp::async_native_tls::TlsConnector::new().danger_accept_invalid_certs(true);
+            // Validate the server certificate chain against the platform trust
+            // store. FTPS must not silently downgrade to "encrypted but
+            // unauthenticated"; users can install a trusted CA instead.
+            let tls_connector = suppaftp::async_native_tls::TlsConnector::new();
             let secure_stream = ftp_stream
                 .into_secure(
                     suppaftp::AsyncNativeTlsConnector::from(tls_connector),

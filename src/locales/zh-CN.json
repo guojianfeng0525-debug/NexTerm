@@ -1898,7 +1898,12 @@
       "jumpFromServerHint": "选择一个已保存的服务器自动填充跳板机信息",
       "selectServerPlaceholder": "选择服务器…",
       "jumpServerCleared": "已清空跳板机",
-      "jumpFromServerNoSsh": "无可用服务器"
+      "jumpFromServerNoSsh": "无可用服务器",
+      "hostKeyTitle": "信任跳板机主机密钥？",
+      "hostKeyDescription": "将固定 {{host}}:{{port}} 的跳板机主机密钥。如果指纹发生变化，可能是服务器重装，也可能是中间人攻击。仅在确认可信后继续。",
+      "hostKeyTrust": "信任并启动",
+      "hostKeyProbeFailed": "跳板机主机密钥探测失败",
+      "hostKeyFingerprint": "指纹"
     },
     "services": {
       "title": "本地服务",

@@ -49,6 +49,13 @@ export type DbTable =
 
 export type Row = Record<string, unknown>;
 
+export interface WorkspaceReplaceRequest {
+  readonly meta: Row;
+  readonly groups: readonly Row[];
+  readonly tabs: readonly Row[];
+  readonly gridNodes: readonly Row[];
+}
+
 /* ── row access on normalized tables ─────────────────────────────────────── */
 
 /** Upsert one row (must include the primary key column with a non-empty value). */
@@ -101,6 +108,11 @@ export async function rowClear(table: DbTable): Promise<void> {
   } catch {
     /* ignore */
   }
+}
+
+/** Atomically replace all normalized terminal-workspace rows. */
+export function workspaceReplace(request: WorkspaceReplaceRequest): Promise<void> {
+  return invoke('workspace_replace', { request });
 }
 
 /** Retain the newest learned command-stat rows. */

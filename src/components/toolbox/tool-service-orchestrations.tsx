@@ -330,10 +330,11 @@ export function ServiceOrchestrations() {
                   remote_host: cfg.remoteHost,
                   remote_port: cfg.remotePort,
                   jump_host: cfg.jumpHost ?? null,
-                  jump_port: cfg.jumpPort ?? null,
-                  jump_username: cfg.jumpUsername ?? null,
-                  jump_password: cfg.jumpPassword ?? null,
-                },
+              jump_port: cfg.jumpPort ?? null,
+              jump_username: cfg.jumpUsername ?? null,
+              jump_password: cfg.jumpPassword ?? null,
+              jump_host_key_fingerprint: cfg.jumpHostKeyFingerprint ?? null,
+            },
               });
             } else {
               const cfg = services.find((c) => c.id === item.id);

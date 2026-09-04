@@ -146,6 +146,7 @@ function installInvoke(overrides: Record<string, () => unknown> = {}) {
     upload_remote_file: () => ({ success: true }),
     download_remote_file: () => ({ success: true }),
     clipboard_write_files: () => null,
+    clipboard_cleanup_cache: () => [],
     copy_file: () => true,
   };
   const impl = { ...defaults, ...overrides };
@@ -225,6 +226,15 @@ describe('IntegratedFileBrowser system-clipboard Ctrl+C', () => {
     expect(invokeCalls('clipboard_write_files')[0][1].paths.sort()).toEqual(
       [`${CACHE_DIR}/alpha.txt`, `${CACHE_DIR}/beta.log`],
     );
+    // The latest clipboard batch is retained for Finder/Explorer paste, while
+    // older staged downloads are removed.
+    await waitFor(() => {
+      expect(invokeCalls('clipboard_cleanup_cache')).toHaveLength(1);
+    });
+    expect(invokeCalls('clipboard_cleanup_cache')[0][1]).toEqual({
+      excludePaths: [`${CACHE_DIR}/alpha.txt`, `${CACHE_DIR}/beta.log`],
+      maxAgeSecs: 0,
+    });
     // 4. Downloading + done toasts.
     expect(
       mocks.info.mock.calls.some(([m]) => String(m).includes('system clipboard')),

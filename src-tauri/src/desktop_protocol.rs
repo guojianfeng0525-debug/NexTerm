@@ -59,7 +59,13 @@ pub trait DesktopProtocol: Send + Sync {
     /// provides them. RDP uses them to emit sync events (Windows hosts track
     /// toggles there rather than on raw CapsLock scancodes); VNC uses
     /// `caps_lock` to case-resolve letter keysyms.
-    async fn send_key(&self, key_code: u32, down: bool, caps_lock: Option<bool>, num_lock: Option<bool>) -> Result<()>;
+    async fn send_key(
+        &self,
+        key_code: u32,
+        down: bool,
+        caps_lock: Option<bool>,
+        num_lock: Option<bool>,
+    ) -> Result<()>;
 
     /// Send a pointer (mouse) event to the remote host.
     async fn send_pointer(&self, x: u16, y: u16, button_mask: u8) -> Result<()>;
@@ -100,6 +106,10 @@ pub struct JumpHostConfig {
     /// Authenticate on the jump host with a key instead of a password.
     pub use_key: Option<bool>,
     pub key_path: Option<String>,
+    pub passphrase: Option<String>,
+    /// Pinned SSH host-key fingerprint. Desktop jump tunnels are fail-closed:
+    /// the renderer must obtain user consent before this field is set.
+    pub host_key_fingerprint: Option<String>,
 }
 
 /// Request to establish an RDP or VNC connection.

@@ -676,6 +676,7 @@ pub fn run() {
             clipboard_files::clipboard_read_files,
             clipboard_files::clipboard_write_files,
             clipboard_files::get_clipboard_cache_dir,
+            clipboard_files::clipboard_cleanup_cache,
             // Note: PTY terminal I/O now uses WebSocket instead of IPC
             // WebSocket server runs on a dynamically assigned port (9001-9010)
         ])

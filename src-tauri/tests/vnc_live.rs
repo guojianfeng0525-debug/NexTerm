@@ -220,7 +220,10 @@ async fn vnc_direct_live() {
         collected.frames, collected.distinct_values
     );
     assert_eq!((collected.width, collected.height), (1280, 800));
-    assert!(collected.frames >= 2, "expected multiple framebuffer updates");
+    assert!(
+        collected.frames >= 2,
+        "expected multiple framebuffer updates"
+    );
     assert!(
         collected.distinct_values >= 8,
         "screen looks blank ({} distinct values)",
@@ -239,16 +242,24 @@ async fn vnc_jump_host_live() {
     // The target address is resolved from inside the jump container: use the
     // docker host alias unless overridden.
     config.host = target_host;
+    let jump_port: u16 = std::env::var("VNC_JUMP_PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(22222);
+    // Pin the fixture key explicitly; the product UI performs this probe as
+    // part of first-use consent rather than trusting silently.
+    let jump_fingerprint = nexterm_lib::ssh::probe_host_key(&jump_host, jump_port)
+        .await
+        .expect("probe jump-host key");
     config.jump_host = Some(JumpHostConfig {
         host: jump_host,
-        port: std::env::var("VNC_JUMP_PORT")
-            .ok()
-            .and_then(|p| p.parse().ok())
-            .or(Some(22222)),
+        port: Some(jump_port),
         username: env_opt("VNC_JUMP_USER"),
         password: env_opt("VNC_JUMP_PASS"),
         use_key: Some(false),
         key_path: None,
+        passphrase: None,
+        host_key_fingerprint: Some(jump_fingerprint),
     });
 
     println!(
@@ -265,7 +276,10 @@ async fn vnc_jump_host_live() {
         collected.frames, collected.distinct_values
     );
     assert_eq!((collected.width, collected.height), (1280, 800));
-    assert!(collected.frames >= 2, "expected multiple framebuffer updates");
+    assert!(
+        collected.frames >= 2,
+        "expected multiple framebuffer updates"
+    );
     assert!(
         collected.distinct_values >= 8,
         "screen looks blank ({} distinct values)",

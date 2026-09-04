@@ -7,9 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **RDP/VNC 跳板机主机密钥强制 pin**：`desktop_connect` 现在携带用户已确认的跳板机指纹、key path 与 passphrase；后端缺失指纹即拒绝建隧道，指纹变化继续 fail-closed，修复“UI 确认过但实际连接未验证”的 MITM 风险。
+- **远程隧道跳板机同样强制 TOFU/pin**：启动带跳板机的 tunnel 前先探测并展示指纹确认框，确认后加密持久化；后端拒绝无指纹隧道，指纹变化需重新确认，且停止隧道时会等待并取消所有 in-flight 转发任务。
+- **FTPS 恢复证书校验**：不再接受任意无效证书，TLS 证书链必须通过系统信任库验证。
+
 ### Fixed
 
 - **PostgreSQL 执行选中 SQL 不再丢失未选中文本**：修复“运行选择/当前语句”把选区片段误写回整个编辑器导致未选中 SQL 被删除的问题；现在仅把片段发送到后端执行，编辑器完整文档保持不变，并新增原生桌面 E2E 回归覆盖。
+- **RDP/VNC 跳板机公钥认证修复**：跳板机复用目标私钥时完整传递 key path 与 passphrase，不再退化为空 key path。
+- **远程桌面会话结束状态修复**：后端 `Terminated/Error` 或 WebSocket 意断后立即切换到可重连的断开视图；组件卸载时也会关闭仍在 CONNECTING 的 WebSocket，避免孤儿连接。
+- **系统剪贴板文件缓存治理**：新一轮复制成功后清理旧批次下载，只保留当前可粘贴文件；获取缓存目录时自动清理超过 24 小时的遗留文件，降低敏感文件残留与磁盘膨胀风险。
+- **终端工作区持久化原子化**：workspace 四张表的清空/重写改为单一 SQLite 事务；任一行失败都会回滚到旧快照，避免半写入导致布局丢失。
 
 ## [2.16.4] - 2026-09-03
 

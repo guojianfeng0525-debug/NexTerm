@@ -1169,8 +1169,7 @@
     "downloadAndOpen": "Download & Open with Local App",
     "downloading": "Downloading…",
     "openedWithOs": "{{fileName}} opened with local application",
-    "failedToOpenWithOs": "Failed to open file with local application"
-    ,
+    "failedToOpenWithOs": "Failed to open file with local application",
     "encodingLabel": "Text encoding",
     "encodingTooltip": "Clean file: reload with this encoding. Modified file: convert to this encoding when saving.",
     "decodeReplacements": "Decoded with replacements"
@@ -1899,7 +1898,12 @@
       "jumpFromServerHint": "Pick a saved server to prefill the jump host fields",
       "selectServerPlaceholder": "Select a server…",
       "jumpServerCleared": "Jump host cleared",
-      "jumpFromServerNoSsh": "No saved servers"
+      "jumpFromServerNoSsh": "No saved servers",
+      "hostKeyTitle": "Trust jump-host key?",
+      "hostKeyDescription": "The host key for {{host}}:{{port}} will be pinned. A changed fingerprint can mean the server was reinstalled, but it can also indicate a man-in-the-middle attack. Continue only after verifying it.",
+      "hostKeyTrust": "Trust and start",
+      "hostKeyProbeFailed": "Failed to probe jump-host key",
+      "hostKeyFingerprint": "Fingerprint"
     },
     "services": {
       "title": "Local Services",

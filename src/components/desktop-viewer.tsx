@@ -40,6 +40,7 @@ export function DesktopViewer({
   const [scalingMode, setScalingMode] = useState<'fit' | 'native'>('fit');
   const [isFullScreen, setIsFullScreen] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
+  const [sessionEnded, setSessionEnded] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
 
   // Calculate displayed dimensions
@@ -77,6 +78,7 @@ export function DesktopViewer({
       }
 
       if (cancelled) return;
+      setSessionEnded(false);
 
       ws = new WebSocket(`ws://127.0.0.1:${wsPort}`);
       ws.binaryType = 'arraybuffer';
@@ -109,12 +111,14 @@ export function DesktopViewer({
             if (typeof msg.width === 'number' && msg.width > 0) setDesktopWidth(msg.width);
             if (typeof msg.height === 'number' && msg.height > 0) setDesktopHeight(msg.height);
             setIsLoading(false);
+            setSessionEnded(false);
           } else if (msg.type === 'ClipboardUpdate' && msg.connection_id === connectionId) {
             // Write incoming remote clipboard text to local clipboard
             writeClipboardText(msg.text).catch(() => {
               // Clipboard write denied — silently ignore
             });
           } else if (msg.type === 'Error') {
+            setSessionEnded(true);
             toast.error(t('desktopViewer.sessionEnded'), {
               description: String(msg.message ?? ''),
             });
@@ -126,6 +130,7 @@ export function DesktopViewer({
 
       ws.onclose = () => {
         wsRef.current = null;
+        setSessionEnded(true);
       };
     };
 
@@ -138,6 +143,14 @@ export function DesktopViewer({
           type: 'CloseDesktop',
           connection_id: connectionId,
         }));
+      }
+      if (
+        ws &&
+        (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)
+      ) {
+        ws.onmessage = null;
+        ws.onclose = null;
+        ws.onerror = null;
         ws.close();
       }
       wsRef.current = null;
@@ -333,7 +346,7 @@ export function DesktopViewer({
   }, [connectionId]);
 
   // Disconnected state
-  if (!isConnected) {
+  if (!isConnected || sessionEnded) {
     return (
       <div className="h-full w-full flex items-center justify-center bg-muted/30">
         <div className="text-center space-y-4">

@@ -54,6 +54,12 @@ export function createTestIpc(): TestIpc {
         row?: Record<string, unknown>;
         key?: string | number;
         id?: string | number;
+        request?: {
+          meta?: Record<string, unknown>;
+          groups?: Record<string, unknown>[];
+          tabs?: Record<string, unknown>[];
+          gridNodes?: Record<string, unknown>[];
+        };
       },
     ) => {
       const table = args?.table ?? '';
@@ -84,6 +90,14 @@ export function createTestIpc(): TestIpc {
         }
         case 'row_clear': {
           DB[table] = [];
+          return Promise.resolve();
+        }
+        case 'workspace_replace': {
+          const request = args?.request ?? {};
+          DB.workspace_meta = request.meta ? [{ ...request.meta }] : [];
+          DB.workspace_groups = [...(request.groups ?? [])];
+          DB.workspace_tabs = [...(request.tabs ?? [])];
+          DB.workspace_grid_nodes = [...(request.gridNodes ?? [])];
           return Promise.resolve();
         }
         case 'legacy_db_get': {

@@ -13,12 +13,16 @@
 //! migrate its data into the normalized tables before `drop_legacy_tables`
 //! removes them.
 
-use aes_gcm::{aead::{Aead, KeyInit}, Aes256Gcm, Nonce};
+use aes_gcm::{
+    aead::{Aead, KeyInit},
+    Aes256Gcm, Nonce,
+};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use pbkdf2::pbkdf2_hmac;
 use rand::{rngs::OsRng, RngCore};
 use rusqlite::types::{Value as SqlValue, ValueRef};
 use rusqlite::{params_from_iter, Connection, DatabaseName, Row};
+use serde::Deserialize;
 use serde_json::{Map as JsonMap, Value as JsonValue};
 use std::sync::{Arc, Mutex};
 use tauri::State;
@@ -157,18 +161,47 @@ impl DbState {
                 "jump_use_key INTEGER NOT NULL DEFAULT 0",
             ),
             ("connections", "default_directory", "default_directory TEXT"),
-            ("connections", "terminal_encoding", "terminal_encoding TEXT NOT NULL DEFAULT 'utf-8'"),
-            ("connections", "terminal_startup_mode", "terminal_startup_mode TEXT NOT NULL DEFAULT 'safe'"),
-            ("connections", "host_key_fingerprint", "host_key_fingerprint TEXT"),
-            ("connections", "jump_host_key_fingerprint", "jump_host_key_fingerprint TEXT"),
+            (
+                "connections",
+                "terminal_encoding",
+                "terminal_encoding TEXT NOT NULL DEFAULT 'utf-8'",
+            ),
+            (
+                "connections",
+                "terminal_startup_mode",
+                "terminal_startup_mode TEXT NOT NULL DEFAULT 'safe'",
+            ),
+            (
+                "connections",
+                "host_key_fingerprint",
+                "host_key_fingerprint TEXT",
+            ),
+            (
+                "connections",
+                "jump_host_key_fingerprint",
+                "jump_host_key_fingerprint TEXT",
+            ),
             ("toolbox_apps", "args", "args TEXT"),
             ("toolbox_apps", "work_dir", "work_dir TEXT"),
             ("tunnels", "jump_host", "jump_host TEXT"),
             ("tunnels", "jump_port", "jump_port INTEGER"),
             ("tunnels", "jump_username", "jump_username TEXT"),
             ("tunnels", "jump_password", "jump_password TEXT"),
-            ("postgres_connections", "ssh_private_key_path", "ssh_private_key_path TEXT"),
-            ("postgres_connections", "ssh_connection_id", "ssh_connection_id TEXT"),
+            (
+                "tunnels",
+                "jump_host_key_fingerprint",
+                "jump_host_key_fingerprint TEXT",
+            ),
+            (
+                "postgres_connections",
+                "ssh_private_key_path",
+                "ssh_private_key_path TEXT",
+            ),
+            (
+                "postgres_connections",
+                "ssh_connection_id",
+                "ssh_connection_id TEXT",
+            ),
             (
                 "app_settings",
                 "command_suggestions",
@@ -296,7 +329,10 @@ impl DbState {
 
     /// Remove all but the newest document versions, returning the deleted row count.
     pub fn documents_prune_versions(&self, keep: u32) -> Result<usize, String> {
-        let conn = self.conn.lock().map_err(|_| "db lock poisoned".to_string())?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| "db lock poisoned".to_string())?;
         conn.execute(
             "DELETE FROM document_versions WHERE id IN (
                 SELECT id FROM (
@@ -326,7 +362,11 @@ impl DbState {
     }
 
     /// Create a consistent SQLite snapshot and encrypt it directly to a backup file.
-    pub fn export_encrypted_backup(&self, password: &str, output_path: &std::path::Path) -> Result<(), String> {
+    pub fn export_encrypted_backup(
+        &self,
+        password: &str,
+        output_path: &std::path::Path,
+    ) -> Result<(), String> {
         if password.len() < 8 {
             return Err("backup password must be at least 8 characters".to_string());
         }
@@ -337,7 +377,10 @@ impl DbState {
             // CPU/IO-heavy and must not block concurrent small writes
             // (row_upsert etc.) on the same lock (audit P0-2).
             {
-                let conn = self.conn.lock().map_err(|_| "db lock poisoned".to_string())?;
+                let conn = self
+                    .conn
+                    .lock()
+                    .map_err(|_| "db lock poisoned".to_string())?;
                 conn.backup(DatabaseName::Main, &temp, None)
                     .map_err(|e| format!("snapshot database: {e}"))?;
             }
@@ -359,7 +402,8 @@ impl DbState {
                 salt: BASE64.encode(salt),
                 payload: BASE64.encode(payload),
             };
-            let json = serde_json::to_vec(&envelope).map_err(|e| format!("serialize backup: {e}"))?;
+            let json =
+                serde_json::to_vec(&envelope).map_err(|e| format!("serialize backup: {e}"))?;
             std::fs::write(output_path, json).map_err(|e| format!("write backup: {e}"))
         })();
         let _ = std::fs::remove_file(&temp);
@@ -368,14 +412,23 @@ impl DbState {
 
     /// Restore a complete encrypted SQLite snapshot. The caller must relaunch
     /// afterwards so the source backup's app-lock metadata is reloaded.
-    pub fn restore_encrypted_backup(&self, password: &str, input_path: &std::path::Path) -> Result<(), String> {
+    pub fn restore_encrypted_backup(
+        &self,
+        password: &str,
+        input_path: &std::path::Path,
+    ) -> Result<(), String> {
         let raw = std::fs::read(input_path).map_err(|e| format!("read backup: {e}"))?;
-        let envelope: EncryptedBackup = serde_json::from_slice(&raw).map_err(|_| "invalid backup file".to_string())?;
+        let envelope: EncryptedBackup =
+            serde_json::from_slice(&raw).map_err(|_| "invalid backup file".to_string())?;
         if envelope.format != BACKUP_MAGIC || envelope.version != 1 {
             return Err("unsupported backup format".to_string());
         }
-        let salt = BASE64.decode(envelope.salt).map_err(|_| "invalid backup salt".to_string())?;
-        let payload = BASE64.decode(envelope.payload).map_err(|_| "invalid backup payload".to_string())?;
+        let salt = BASE64
+            .decode(envelope.salt)
+            .map_err(|_| "invalid backup salt".to_string())?;
+        let payload = BASE64
+            .decode(envelope.payload)
+            .map_err(|_| "invalid backup payload".to_string())?;
         if salt.len() != 16 || payload.len() <= 12 {
             return Err("invalid backup data".to_string());
         }
@@ -395,9 +448,16 @@ impl DbState {
                 return Err("backup integrity check failed".to_string());
             }
             drop(source);
-            let mut conn = self.conn.lock().map_err(|_| "db lock poisoned".to_string())?;
-            conn.restore(DatabaseName::Main, &temp, None::<fn(rusqlite::backup::Progress)>)
-                .map_err(|e| format!("restore database: {e}"))
+            let mut conn = self
+                .conn
+                .lock()
+                .map_err(|_| "db lock poisoned".to_string())?;
+            conn.restore(
+                DatabaseName::Main,
+                &temp,
+                None::<fn(rusqlite::backup::Progress)>,
+            )
+            .map_err(|e| format!("restore database: {e}"))
         })();
         let _ = std::fs::remove_file(&temp);
         result
@@ -709,12 +769,20 @@ pub fn row_upsert(
     row: JsonMap<String, JsonValue>,
     state: State<'_, Arc<DbState>>,
 ) -> Result<(), String> {
-    validate_table(&table)?;
-    let pk = pk_column(&table)?.to_string();
     let conn = state
         .conn
         .lock()
         .map_err(|_| "db lock poisoned".to_string())?;
+    upsert_row(&conn, &table, &row)
+}
+
+fn upsert_row(
+    conn: &Connection,
+    table: &str,
+    row: &JsonMap<String, JsonValue>,
+) -> Result<(), String> {
+    validate_table(&table)?;
+    let pk = pk_column(&table)?.to_string();
     let columns = table_columns(&conn, &table)?;
 
     let mut names: Vec<String> = Vec::new();
@@ -775,6 +843,69 @@ pub fn row_upsert(
             format!("upsert: {}", e)
         })?;
     Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceReplaceRequest {
+    pub meta: JsonMap<String, JsonValue>,
+    pub groups: Vec<JsonMap<String, JsonValue>>,
+    pub tabs: Vec<JsonMap<String, JsonValue>>,
+    pub grid_nodes: Vec<JsonMap<String, JsonValue>>,
+}
+
+/// Atomically replace the normalized terminal-workspace tables.
+///
+/// The old frontend flow cleared four tables and then issued many independent
+/// upserts. A crash or SQLite error between those IPCs could leave a partially
+/// cleared workspace. This command performs all deletes and inserts in one
+/// SQLite transaction, so persisted state is either the complete old snapshot
+/// or the complete new snapshot.
+#[tauri::command]
+pub fn workspace_replace(
+    request: WorkspaceReplaceRequest,
+    state: State<'_, Arc<DbState>>,
+) -> Result<(), String> {
+    let mut conn = state
+        .conn
+        .lock()
+        .map_err(|_| "db lock poisoned".to_string())?;
+    replace_workspace(&mut conn, &request)
+}
+
+fn replace_workspace(
+    conn: &mut Connection,
+    request: &WorkspaceReplaceRequest,
+) -> Result<(), String> {
+    let transaction = conn
+        .transaction()
+        .map_err(|e| format!("failed to begin workspace transaction: {e}"))?;
+
+    for table in [
+        "workspace_meta",
+        "workspace_groups",
+        "workspace_tabs",
+        "workspace_grid_nodes",
+    ] {
+        transaction
+            .execute(&format!("DELETE FROM \"{table}\""), [])
+            .map_err(|e| format!("failed to clear workspace table {table}: {e}"))?;
+    }
+
+    upsert_row(&transaction, "workspace_meta", &request.meta)?;
+    for row in &request.groups {
+        upsert_row(&transaction, "workspace_groups", row)?;
+    }
+    for row in &request.tabs {
+        upsert_row(&transaction, "workspace_tabs", row)?;
+    }
+    for row in &request.grid_nodes {
+        upsert_row(&transaction, "workspace_grid_nodes", row)?;
+    }
+
+    transaction
+        .commit()
+        .map_err(|e| format!("failed to commit workspace transaction: {e}"))
 }
 
 /// Read one row by primary key.
@@ -915,11 +1046,9 @@ pub async fn database_vacuum(state: State<'_, Arc<DbState>>) -> Result<(), Strin
     // rest of the IPC surface) stays responsive (audit P0-2).
     let db = Arc::clone(state.inner());
     tauri::async_runtime::spawn_blocking(move || {
-        let conn = db
-            .conn
-            .lock()
-            .map_err(|_| "db lock poisoned".to_string())?;
-        conn.execute_batch("VACUUM").map_err(|e| format!("vacuum: {e}"))
+        let conn = db.conn.lock().map_err(|_| "db lock poisoned".to_string())?;
+        conn.execute_batch("VACUUM")
+            .map_err(|e| format!("vacuum: {e}"))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -1115,6 +1244,7 @@ CREATE TABLE IF NOT EXISTS "tunnels" (
   jump_port INTEGER,
   jump_username TEXT,
   jump_password TEXT,
+  jump_host_key_fingerprint TEXT,
   group_name TEXT,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
@@ -1521,6 +1651,81 @@ mod upsert_tests {
     }
 
     #[test]
+    fn workspace_replace_rolls_back_when_any_row_is_invalid() {
+        let state = open_test_db();
+        let request = WorkspaceReplaceRequest {
+            meta: serde_json::from_value(json!({
+                "id": 1,
+                "active_group_id": "g1",
+                "next_group_id": 2,
+                "updated_at": 1
+            }))
+            .unwrap(),
+            groups: vec![serde_json::from_value(json!({
+                "group_id": "g1",
+                "position": 0,
+                "active_tab_id": "t1"
+            }))
+            .unwrap()],
+            tabs: vec![serde_json::from_value(json!({
+                "tab_id": "t1",
+                "group_id": "g1",
+                "position": 0,
+                "name": "Terminal"
+            }))
+            .unwrap()],
+            grid_nodes: vec![serde_json::from_value(json!({
+                "node_id": "0",
+                "type": "leaf",
+                "direction": null,
+                "parent_id": null,
+                "position": 0,
+                "size": 1,
+                "group_id": "g1"
+            }))
+            .unwrap()],
+        };
+        {
+            let mut conn = state.conn.lock().unwrap();
+            replace_workspace(&mut conn, &request).expect("initial workspace replace");
+        }
+
+        let invalid = WorkspaceReplaceRequest {
+            meta: serde_json::from_value(json!({
+                "id": 1,
+                "active_group_id": "g2",
+                "next_group_id": 3,
+                "updated_at": 2
+            }))
+            .unwrap(),
+            groups: Vec::new(),
+            // Missing `tab_id` (the table's primary key) must reject and roll
+            // back the already-cleared/deleted workspace rows.
+            tabs: vec![JsonMap::new()],
+            grid_nodes: Vec::new(),
+        };
+        {
+            let mut conn = state.conn.lock().unwrap();
+            let error = replace_workspace(&mut conn, &invalid).unwrap_err();
+            assert!(error.contains("primary key"));
+        }
+
+        let conn = state.conn.lock().unwrap();
+        let tabs: i64 = conn
+            .query_row("SELECT COUNT(*) FROM workspace_tabs", [], |row| row.get(0))
+            .unwrap();
+        let active_group: String = conn
+            .query_row(
+                "SELECT active_group_id FROM workspace_meta WHERE id=1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(tabs, 1, "failed replacement must preserve the old snapshot");
+        assert_eq!(active_group, "g1");
+    }
+
+    #[test]
     fn upsert_connection_row_with_all_columns() {
         let state = open_test_db();
         let mut row = serde_json::Map::new();
@@ -1567,11 +1772,16 @@ mod upsert_tests {
         row.insert("read_only".into(), json!(0));
         row.insert("created_at".into(), json!(1));
         row.insert("updated_at".into(), json!(1));
-        upsert_raw(&state, "database_sqlite_connections", row).expect("SQLite profile upsert must succeed");
+        upsert_raw(&state, "database_sqlite_connections", row)
+            .expect("SQLite profile upsert must succeed");
 
         let conn = state.conn.lock().unwrap();
         let name: String = conn
-            .query_row("SELECT name FROM database_sqlite_connections WHERE id='sqlite-profile'", [], |row| row.get(0))
+            .query_row(
+                "SELECT name FROM database_sqlite_connections WHERE id='sqlite-profile'",
+                [],
+                |row| row.get(0),
+            )
             .unwrap();
         assert_eq!(name, "Fixture SQLite");
     }

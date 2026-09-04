@@ -67,6 +67,7 @@ interface TunnelFormState {
   jumpPort: string;
   jumpUsername: string;
   jumpPassword: string;
+  jumpHostKeyFingerprint: string;
   description: string;
 }
 
@@ -81,10 +82,16 @@ const EMPTY_FORM: TunnelFormState = {
   jumpPort: '22',
   jumpUsername: '',
   jumpPassword: '',
+  jumpHostKeyFingerprint: '',
   description: '',
 };
 
 const MAX_ACTIVITY = 50;
+
+interface PendingJumpTrust {
+  config: TunnelConfig;
+  fingerprint: string;
+}
 
 function parsePort(value: string): number | null {
   const n = Number(value);
@@ -97,6 +104,7 @@ export function ToolTunnels() {
   const [configs, setConfigs] = useState<TunnelConfig[]>(() => TunnelsStorage.load());
   const [runningIds, setRunningIds] = useState<Set<string>>(new Set());
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [pendingJumpTrust, setPendingJumpTrust] = useState<PendingJumpTrust | null>(null);
   const [formOpen, setFormOpen] = useState(false);
   const [editing, setEditing] = useState<TunnelConfig | null>(null);
   const [form, setForm] = useState<TunnelFormState>({ ...EMPTY_FORM });
@@ -204,6 +212,7 @@ export function ToolTunnels() {
       jumpPort: String(config.jumpPort ?? 22),
       jumpUsername: config.jumpUsername ?? '',
       jumpPassword: config.jumpPassword ?? '',
+      jumpHostKeyFingerprint: config.jumpHostKeyFingerprint ?? '',
       description: config.description ?? '',
     });
     // Match the saved jump host to a server in the list, if any.
@@ -227,6 +236,9 @@ export function ToolTunnels() {
         jumpPort: String(server.port || 22),
         jumpUsername: server.username || '',
         jumpPassword: server.password || '',
+        // Prefill the already-trusted saved-server fingerprint. Manual host
+        // edits below keep/reset this value at save time.
+        jumpHostKeyFingerprint: server.hostKeyFingerprint || '',
       }));
     },
     [servers],
@@ -262,6 +274,9 @@ export function ToolTunnels() {
       jumpPort: form.jumpHost.trim() ? parsePort(form.jumpPort) ?? 22 : undefined,
       jumpUsername: form.jumpHost.trim() ? form.jumpUsername.trim() || undefined : undefined,
       jumpPassword: form.jumpHost.trim() ? form.jumpPassword : undefined,
+      jumpHostKeyFingerprint: form.jumpHost.trim()
+        ? form.jumpHostKeyFingerprint.trim() || undefined
+        : undefined,
       description: form.description.trim() || undefined,
       createdAt: editing?.createdAt ?? now,
       updatedAt: now,
@@ -288,9 +303,29 @@ export function ToolTunnels() {
     setDeleteTarget(null);
   }, [deleteTarget, runningIds, t]);
 
-  const handleStart = useCallback(
-    async (config: TunnelConfig) => {
-      setBusyId(config.id);
+  /** Start one tunnel, probing/requesting jump-host consent when needed. */
+  const startTunnelConfig = useCallback(
+    async (config: TunnelConfig, trustedFingerprint?: string) => {
+      const jumpEnabled = !!config.jumpHost?.trim();
+      const fingerprint = trustedFingerprint ?? config.jumpHostKeyFingerprint;
+      if (jumpEnabled && !fingerprint) {
+        try {
+          const probe = await invoke<{ fingerprint: string }>('ssh_host_key_fingerprint', {
+            request: {
+              host: config.jumpHost,
+              port: config.jumpPort ?? 22,
+            },
+          });
+          setPendingJumpTrust({ config, fingerprint: probe.fingerprint });
+          return false;
+        } catch (error) {
+          toast.error(t('toolbox.tunnels.hostKeyProbeFailed'), {
+            description: error instanceof Error ? error.message : String(error),
+          });
+          return false;
+        }
+      }
+
       try {
         await invoke('tunnel_start', {
           request: {
@@ -304,12 +339,66 @@ export function ToolTunnels() {
             jump_port: config.jumpPort ?? null,
             jump_username: config.jumpUsername ?? null,
             jump_password: config.jumpPassword ?? null,
+            jump_host_key_fingerprint: jumpEnabled ? (fingerprint ?? null) : null,
           },
         });
+        if (
+          jumpEnabled &&
+          fingerprint &&
+          (trustedFingerprint !== undefined || fingerprint !== config.jumpHostKeyFingerprint)
+        ) {
+          const trusted = {
+            ...config,
+            jumpHostKeyFingerprint: fingerprint,
+            updatedAt: Date.now(),
+          };
+          setConfigs(TunnelsStorage.upsert(trusted));
+        }
         setRunningIds((prev) => new Set(prev).add(config.id));
-        toast.success(t('toolbox.tunnels.started'), {
-          description: `${config.bindAddress}:${config.listenPort} → ${config.remoteHost}:${config.remotePort}`,
-        });
+        return true;
+      } catch (error) {
+        // A changed key must never be retried silently. Re-probe and require
+        // explicit consent before the new fingerprint is persisted.
+        if (
+          jumpEnabled &&
+          String(error).toLowerCase().includes('host key fingerprint changed')
+        ) {
+          try {
+            const probe = await invoke<{ fingerprint: string }>('ssh_host_key_fingerprint', {
+              request: {
+                host: config.jumpHost,
+                port: config.jumpPort ?? 22,
+              },
+            });
+            setPendingJumpTrust({
+              config: { ...config, jumpHostKeyFingerprint: undefined },
+              fingerprint: probe.fingerprint,
+            });
+            return false;
+          } catch (probeError) {
+            toast.error(t('toolbox.tunnels.hostKeyProbeFailed'), {
+              description: probeError instanceof Error ? probeError.message : String(probeError),
+            });
+            return false;
+          }
+        }
+        throw error;
+      }
+    },
+    [t],
+  );
+
+  const confirmJumpTrust = useCallback(
+    async (pending: PendingJumpTrust) => {
+      setPendingJumpTrust(null);
+      setBusyId(pending.config.id);
+      try {
+        const trusted = {
+          ...pending.config,
+          jumpHostKeyFingerprint: pending.fingerprint,
+          updatedAt: Date.now(),
+        };
+        await startTunnelConfig(trusted, pending.fingerprint);
       } catch (error) {
         toast.error(t('toolbox.tunnels.startFailed'), {
           description: error instanceof Error ? error.message : String(error),
@@ -318,7 +407,28 @@ export function ToolTunnels() {
         setBusyId(null);
       }
     },
-    [t],
+    [startTunnelConfig, t],
+  );
+
+  const handleStart = useCallback(
+    async (config: TunnelConfig) => {
+      setBusyId(config.id);
+      try {
+        const started = await startTunnelConfig(config);
+        if (started) {
+          toast.success(t('toolbox.tunnels.started'), {
+            description: `${config.bindAddress}:${config.listenPort} → ${config.remoteHost}:${config.remotePort}`,
+          });
+        }
+      } catch (error) {
+        toast.error(t('toolbox.tunnels.startFailed'), {
+          description: error instanceof Error ? error.message : String(error),
+        });
+      } finally {
+        setBusyId(null);
+      }
+    },
+    [startTunnelConfig, t],
   );
 
   const handleStop = useCallback(
@@ -355,18 +465,13 @@ export function ToolTunnels() {
     let fail = 0;
     for (const c of targets) {
       try {
-        await invoke('tunnel_start', {
-          request: {
-            id: c.id, name: c.name, bind_address: c.bindAddress,
-            listen_port: c.listenPort, remote_host: c.remoteHost, remote_port: c.remotePort,
-            jump_host: c.jumpHost ?? null,
-            jump_port: c.jumpPort ?? null,
-            jump_username: c.jumpUsername ?? null,
-            jump_password: c.jumpPassword ?? null,
-          },
-        });
-        setRunningIds((prev) => new Set(prev).add(c.id));
-        ok++;
+        if (await startTunnelConfig(c)) ok++;
+        else {
+          // A trust dialog or failed probe needs user attention. Continuing
+          // would overwrite the pending dialog with another tunnel's prompt.
+          fail++;
+          break;
+        }
       } catch {
         fail++;
       }
@@ -375,7 +480,7 @@ export function ToolTunnels() {
     toast.success(t('toolbox.tunnels.batchStarted', { count: ok }), {
       description: fail > 0 ? t('toolbox.tunnels.batchFailed', { count: fail }) : undefined,
     });
-  }, [visibleConfigs, runningIds, t]);
+  }, [visibleConfigs, runningIds, startTunnelConfig, t]);
 
   const handleBatchStop = useCallback(async () => {
     const targets = visibleConfigs.filter((c) => runningIds.has(c.id));
@@ -713,7 +818,14 @@ export function ToolTunnels() {
                   <Input
                     id="tun-jump-host"
                     value={form.jumpHost}
-                    onChange={(e) => setForm((f) => ({ ...f, jumpHost: e.target.value }))}
+                    onChange={(e) => {
+                      setJumpServerId('');
+                      setForm((f) => ({
+                        ...f,
+                        jumpHost: e.target.value,
+                        jumpHostKeyFingerprint: '',
+                      }));
+                    }}
                     placeholder="bastion.example.com"
                     className="font-mono text-xs"
                   />
@@ -726,7 +838,11 @@ export function ToolTunnels() {
                     min={1}
                     max={65535}
                     value={form.jumpPort}
-                    onChange={(e) => setForm((f) => ({ ...f, jumpPort: e.target.value }))}
+                    onChange={(e) => setForm((f) => ({
+                      ...f,
+                      jumpPort: e.target.value,
+                      jumpHostKeyFingerprint: '',
+                    }))}
                     placeholder="22"
                     className="font-mono text-xs"
                   />
@@ -795,6 +911,44 @@ export function ToolTunnels() {
               onClick={handleDelete}
             >
               {t('common.delete')}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog
+        open={!!pendingJumpTrust}
+        onOpenChange={(open) => !open && setPendingJumpTrust(null)}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t('toolbox.tunnels.hostKeyTitle')}</AlertDialogTitle>
+            <AlertDialogDescription>
+              {t('toolbox.tunnels.hostKeyDescription', {
+                host: pendingJumpTrust?.config.jumpHost ?? '',
+                port: pendingJumpTrust?.config.jumpPort ?? 22,
+              })}
+            </AlertDialogDescription>
+            <div className="rounded-md border bg-muted/50 p-3">
+              <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+                {t('toolbox.tunnels.hostKeyFingerprint')}
+              </div>
+              <code
+                className="block break-all font-mono text-xs text-foreground"
+                data-testid="tunnel-host-key-fingerprint"
+              >
+                {pendingJumpTrust?.fingerprint ?? ''}
+              </code>
+            </div>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>{t('common.cancel')}</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                if (pendingJumpTrust) void confirmJumpTrust(pendingJumpTrust);
+              }}
+            >
+              {t('toolbox.tunnels.hostKeyTrust')}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

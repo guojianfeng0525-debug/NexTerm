@@ -106,6 +106,8 @@ export interface TunnelConfig {
   jumpPort?: number;
   jumpUsername?: string;
   jumpPassword?: string;
+  /** User-approved SSH host-key fingerprint for the jump host. */
+  jumpHostKeyFingerprint?: string;
   description?: string;
   createdAt: number;
   updatedAt: number;
