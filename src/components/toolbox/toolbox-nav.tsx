@@ -13,6 +13,7 @@ import {
   Brackets,
   Archive,
   Database,
+  Network,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { FileText } from 'lucide-react';
@@ -34,6 +35,7 @@ interface NavEntry {
     | 'toolbox.notes.title'
     | 'toolbox.history.title'
     | 'toolbox.apiDebug.title'
+    | 'toolbox.topology.title'
     | 'toolbox.documents.title'
     | 'toolbox.jar.title'
     | 'toolbox.postgres.title';
@@ -45,6 +47,7 @@ const NAV_ENTRIES: NavEntry[] = [
   { id: 'apps', icon: AppWindow, labelKey: 'toolbox.apps.title' },
   { id: 'vault', icon: KeyRound, labelKey: 'toolbox.vault.title' },
   { id: 'tunnels', icon: ArrowLeftRight, labelKey: 'toolbox.tunnels.title' },
+  { id: 'topology', icon: Network, labelKey: 'toolbox.topology.title' },
   { id: 'services', icon: Server, labelKey: 'toolbox.services.title' },
   { id: 'notes', icon: StickyNote, labelKey: 'toolbox.notes.title' },
   { id: 'history', icon: HistoryIcon, labelKey: 'toolbox.history.title' },

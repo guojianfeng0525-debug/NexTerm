@@ -12,6 +12,7 @@ mod ftp_client;
 mod jump;
 mod ls_parser;
 mod mysql;
+mod network_probe;
 mod os_detect;
 mod postgres;
 mod postgres_catalog;
@@ -530,6 +531,8 @@ pub fn run() {
             commands::get_network_bandwidth,
             commands::get_network_latency,
             commands::get_disk_usage,
+            commands::probe_network_topology,
+            commands::probe_tcp_ports,
             commands::create_directory,
             commands::delete_file,
             commands::rename_file,

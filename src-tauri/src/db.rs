@@ -32,7 +32,7 @@ type DocumentListRow = (String, String, String, i64, i64, i64, i64);
 
 /// Allow-listed normalized tables. Table names are validated against this
 /// list before being interpolated into SQL, so no injection is possible.
-pub const TABLES: [&str; 40] = [
+pub const TABLES: [&str; 49] = [
     "connections",
     "folders",
     "active_connections",
@@ -77,6 +77,19 @@ pub const TABLES: [&str; 40] = [
     "jar_preferences",
     "jar_recent_files",
     "jar_find_history",
+    // Network topology & diagnostics module — assets and inferred topology
+    // only. NOTE: none of these tables may ever carry an authentication field
+    // (password / private key / passphrase / token); a node references a saved
+    // connection by `connection_id` alone.
+    "net_nodes",
+    "net_interfaces",
+    "net_routes",
+    "net_firewalls",
+    "net_firewall_rules",
+    "net_ports",
+    "net_port_probes",
+    "net_links",
+    "net_port_links",
 ];
 
 /// Tables whose legacy key-value layout collides with a new normalized table
@@ -236,6 +249,10 @@ impl DbState {
             ("postgres_connections", "color", "color TEXT"),
             ("database_sqlite_connections", "color", "color TEXT"),
             ("database_mysql_connections", "color", "color TEXT"),
+            // Network port topology: manual annotations and endpoint identity.
+            ("net_ports", "notes", "notes TEXT NOT NULL DEFAULT ''"),
+            ("net_ports", "tags", "tags TEXT NOT NULL DEFAULT '[]'"),
+            ("net_port_links", "source_ip", "source_ip TEXT"),
         ] {
             ensure_column(&conn, table, column, ddl)?;
         }
@@ -698,6 +715,15 @@ fn pk_column(table: &str) -> Result<&'static str, String> {
         "jar_preferences" => "id",
         "jar_recent_files" => "id",
         "jar_find_history" => "id",
+        "net_nodes" => "id",
+        "net_interfaces" => "id",
+        "net_routes" => "id",
+        "net_firewalls" => "id",
+        "net_firewall_rules" => "id",
+        "net_ports" => "id",
+        "net_port_probes" => "id",
+        "net_links" => "id",
+        "net_port_links" => "id",
         _ => return Err(format!("unknown table: {}", table)),
     })
 }
@@ -1592,6 +1618,201 @@ CREATE INDEX IF NOT EXISTS idx_jar_symbols_project ON jar_symbols(project_id);
 CREATE INDEX IF NOT EXISTS idx_jar_subtypes_super ON jar_subtypes(super_name);
 CREATE INDEX IF NOT EXISTS idx_jar_subtypes_sub ON jar_subtypes(sub_name);
 CREATE INDEX IF NOT EXISTS idx_jar_subtypes_project ON jar_subtypes(project_id);
+-- ══ Network topology & diagnostics ═════════════════════════════════════════
+-- 资产与拓扑数据，不含任何认证字段（password / private_key / passphrase /
+-- token）。节点只通过 connection_id 引用已保存连接，不复制其凭据部分。
+-- 列标注：A = 探测可覆盖的自动字段 · M = 人工维护字段 · S = 系统字段。
+CREATE TABLE IF NOT EXISTS "net_nodes" (
+  id TEXT PRIMARY KEY,
+  connection_id TEXT NOT NULL,
+  hostname TEXT NOT NULL DEFAULT '',
+  os_name TEXT NOT NULL DEFAULT '',
+  primary_ip TEXT NOT NULL DEFAULT '',
+  role_hint TEXT NOT NULL DEFAULT 'unknown',
+  display_name TEXT NOT NULL DEFAULT '',
+  node_type TEXT NOT NULL DEFAULT '',
+  environment TEXT NOT NULL DEFAULT '',
+  notes TEXT NOT NULL DEFAULT '',
+  hidden INTEGER NOT NULL DEFAULT 0,
+  pos_x REAL,
+  pos_y REAL,
+  last_probe_at INTEGER,
+  last_probe_status TEXT NOT NULL DEFAULT 'never',
+  last_probe_error TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_net_nodes_connection ON net_nodes(connection_id);
+CREATE TABLE IF NOT EXISTS "net_interfaces" (
+  id TEXT PRIMARY KEY,
+  node_id TEXT NOT NULL,
+  iface_name TEXT NOT NULL DEFAULT '',
+  mac TEXT NOT NULL DEFAULT '',
+  state TEXT NOT NULL DEFAULT '',
+  mtu INTEGER,
+  is_loopback INTEGER NOT NULL DEFAULT 0,
+  ipv4_addrs TEXT NOT NULL DEFAULT '[]',
+  ipv6_addrs TEXT NOT NULL DEFAULT '[]',
+  manual_label TEXT NOT NULL DEFAULT '',
+  last_seen_at INTEGER NOT NULL,
+  missing_since INTEGER,
+  created_at INTEGER NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_net_interfaces_node_iface ON net_interfaces(node_id, iface_name);
+CREATE INDEX IF NOT EXISTS idx_net_interfaces_node ON net_interfaces(node_id);
+CREATE TABLE IF NOT EXISTS "net_routes" (
+  id TEXT PRIMARY KEY,
+  node_id TEXT NOT NULL,
+  destination TEXT NOT NULL DEFAULT '',
+  gateway TEXT NOT NULL DEFAULT '',
+  genmask TEXT NOT NULL DEFAULT '',
+  flags TEXT NOT NULL DEFAULT '',
+  metric INTEGER,
+  iface TEXT NOT NULL DEFAULT '',
+  route_type TEXT NOT NULL DEFAULT 'unknown',
+  manual_note TEXT NOT NULL DEFAULT '',
+  last_seen_at INTEGER NOT NULL,
+  missing_since INTEGER
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_net_routes_natural ON net_routes(node_id, destination, gateway, iface);
+CREATE INDEX IF NOT EXISTS idx_net_routes_node ON net_routes(node_id);
+CREATE TABLE IF NOT EXISTS "net_firewalls" (
+  id TEXT PRIMARY KEY,
+  node_id TEXT NOT NULL,
+  fw_type TEXT NOT NULL DEFAULT 'unknown',
+  active INTEGER NOT NULL DEFAULT 0,
+  default_in_policy TEXT NOT NULL DEFAULT '',
+  default_out_policy TEXT NOT NULL DEFAULT '',
+  version TEXT NOT NULL DEFAULT '',
+  zones TEXT NOT NULL DEFAULT '[]',
+  detect_note TEXT NOT NULL DEFAULT '',
+  manual_note TEXT NOT NULL DEFAULT '',
+  last_seen_at INTEGER NOT NULL,
+  missing_since INTEGER
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_net_firewalls_natural ON net_firewalls(node_id, fw_type);
+CREATE INDEX IF NOT EXISTS idx_net_firewalls_node ON net_firewalls(node_id);
+CREATE TABLE IF NOT EXISTS "net_firewall_rules" (
+  id TEXT PRIMARY KEY,
+  node_id TEXT NOT NULL,
+  firewall_id TEXT,
+  table_name TEXT NOT NULL DEFAULT '',
+  chain TEXT NOT NULL DEFAULT '',
+  action TEXT NOT NULL DEFAULT '',
+  protocol TEXT NOT NULL DEFAULT '',
+  src TEXT NOT NULL DEFAULT '',
+  dst TEXT NOT NULL DEFAULT '',
+  src_port TEXT NOT NULL DEFAULT '',
+  dst_port TEXT NOT NULL DEFAULT '',
+  in_iface TEXT NOT NULL DEFAULT '',
+  out_iface TEXT NOT NULL DEFAULT '',
+  raw_rule TEXT NOT NULL DEFAULT '',
+  rule_hash TEXT NOT NULL DEFAULT '',
+  manual_purpose TEXT NOT NULL DEFAULT '',
+  last_seen_at INTEGER NOT NULL,
+  missing_since INTEGER
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_net_firewall_rules_natural ON net_firewall_rules(node_id, rule_hash);
+CREATE INDEX IF NOT EXISTS idx_net_firewall_rules_node ON net_firewall_rules(node_id);
+CREATE INDEX IF NOT EXISTS idx_net_firewall_rules_fw ON net_firewall_rules(firewall_id);
+CREATE TABLE IF NOT EXISTS "net_ports" (
+  id TEXT PRIMARY KEY,
+  node_id TEXT NOT NULL,
+  protocol TEXT NOT NULL DEFAULT 'tcp',
+  port INTEGER NOT NULL DEFAULT 0,
+  listen_addr TEXT NOT NULL DEFAULT '',
+  state TEXT NOT NULL DEFAULT '',
+  process_name TEXT NOT NULL DEFAULT '',
+  pid INTEGER,
+  process_user TEXT NOT NULL DEFAULT '',
+  reachability TEXT NOT NULL DEFAULT 'untested',
+  reachability_at INTEGER,
+  service_name TEXT NOT NULL DEFAULT '',
+  purpose TEXT NOT NULL DEFAULT '',
+  notes TEXT NOT NULL DEFAULT '',
+  tags TEXT NOT NULL DEFAULT '[]',
+  hidden INTEGER NOT NULL DEFAULT 0,
+  last_seen_at INTEGER NOT NULL,
+  missing_since INTEGER,
+  created_at INTEGER NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_net_ports_natural ON net_ports(node_id, protocol, listen_addr, port);
+CREATE INDEX IF NOT EXISTS idx_net_ports_node ON net_ports(node_id);
+CREATE TABLE IF NOT EXISTS "net_port_probes" (
+  id TEXT PRIMARY KEY,
+  node_id TEXT NOT NULL,
+  port_id TEXT,
+  protocol TEXT NOT NULL DEFAULT 'tcp',
+  port INTEGER NOT NULL DEFAULT 0,
+  target_host TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'untested',
+  tcp_ok INTEGER NOT NULL DEFAULT 0,
+  latency_ms INTEGER,
+  error_text TEXT,
+  probed_at INTEGER NOT NULL,
+  triggered_by TEXT NOT NULL DEFAULT 'manual'
+);
+CREATE INDEX IF NOT EXISTS idx_net_port_probes_node ON net_port_probes(node_id);
+CREATE INDEX IF NOT EXISTS idx_net_port_probes_port ON net_port_probes(port_id);
+CREATE TABLE IF NOT EXISTS "net_links" (
+  id TEXT PRIMARY KEY,
+  source_node_id TEXT NOT NULL,
+  target_node_id TEXT NOT NULL,
+  protocol TEXT NOT NULL DEFAULT 'tcp',
+  port INTEGER,
+  link_type TEXT NOT NULL DEFAULT 'unknown',
+  status TEXT NOT NULL DEFAULT 'unknown',
+  source TEXT NOT NULL DEFAULT 'manual',
+  evidence TEXT NOT NULL DEFAULT '',
+  description TEXT NOT NULL DEFAULT '',
+  manual_label TEXT NOT NULL DEFAULT '',
+  hidden INTEGER NOT NULL DEFAULT 0,
+  first_seen_at INTEGER NOT NULL,
+  last_confirmed_at INTEGER NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_net_links_natural ON net_links(source_node_id, target_node_id, protocol, port);
+CREATE INDEX IF NOT EXISTS idx_net_links_source ON net_links(source_node_id);
+CREATE INDEX IF NOT EXISTS idx_net_links_target ON net_links(target_node_id);
+CREATE TABLE IF NOT EXISTS "net_port_links" (
+  id TEXT PRIMARY KEY,
+  source_node_id TEXT NOT NULL,
+  source_port_id TEXT NOT NULL,
+  source_ip TEXT,
+  source_protocol TEXT NOT NULL DEFAULT 'tcp',
+  source_port INTEGER NOT NULL DEFAULT 0,
+  target_node_id TEXT,
+  target_port_id TEXT,
+  target_protocol TEXT NOT NULL DEFAULT 'tcp',
+  target_port INTEGER NOT NULL DEFAULT 0,
+  target_ip TEXT,
+  status TEXT NOT NULL DEFAULT 'unknown',
+  source TEXT NOT NULL DEFAULT 'manual',
+  evidence TEXT NOT NULL DEFAULT '',
+  description TEXT NOT NULL DEFAULT '',
+  manual_label TEXT NOT NULL DEFAULT '',
+  hidden INTEGER NOT NULL DEFAULT 0,
+  first_seen_at INTEGER NOT NULL,
+  last_confirmed_at INTEGER,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+DROP INDEX IF EXISTS idx_net_port_links_natural;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_net_port_links_natural_v2 ON net_port_links(
+  COALESCE(source_node_id, ''),
+  COALESCE(source_ip, ''),
+  source_protocol,
+  source_port,
+  COALESCE(target_node_id, ''),
+  COALESCE(target_ip, ''),
+  target_protocol,
+  target_port
+);
+CREATE INDEX IF NOT EXISTS idx_net_port_links_source ON net_port_links(source_node_id);
+CREATE INDEX IF NOT EXISTS idx_net_port_links_source_port ON net_port_links(source_port_id);
+CREATE INDEX IF NOT EXISTS idx_net_port_links_target ON net_port_links(target_node_id);
+CREATE INDEX IF NOT EXISTS idx_net_port_links_target_port ON net_port_links(target_port_id);
 "#;
 
 #[cfg(test)]

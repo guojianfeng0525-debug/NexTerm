@@ -45,6 +45,8 @@ const ToolPostgres = lazy(() => import('./components/toolbox/tool-postgres').the
 const ToolSqlite = lazy(() => import('./components/toolbox/tool-sqlite').then((m) => ({ default: m.ToolSqlite })));
 const ToolMySql = lazy(() => import('./components/toolbox/tool-mysql').then((m) => ({ default: m.ToolMySql })));
 const ToolJarDecompiler = lazy(() => import('./components/toolbox/tool-jar-decompiler').then((m) => ({ default: m.ToolJarDecompiler })));
+// Network topology & diagnostics (manual, per-server probing → global topology graph).
+const ToolTopology = lazy(() => import('./components/toolbox/tool-topology').then((m) => ({ default: m.ToolTopology })));
 import { ErrorBoundary } from './components/error-boundary';
 import { initializeAllStorage } from './lib/storage-init';
 import type { TerminalTab } from './lib/terminal-group-types';
@@ -1874,6 +1876,7 @@ function AppContent() {
                         <Tabs value={rightSidebarTab} onValueChange={setRightSidebarTab} className="h-full flex flex-col">
                           <TabsList className="inline-flex w-auto mx-1 mt-2">
                             <TabsTrigger value="monitor" className="text-xs px-2">{t('app.monitor')}</TabsTrigger>
+                            <TabsTrigger value="network" className="text-xs px-2">{t('app.network')}</TabsTrigger>
                             <TabsTrigger value="logs" className="text-xs px-2">{t('app.logs')}</TabsTrigger>
                             {rightSidebarTab === 'logs' && activeConnection && (
                               <button
@@ -1894,6 +1897,23 @@ function AppContent() {
                                   <ErrorBoundary label={t('app.systemMonitor')}>
                                     <Suspense fallback={<div className="h-full flex items-center justify-center text-xs text-muted-foreground">{'...'}</div>}>
                                       <SystemMonitor connectionId={activeConnection.connectionId} />
+                                    </Suspense>
+                                  </ErrorBoundary>
+                                ) : null}
+                              </div>
+                            </TabsContent>
+
+                            <TabsContent value="network" forceMount className="absolute inset-0 mt-0 data-[state=inactive]:hidden">
+                              <div className="h-full overflow-hidden px-1 py-2">
+                                {activeConnection ? (
+                                  <ErrorBoundary label={t('app.networkTopology')}>
+                                    <Suspense fallback={<div className="h-full flex items-center justify-center text-xs text-muted-foreground">{'...'}</div>}>
+                                      <NetworkPanel
+                                        connectionId={activeConnection.connectionId}
+                                        connectionName={activeConnection.name}
+                                        host={activeConnection.host ?? ''}
+                                        assetConnectionId={activeTab?.originalConnectionId ?? activeConnection.connectionId}
+                                      />
                                     </Suspense>
                                   </ErrorBoundary>
                                 ) : null}
@@ -2017,6 +2037,9 @@ function AppContent() {
           <div className={cn('absolute inset-0 bg-background', section === 'mysql' ? '' : 'hidden')}>
             <ToolMySql />
           </div>
+          <div className={cn('absolute inset-0 bg-background', section === 'topology' ? '' : 'hidden')}>
+            <ToolTopology />
+          </div>
           {section === 'jar' && (
             <div className="absolute inset-0 bg-background">
               <ToolJarDecompiler />
@@ -2062,6 +2085,7 @@ function AppContent() {
 }
 
 const SystemMonitor = lazy(() => import('./components/system-monitor').then((m) => ({ default: m.SystemMonitor })));
+const NetworkPanel = lazy(() => import('./components/network/network-panel').then((m) => ({ default: m.NetworkPanel })));
 
 /** Full-screen loading state shown while SQLite stores hydrate (after unlock). */
 function AppStorageLoading() {
