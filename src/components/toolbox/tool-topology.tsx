@@ -39,7 +39,7 @@ import {
   upsertLink,
   upsertNode,
 } from '@/lib/network/topology-storage';
-import type { NetworkLink, NetworkNode } from '@/lib/network/topology-types';
+import type { NetworkLink, NetworkNode, NetworkPort } from '@/lib/network/topology-types';
 import { cn } from '@/lib/utils';
 import {
   TopologyGraph,
@@ -49,6 +49,7 @@ import {
 } from '@/components/network/topology-graph';
 import { TopologyNodeDialog } from '@/components/network/topology-node-dialog';
 import { LinkEditorDialog } from '@/components/network/link-editor-dialog';
+import { PortTopologyView } from '@/components/network/port-topology';
 
 const LINK_TYPE_BADGE: Record<string, string> = {
   ssh: 'bg-chart-1/15 text-chart-1 border-chart-1/30',
@@ -82,6 +83,7 @@ export function ToolTopology() {
   const [editingLink, setEditingLink] = useState<NetworkLink | null>(null);
   const [deleteNodeTarget, setDeleteNodeTarget] = useState<NetworkNode | null>(null);
   const [deleteLinkTarget, setDeleteLinkTarget] = useState<NetworkLink | null>(null);
+  const [drillDownPort, setDrillDownPort] = useState<{ nodeId: string; portId: string; host: string } | null>(null);
 
   const reload = useCallback(() => {
     setNodes(listNodes());
@@ -124,6 +126,10 @@ export function ToolTopology() {
   const selectedLink = useMemo(
     () => links.find((link) => link.id === selectedLinkId) ?? null,
     [links, selectedLinkId],
+  );
+  const selectedNodePorts = useMemo(
+    () => (selectedNode ? getNodePorts(selectedNode.id) : []),
+    [selectedNode],
   );
 
   const labelForId = useCallback(
@@ -276,10 +282,14 @@ export function ToolTopology() {
             <Network className="h-4 w-4 text-primary" />
             {t('topology.title')}
             <Badge variant="outline" className="gap-1 text-[10px] text-muted-foreground">
-              {t('topology.stats', { nodes: visibleNodes.length, links: visibleLinks.length })}
+              {drillDownPort
+                ? t('network.portTopology.drillDownBadge')
+                : t('topology.stats', { nodes: visibleNodes.length, links: visibleLinks.length })}
             </Badge>
           </h3>
-          <p className="truncate text-xs text-muted-foreground">{t('topology.description')}</p>
+          <p className="truncate text-xs text-muted-foreground">
+            {drillDownPort ? t('network.portTopology.drillDownDescription') : t('topology.description')}
+          </p>
         </div>
 
         <div className="ml-auto flex flex-wrap items-center gap-1.5">
@@ -376,6 +386,20 @@ export function ToolTopology() {
             <p className="text-xs text-muted-foreground">{t('topology.emptyDesc')}</p>
           </div>
         </div>
+      ) : drillDownPort ? (
+        <div className="min-h-0 flex-1">
+          <PortTopologyView
+            key={`${drillDownPort.nodeId}:${drillDownPort.portId}`}
+            nodeId={drillDownPort.nodeId}
+            portId={drillDownPort.portId}
+            host={drillDownPort.host}
+            onBack={() => setDrillDownPort(null)}
+            onOpenPort={(peerNodeId, peerPortId) => {
+              const peer = nodes.find((item) => item.id === peerNodeId);
+              setDrillDownPort({ nodeId: peerNodeId, portId: peerPortId, host: peer?.primaryIp ?? '' });
+            }}
+          />
+        </div>
       ) : (
         <div className="flex min-h-0 flex-1">
           <div className="min-w-0 flex-1">
@@ -405,11 +429,17 @@ export function ToolTopology() {
                   {t('topology.details.title')}
                 </h4>
                 {selectedNode ? (
-                  <NodeDetails
-                    node={selectedNode}
-                    interfaceCount={nodeStats.interfaces}
-                    portCount={nodeStats.ports}
-                    onEdit={() => handleEditNode(selectedNode.id)}
+                    <NodeDetails
+                      node={selectedNode}
+                      interfaceCount={nodeStats.interfaces}
+                      portCount={nodeStats.ports}
+                      ports={selectedNodePorts}
+                      onOpenPort={(port) => setDrillDownPort({
+                        nodeId: selectedNode.id,
+                        portId: port.id,
+                        host: selectedNode.primaryIp,
+                      })}
+                      onEdit={() => handleEditNode(selectedNode.id)}
                     onHide={() => handleHideNode(selectedNode.id)}
                     onDelete={() => setDeleteNodeTarget(selectedNode)}
                   />
@@ -525,6 +555,8 @@ interface NodeDetailsProps {
   readonly node: NetworkNode;
   readonly interfaceCount: number;
   readonly portCount: number;
+  readonly ports: NetworkPort[];
+  readonly onOpenPort: (port: NetworkPort) => void;
   readonly onEdit: () => void;
   readonly onHide: () => void;
   readonly onDelete: () => void;
@@ -534,6 +566,8 @@ function NodeDetails({
   node,
   interfaceCount,
   portCount,
+  ports,
+  onOpenPort,
   onEdit,
   onHide,
   onDelete,
@@ -568,6 +602,33 @@ function NodeDetails({
         </DetailRow>
         <DetailRow label={t('topology.node.interfaceCount')}>{interfaceCount}</DetailRow>
         <DetailRow label={t('topology.node.portCount')}>{portCount}</DetailRow>
+      </div>
+
+      <div className="space-y-1.5">
+        <p className="text-[11px] font-medium text-foreground">{t('network.portTopology.serverPorts')}</p>
+        {ports.length === 0 ? (
+          <p className="text-[11px] text-muted-foreground">{t('network.portTopology.empty')}</p>
+        ) : (
+          <div className="max-h-44 overflow-auto rounded-md border border-border">
+            {ports.map((port) => (
+              <button
+                key={port.id}
+                type="button"
+                data-testid={`server-port-${port.id}`}
+                onClick={() => onOpenPort(port)}
+                title={t('network.portTopology.drillDown')}
+                className="flex w-full items-center gap-1.5 border-b border-border px-2 py-1.5 text-left text-[11px] transition-colors last:border-b-0 hover:bg-accent"
+              >
+                <span className="font-mono">{port.port}</span>
+                <span className="text-[9px] uppercase text-muted-foreground">{port.protocol}</span>
+                <span className="min-w-0 flex-1 truncate text-muted-foreground">
+                  {[port.listenAddr, port.serviceName, port.processName].filter(Boolean).join(' · ')}
+                </span>
+                <span className="font-mono text-[9px] text-muted-foreground">{port.state || '—'}</span>
+              </button>
+            ))}
+          </div>
+        )}
       </div>
       {node.notes && (
         <p className="whitespace-pre-wrap break-words rounded-md bg-muted px-2.5 py-2 text-[11px] text-foreground">

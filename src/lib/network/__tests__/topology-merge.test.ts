@@ -6,6 +6,7 @@ import {
   hashRule,
   inferLinkType,
   inferLinksFromPeers,
+  inferPortLinksFromPeers,
   inferRoleHint,
   interfaceNaturalKey,
   linkNaturalKey,
@@ -17,6 +18,7 @@ import {
   mergePorts,
   mergeRoutes,
   portNaturalKey,
+  resolvePortLinkTargets,
   resolveReachability,
   resolveRouteType,
   resolveRuleHash,
@@ -38,6 +40,7 @@ import {
   makeFirewall,
   makeInterface,
   makeLink,
+  makePortLink,
   makeNode,
   makePort,
   makeRoute,
@@ -608,6 +611,8 @@ describe('mergePorts', () => {
       processName: 'nginx-old',
       serviceName: '官网',
       purpose: '对外 HTTP',
+      notes: '人工备注',
+      tags: ['web', '内网'],
       hidden: true,
       reachability: 'blocked',
       reachabilityAt: 1_500,
@@ -624,6 +629,8 @@ describe('mergePorts', () => {
     expect(out.items[0].pid).toBe(999);
     expect(out.items[0].serviceName).toBe('官网');
     expect(out.items[0].purpose).toBe('对外 HTTP');
+    expect(out.items[0].notes).toBe('人工备注');
+    expect(out.items[0].tags).toEqual(['web', '内网']);
     expect(out.items[0].hidden).toBe(true);
     expect(out.items[0].reachability).toBe('blocked');
     expect(out.items[0].reachabilityAt).toBe(1_500);
@@ -654,6 +661,13 @@ describe('mergePorts', () => {
     expect(portNaturalKey({ nodeId: 'n', protocol: 'tcp', listenAddr: '0.0.0.0', port: 80 })).toBe(
       'n|tcp|0.0.0.0|80',
     );
+  });
+
+  it('never merges the same protocol/port on two different servers', () => {
+    const serverA = makePort({ nodeId: 'node-a', port: 8080 });
+    const out = mergePorts([serverA], [detectedPort({ port: 8080 })], 'node-b', 2_000);
+    expect(out.items).toHaveLength(2);
+    expect(out.items.map((port) => port.nodeId).sort()).toEqual(['node-a', 'node-b']);
   });
 });
 
@@ -829,5 +843,155 @@ describe('inferLinksFromPeers', () => {
     expect(linkNaturalKey({ sourceNodeId: 'a', targetNodeId: 'b', protocol: 'tcp', port: null })).toBe(
       'a|b|tcp|',
     );
+  });
+});
+
+describe('port-level topology links', () => {
+  const interfacesIndex = new Map([
+    ['10.10.1.20', 'node-a'],
+    ['10.10.1.21', 'node-b'],
+  ]);
+  const currentPorts = [
+    makePort({ id: 'port-a8080', nodeId: 'node-a', port: 8080, processName: 'app', pid: 10 }),
+  ];
+  const allPorts = [
+    ...currentPorts,
+    makePort({ id: 'port-b3306', nodeId: 'node-b', port: 3306, processName: 'postgres', pid: 20 }),
+  ];
+
+  it('maps an outbound ephemeral socket to the service port of the same process', () => {
+    const result = inferPortLinksFromPeers({
+      nodeId: 'node-a',
+      peers: [detectedPeer({
+        remoteAddr: '10.10.1.21',
+        remotePort: 3306,
+        localPort: 45678,
+        processName: 'app',
+        processPid: 10,
+      })],
+      nodePorts: currentPorts,
+      allPorts,
+      interfacesIndex,
+      existingPortLinks: [],
+      now: 2_000,
+    });
+
+    expect(result.added).toBe(1);
+    expect(result.links[0]).toMatchObject({
+      sourceNodeId: 'node-a',
+      sourcePortId: 'port-a8080',
+      sourcePort: 8080,
+      targetNodeId: 'node-b',
+      targetPortId: 'port-b3306',
+      targetPort: 3306,
+      status: 'active',
+      source: 'auto',
+    });
+    expect(result.links[0].sourceProtocol).toBe('tcp');
+    expect(result.links[0].targetProtocol).toBe('tcp');
+  });
+
+  it('keeps an inbound listening socket directed remote → current, including unknown IPs', () => {
+    const serverPorts = [makePort({ id: 'port-b8080', nodeId: 'node-b', port: 8080, processName: 'app' })];
+    const result = inferPortLinksFromPeers({
+      nodeId: 'node-b',
+      peers: [detectedPeer({ remoteAddr: '203.0.113.9', remotePort: 51000, localPort: 8080 })],
+      nodePorts: serverPorts,
+      allPorts: serverPorts,
+      interfacesIndex,
+      existingPortLinks: [],
+      now: 2_000,
+    });
+
+    expect(result.added).toBe(1);
+    expect(result.links[0]).toMatchObject({
+      sourceNodeId: null,
+      sourcePortId: null,
+      sourceIp: '203.0.113.9',
+      sourcePort: 51000,
+      targetNodeId: 'node-b',
+      targetPortId: 'port-b8080',
+      targetPort: 8080,
+      status: 'active',
+    });
+  });
+
+  it('re-confirms a matching manual relation without changing its status or annotations', () => {
+    const existing = makePortLink({
+      sourceNodeId: 'node-a',
+      sourcePortId: 'port-a8080',
+      sourcePort: 8080,
+      targetNodeId: 'node-b',
+      targetPortId: 'port-b3306',
+      targetPort: 3306,
+      status: 'unknown',
+      source: 'manual',
+      description: '业务专线',
+      manualLabel: '订单库',
+      hidden: true,
+    });
+    const result = inferPortLinksFromPeers({
+      nodeId: 'node-a',
+      peers: [detectedPeer({ remoteAddr: '10.10.1.21', remotePort: 3306, localPort: 45678, processName: 'app', processPid: 10 })],
+      nodePorts: currentPorts,
+      allPorts,
+      interfacesIndex,
+      existingPortLinks: [existing],
+      now: 2_000,
+    });
+
+    expect(result.added).toBe(0);
+    expect(result.confirmed).toBe(1);
+    expect(result.links[0]).toMatchObject({
+      id: existing.id,
+      status: 'unknown',
+      source: 'manual',
+      description: '业务专线',
+      manualLabel: '订单库',
+      hidden: true,
+      lastConfirmedAt: 2_000,
+    });
+  });
+
+  it('resolves unknown source and target endpoints after that server is probed', () => {
+    const danglingTarget = makePortLink({
+      id: 'plink-target',
+      sourceNodeId: 'node-a',
+      sourcePortId: 'port-a8080',
+      sourcePort: 8080,
+      targetNodeId: null,
+      targetPortId: null,
+      targetIp: '10.10.1.21',
+      targetPort: 3306,
+    });
+    const danglingSource = makePortLink({
+      id: 'plink-source',
+      sourceNodeId: null,
+      sourcePortId: null,
+      sourceIp: '10.10.1.21',
+      sourcePort: 8080,
+      targetNodeId: 'node-b',
+      targetPortId: 'port-b3306',
+      targetPort: 3306,
+    });
+    const result = resolvePortLinkTargets({
+      nodeId: 'node-b',
+      nodePorts: [makePort({ id: 'port-b3306', nodeId: 'node-b', port: 3306 })],
+      interfacesIndex,
+      existingPortLinks: [danglingTarget, danglingSource],
+      now: 2_000,
+    });
+
+    expect(result.resolved).toBeGreaterThanOrEqual(2);
+    expect(result.links.find((link) => link.id === 'plink-target')).toMatchObject({
+      targetNodeId: 'node-b',
+      targetPortId: 'port-b3306',
+      targetIp: null,
+    });
+    expect(result.links.find((link) => link.id === 'plink-source')).toMatchObject({
+      sourceNodeId: 'node-b',
+      sourcePortId: null,
+      sourceIp: null,
+    });
   });
 });

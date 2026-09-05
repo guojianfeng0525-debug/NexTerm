@@ -29,7 +29,7 @@ use tauri::State;
 
 /// Allow-listed normalized tables. Table names are validated against this
 /// list before being interpolated into SQL, so no injection is possible.
-pub const TABLES: [&str; 48] = [
+pub const TABLES: [&str; 49] = [
     "connections",
     "folders",
     "active_connections",
@@ -86,6 +86,7 @@ pub const TABLES: [&str; 48] = [
     "net_ports",
     "net_port_probes",
     "net_links",
+    "net_port_links",
 ];
 
 /// Tables whose legacy key-value layout collides with a new normalized table
@@ -245,6 +246,10 @@ impl DbState {
             ("postgres_connections", "color", "color TEXT"),
             ("database_sqlite_connections", "color", "color TEXT"),
             ("database_mysql_connections", "color", "color TEXT"),
+            // Network port topology: manual annotations and endpoint identity.
+            ("net_ports", "notes", "notes TEXT NOT NULL DEFAULT ''"),
+            ("net_ports", "tags", "tags TEXT NOT NULL DEFAULT '[]'"),
+            ("net_port_links", "source_ip", "source_ip TEXT"),
         ] {
             ensure_column(&conn, table, column, ddl)?;
         }
@@ -719,6 +724,7 @@ fn pk_column(table: &str) -> Result<&'static str, String> {
         "net_ports" => "id",
         "net_port_probes" => "id",
         "net_links" => "id",
+        "net_port_links" => "id",
         _ => return Err(format!("unknown table: {}", table)),
     })
 }
@@ -1724,6 +1730,8 @@ CREATE TABLE IF NOT EXISTS "net_ports" (
   reachability_at INTEGER,
   service_name TEXT NOT NULL DEFAULT '',
   purpose TEXT NOT NULL DEFAULT '',
+  notes TEXT NOT NULL DEFAULT '',
+  tags TEXT NOT NULL DEFAULT '[]',
   hidden INTEGER NOT NULL DEFAULT 0,
   last_seen_at INTEGER NOT NULL,
   missing_since INTEGER,
@@ -1768,6 +1776,44 @@ CREATE TABLE IF NOT EXISTS "net_links" (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_net_links_natural ON net_links(source_node_id, target_node_id, protocol, port);
 CREATE INDEX IF NOT EXISTS idx_net_links_source ON net_links(source_node_id);
 CREATE INDEX IF NOT EXISTS idx_net_links_target ON net_links(target_node_id);
+CREATE TABLE IF NOT EXISTS "net_port_links" (
+  id TEXT PRIMARY KEY,
+  source_node_id TEXT NOT NULL,
+  source_port_id TEXT NOT NULL,
+  source_ip TEXT,
+  source_protocol TEXT NOT NULL DEFAULT 'tcp',
+  source_port INTEGER NOT NULL DEFAULT 0,
+  target_node_id TEXT,
+  target_port_id TEXT,
+  target_protocol TEXT NOT NULL DEFAULT 'tcp',
+  target_port INTEGER NOT NULL DEFAULT 0,
+  target_ip TEXT,
+  status TEXT NOT NULL DEFAULT 'unknown',
+  source TEXT NOT NULL DEFAULT 'manual',
+  evidence TEXT NOT NULL DEFAULT '',
+  description TEXT NOT NULL DEFAULT '',
+  manual_label TEXT NOT NULL DEFAULT '',
+  hidden INTEGER NOT NULL DEFAULT 0,
+  first_seen_at INTEGER NOT NULL,
+  last_confirmed_at INTEGER,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+DROP INDEX IF EXISTS idx_net_port_links_natural;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_net_port_links_natural_v2 ON net_port_links(
+  COALESCE(source_node_id, ''),
+  COALESCE(source_ip, ''),
+  source_protocol,
+  source_port,
+  COALESCE(target_node_id, ''),
+  COALESCE(target_ip, ''),
+  target_protocol,
+  target_port
+);
+CREATE INDEX IF NOT EXISTS idx_net_port_links_source ON net_port_links(source_node_id);
+CREATE INDEX IF NOT EXISTS idx_net_port_links_source_port ON net_port_links(source_port_id);
+CREATE INDEX IF NOT EXISTS idx_net_port_links_target ON net_port_links(target_node_id);
+CREATE INDEX IF NOT EXISTS idx_net_port_links_target_port ON net_port_links(target_port_id);
 "#;
 
 #[cfg(test)]

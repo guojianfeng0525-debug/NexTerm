@@ -82,6 +82,6 @@ export async function unlockApp(
       if (el) el.focus();
     });
     await confirm.setValue(password);
-    await $('#app-lock-submit, button.w-full').click();
+    await $('[data-testid="app-lock-submit"], #app-lock-submit, button.w-full').click();
   }
 }

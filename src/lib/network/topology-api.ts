@@ -17,12 +17,14 @@ import {
   buildInterfaceIpIndex,
   deriveProbeStatus,
   inferLinksFromPeers,
+  inferPortLinksFromPeers,
   mergeFirewallRules,
   mergeFirewalls,
   mergeInterfaces,
   mergeNode,
   mergePorts,
   mergeRoutes,
+  resolvePortLinkTargets,
 } from './topology-merge';
 import {
   getNodeByConnectionId,
@@ -34,12 +36,15 @@ import {
   listInterfaces,
   listLinks,
   listNodes,
+  listPortLinks,
+  listPorts,
   saveLinks,
   saveNodeFirewallRules,
   saveNodeFirewalls,
   saveNodeInterfaces,
   saveNodePorts,
   saveNodeRoutes,
+  savePortLinks,
   upsertNode,
 } from './topology-storage';
 
@@ -189,6 +194,32 @@ export function applyProbeResult(input: ApplyProbeInput): ApplyProbeSummary {
   });
   saveLinks(linkResult.links);
 
+  // ── port-level links (level-2 drill-down) ──
+  // Infer port links from the same observed peers, anchored at the probed
+  // node's listening ports. Unknown peers are kept as bare IP:port targets
+  // (never auto-probed); they resolve to a node once that server is probed.
+  const portLinkResult = inferPortLinksFromPeers({
+    nodeId,
+    peers: data?.peers ?? [],
+    nodePorts: getNodePorts(nodeId),
+    allPorts: listPorts(),
+    interfacesIndex: buildInterfaceIpIndex(knownNodes, listInterfaces()),
+    existingPortLinks: listPortLinks(),
+    now: probeAt,
+  });
+  savePortLinks(portLinkResult.links);
+
+  // Resolve any dangling port links whose target IP now matches this node's
+  // freshly-probed interfaces ("探测后关联", without re-probing the peer).
+  const portLinkResolution = resolvePortLinkTargets({
+    nodeId,
+    nodePorts: getNodePorts(nodeId),
+    interfacesIndex: buildInterfaceIpIndex(knownNodes, listInterfaces()),
+    existingPortLinks: listPortLinks(),
+    now: probeAt,
+  });
+  if (portLinkResolution.resolved > 0) savePortLinks(portLinkResolution.links);
+
   return {
     nodeId,
     added: {
@@ -211,5 +242,8 @@ export function applyProbeResult(input: ApplyProbeInput): ApplyProbeSummary {
     },
     linksAdded: linkResult.added,
     linksConfirmed: linkResult.confirmed,
+    portLinksAdded: portLinkResult.added,
+    portLinksConfirmed: portLinkResult.confirmed,
+    portLinksResolved: portLinkResolution.resolved,
   };
 }

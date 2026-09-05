@@ -39,6 +39,7 @@ import {
   type NetworkLink,
   type NetworkNode,
   type NetworkPort,
+  type NetworkPortLink,
   type NetworkRoute,
   type NodeRoleHint,
   type ProbeData,
@@ -723,6 +724,8 @@ export function mergePorts(
       // ── M ──
       serviceName: '',
       purpose: '',
+      notes: '',
+      tags: [],
       hidden: false,
       // ── S ──
       reachability: 'untested',
@@ -803,7 +806,6 @@ export function inferLinksFromPeers(params: {
   let added = 0;
   let confirmed = 0;
   const handled = new Set<string>();
-
   for (const peer of peers ?? []) {
     const remoteAddr = peer?.remoteAddr ?? '';
     if (!remoteAddr) continue;
@@ -862,6 +864,262 @@ export function inferLinksFromPeers(params: {
   }
 
   return { links, added, confirmed };
+}
+
+/* ══ port-level links (level-2 drill-down) ════════════════════════════════ */
+
+export function portLinkNaturalKey(item: {
+  sourceNodeId: string | null;
+  sourcePortId: string | null;
+  sourceIp: string | null;
+  sourceProtocol: string;
+  sourcePort: number;
+  targetNodeId: string | null;
+  targetIp: string | null;
+  targetProtocol: string;
+  targetPort: number | null;
+}): string {
+  const source = item.sourceNodeId ?? item.sourceIp ?? '';
+  const target = item.targetNodeId ?? item.targetIp ?? '';
+  return [
+    source,
+    item.sourceProtocol,
+    item.sourcePort,
+    target,
+    item.targetProtocol,
+    item.targetPort ?? '',
+  ].join('|');
+}
+
+/**
+ * Turn observed ESTABLISHED peer connections into port-level links anchored at
+ * the probed server's listening port.
+ *
+ * ── Level-2 drill-down ─────────────────────────────────────────────────────
+ * Where `inferLinksFromPeers` connects two *servers*, this connects two
+ * *ports*: `源服务器:源端口 → 目标服务器:目标端口`. Direction follows the
+ * socket shape instead of assuming the probed server is always the client.
+ *
+ * ── Unknown peers are KEPT, never probed ───────────────────────────────────
+ * Unlike the server-level inference, an unknown peer (not an already-probed
+ * node) is NOT discarded here: it is recorded as a bare `IP:port` target with
+ * `targetNodeId === null`. The link is never auto-probed; it is resolved to a
+ * node only once the user manually probes that server (see resolvePortLinkTargets).
+ *
+ * ── No clobbering ──────────────────────────────────────────────────────────
+ * An already-known link is only re-confirmed. Manual fields, `source` and
+ * `evidence` are left alone.
+ */
+export function inferPortLinksFromPeers(params: {
+  nodeId: string;
+  peers: DetectedPeer[];
+  nodePorts: NetworkPort[];
+  allPorts?: NetworkPort[];
+  interfacesIndex: Map<string, string>;
+  existingPortLinks: NetworkPortLink[];
+  now: number;
+}): { links: NetworkPortLink[]; added: number; confirmed: number } {
+  const { nodeId, peers, nodePorts, allPorts = nodePorts, interfacesIndex, existingPortLinks, now } = params;
+
+  const portKey = (protocol: string, port: number) => `${protocol}|${port}`;
+  const isListenerState = (state: string) => {
+    const value = state.trim().toUpperCase();
+    return value.includes('LISTEN') || value.includes('UNCONN');
+  };
+  const portIdForNode = (owner: string | null, protocol: string, port: number) => {
+    if (!owner) return null;
+    return allPorts.find((p) =>
+      p.nodeId === owner &&
+      p.protocol === protocol &&
+      p.port === port &&
+      p.missingSince === null &&
+      isListenerState(p.state),
+    )?.id ?? null;
+  };
+
+  const listeningPorts = (nodePorts ?? []).filter(
+    (p) => p.missingSince === null && isListenerState(p.state),
+  );
+
+  // Resolve the probed node's listening ports by (protocol, port) → port row.
+  const portByKey = new Map<string, NetworkPort>();
+  for (const p of listeningPorts) {
+    const key = portKey(p.protocol, p.port);
+    if (!portByKey.has(key)) portByKey.set(key, p);
+  }
+
+  const existing = existingPortLinks ?? [];
+  const byKey = new Map<string, NetworkPortLink>();
+  for (const link of existing) byKey.set(portLinkNaturalKey(link), link);
+  const links: NetworkPortLink[] = [...existing];
+
+  let added = 0;
+  let confirmed = 0;
+  for (const peer of peers ?? []) {
+    const localPort = peer?.localPort ?? null;
+    if (localPort == null) continue;
+    const protocol = peer.protocol === 'udp' ? 'udp' : 'tcp';
+    const ip = normalizeAddr(peer?.remoteAddr ?? '');
+    if (!ip) continue;
+    const targetPort = peer.remotePort ?? null;
+    if (targetPort == null) continue;
+    if (interfacesIndex.get(ip) === nodeId) continue; // loopback to own interface
+
+    const peerNodeId = interfacesIndex.get(ip) ?? null;
+    const localListener = portByKey.get(portKey(protocol, localPort));
+    const normalizedProcess = (peer.processName ?? '').trim().toLowerCase();
+    const processListener = peer.processPid != null
+      ? listeningPorts.find((p) => p.pid === peer.processPid)
+      : listeningPorts.find((p) => normalizedProcess !== '' && p.processName.trim().toLowerCase() === normalizedProcess);
+
+    // A listening local socket is the server side of the connection. Keep the
+    // TCP direction truthful: remote:remotePort → currentNode:localPort.
+    if (localListener) {
+      const candidate: NetworkPortLink = {
+        id: '',
+        sourceNodeId: peerNodeId,
+        sourcePortId: portIdForNode(peerNodeId, protocol, targetPort),
+        sourceIp: peerNodeId ? null : ip,
+        sourceProtocol: protocol,
+        sourcePort: targetPort,
+        targetNodeId: nodeId,
+        targetPortId: localListener.id,
+        targetProtocol: protocol,
+        targetPort: localPort,
+        targetIp: null,
+        status: 'active',
+        source: 'auto',
+        evidence: `ss ESTABLISHED ${ip}:${targetPort} -> local:${localPort}`,
+        description: '',
+        manualLabel: '',
+        hidden: false,
+        firstSeenAt: now,
+        lastConfirmedAt: now,
+        createdAt: now,
+        updatedAt: now,
+      };
+      const index = links.findIndex((l) => portLinkNaturalKey(l) === portLinkNaturalKey(candidate));
+      if (index >= 0) {
+        const prev = links[index];
+        links[index] = prev.source === 'manual'
+          ? { ...prev, lastConfirmedAt: now, updatedAt: now }
+          : { ...prev, ...candidate, id: prev.id, source: 'auto', description: prev.description, manualLabel: prev.manualLabel, hidden: prev.hidden, firstSeenAt: prev.firstSeenAt, createdAt: prev.createdAt };
+        confirmed += 1;
+        continue;
+      }
+      links.push({ ...candidate, id: generateId('plink') });
+      added += 1;
+      continue;
+    }
+
+    // An ephemeral local socket is outbound. Anchor it to the service port of
+    // the same process when possible (for example app:8080 → db:3306); without
+    // a service anchor the ephemeral socket is not a durable port node.
+    if (!processListener) continue;
+    const candidate: NetworkPortLink = {
+      id: '',
+      sourceNodeId: nodeId,
+      sourcePortId: processListener.id,
+      sourceIp: null,
+      sourceProtocol: protocol,
+      sourcePort: processListener.port,
+      targetNodeId: peerNodeId,
+      targetPortId: portIdForNode(peerNodeId, protocol, targetPort),
+      targetProtocol: protocol,
+      targetPort,
+      targetIp: peerNodeId ? null : ip,
+      status: 'active',
+      source: 'auto',
+      evidence: `ss ESTABLISHED local:${localPort} -> ${ip}:${targetPort}`,
+      description: '',
+      manualLabel: '',
+      hidden: false,
+      firstSeenAt: now,
+      lastConfirmedAt: now,
+      createdAt: now,
+      updatedAt: now,
+    };
+    const key = portLinkNaturalKey(candidate);
+    const prev = byKey.get(key);
+    if (prev) {
+      links[links.findIndex((l) => l.id === prev.id)] = prev.source === 'manual'
+        ? { ...prev, lastConfirmedAt: now, updatedAt: now }
+        : { ...prev, ...candidate, id: prev.id, source: 'auto', description: prev.description, manualLabel: prev.manualLabel, hidden: prev.hidden, firstSeenAt: prev.firstSeenAt, createdAt: prev.createdAt };
+      confirmed += 1;
+      continue;
+    }
+    links.push({ ...candidate, id: generateId('plink') });
+    byKey.set(key, links[links.length - 1]);
+    added += 1;
+  }
+
+  return { links, added, confirmed };
+}
+
+/**
+ * After a node is probed, resolve dangling port-link endpoints whose IP matches
+ * one of that node's interface addresses. This only correlates data already in
+ * the store; it never probes the formerly unknown peer.
+ */
+export function resolvePortLinkTargets(params: {
+  nodeId: string;
+  nodePorts: NetworkPort[];
+  interfacesIndex: Map<string, string>;
+  existingPortLinks: NetworkPortLink[];
+  now: number;
+}): { links: NetworkPortLink[]; resolved: number } {
+  const { nodeId, nodePorts, interfacesIndex, existingPortLinks, now } = params;
+
+  const portIdByKey = new Map<string, string>();
+  for (const p of nodePorts ?? []) {
+    const key = `${p.protocol}|${p.port}`;
+    if (!portIdByKey.has(key)) portIdByKey.set(key, p.id);
+  }
+
+  let resolved = 0;
+  const links = (existingPortLinks ?? []).map((l): NetworkPortLink => {
+    let next = l;
+
+    if (next.targetIp && interfacesIndex.get(next.targetIp) === nodeId) {
+      next = {
+        ...next,
+        targetNodeId: nodeId,
+        targetPortId: portIdByKey.get(`${next.targetProtocol}|${next.targetPort}`) ?? null,
+        targetIp: null,
+        lastConfirmedAt: now,
+        updatedAt: now,
+      };
+      resolved += 1;
+    } else if (next.targetNodeId === nodeId && next.targetPortId === null) {
+      const portId = portIdByKey.get(`${next.targetProtocol}|${next.targetPort}`) ?? null;
+      if (portId) {
+        next = { ...next, targetPortId: portId, updatedAt: now };
+        resolved += 1;
+      }
+    }
+
+    if (next.sourceIp && interfacesIndex.get(next.sourceIp) === nodeId) {
+      next = {
+        ...next,
+        sourceNodeId: nodeId,
+        sourcePortId: portIdByKey.get(`${next.sourceProtocol}|${next.sourcePort}`) ?? null,
+        sourceIp: null,
+        lastConfirmedAt: now,
+        updatedAt: now,
+      };
+      resolved += 1;
+    } else if (next.sourceNodeId === nodeId && next.sourcePortId === null) {
+      const portId = portIdByKey.get(`${next.sourceProtocol}|${next.sourcePort}`) ?? null;
+      if (portId) {
+        next = { ...next, sourcePortId: portId, updatedAt: now };
+        resolved += 1;
+      }
+    }
+
+    return next;
+  });
+
+  return { links, resolved };
 }
 
 /* ══ probe result → overall verdict (convenience for the API layer) ═════════ */

@@ -22,6 +22,7 @@ import { InterfaceTable } from './interface-table';
 import { RouteTable } from './route-table';
 import { FirewallView } from './firewall-view';
 import { PortTable, ReachabilityBadge } from './port-table';
+import { PortTopologyView } from './port-topology';
 import { ProbeEmptyState } from './probe-empty-state';
 import { cn } from '@/lib/utils';
 import { applyProbeResult, probeServerTopology, probeTcpPorts } from '@/lib/network/topology-api';
@@ -30,10 +31,12 @@ import {
   getNodeByConnectionId,
   getNodeFirewall,
   getNodeFirewallRules,
+  getNode,
   getNodeInterfaces,
   getNodePorts,
   getNodeRoutes,
   getPortProbes,
+  listPortLinks,
   patchFirewallRuleManual,
   patchInterfaceManual,
   patchPortManual,
@@ -50,6 +53,7 @@ import type {
   NetworkInterface,
   NetworkNode,
   NetworkPort,
+  NetworkPortLink,
   NetworkRoute,
   PortProbeRecord,
   ProbeSections,
@@ -77,6 +81,7 @@ interface NodePanelData {
   rules: NetworkFirewallRule[];
   ports: NetworkPort[];
   portProbes: PortProbeRecord[];
+  portLinks: NetworkPortLink[];
 }
 
 const PROBE_STATUS_CLASSES: Record<ProbeStatus, string> = {
@@ -117,6 +122,7 @@ function readNodeData(assetId: string): NodePanelData | null {
     rules: getNodeFirewallRules(node.id),
     ports: getNodePorts(node.id),
     portProbes: getPortProbes(node.id),
+    portLinks: listPortLinks(),
   };
 }
 
@@ -151,6 +157,8 @@ export function NetworkPanel({
   const [probing, setProbing] = useState(false);
   const [lastSections, setLastSections] = useState<ProbeSections | null>(null);
   const [activeTab, setActiveTab] = useState('summary');
+  /** Level-2 drill-down: when set, the panel shows that port's topology. */
+  const [selectedPort, setSelectedPort] = useState<{ nodeId: string; portId: string; host: string } | null>(null);
 
   // Manual TCP reachability state. Keyed by assetId so switching servers can
   // never show another server's results.
@@ -174,6 +182,11 @@ export function NetworkPanel({
     setData(readNodeData(assetId));
     setLastSections(null);
   }, [assetId, storeVersion]);
+
+  // Drilling into a port is scoped to one server; leaving it resets the view.
+  useEffect(() => {
+    setSelectedPort(null);
+  }, [assetId]);
 
   useEffect(() => subscribeTopology(() => setStoreVersion(v => v + 1)), []);
 
@@ -376,6 +389,20 @@ export function NetworkPanel({
         <div className="min-h-0 flex-1 overflow-auto">
           <ProbeEmptyState />
         </div>
+      ) : selectedPort ? (
+        <div className="min-h-0 flex-1 overflow-hidden">
+          <PortTopologyView
+            key={`${selectedPort.nodeId}:${selectedPort.portId}`}
+            nodeId={selectedPort.nodeId}
+            portId={selectedPort.portId}
+            host={selectedPort.host}
+            onBack={() => setSelectedPort(null)}
+            onOpenPort={(peerNodeId, peerPortId) => {
+              const peer = getNode(peerNodeId);
+              setSelectedPort({ nodeId: peerNodeId, portId: peerPortId, host: peer?.primaryIp || host });
+            }}
+          />
+        </div>
       ) : (
         <Tabs
           value={activeTab}
@@ -461,10 +488,13 @@ export function NetworkPanel({
               <div className="animate-in fade-in-0 pr-2 duration-200">
                 <PortTable
                   ports={data.ports}
+                  host={host}
+                  links={data.portLinks}
                   reachabilityOf={reachabilityOf}
                   testing={tcpRunning}
                   tcpDisabled={host.trim() === ''}
                   onTestConnectivity={openTcpDialog}
+                  onDrillDown={(port) => setSelectedPort({ nodeId: node.id, portId: port.id, host })}
                   onPatch={(portId, patch) => {
                     patchPortManual(node.id, portId, patch);
                     refresh();

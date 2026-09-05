@@ -30,7 +30,7 @@
 | 区分监听 / 放行 / 实际可达 | 服务器监听状态 × 客户端 TCP 结果交叉判定，6 种结论 | 表驱动单测覆盖全部 6 条分支 |
 | 增量保存，不覆盖人工修改 | 按自然键合并，**白名单拷贝**只写自动字段；自动/人工字段冲突时 fail-fast | 12 个回归用例，含「负载携带人工键也不得覆盖」 |
 | 消失的条目不丢数据 | 不删除，只标记 `missingSince`，界面置灰显示「本次未探测到」 | 单测覆盖「消失→再现」的 `missingSince` 清空语义 |
-| 不保存密码/私钥 | 8 张 `net_*` 表无任何认证字段，节点仅存 `connectionId` | 建表语句与前端行映射双向扫描，凭据字段 0 命中 |
+| 不保存密码/私钥 | 9 张 `net_*` 表无任何认证字段，节点仅存 `connectionId` | 建表语句与前端行映射双向扫描，凭据字段 0 命中 |
 
 ---
 
@@ -46,7 +46,7 @@
 
 `iptables -L`、`ss -p` 在非 root 下常报 `Permission denied`。这类情况不判为失败，而是该段标记 `partial` 并在界面显示提示（如「防火墙：需要 root 权限」），其余数据正常入库。
 
-### 数据模型：8 张表
+### 数据模型：9 张表
 
 `net_nodes` / `net_interfaces` / `net_routes` / `net_firewalls` / `net_firewall_rules` / `net_ports` / `net_port_probes` / `net_links`
 
@@ -95,3 +95,11 @@ Rust 侧还在真实 Linux 主机上跑通了完整探测：8 段全部 ok，解
 | `src/components/network/network-panel.tsx` | 服务器维度诊断面板 |
 | `src/components/toolbox/tool-topology.tsx` | 全局拓扑视图 |
 | `src/components/network/topology-graph.tsx` | 自绘 SVG 拓扑图 |
+
+---
+
+## 七、端口拓扑补充交付
+
+- **二级下钻**：服务器拓扑选中节点后显示该服务器端口列表；点击端口进入以 `IP:PORT/协议` 为中心的端口视图，可继续打开已持久化的对端端口。所有展开仅读取本地 SQLite，不触发探测。
+- **端口级关系**：新增 `net_port_links`，保存源端点、目标端点、协议、端口、状态、证据、时间与人工说明。实际连接方向按 socket 形态推断，未知 IP 端点仅保存不探测，待用户主动探测后再关联已有资产。
+- **状态与筛选**：端口列表支持协议、可达状态、连接状态和服务 / 用途 / 进程 / `IP:PORT` 搜索；端口详情并列展示监听、防火墙、客户端 TCP 可达性与实际连接，避免把“监听”误读为“可访问”。

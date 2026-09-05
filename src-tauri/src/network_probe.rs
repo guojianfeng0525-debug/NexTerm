@@ -146,6 +146,7 @@ pub struct DetectedPeer {
     pub local_port: Option<u16>,
     pub protocol: String,
     pub process_name: String,
+    pub process_pid: Option<u32>,
     pub state: String,
 }
 
@@ -1231,7 +1232,7 @@ fn empty_rule() -> DetectedFirewallRule {
 }
 
 /// `firewall-cmd --list-all-zones`:
-/// ```
+/// ```text
 /// public (active)
 ///   target: default
 ///   services: ssh dhcpv6-client
@@ -1308,7 +1309,7 @@ fn parse_firewalld_line(line: &str, zone: &mut String, rules: &mut Vec<DetectedF
 }
 
 /// `ufw status verbose`:
-/// ```
+/// ```text
 /// Status: active
 /// To                         Action      From
 /// --                         ------      ----
@@ -1375,7 +1376,7 @@ fn parse_ufw_line(line: &str, rules: &mut Vec<DetectedFirewallRule>) {
 }
 
 /// `nft list ruleset`:
-/// ```
+/// ```text
 /// table inet filter {
 ///   chain input {
 ///     type filter hook input priority 0; policy accept;
@@ -1731,13 +1732,14 @@ pub fn parse_peers(raw: &str) -> (Vec<DetectedPeer>, ProbeSection) {
             }
             let (remote_addr, remote_port) = split_host_port(tokens[5]);
             let (_, local_port) = split_host_port(tokens[4]);
-            let (name, _, _) = parse_ss_process(t);
+            let (name, pid, _) = parse_ss_process(t);
             peers.push(DetectedPeer {
                 remote_addr,
                 remote_port,
                 local_port,
                 protocol: proto,
                 process_name: name,
+                process_pid: pid,
                 state: normalize_state(tokens[1]),
             });
             continue;
@@ -1758,13 +1760,14 @@ pub fn parse_peers(raw: &str) -> (Vec<DetectedPeer>, ProbeSection) {
         }
         let (remote_addr, remote_port) = split_host_port(tokens[4]);
         let (_, local_port) = split_host_port(tokens[3]);
-        let (name, _, _) = parse_netstat_process(&proc_field);
+        let (name, pid, _) = parse_netstat_process(&proc_field);
         peers.push(DetectedPeer {
             remote_addr,
             remote_port,
             local_port,
             protocol: proto,
             process_name: name,
+            process_pid: pid,
             state: normalize_state(&state),
         });
     }
@@ -2569,6 +2572,7 @@ mod tests {
         assert_eq!(peers[0].local_port, Some(54322));
         assert_eq!(peers[0].protocol, "tcp");
         assert_eq!(peers[0].process_name, "psql");
+        assert_eq!(peers[0].process_pid, Some(99));
         assert_eq!(peers[0].state, "ESTABLISHED");
     }
 
@@ -2581,6 +2585,7 @@ mod tests {
         assert_eq!(peers[0].remote_addr, "10.0.0.5");
         assert_eq!(peers[0].remote_port, Some(5432));
         assert_eq!(peers[0].process_name, "psql");
+        assert_eq!(peers[0].process_pid, Some(99));
     }
 
     #[test]
@@ -2728,4 +2733,3 @@ mod tests {
         }
     }
 }
-

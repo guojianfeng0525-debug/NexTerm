@@ -62,12 +62,14 @@ import {
   getNodePorts,
   getNodeRoutes,
   getNodeSnapshot,
+  getPortLinksForPort,
   getPortProbes,
   initializeTopologyStore,
   isTopologyStoreInitialized,
   listInterfaces,
   listLinks,
   listNodes,
+  listPortLinks,
   patchFirewallRuleManual,
   patchInterfaceManual,
   patchNodeManual,
@@ -78,12 +80,14 @@ import {
   removeNode,
   resetTopologyStore,
   saveNodeFirewallRules,
+  savePortLinks,
   saveNodeFirewalls,
   saveNodeInterfaces,
   saveNodePorts,
   saveNodeRoutes,
   subscribeTopology,
   upsertLink,
+  upsertPortLink,
   upsertNode,
 } from '../topology-storage';
 import {
@@ -92,6 +96,7 @@ import {
   makeLink,
   makeNode,
   makePort,
+  makePortLink,
   makeProbe,
   makeRoute,
   makeRule,
@@ -272,9 +277,17 @@ describe('manual patches', () => {
     saveNodeRoutes('n1', [makeRoute({ id: 'r1', nodeId: 'n1' })]);
     saveNodeFirewallRules('n1', [makeRule({ id: 'x1', nodeId: 'n1' })]);
 
-    expect(patchPortManual('n1', 'p1', { serviceName: '官网', purpose: '对外', hidden: true })).toMatchObject({
+    expect(patchPortManual('n1', 'p1', {
       serviceName: '官网',
       purpose: '对外',
+      notes: '人工备注',
+      tags: ['web', '内网'],
+      hidden: true,
+    })).toMatchObject({
+      serviceName: '官网',
+      purpose: '对外',
+      notes: '人工备注',
+      tags: ['web', '内网'],
       hidden: true,
     });
     // scope guard: a patch for another node must not apply
@@ -349,3 +362,50 @@ describe('snapshot + subscription', () => {
   });
 });
 
+describe('port links', () => {
+  it('persists unknown endpoints and classifies exact server/port relations by direction', async () => {
+    upsertNode(makeNode({ id: 'node-a', connectionId: 'conn-a' }));
+    upsertNode(makeNode({ id: 'node-b', connectionId: 'conn-b' }));
+    saveNodePorts('node-a', [makePort({ id: 'port-a8080', nodeId: 'node-a', port: 8080 })]);
+    saveNodePorts('node-b', [makePort({ id: 'port-b8080', nodeId: 'node-b', port: 8080 })]);
+
+    const outbound = makePortLink({
+      id: 'plink-out',
+      sourceNodeId: 'node-a',
+      sourcePortId: 'port-a8080',
+      sourcePort: 8080,
+      targetNodeId: 'node-b',
+      targetPortId: 'port-b8080',
+      targetPort: 8080,
+      description: '订单服务调用',
+    });
+    const inboundUnknownClient = makePortLink({
+      id: 'plink-in',
+      sourceNodeId: null,
+      sourcePortId: null,
+      sourceIp: '203.0.113.9',
+      sourcePort: 51000,
+      targetNodeId: 'node-b',
+      targetPortId: 'port-b8080',
+      targetPort: 8080,
+    });
+    upsertPortLink(outbound);
+    upsertPortLink(inboundUnknownClient);
+    await flush();
+    await initializeTopologyStore();
+
+    expect(listPortLinks()).toEqual([outbound, inboundUnknownClient]);
+    expect(getPortLinksForPort('node-a', 'port-a8080')).toEqual({
+      inbound: [],
+      outbound: [outbound],
+    });
+    // The same port number on another server is a different endpoint.
+    expect(getPortLinksForPort('node-b', 'port-b8080')).toEqual({
+      inbound: [outbound, inboundUnknownClient],
+      outbound: [],
+    });
+
+    savePortLinks([outbound]);
+    expect(listPortLinks()).toEqual([outbound]);
+  });
+});

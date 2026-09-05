@@ -281,6 +281,10 @@ export interface NetworkPort {
   /* M */
   serviceName: string;
   purpose: string;
+  /** Free-text user annotation for the port (never written by a probe). */
+  notes: string;
+  /** User tags for grouping/filtering (never written by a probe). */
+  tags: string[];
   hidden: boolean;
 
   /* S */
@@ -300,7 +304,7 @@ export const PORT_AUTO_KEYS = [
   'pid',
   'processUser',
 ] as const;
-export const PORT_MANUAL_KEYS = ['serviceName', 'purpose', 'hidden'] as const;
+export const PORT_MANUAL_KEYS = ['serviceName', 'purpose', 'notes', 'tags', 'hidden'] as const;
 
 /* ══ TCP reachability probes ══════════════════════════════════════════════ */
 
@@ -351,6 +355,92 @@ export interface NetworkLink {
 
 export const LINK_AUTO_KEYS = ['protocol', 'port', 'linkType', 'status', 'source', 'evidence'] as const;
 export const LINK_MANUAL_KEYS = ['description', 'manualLabel', 'hidden'] as const;
+
+/* ══ port-level topology links ════════════════════════════════════════════ */
+/**
+ * A port-level connection: `源服务器:源端口 → 目标服务器:目标端口`.
+ *
+ * This is the level-2 drill-down of `NetworkLink`. Where `NetworkLink`
+ * connects two *servers*, a port link connects two *ports*. Either endpoint
+ * may be:
+ *
+ *   · a port on another already-probed node (`targetNodeId` set), or
+ *   · a bare `IP:port` peer seen in an ESTABLISHED connection but never probed
+ *     by NexTerm (`sourceNodeId` / `targetNodeId === null`). Such an endpoint
+ *     is recorded but NEVER auto-probed; it resolves to a node only once the
+ *     user manually probes that server.
+ *
+ * Field ownership follows the same A/M/S discipline as every other entity:
+ * a re-probe may overwrite auto fields but must never touch a manual link's
+ * `description` / `manualLabel` / `hidden`, nor downgrade its `source`.
+ */
+
+/** Who produced a port-level connection. */
+export type PortLinkSource = 'auto' | 'manual';
+
+/** Observed state of a port-level connection. */
+export type PortLinkStatus = 'active' | 'observed' | 'stale' | 'unknown';
+
+export interface NetworkPortLink {
+  readonly id: string;
+  /**
+   * Source server node id. NULL when an observed client is only known by IP.
+   * Unknown endpoints are never probed; they resolve after a user probes that
+   * server and its interface addresses match.
+   */
+  readonly sourceNodeId: string | null;
+  /** Source port row id; NULL for an ephemeral/unknown-source socket. */
+  readonly sourcePortId: string | null;
+  /** Bare IP for an unprobed source endpoint; NULL once `sourceNodeId` resolves. */
+  readonly sourceIp: string | null;
+  sourceProtocol: NetProtocol;
+  sourcePort: number;
+
+  /**
+   * Target server node id. NULL when the target is an unprobed peer — in that
+   * case only `targetIp` / `targetProtocol` / `targetPort` carry identity and
+   * the link is NEVER auto-probed. Resolved to a node once that server is
+   * probed and its interfaces/ports correlate.
+   */
+  targetNodeId: string | null;
+  /** Resolved target port row id; NULL until the target node is probed. */
+  targetPortId: string | null;
+  targetProtocol: NetProtocol;
+  targetPort: number;
+  /** Bare IP for an unprobed peer target; NULL once `targetNodeId` resolves. */
+  targetIp: string | null;
+
+  /* A — inferred from observed peer connections / TCP reachability checks */
+  status: PortLinkStatus;
+  /** `auto` = inferred from an observed peer; `manual` = user-authored. */
+  source: PortLinkSource;
+  /** How an auto link was inferred, e.g. "ss ESTABLISHED 10.0.0.5:5432". */
+  evidence: string;
+
+  /* M */
+  description: string;
+  manualLabel: string;
+  hidden: boolean;
+
+  /* S */
+  firstSeenAt: number;
+  lastConfirmedAt: number | null;
+  readonly createdAt: number;
+  updatedAt: number;
+}
+
+export const PORT_LINK_AUTO_KEYS = [
+  'sourceProtocol',
+  'sourcePort',
+  'sourceIp',
+  'targetProtocol',
+  'targetPort',
+  'targetIp',
+  'status',
+  'evidence',
+  'lastConfirmedAt',
+] as const;
+export const PORT_LINK_MANUAL_KEYS = ['description', 'manualLabel', 'hidden'] as const;
 
 /* ══ probe payload (Rust ↔ TS) ════════════════════════════════════════════ */
 
@@ -447,6 +537,7 @@ export interface DetectedPeer {
   localPort: number | null;
   protocol: NetProtocol;
   processName: string;
+  processPid: number | null;
   state: string;
 }
 
@@ -530,4 +621,10 @@ export interface ApplyProbeSummary {
   linksAdded: number;
   /** Topology links re-observed by this probe. */
   linksConfirmed: number;
+  /** Port-level links inferred from observed peers for the first time. */
+  portLinksAdded: number;
+  /** Port-level links re-observed by this probe. */
+  portLinksConfirmed: number;
+  /** Dangling port links resolved to a node after this probe. */
+  portLinksResolved: number;
 }

@@ -54,7 +54,8 @@ export type DbTable =
   | 'net_firewall_rules'
   | 'net_ports'
   | 'net_port_probes'
-  | 'net_links';
+  | 'net_links'
+  | 'net_port_links';
 
 export type Row = Record<string, unknown>;
 

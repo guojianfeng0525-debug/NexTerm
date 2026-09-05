@@ -30,6 +30,7 @@ import type {
   NetworkLink,
   NetworkNode,
   NetworkPort,
+  NetworkPortLink,
   NetworkRoute,
   NodeSnapshot,
   PortProbeRecord,
@@ -46,7 +47,8 @@ type Kind =
   | 'rules'
   | 'ports'
   | 'probes'
-  | 'links';
+  | 'links'
+  | 'port_links';
 
 const TABLES: Record<Kind, DbTable> = {
   nodes: 'net_nodes',
@@ -57,6 +59,7 @@ const TABLES: Record<Kind, DbTable> = {
   ports: 'net_ports',
   probes: 'net_port_probes',
   links: 'net_links',
+  port_links: 'net_port_links',
 };
 
 // In-memory cache (synchronous reads for the UI).
@@ -69,6 +72,7 @@ const cache: Record<Kind, unknown[]> = {
   ports: [],
   probes: [],
   links: [],
+  port_links: [],
 };
 
 let initialized = false;
@@ -329,6 +333,8 @@ function portToRow(p: NetworkPort): Row {
     reachability_at: p.reachabilityAt ?? null,
     service_name: p.serviceName,
     purpose: p.purpose,
+    notes: p.notes,
+    tags: stringsToJson(p.tags),
     hidden: boolToInt(p.hidden),
     last_seen_at: p.lastSeenAt,
     missing_since: p.missingSince ?? null,
@@ -351,6 +357,8 @@ function rowToPort(row: Row): NetworkPort {
     reachabilityAt: numOrNull(row.reachability_at),
     serviceName: str(row.service_name),
     purpose: str(row.purpose),
+    notes: str(row.notes),
+    tags: jsonToStrings(row.tags),
     hidden: bool(row.hidden),
     lastSeenAt: num(row.last_seen_at),
     missingSince: numOrNull(row.missing_since),
@@ -434,6 +442,63 @@ function rowToLink(row: Row): NetworkLink {
   };
 }
 
+function portLinkToRow(l: NetworkPortLink): Row {
+  return {
+    id: l.id,
+    source_node_id: l.sourceNodeId ?? '',
+    source_port_id: l.sourcePortId ?? '',
+    source_ip: l.sourceIp ?? null,
+    source_protocol: l.sourceProtocol,
+    source_port: l.sourcePort,
+    target_node_id: l.targetNodeId ?? null,
+    target_port_id: l.targetPortId ?? null,
+    target_protocol: l.targetProtocol,
+    target_port: l.targetPort,
+    target_ip: l.targetIp ?? null,
+    status: l.status,
+    source: l.source,
+    evidence: l.evidence,
+    description: l.description,
+    manual_label: l.manualLabel,
+    hidden: boolToInt(l.hidden),
+    first_seen_at: l.firstSeenAt,
+    last_confirmed_at: l.lastConfirmedAt ?? null,
+    created_at: l.createdAt,
+    updated_at: l.updatedAt,
+  };
+}
+
+function rowToPortLink(row: Row): NetworkPortLink {
+  const sourceNodeId = str(row.source_node_id);
+  const sourcePortId = str(row.source_port_id);
+  const targetNodeId = str(row.target_node_id);
+  const targetPortId = str(row.target_port_id);
+  const targetIp = str(row.target_ip);
+  return {
+    id: str(row.id),
+    sourceNodeId: sourceNodeId || null,
+    sourcePortId: sourcePortId || null,
+    sourceIp: strOrNull(row.source_ip),
+    sourceProtocol: row.source_protocol === 'udp' ? 'udp' : 'tcp',
+    sourcePort: num(row.source_port),
+    targetNodeId: targetNodeId || null,
+    targetPortId: targetPortId || null,
+    targetProtocol: row.target_protocol === 'udp' ? 'udp' : 'tcp',
+    targetPort: num(row.target_port),
+    targetIp: targetIp || null,
+    status: (row.status as NetworkPortLink['status']) || 'unknown',
+    source: row.source === 'manual' ? 'manual' : 'auto',
+    evidence: str(row.evidence),
+    description: str(row.description),
+    manualLabel: str(row.manual_label),
+    hidden: bool(row.hidden),
+    firstSeenAt: num(row.first_seen_at),
+    lastConfirmedAt: numOrNull(row.last_confirmed_at),
+    createdAt: num(row.created_at),
+    updatedAt: num(row.updated_at),
+  };
+}
+
 function toRow(kind: Kind, item: { readonly id: string }): Row {
   switch (kind) {
     case 'nodes':
@@ -452,6 +517,8 @@ function toRow(kind: Kind, item: { readonly id: string }): Row {
       return probeToRow(item as PortProbeRecord);
     case 'links':
       return linkToRow(item as NetworkLink);
+    case 'port_links':
+      return portLinkToRow(item as NetworkPortLink);
   }
 }
 
@@ -459,7 +526,7 @@ function toRow(kind: Kind, item: { readonly id: string }): Row {
 
 /** Load every `net_*` table into the in-memory cache (call once after unlock). */
 export async function initializeTopologyStore(): Promise<void> {
-  const [nodes, interfaces, routes, firewalls, rules, ports, probes, links] = await Promise.all([
+  const [nodes, interfaces, routes, firewalls, rules, ports, probes, links, portLinks] = await Promise.all([
     rowList(TABLES.nodes),
     rowList(TABLES.interfaces),
     rowList(TABLES.routes),
@@ -468,6 +535,7 @@ export async function initializeTopologyStore(): Promise<void> {
     rowList(TABLES.ports),
     rowList(TABLES.probes),
     rowList(TABLES.links),
+    rowList(TABLES.port_links),
   ]);
   cache.nodes = nodes.map(rowToNode);
   cache.interfaces = interfaces.map(rowToInterface);
@@ -477,6 +545,7 @@ export async function initializeTopologyStore(): Promise<void> {
   cache.ports = ports.map(rowToPort);
   cache.probes = probes.map(rowToProbe);
   cache.links = links.map(rowToLink);
+  cache.port_links = portLinks.map(rowToPortLink);
   initialized = true;
 }
 
@@ -494,6 +563,7 @@ export function resetTopologyStore(): void {
   cache.ports = [];
   cache.probes = [];
   cache.links = [];
+  cache.port_links = [];
   initialized = false;
 }
 
@@ -614,6 +684,17 @@ export function removeNode(id: string): void {
     for (const link of doomed) commitDelete('links', link.id);
   }
 
+  // Port links hang off a node as source; an unprobed peer target is referenced
+  // by `targetIp` only (targetNodeId is NULL), so cascade on the source side and
+  // on a resolved target node. A target that was never probed simply keeps its
+  // dangling targetIp — it is not orphaned because it has no node to lose.
+  const portLinks = list<NetworkPortLink>('port_links');
+  const doomedPortLinks = portLinks.filter((l) => l.sourceNodeId === id || l.targetNodeId === id);
+  if (doomedPortLinks.length > 0) {
+    cache.port_links = portLinks.filter((l) => l.sourceNodeId !== id && l.targetNodeId !== id);
+    for (const link of doomedPortLinks) commitDelete('port_links', link.id);
+  }
+
   cache.nodes = list<NetworkNode>('nodes').filter((n) => n.id !== id);
   commitDelete('nodes', id);
   notifyTopologyChanged();
@@ -662,6 +743,11 @@ export function getNodePorts(nodeId: string): NetworkPort[] {
   return list<NetworkPort>('ports').filter((p) => p.nodeId === nodeId);
 }
 
+/** Every persisted port across all servers; used only for local correlation. */
+export function listPorts(): NetworkPort[] {
+  return list<NetworkPort>('ports');
+}
+
 /* ── manual-field patches (never called by the probe pipeline) ───────────── */
 
 function patchRow<T extends { readonly id: string; readonly nodeId: string }>(
@@ -686,7 +772,7 @@ function patchRow<T extends { readonly id: string; readonly nodeId: string }>(
 export function patchPortManual(
   nodeId: string,
   portId: string,
-  patch: Partial<Pick<NetworkPort, 'serviceName' | 'purpose' | 'hidden'>>,
+  patch: Partial<Pick<NetworkPort, 'serviceName' | 'purpose' | 'notes' | 'tags' | 'hidden'>>,
 ): NetworkPort | undefined {
   return patchRow<NetworkPort>('ports', nodeId, portId, patch);
 }
@@ -750,6 +836,78 @@ export function removeLink(id: string): void {
   cache.links = list<NetworkLink>('links').filter((l) => l.id !== id);
   commitDelete('links', id);
   notifyTopologyChanged();
+}
+
+/* ── port links (level-2 drill-down) ─────────────────────────────────────── */
+
+/** Every port link in the store (hidden ones included — filtering is a UI concern). */
+export function listPortLinks(): NetworkPortLink[] {
+  return list<NetworkPortLink>('port_links');
+}
+
+/** Port links where `nodeId` is the source owning server. */
+export function getPortLinksForNode(nodeId: string): NetworkPortLink[] {
+  return list<NetworkPortLink>('port_links').filter((l) => l.sourceNodeId === nodeId);
+}
+
+/**
+ * Port links touching a specific port of a node, in either direction:
+ *   · as source  → the port connects OUT to a target (出站)
+ *   · as target  → something connects IN to the port (入站)
+ */
+export function getPortLinksForPort(
+  nodeId: string,
+  portId: string,
+): { inbound: NetworkPortLink[]; outbound: NetworkPortLink[] } {
+  const all = list<NetworkPortLink>('port_links');
+  const inbound: NetworkPortLink[] = [];
+  const outbound: NetworkPortLink[] = [];
+  for (const l of all) {
+    if (l.sourceNodeId === nodeId && l.sourcePortId === portId) outbound.push(l);
+    else if (l.targetNodeId === nodeId && l.targetPortId === portId) inbound.push(l);
+  }
+  return { inbound, outbound };
+}
+
+/** Insert or replace one port link (used by manual edits and auto inference). */
+export function upsertPortLink(link: NetworkPortLink): NetworkPortLink[] {
+  return upsert('port_links', link);
+}
+
+export function removePortLink(id: string): void {
+  cache.port_links = list<NetworkPortLink>('port_links').filter((l) => l.id !== id);
+  commitDelete('port_links', id);
+  notifyTopologyChanged();
+}
+
+/** Replace the whole port-link set (only rows that vanished are deleted). */
+export function savePortLinks(items: readonly NetworkPortLink[]): void {
+  const rows = list<NetworkPortLink>('port_links');
+  const keptIds = new Set(items.map((i) => i.id));
+  cache.port_links = [...items];
+  for (const gone of rows) {
+    if (!keptIds.has(gone.id)) commitDelete('port_links', gone.id);
+  }
+  for (const item of items) commitUpsert('port_links', toRow('port_links', item));
+  notifyTopologyChanged();
+}
+
+/** Patch a port link's user-maintained fields (never called by the probe pipeline). */
+export function patchPortLinkManual(
+  linkId: string,
+  patch: Partial<Pick<NetworkPortLink, 'description' | 'manualLabel' | 'hidden'>>,
+): NetworkPortLink | undefined {
+  const rows = list<NetworkPortLink>('port_links');
+  const row = rows.find((r) => r.id === linkId);
+  if (!row) return undefined;
+  const next: NetworkPortLink = { ...row, ...patch, updatedAt: Date.now() };
+  const index = rows.findIndex((r) => r.id === linkId);
+  const copy = [...rows];
+  copy[index] = next;
+  cache.port_links = copy;
+  commitUpsert('port_links', toRow('port_links', next));
+  notifyTopologyChanged();
+  return next;
 }
 
 /* ── batch writers used by the probe pipeline ────────────────────────────── */
