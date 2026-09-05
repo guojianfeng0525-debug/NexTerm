@@ -287,12 +287,12 @@ pub async fn launch_app(request: LaunchAppRequest) -> Result<(), String> {
                 if let Some(cwd) = &request.cwd {
                     start.current_dir(cwd);
                 }
-                return start.spawn().map(|_| ()).map_err(|e2| {
+                start.spawn().map(|_| ()).map_err(|e2| {
                     format!(
                         "Failed to launch '{}': {} (fallback 'cmd /C start' also failed: {})",
                         path, e, e2
                     )
-                });
+                })
             }
             #[cfg(not(target_os = "windows"))]
             {
@@ -1690,7 +1690,7 @@ pub async fn extract_app_icon(path: String) -> Result<String, String> {
         }
         let bytes = std::fs::read(&tmp).map_err(|e| e.to_string())?;
         let _ = std::fs::remove_file(&tmp);
-        return Ok(data_url(&bytes));
+        Ok(data_url(&bytes))
     }
 
     #[cfg(not(any(target_os = "macos", windows)))]

@@ -307,7 +307,7 @@ fn read_files_platform(_app: &tauri::AppHandle) -> Result<Vec<String>, String> {
                 continue;
             }
             let end = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
-            if let Some(p) = String::from_utf16(&buf[..end]).ok() {
+            if let Ok(p) = String::from_utf16(&buf[..end]) {
                 if !p.is_empty() {
                     paths.push(p);
                 }
