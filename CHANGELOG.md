@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [未发布]
 
+## [2.17.0] - 2026-09-05
+
 ### 安全
 
 - **修复生产依赖高危漏洞**：将 `xlsx` 从 npm 上的老旧 `0.18.5` 升级到 SheetJS 官方发布的 `0.20.3`，并通过 pnpm override 把 Recharts 传递依赖 `lodash` 从 `4.17.21` 提升到 `4.18.1`，消除已知的 Prototype Pollution / Code Injection / ReDoS 攻击面；配置导出/导入、密码库 Excel、PostgreSQL/MySQL/SQLite 结果导出相关测试通过。
