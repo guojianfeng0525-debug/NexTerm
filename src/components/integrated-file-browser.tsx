@@ -133,6 +133,13 @@ export function IntegratedFileBrowser({ connectionId, host: _host, isConnected, 
     () => prefGet<boolean>(FOLLOW_TERMINAL_DIRECTORY_KEY, true),
   );
   const loadingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // 组件卸载时清掉最小加载时长计时器，避免 jsdom 环境销毁后继续 setState。
+  React.useEffect(() => {
+    return () => {
+      if (loadingTimerRef.current) clearTimeout(loadingTimerRef.current);
+    };
+  }, []);
   const lastFailedFollowPathRef = useRef<string | null>(null);
   // Tracks which connectionId the current path/files state belongs to.
   // Updated synchronously (via ref) in the restore effect so the save effect
