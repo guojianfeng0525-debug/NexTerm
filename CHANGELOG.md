@@ -22,7 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **VNC/RDP 同 ID 复连竞态修复**：`DesktopViewer` 卸载或切换状态时不再从旧 WebSocket 发送 `CloseDesktop`；后端会话继续由工具栏断开、关闭标签和重连流程这些唯一所有者清理。此前迟到的旧 `CloseDesktop` 可能落在新的 `desktop_connect` 之后，把刚创建的 VNC/RDP 会话关掉，表现为首次能连、后续复连失败。新增真实 x11vnc 原生桌面 E2E，并人为延迟旧 WebSocket 关闭消息以稳定复现该竞态。
 - **Linux 剪贴板远程文件 URI 修复**：解析 `text/uri-list` 时不再把 `file://remote/path` 的 host 截掉后误认为本地路径；现在只接受空 host 的 `file:///absolute/path`，远程 URI 会被忽略，避免把远程文件当作本地文件粘贴。
 
-### Added
+### 新增
 
 - **网络拓扑与网络诊断**：新增面向 Windows 桌面端的网络资产探测与拓扑管理能力，服务器端零安装。
   - **手动触发，范围严格**：仅当用户点击「探测当前服务器」时才执行探测；组件挂载、切换服务器、应用启动均不会自动探测。每次探测范围严格限定为当前服务器，不扫描局域网、不自动发现或主动连接其他主机。

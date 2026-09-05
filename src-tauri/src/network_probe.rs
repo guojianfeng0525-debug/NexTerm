@@ -410,7 +410,10 @@ fn parse_ss_process(field: &str) -> (String, Option<u32>, String) {
     }
     let mut pid = None;
     if let Some(p) = field.find("pid=") {
-        let digits: String = field[p + 4..].chars().take_while(|c| c.is_ascii_digit()).collect();
+        let digits: String = field[p + 4..]
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
         if let Ok(n) = digits.parse::<u32>() {
             pid = Some(n);
         }
@@ -535,7 +538,10 @@ pub fn parse_os_name(raw: &str) -> (String, ProbeSection) {
     }
 
     let os_name = os_name.trim().to_string();
-    (os_name.clone(), downgrade_empty(section, os_name.is_empty()))
+    (
+        os_name.clone(),
+        downgrade_empty(section, os_name.is_empty()),
+    )
 }
 
 /// `interfaces` section — supports both `ip -o addr` and `ifconfig -a`.
@@ -733,7 +739,9 @@ fn apply_ip_addr(entry: &mut DetectedInterface, line: &str) {
         if *tk == "inet" || *tk == "inet6" {
             if let Some(addr) = tokens.get(i + 1) {
                 let addr = addr.trim();
-                if addr.contains('.') && *tk == "inet" && !entry.ipv4_addrs.contains(&addr.to_string())
+                if addr.contains('.')
+                    && *tk == "inet"
+                    && !entry.ipv4_addrs.contains(&addr.to_string())
                 {
                     entry.ipv4_addrs.push(addr.to_string());
                 } else if addr.contains(':')
@@ -1023,9 +1031,7 @@ fn is_ipv4(token: &str) -> bool {
 /// `netstat` routing flags always start with `U` (up). BSD/macOS mixes in
 /// lowercase markers (`UGSc`, `UHLWIi`), so only require ASCII letters.
 fn is_flag_word(token: &str) -> bool {
-    !token.is_empty()
-        && token.starts_with('U')
-        && token.chars().all(|c| c.is_ascii_alphabetic())
+    !token.is_empty() && token.starts_with('U') && token.chars().all(|c| c.is_ascii_alphabetic())
 }
 
 fn classify_route(dest: &str, gateway: &str, genmask: &str, link_only: bool) -> String {
@@ -1079,12 +1085,14 @@ pub fn parse_firewall(raw: &str) -> (DetectedFirewall, ProbeSection) {
             continue;
         }
         if in_zones {
-            // `firewall-cmd --get-active-zones` prints the zone name at column
-            // 0 and its members indented underneath.
-            if !t.starts_with(' ') && !t.starts_with('\t') && !tt.is_empty() {
-                if !fw.zones.contains(&tt.to_string()) {
-                    fw.zones.push(tt.to_string());
-                }
+            // `firewall-cmd --get-active-zones` 的 zone 名从第 0 列开始，
+            // 成员行则会缩进。
+            if !t.starts_with(' ')
+                && !t.starts_with('\t')
+                && !tt.is_empty()
+                && !fw.zones.contains(&tt.to_string())
+            {
+                fw.zones.push(tt.to_string());
             }
             continue;
         }
@@ -1427,7 +1435,10 @@ fn parse_nft_line(
     rule.chain = chain.clone();
     rule.action = action;
     if let Some(p) = tokens.first() {
-        if matches!(*p, "tcp" | "udp" | "icmp" | "icmpv6" | "ip" | "ip6" | "sctp") {
+        if matches!(
+            *p,
+            "tcp" | "udp" | "icmp" | "icmpv6" | "ip" | "ip6" | "sctp"
+        ) {
             rule.protocol = p.to_string();
         }
     }
@@ -2086,13 +2097,19 @@ async fn probe_one_tcp_port(host: &str, port: u16, timeout: std::time::Duration)
 /// Arguments are sanitised here (host trimmed, timeout clamped, ports
 /// de-duplicated and capped) so a malformed frontend call can never fan out
 /// into an unbounded number of outbound connections.
-pub async fn probe_tcp_ports(host: &str, ports: &[u16], timeout_ms: Option<u64>) -> Vec<TcpProbeResult> {
+pub async fn probe_tcp_ports(
+    host: &str,
+    ports: &[u16],
+    timeout_ms: Option<u64>,
+) -> Vec<TcpProbeResult> {
     let host = host.trim();
     if host.is_empty() {
         return Vec::new();
     }
     let timeout = std::time::Duration::from_millis(
-        timeout_ms.unwrap_or(DEFAULT_TCP_TIMEOUT_MS).min(MAX_TCP_TIMEOUT_MS),
+        timeout_ms
+            .unwrap_or(DEFAULT_TCP_TIMEOUT_MS)
+            .min(MAX_TCP_TIMEOUT_MS),
     );
 
     let mut unique: Vec<u16> = Vec::new();
@@ -2191,8 +2208,9 @@ mod tests {
 
     #[test]
     fn os_name_from_macos_sw_vers() {
-        let (name, _) =
-            parse_os_name("ProductName:\tmacOS\nProductVersion:\t14.5\nBuildVersion:\t23F79\nDarwin 23.5.0");
+        let (name, _) = parse_os_name(
+            "ProductName:\tmacOS\nProductVersion:\t14.5\nBuildVersion:\t23F79\nDarwin 23.5.0",
+        );
         assert!(name.starts_with("macOS 14.5"));
     }
 
@@ -2229,7 +2247,10 @@ mod tests {
         assert_eq!(eth0.state, "UP");
         assert!(!eth0.is_loopback);
         assert_eq!(eth0.ipv4_addrs, vec!["192.168.1.10/24".to_string()]);
-        assert_eq!(eth0.ipv6_addrs, vec!["fe80::5054:ff:fe12:3456/64".to_string()]);
+        assert_eq!(
+            eth0.ipv6_addrs,
+            vec!["fe80::5054:ff:fe12:3456/64".to_string()]
+        );
     }
 
     #[test]
@@ -2242,7 +2263,10 @@ mod tests {
         assert_eq!(eth0.mtu, Some(1500));
         assert_eq!(eth0.state, "UP");
         assert_eq!(eth0.ipv4_addrs, vec!["10.0.0.5/24".to_string()]);
-        assert_eq!(eth0.ipv6_addrs, vec!["fe80::5054:ff:fe12:3456/64".to_string()]);
+        assert_eq!(
+            eth0.ipv6_addrs,
+            vec!["fe80::5054:ff:fe12:3456/64".to_string()]
+        );
         let lo = ifaces.iter().find(|i| i.iface_name == "lo").unwrap();
         assert!(lo.is_loopback);
     }
@@ -2437,14 +2461,18 @@ mod tests {
         let raw = "##RULE_FMT:firewalld##\npublic (active)\n  target: default\n  icmp-block-inversion: no\n  services: ssh dhcpv6-client\n  ports: 8080/tcp 9090/udp\n  forward-ports: \n  rich rules: \ndmz\n  services: http\n  ports: 3306/tcp";
         let (rules, section) = parse_firewall_rules(raw);
         assert_eq!(section.status, "ok");
-        assert!(rules.iter().any(|r| r.chain == "public" && r.dst_port == "ssh"));
-        assert!(rules.iter().any(|r| r.chain == "public"
-            && r.dst_port == "8080"
-            && r.protocol == "tcp"));
+        assert!(rules
+            .iter()
+            .any(|r| r.chain == "public" && r.dst_port == "ssh"));
+        assert!(rules
+            .iter()
+            .any(|r| r.chain == "public" && r.dst_port == "8080" && r.protocol == "tcp"));
         assert!(rules
             .iter()
             .any(|r| r.chain == "public" && r.dst_port == "9090" && r.protocol == "udp"));
-        assert!(rules.iter().any(|r| r.chain == "dmz" && r.dst_port == "3306"));
+        assert!(rules
+            .iter()
+            .any(|r| r.chain == "dmz" && r.dst_port == "3306"));
     }
 
     #[test]
@@ -2606,7 +2634,10 @@ mod tests {
 
     #[test]
     fn split_host_port_handles_all_layouts() {
-        assert_eq!(split_host_port("0.0.0.0:22"), ("0.0.0.0".to_string(), Some(22)));
+        assert_eq!(
+            split_host_port("0.0.0.0:22"),
+            ("0.0.0.0".to_string(), Some(22))
+        );
         assert_eq!(split_host_port("[::]:80"), ("::".to_string(), Some(80)));
         assert_eq!(split_host_port(":::80"), ("::".to_string(), Some(80)));
         assert_eq!(split_host_port("*:80"), ("*".to_string(), Some(80)));
