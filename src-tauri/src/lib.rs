@@ -532,7 +532,6 @@ pub fn run() {
             commands::get_network_latency,
             commands::get_disk_usage,
             commands::probe_network_topology,
-            commands::probe_tcp_ports,
             commands::create_directory,
             commands::delete_file,
             commands::rename_file,

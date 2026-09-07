@@ -11,7 +11,7 @@ async function expectElementText(element: WebdriverIO.Element, text: string): Pr
  * Port-topology drill-down acceptance.
  *
  * wdio.conf.ts seeds the real SQLite store before the app process starts. Every
- * interaction below is local navigation and must not call either probe command.
+ * interaction below is local navigation and must not call the probe command.
  */
 describe('Network port topology drill-down', () => {
   const password = `E2E_PORT_TOPOLOGY_${Date.now()}`;
@@ -31,7 +31,7 @@ describe('Network port topology drill-down', () => {
       const tracked = (window as unknown as { __e2eNetworkCommands?: string[] });
       tracked.__e2eNetworkCommands = [];
       internals.invoke = async (command, args) => {
-        if (command === 'probe_network_topology' || command === 'probe_tcp_ports') {
+        if (command === 'probe_network_topology') {
           tracked.__e2eNetworkCommands?.push(command);
         }
         return original(command, args);
@@ -120,7 +120,8 @@ describe('Network port topology drill-down', () => {
     expect(dialogMetrics.bottom).toBeLessThanOrEqual(dialogMetrics.viewportHeight);
     expect(dialogMetrics.top).toBeGreaterThanOrEqual(0);
     await browser.saveScreenshot('./test-results/wdio/network-port-link-dialog.png');
-    await (await $('[data-testid="port-link-peer-port"]')).setValue('8080');
+    await (await $('[data-testid="port-link-peer-port"]')).click();
+    await (await $('[role="option"]*=8080/tcp')).click();
     await (await $('[data-testid="port-link-save"]')).click();
     await $('[data-testid="port-link-editor"]').waitForExist({ reverse: true });
     await (await $('[data-testid="port-direction-outbound"]')).click();

@@ -16,11 +16,9 @@ import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Textarea } from '@/components/ui/textarea';
 import { TopologyGraph, nodeLabel } from './topology-graph';
-import { ReachabilityBadge } from './port-table';
 import { PortLinkEditorDialog } from './port-link-editor-dialog';
 import {
   getNodeFirewall,
-  getNodeFirewallRules,
   getNodePorts,
   getPortLinksForPort,
   listNodes,
@@ -31,7 +29,6 @@ import {
   subscribeTopology,
   upsertPortLink,
 } from '@/lib/network/topology-storage';
-import { evaluatePortFirewall, type PortFirewallStatus } from '@/lib/network/port-insights';
 import { cn } from '@/lib/utils';
 import type {
   NetworkLink,
@@ -55,18 +52,16 @@ const STATUS_KEYS = {
   stale: 'topology.linkStatus.stale',
   unknown: 'topology.linkStatus.unknown',
 } as const satisfies Record<PortLinkStatus, string>;
-const FIREWALL_KEYS = {
-  allowed: 'network.portTopology.firewallAllowed',
-  denied: 'network.portTopology.firewallDenied',
-  conflict: 'network.portTopology.firewallConflict',
-  inactive: 'network.portTopology.firewallInactive',
-  unknown: 'network.portTopology.firewallUnknown',
-} as const satisfies Record<PortFirewallStatus, string>;
 const DIRECTION_KEYS = {
   all: 'network.portTopology.all',
   inbound: 'network.portTopology.inbound',
   outbound: 'network.portTopology.outbound',
 } as const satisfies Record<Direction, string>;
+const FIREWALL_APPLICABILITY_KEYS = {
+  unknown: 'network.portTopology.firewallUnknown',
+  metadataAvailable: 'network.portTopology.firewallMetadataAvailable',
+  notApplicable: 'network.portTopology.firewallNotApplicable',
+} as const;
 
 function makeNode(id: string, label: string, subtitle: string, nodeType: string): NetworkNode {
   return {
@@ -96,7 +91,7 @@ function makeLink(
   sourceNodeId: string,
   targetNodeId: string,
   protocol: 'tcp' | 'udp',
-  port: number,
+  port: number | null,
   source: 'auto' | 'manual',
   status: PortLinkStatus,
   hidden: boolean,
@@ -150,7 +145,9 @@ export function PortTopologyView({ nodeId, portId, host, onBack, onOpenPort }: P
   const [linkEditOpen, setLinkEditOpen] = useState(false);
   const [editingLink, setEditingLink] = useState<NetworkPortLink | null>(null);
   const positionsRef = useRef<Map<string, { x: number; y: number }>>(new Map());
-  const centralNodeId = `port:${portId}`;
+  // This is a render projection of a persisted listener row, not a synthetic
+  // port entity. The prefix only keeps graph ids disjoint from server ids.
+  const centralNodeId = `listener:${portId}`;
 
   useEffect(() => subscribeTopology(() => setStoreVersion((version) => version + 1)), []);
 
@@ -171,8 +168,13 @@ export function PortTopologyView({ nodeId, portId, host, onBack, onOpenPort }: P
     }
     return map;
   }, [storeVersion]);
-  const firewallStatus = useMemo(
-    () => focused ? evaluatePortFirewall(focused, getNodeFirewall(nodeId), getNodeFirewallRules(nodeId)) : 'unknown',
+  const firewallApplicability = useMemo(
+    () => {
+      if (!focused) return 'unknown' as const;
+      const firewall = getNodeFirewall(nodeId);
+      if (!firewall) return 'unknown' as const;
+      return firewall.active ? 'metadataAvailable' as const : 'notApplicable' as const;
+    },
     [focused, nodeId, storeVersion],
   );
   const relatedServers = useMemo(() => {
@@ -198,14 +200,19 @@ export function PortTopologyView({ nodeId, portId, host, onBack, onOpenPort }: P
       const protocol = source ? link.sourceProtocol : link.targetProtocol;
       const peerPortId = source ? link.sourcePortId : link.targetPortId;
       const node = peerNodeId ? nodesById.get(peerNodeId) : undefined;
+      const endpointLabel = node
+        ? peerPortId
+          ? `${nodeLabel(node)} · ${peerPort}/${protocol}`
+          : nodeLabel(node)
+        : peerIp ?? '?';
       return {
         nodeId: peerNodeId,
         portId: peerPortId,
         ip: peerIp,
         port: peerPort,
         protocol,
-        label: node ? `${nodeLabel(node)} · ${peerPort}/${protocol}` : peerIp ?? '?',
-        subtitle: node?.primaryIp || `${peerPort}/${protocol}`,
+        label: endpointLabel,
+        subtitle: node?.primaryIp || (peerPortId ? `${peerPort}/${protocol}` : ''),
         type: 'server',
       };
     };
@@ -247,7 +254,7 @@ export function PortTopologyView({ nodeId, portId, host, onBack, onOpenPort }: P
 
     for (const link of filteredLinks) {
       const { isOutbound, peer } = endpointOf(link);
-      const peerKey = `peer:${peer.nodeId ?? peer.ip}:${peer.protocol}:${peer.port}`;
+      const peerKey = `peer:${peer.nodeId ?? peer.ip}:${peer.protocol}:${peer.portId ?? 'server'}`;
       if (!syntheticNodes.some((node) => node.id === peerKey)) {
         syntheticNodes.push(makeNode(peerKey, peer.label, peer.subtitle, peer.type));
       }
@@ -257,7 +264,7 @@ export function PortTopologyView({ nodeId, portId, host, onBack, onOpenPort }: P
           isOutbound ? centralId : peerKey,
           isOutbound ? peerKey : centralId,
           peer.protocol,
-          peer.port,
+          peer.portId ? peer.port : null,
           link.source,
           link.status,
           link.hidden,
@@ -309,8 +316,7 @@ export function PortTopologyView({ nodeId, portId, host, onBack, onOpenPort }: P
     { label: t('network.portTopology.process'), value: focused.processName || t('network.common.na') },
     { label: t('network.portTopology.serviceName'), value: focused.serviceName || t('network.common.na') },
     { label: t('network.portTopology.purpose'), value: focused.purpose || t('network.common.na') },
-    { label: t('network.portTopology.firewallStatus'), value: t(FIREWALL_KEYS[firewallStatus]) },
-    { label: t('network.portTopology.tcpConnectivity'), value: <ReachabilityBadge status={focused.reachability} /> },
+    { label: t('network.portTopology.firewallStatus'), value: t(FIREWALL_APPLICABILITY_KEYS[firewallApplicability]) },
     { label: t('network.portTopology.relatedServers'), value: relatedServers },
     { label: t('network.portTopology.inboundCount'), value: inbound.length },
     { label: t('network.portTopology.outboundCount'), value: outbound.length },
@@ -412,11 +418,14 @@ export function PortTopologyView({ nodeId, portId, host, onBack, onOpenPort }: P
             onSelectNode={setSelectedNodeId}
             onSelectLink={setSelectedLinkId}
             onEditNode={(id) => {
-              if (id === `port:${portId}`) {
+              if (id === centralNodeId) {
                 setPortEditOpen(true);
                 return;
               }
-              const real = filteredLinks.find((link) => `peer:${endpointOf(link).peer.nodeId ?? endpointOf(link).peer.ip}:${endpointOf(link).peer.protocol}:${endpointOf(link).peer.port}` === id);
+              const real = filteredLinks.find((link) => {
+                const peer = endpointOf(link).peer;
+                return `peer:${peer.nodeId ?? peer.ip}:${peer.protocol}:${peer.portId ?? 'server'}` === id;
+              });
               const endpoint = real ? endpointOf(real).peer : undefined;
               if (endpoint?.nodeId && endpoint.portId) openPort(endpoint.nodeId, endpoint.portId);
             }}

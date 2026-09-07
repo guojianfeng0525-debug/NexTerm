@@ -1,3 +1,5 @@
+> 历史交付记录：本文描述 v2.16.5 当时的初始交付。当前网络拓扑安全契约以 `docs/network-topology-design.md` 为准：零安装、只读 `/proc`、不主动访问任何远端、界面不展示临时客户端端口。
+
 # 网络拓扑与网络诊断 — 交付说明
 
 - **分支**：`feature/network-topology`（基于 tag `v2.16.5`，commit `366bbb6`）

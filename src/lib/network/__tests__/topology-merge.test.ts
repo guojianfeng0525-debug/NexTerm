@@ -19,7 +19,6 @@ import {
   mergeRoutes,
   portNaturalKey,
   resolvePortLinkTargets,
-  resolveReachability,
   resolveRouteType,
   resolveRuleHash,
 } from '../topology-merge';
@@ -28,7 +27,6 @@ import type {
   MergeOutcome,
   NetworkLink,
   RouteType,
-  TcpProbeResult,
 } from '../topology-types';
 import {
   detectedFirewall,
@@ -337,58 +335,6 @@ describe('inferLinkType', () => {
   });
 });
 
-/* ══ resolveReachability (design doc §5) ═══════════════════════════════════ */
-
-function tcp(over: Partial<TcpProbeResult> = {}): TcpProbeResult {
-  return { port: 80, status: 'reachable', tcpOk: true, latencyMs: 5, errorText: null, ...over };
-}
-
-describe('resolveReachability', () => {
-  const cases: [string, { listening: boolean; tcp: TcpProbeResult }, string][] = [
-    ['listening + connect ok → reachable', { listening: true, tcp: tcp({ status: 'reachable' }) }, 'reachable'],
-    [
-      'listening + refused → not_listening (stale server data)',
-      { listening: true, tcp: tcp({ status: 'not_listening', tcpOk: false }) },
-      'not_listening',
-    ],
-    [
-      'listening + timeout → blocked (firewall drop)',
-      { listening: true, tcp: tcp({ status: 'blocked', tcpOk: false }) },
-      'blocked',
-    ],
-    [
-      'not listening + connect ok → unexpected_open',
-      { listening: false, tcp: tcp({ status: 'reachable' }) },
-      'unexpected_open',
-    ],
-    [
-      'not listening + timeout → unreachable',
-      { listening: false, tcp: tcp({ status: 'blocked', tcpOk: false }) },
-      'unreachable',
-    ],
-    [
-      'dns failure wins over the listening flag',
-      { listening: true, tcp: tcp({ status: 'dns_error', tcpOk: false }) },
-      'dns_error',
-    ],
-  ];
-
-  it.each(cases)('%s', (_name, input, expected) => {
-    expect(resolveReachability(input)).toBe(expected);
-  });
-
-  it('treats a refused connection as not_listening even when the port is not reported', () => {
-    expect(resolveReachability({ listening: false, tcp: tcp({ status: 'not_listening', tcpOk: false }) })).toBe(
-      'not_listening',
-    );
-  });
-
-  it('propagates a transport error and leaves an untested port untested', () => {
-    expect(resolveReachability({ listening: true, tcp: tcp({ status: 'error', tcpOk: false }) })).toBe('error');
-    expect(resolveReachability({ listening: true, tcp: tcp({ status: 'untested', tcpOk: false }) })).toBe('untested');
-  });
-});
-
 /* ══ deriveProbeStatus ═════════════════════════════════════════════════════ */
 
 describe('deriveProbeStatus', () => {
@@ -678,7 +624,7 @@ describe('buildInterfaceIpIndex', () => {
     const nodes = [makeNode({ id: 'node-a' }), makeNode({ id: 'node-b', connectionId: 'conn-b' })];
     const ifaces = [
       makeInterface({ nodeId: 'node-a', ipv4Addrs: ['10.0.0.5/24'], ipv6Addrs: ['fe80::1/64'] }),
-      makeInterface({ id: 'i2', nodeId: 'node-b', ipv4Addrs: ['10.0.0.6/24'] }),
+      makeInterface({ id: 'i2', nodeId: 'node-b', ipv4Addrs: ['10.0.0.6/24'], ipv6Addrs: [] }),
       makeInterface({ id: 'i3', nodeId: 'node-unknown', ipv4Addrs: ['10.0.0.9/24'] }),
     ];
 
@@ -715,8 +661,8 @@ describe('inferLinksFromPeers', () => {
     expect(link.port).toBe(5432);
     expect(link.linkType).toBe('database');
     expect(link.source).toBe('auto');
-    expect(link.status).toBe('observed');
-    expect(link.evidence).toBe('ss ESTABLISHED 10.0.0.6:5432');
+    expect(link.status).toBe('active');
+    expect(link.evidence).toBe('/proc ESTABLISHED: local -> 10.0.0.6:5432');
     expect(link.description).toBe('');
     expect(link.firstSeenAt).toBe(2_000);
   });
@@ -818,7 +764,7 @@ describe('inferLinksFromPeers', () => {
     expect(link?.description).toBe('手工标注的专线');
     expect(link?.manualLabel).toBe('专线');
     expect(link?.evidence).toBe('');
-    expect(link?.status).toBe('observed');
+    expect(link?.status).toBe('active');
     expect(link?.lastConfirmedAt).toBe(2_000);
   });
 
@@ -846,6 +792,131 @@ describe('inferLinksFromPeers', () => {
     expect(linkNaturalKey({ sourceNodeId: 'a', targetNodeId: 'b', protocol: 'tcp', port: null })).toBe(
       'a|b|tcp|',
     );
+  });
+
+  it('normalizes IPv4-mapped IPv6 peers so both sides of a Docker connection meet', () => {
+    const out = inferLinksFromPeers({
+      nodeId: 'node-b',
+      peers: [detectedPeer({
+        localAddr: '::ffff:172.21.0.3',
+        remoteAddr: '::ffff:172.21.0.2',
+        remotePort: 42000,
+        localPort: 8080,
+      })],
+      knownNodes: nodes,
+      interfacesIndex: buildInterfaceIpIndex(nodes, [
+        makeInterface({ nodeId: 'node-a', ipv4Addrs: ['172.21.0.2/16'], ipv6Addrs: [] }),
+        makeInterface({ id: 'i2', nodeId: 'node-b', ipv4Addrs: ['172.21.0.3/16'], ipv6Addrs: [] }),
+      ]),
+      nodePorts: [makePort({ nodeId: 'node-b', port: 8080, listenAddr: '::' })],
+      existingLinks: [],
+      now: 2_000,
+    });
+
+    expect(out.links).toHaveLength(1);
+    expect(out.links[0]).toMatchObject({
+      sourceNodeId: 'node-a',
+      targetNodeId: 'node-b',
+      port: 8080,
+      status: 'active',
+    });
+  });
+
+  it('confirms reciprocal /proc observations without exposing the client ephemeral port', () => {
+    const dockerIndex = buildInterfaceIpIndex(nodes, [
+      makeInterface({ nodeId: 'node-a', ipv4Addrs: ['172.21.0.2/16'], ipv6Addrs: [] }),
+      makeInterface({ id: 'i2', nodeId: 'node-b', ipv4Addrs: ['172.21.0.3/16'], ipv6Addrs: [] }),
+    ]);
+    const listener = makePort({
+      id: 'port-b8080',
+      nodeId: 'node-b',
+      port: 8080,
+      listenAddr: '::',
+      state: 'LISTEN',
+    });
+
+    const outbound = inferLinksFromPeers({
+      nodeId: 'node-a',
+      peers: [detectedPeer({
+        localAddr: '172.21.0.2',
+        remoteAddr: '172.21.0.3',
+        remotePort: 8080,
+        localPort: 42137,
+      })],
+      knownNodes: nodes,
+      interfacesIndex: dockerIndex,
+      nodePorts: [],
+      existingLinks: [],
+      now: 1_000,
+    });
+    const confirmed = inferLinksFromPeers({
+      nodeId: 'node-b',
+      peers: [detectedPeer({
+        localAddr: '::ffff:172.21.0.3',
+        remoteAddr: '::ffff:172.21.0.2',
+        remotePort: 42137,
+        localPort: 8080,
+      })],
+      knownNodes: nodes,
+      interfacesIndex: dockerIndex,
+      nodePorts: [listener],
+      existingLinks: outbound.links,
+      now: 2_000,
+    });
+
+    expect(outbound.added).toBe(1);
+    expect(confirmed.added).toBe(0);
+    expect(confirmed.confirmed).toBe(1);
+    expect(confirmed.links).toHaveLength(1);
+    expect(confirmed.links[0]).toMatchObject({
+      sourceNodeId: 'node-a',
+      targetNodeId: 'node-b',
+      port: 8080,
+      status: 'active',
+      lastConfirmedAt: 2_000,
+    });
+
+    const portOutbound = inferPortLinksFromPeers({
+      nodeId: 'node-a',
+      peers: [detectedPeer({
+        localAddr: '172.21.0.2',
+        remoteAddr: '172.21.0.3',
+        remotePort: 8080,
+        localPort: 42137,
+      })],
+      nodePorts: [],
+      allPorts: [listener],
+      interfacesIndex: dockerIndex,
+      existingPortLinks: [],
+      now: 1_000,
+    });
+    const portInbound = inferPortLinksFromPeers({
+      nodeId: 'node-b',
+      peers: [detectedPeer({
+        localAddr: '::ffff:172.21.0.3',
+        remoteAddr: '::ffff:172.21.0.2',
+        remotePort: 42137,
+        localPort: 8080,
+      })],
+      nodePorts: [listener],
+      allPorts: [listener],
+      interfacesIndex: dockerIndex,
+      existingPortLinks: portOutbound.links,
+      now: 2_000,
+    });
+
+    expect(portOutbound.added).toBe(1);
+    expect(portInbound.added).toBe(0);
+    expect(portInbound.confirmed).toBe(1);
+    expect(portInbound.links).toHaveLength(1);
+    expect(portInbound.links[0]).toMatchObject({
+      sourceNodeId: 'node-a',
+      sourcePortId: null,
+      sourcePort: 0,
+      targetNodeId: 'node-b',
+      targetPortId: 'port-b8080',
+      targetPort: 8080,
+    });
   });
 });
 
@@ -911,11 +982,42 @@ describe('port-level topology links', () => {
       sourceNodeId: 'observed:203.0.113.9',
       sourcePortId: null,
       sourceIp: null,
-      sourcePort: 51000,
+      sourcePort: 0,
       targetNodeId: 'node-b',
       targetPortId: 'port-b8080',
       targetPort: 8080,
       status: 'active',
+    });
+  });
+
+  it('does not arbitrarily choose a service port when one process owns multiple listeners', () => {
+    const result = inferPortLinksFromPeers({
+      nodeId: 'node-a',
+      peers: [detectedPeer({
+        remoteAddr: '10.10.1.21',
+        remotePort: 3306,
+        localPort: 45678,
+        processName: 'app',
+        processPid: 10,
+      })],
+      nodePorts: [
+        makePort({ id: 'port-a80', nodeId: 'node-a', port: 80, processName: 'app', pid: 10 }),
+        makePort({ id: 'port-a443', nodeId: 'node-a', port: 443, processName: 'app', pid: 10 }),
+      ],
+      allPorts: [makePort({ id: 'port-b3306', nodeId: 'node-b', port: 3306 })],
+      interfacesIndex,
+      existingPortLinks: [],
+      now: 2_000,
+    });
+
+    expect(result.added).toBe(1);
+    expect(result.links[0]).toMatchObject({
+      sourceNodeId: 'node-a',
+      sourcePortId: null,
+      sourcePort: 0,
+      targetNodeId: 'node-b',
+      targetPortId: 'port-b3306',
+      targetPort: 3306,
     });
   });
 

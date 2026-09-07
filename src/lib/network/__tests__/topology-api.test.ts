@@ -27,11 +27,8 @@ vi.mock('@tauri-apps/api/core', () => ({
 }));
 
 import {
-  DEFAULT_PROBE_TIMEOUT_MS,
-  MAX_PROBE_PORTS,
   applyProbeResult,
   probeServerTopology,
-  probeTcpPorts,
 } from '../topology-api';
 import {
   getNodeByConnectionId,
@@ -53,7 +50,6 @@ import {
   patchRouteManual,
   resetTopologyStore,
 } from '../topology-storage';
-import type { TcpProbeResult } from '../topology-types';
 import {
   detectedFirewall,
   detectedInterface,
@@ -102,64 +98,6 @@ describe('probeServerTopology', () => {
       throw new Error('boom');
     };
     await expect(probeServerTopology('conn-a')).rejects.toThrow('boom');
-  });
-});
-
-describe('probeTcpPorts', () => {
-  it('de-duplicates, filters and forwards the sanitized port list', async () => {
-    backend.handler = () => [];
-    const ports = [80, 80, 443, 0, -1, 65536, 70000, 22.5, 8080];
-
-    await probeTcpPorts('conn-a', '10.0.0.5', ports);
-
-    const call = backend.calls.find((c) => c.cmd === 'probe_tcp_ports');
-    expect(call?.args.host).toBe('10.0.0.5');
-    expect(call?.args.connectionId).toBe('conn-a');
-    expect(call?.args.ports).toEqual([80, 443, 8080]);
-    expect(call?.args.timeoutMs).toBe(DEFAULT_PROBE_TIMEOUT_MS);
-  });
-
-  it('honours an explicit timeout within bounds', async () => {
-    backend.handler = () => [];
-    await probeTcpPorts('conn-a', 'h', [80], 3_000);
-    expect(backend.calls.at(-1)?.args.timeoutMs).toBe(3_000);
-
-    await probeTcpPorts('conn-a', 'h', [80], 10);
-    expect(backend.calls.at(-1)?.args.timeoutMs).toBe(100);
-
-    await probeTcpPorts('conn-a', 'h', [80], 999_999);
-    expect(backend.calls.at(-1)?.args.timeoutMs).toBe(30_000);
-  });
-
-  it('caps the batch at 200 ports', async () => {
-    backend.handler = () => [];
-    const ports = Array.from({ length: 500 }, (_, i) => i + 1);
-    await probeTcpPorts('conn-a', 'h', ports);
-    expect((backend.calls.at(-1)?.args.ports as number[]).length).toBe(MAX_PROBE_PORTS);
-  });
-
-  it('short-circuits without an IPC round-trip when nothing is valid', async () => {
-    await expect(probeTcpPorts('conn-a', 'h', [0, -3, 99999])).resolves.toEqual([]);
-    expect(backend.calls.some((c) => c.cmd === 'probe_tcp_ports')).toBe(false);
-  });
-
-  it('requires both an SSH origin and a target host instead of probing nothing', async () => {
-    await expect(probeTcpPorts('   ', '10.0.0.5', [80])).rejects.toThrow('缺少 SSH 会话');
-    await expect(probeTcpPorts('conn-a', '   ', [80])).rejects.toThrow('缺少目标主机');
-  });
-
-  it('returns the backend verdicts and normalizes failures', async () => {
-    const results: TcpProbeResult[] = [
-      { port: 80, status: 'reachable', tcpOk: true, latencyMs: 3, errorText: null },
-    ];
-    backend.handler = () => results;
-    await expect(probeTcpPorts('conn-a', 'h', [80])).resolves.toEqual(results);
-
-    backend.handler = () => {
-      // eslint-disable-next-line @typescript-eslint/only-throw-error
-      throw 'connect failed';
-    };
-    await expect(probeTcpPorts('conn-a', 'h', [80])).rejects.toThrow('connect failed');
   });
 });
 
@@ -372,10 +310,10 @@ describe('applyProbeResult', () => {
     expect(aToB).toHaveLength(1);
     expect(aToB[0]).toMatchObject({
       source: 'auto',
-      status: 'observed',
+      status: 'active',
       linkType: 'database',
       port: 5432,
-      evidence: 'ss ESTABLISHED 10.0.0.6:5432',
+      evidence: '/proc ESTABLISHED: local -> 10.0.0.6:5432',
     });
   });
 

@@ -1,9 +1,10 @@
 /**
  * Manual editor / creator for port-level topology connections.
  *
- * A relation can be outbound (focused port → peer port) or inbound (peer port →
- * focused port). Unknown peer endpoints stay as IP:port data and are never
- * probed from this dialog.
+ * A relation can be outbound (focused listener → peer) or inbound (peer →
+ * focused listener). Every port endpoint must reference a persisted listener
+ * row; a peer without collected ports stays a server endpoint, never a virtual
+ * port.
  */
 import React, { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -63,10 +64,8 @@ export interface PortLinkEditorDialogProps {
 
 interface FormState {
   direction: 'outbound' | 'inbound';
-  peerMode: 'node' | 'ip';
   peerNodeId: string;
-  peerIp: string;
-  peerPort: string;
+  peerPortId: string;
   protocol: NetProtocol;
   status: PortLinkStatus;
   manualLabel: string;
@@ -75,20 +74,13 @@ interface FormState {
 
 const EMPTY_FORM: FormState = {
   direction: 'outbound',
-  peerMode: 'node',
   peerNodeId: '',
-  peerIp: '',
-  peerPort: '',
+  peerPortId: '',
   protocol: 'tcp',
   status: 'active',
   manualLabel: '',
   description: '',
 };
-
-function parsePort(raw: string): number | null {
-  const value = Number.parseInt(raw.trim(), 10);
-  return Number.isFinite(value) && value >= 1 && value <= 65535 ? value : null;
-}
 
 function portOptionLabel(port: NetworkPort): string {
   return [
@@ -118,14 +110,11 @@ export function PortLinkEditorDialog({
     if (link) {
       const inbound = link.targetNodeId === focusNodeId && link.targetPortId === focusPort.id;
       const peerNodeId = inbound ? link.sourceNodeId : link.targetNodeId;
-      const peerIp = inbound ? link.sourceIp : link.targetIp;
-      const peerPort = inbound ? link.sourcePort : link.targetPort;
+      const peerPortId = inbound ? link.sourcePortId : link.targetPortId;
       setForm({
         direction: inbound ? 'inbound' : 'outbound',
-        peerMode: peerNodeId ? 'node' : 'ip',
         peerNodeId: peerNodeId ?? '',
-        peerIp: peerIp ?? '',
-        peerPort: String(peerPort ?? ''),
+        peerPortId: peerPortId ?? '',
         protocol: inbound ? link.sourceProtocol : link.targetProtocol,
         status: link.status,
         manualLabel: link.manualLabel,
@@ -139,36 +128,31 @@ export function PortLinkEditorDialog({
       ...EMPTY_FORM,
       protocol: focusPort.protocol,
       peerNodeId: firstPeer?.id ?? '',
-      peerPort: '',
+      peerPortId: '',
     });
   }, [open, link, focusNodeId, focusPort, nodes]);
 
   const peerPortOptions = useMemo(() => {
-    if (form.direction !== 'inbound' || form.peerMode !== 'node') return [];
+    if (!form.peerNodeId) return [];
     return (portsByNode[form.peerNodeId] ?? []).filter((port) => port.protocol === form.protocol);
-  }, [form.direction, form.peerMode, form.peerNodeId, form.protocol, portsByNode]);
+  }, [form.peerNodeId, form.protocol, portsByNode]);
 
   useEffect(() => {
-    if (!open || form.direction !== 'inbound' || form.peerMode !== 'node') return;
-    const ports = portsByNode[form.peerNodeId] ?? [];
-    const current = ports.find((port) => `${port.port}` === form.peerPort && port.protocol === form.protocol);
+    if (!open || !form.peerNodeId) return;
+    const current = peerPortOptions.some((port) => port.id === form.peerPortId);
     if (current) return;
-    const first = ports.find((port) => port.protocol === form.protocol);
-    if (first) setForm((state) => ({ ...state, peerPort: String(first.port) }));
-  }, [open, form.direction, form.peerMode, form.peerNodeId, form.peerPort, form.protocol, portsByNode]);
+    setForm((state) => ({ ...state, peerPortId: '' }));
+  }, [open, form.peerNodeId, form.peerPortId, peerPortOptions]);
 
-  const endpointPort = parsePort(form.peerPort);
-  const canSave =
-    endpointPort !== null &&
-    (form.peerMode === 'node' ? form.peerNodeId !== '' : form.peerIp.trim() !== '');
+  const selectedPeerPort = peerPortOptions.find((port) => port.id === form.peerPortId);
+  const canSave = form.peerNodeId !== '' && form.peerNodeId !== focusNodeId;
 
   const handleSave = () => {
     if (!canSave) return;
     const now = Date.now();
-    const peerIsNode = form.peerMode === 'node';
-    const peerNodeId = peerIsNode ? form.peerNodeId : null;
-    const peerIp = peerIsNode ? null : form.peerIp.trim();
+    const peerNodeId = form.peerNodeId;
     const inbound = form.direction === 'inbound';
+    const peerPort = selectedPeerPort;
 
     let sourceNodeId: string | null;
     let sourcePortId: string | null;
@@ -179,12 +163,8 @@ export function PortLinkEditorDialog({
 
     if (inbound) {
       sourceNodeId = peerNodeId;
-      sourceIp = peerIp;
-      sourcePortId = peerIsNode
-        ? (portsByNode[peerNodeId ?? ''] ?? []).find(
-            (port) => port.protocol === form.protocol && port.port === endpointPort,
-          )?.id ?? null
-        : null;
+      sourcePortId = peerPort?.id ?? null;
+      sourceIp = null;
       targetNodeId = focusNodeId;
       targetPortId = focusPort.id;
       targetIp = null;
@@ -193,12 +173,8 @@ export function PortLinkEditorDialog({
       sourcePortId = focusPort.id;
       sourceIp = null;
       targetNodeId = peerNodeId;
-      targetPortId = peerIsNode
-        ? (portsByNode[peerNodeId ?? ''] ?? []).find(
-            (port) => port.protocol === form.protocol && port.port === endpointPort,
-          )?.id ?? null
-        : null;
-      targetIp = peerIp;
+      targetPortId = peerPort?.id ?? null;
+      targetIp = null;
     }
 
     const next: NetworkPortLink = {
@@ -207,11 +183,11 @@ export function PortLinkEditorDialog({
       sourcePortId,
       sourceIp,
       sourceProtocol: form.protocol,
-      sourcePort: inbound ? endpointPort : focusPort.port,
+      sourcePort: inbound ? peerPort?.port ?? 0 : focusPort.port,
       targetNodeId,
       targetPortId,
       targetProtocol: form.protocol,
-      targetPort: inbound ? focusPort.port : endpointPort,
+      targetPort: inbound ? focusPort.port : peerPort?.port ?? 0,
       targetIp,
       status: form.status,
       source: 'manual',
@@ -231,6 +207,9 @@ export function PortLinkEditorDialog({
   const peerTypeLabel = form.direction === 'inbound'
     ? t('network.portLinks.sourcePort')
     : t('network.portLinks.targetPort');
+  const peerPreview = selectedPeerPort
+    ? `${selectedPeerPort.port}/${selectedPeerPort.protocol}`
+    : t('network.portLinks.serverOnly');
 
   return (
     <>
@@ -278,89 +257,50 @@ export function PortLinkEditorDialog({
               </div>
               <p className="text-[11px] text-muted-foreground">
                 {form.direction === 'inbound'
-                  ? `${t('network.portTopology.peer')}:${form.protocol.toUpperCase()} ${endpointPort ?? '--'} → ${focusPort.port}/${focusPort.protocol}`
-                  : `${focusPort.port}/${focusPort.protocol} → ${t('network.portTopology.peer')}:${form.protocol.toUpperCase()} ${endpointPort ?? '--'}`}
+                  ? `${peerPreview} → ${focusPort.port}/${focusPort.protocol}`
+                  : `${focusPort.port}/${focusPort.protocol} → ${peerPreview}`}
               </p>
             </div>
 
             <div className="space-y-1.5">
-              <Label htmlFor="port-link-peer-mode">{t('network.portLinks.peerType')}</Label>
+              <Label htmlFor="port-link-peer-node">
+                {form.direction === 'inbound' ? t('network.portLinks.sourceServer') : t('network.portLinks.targetServer')}
+              </Label>
               <Select
-                value={form.peerMode}
-                onValueChange={(value) => setForm((current) => ({ ...current, peerMode: value as 'node' | 'ip' }))}
+                value={form.peerNodeId}
+                onValueChange={(value) => setForm((current) => ({ ...current, peerNodeId: value, peerPortId: '' }))}
               >
-                <SelectTrigger id="port-link-peer-mode" className="w-full" data-testid="port-link-peer-mode">
-                  <SelectValue />
+                <SelectTrigger id="port-link-peer-node" className="w-full" data-testid="port-link-peer-node">
+                  <SelectValue placeholder={t('network.portLinks.targetServer')} />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="node">{t('network.portLinks.targetModeNode')}</SelectItem>
-                  <SelectItem value="ip">{t('network.portLinks.targetModeIp')}</SelectItem>
+                  {nodes
+                    .filter((node) => node.id !== focusNodeId)
+                    .map((node) => (
+                      <SelectItem key={node.id} value={node.id}>{nodeLabel(node)}</SelectItem>
+                    ))}
                 </SelectContent>
               </Select>
             </div>
 
-            {form.peerMode === 'node' ? (
-              <div className="space-y-1.5">
-                <Label htmlFor="port-link-peer-node">
-                  {form.direction === 'inbound' ? t('network.portLinks.sourceServer') : t('network.portLinks.targetServer')}
-                </Label>
-                <Select
-                  value={form.peerNodeId}
-                  onValueChange={(value) => setForm((current) => ({ ...current, peerNodeId: value }))}
-                >
-                  <SelectTrigger id="port-link-peer-node" className="w-full" data-testid="port-link-peer-node">
-                    <SelectValue placeholder={t('network.portLinks.targetServer')} />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {nodes
-                      .filter((node) => node.id !== focusNodeId || form.direction === 'outbound')
-                      .map((node) => (
-                        <SelectItem key={node.id} value={node.id}>{nodeLabel(node)}</SelectItem>
-                      ))}
-                  </SelectContent>
-                </Select>
-              </div>
-            ) : (
-              <div className="space-y-1.5">
-                <Label htmlFor="port-link-peer-ip">{t('network.portLinks.peerIp')}</Label>
-                <Input
-                  id="port-link-peer-ip"
-                  value={form.peerIp}
-                  onChange={(event) => setForm((current) => ({ ...current, peerIp: event.target.value }))}
-                  placeholder="10.10.1.21"
-                  className="font-mono"
-                />
-              </div>
-            )}
-
             <div className="space-y-1.5">
               <Label htmlFor="port-link-peer-port">{peerTypeLabel}</Label>
-              {form.direction === 'inbound' && form.peerMode === 'node' && peerPortOptions.length > 0 && (link?.sourcePortId !== null || !link) ? (
-                <Select
-                  value={form.peerPort}
-                  onValueChange={(value) => setForm((current) => ({ ...current, peerPort: value }))}
-                >
-                  <SelectTrigger id="port-link-peer-port" className="w-full" data-testid="port-link-peer-port">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {peerPortOptions.map((port) => (
-                      <SelectItem key={port.id} value={String(port.port)}>
-                        {portOptionLabel(port)}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              ) : (
-                <Input
-                  id="port-link-peer-port"
-                  data-testid="port-link-peer-port"
-                  value={form.peerPort}
-                  onChange={(event) => setForm((current) => ({ ...current, peerPort: event.target.value }))}
-                  placeholder="8080"
-                  className="font-mono"
-                />
-              )}
+              <Select
+                value={form.peerPortId || 'server-only'}
+                onValueChange={(value) => setForm((current) => ({ ...current, peerPortId: value === 'server-only' ? '' : value }))}
+                disabled={peerPortOptions.length === 0}
+              >
+                <SelectTrigger id="port-link-peer-port" className="w-full" data-testid="port-link-peer-port">
+                  <SelectValue placeholder={t('network.portLinks.serverOnly')} />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="server-only">{t('network.portLinks.serverOnly')}</SelectItem>
+                  {peerPortOptions.map((port) => (
+                    <SelectItem key={port.id} value={port.id}>{portOptionLabel(port)}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <p className="text-[11px] text-muted-foreground">{t('network.portLinks.realPortOnlyHint')}</p>
             </div>
 
             <div className="grid grid-cols-2 gap-3">

@@ -31,6 +31,7 @@ import {
   type DetectedPort,
   type DetectedRoute,
   type FirewallType,
+  type LinkStatus,
   type LinkType,
   type MergeOutcome,
   type NetworkFirewall,
@@ -46,10 +47,8 @@ import {
   type ProbeResult,
   type ProbeSections,
   type ProbeStatus,
-  type ReachabilityStatus,
   type RouteType,
   type SectionStatus,
-  type TcpProbeResult,
   FIREWALL_AUTO_KEYS,
   FIREWALL_MANUAL_KEYS,
   FIREWALL_RULE_AUTO_KEYS,
@@ -217,7 +216,13 @@ export function normalizeTopologyAddress(value: string): string {
 }
 
 function normalizeAddr(value: string): string {
-  return normalizeTopologyAddress(value);
+  let out = normalizeTopologyAddress(value);
+  const lower = out.toLowerCase();
+  const mappedPrefix = '::ffff:';
+  if (lower.startsWith(mappedPrefix)) {
+    out = out.slice(mappedPrefix.length);
+  }
+  return out;
 }
 
 /**
@@ -311,45 +316,6 @@ export function inferLinkType(port: number, processName: string): LinkType {
     }
   }
   return 'unknown';
-}
-
-/**
- * Cross-reference "the server says this port is listening" with "the client
- * could actually complete a TCP connect" (design doc §5).
- *
- * The Rust `probe_tcp_ports` command reports a *transport-level* verdict, so
- * the final answer depends on both inputs:
- *
- *  | tcp verdict      | listening | result            |
- *  |------------------|-----------|-------------------|
- *  | dns_error        | —         | dns_error         |
- *  | error            | —         | error             |
- *  | refused          | —         | not_listening     |
- *  | timed out        | yes       | blocked           |
- *  | timed out        | no        | unreachable       |
- *  | connected        | yes       | reachable         |
- *  | connected        | no        | unexpected_open   |
- *
- * A refused connection always wins over the listening flag: the server-side
- * snapshot is simply stale at that point.
- */
-export function resolveReachability(params: {
-  listening: boolean;
-  tcp: TcpProbeResult;
-}): ReachabilityStatus {
-  const { listening, tcp } = params;
-  const status = tcp?.status;
-
-  if (status === 'dns_error') return 'dns_error';
-  if (status === 'error') return 'error';
-  if (status === 'not_listening') return 'not_listening';
-  if (status === 'blocked') return listening ? 'blocked' : 'unreachable';
-
-  const connected = status === 'reachable' || tcp?.tcpOk === true;
-  if (connected) return listening ? 'reachable' : 'unexpected_open';
-
-  // No usable verdict yet (`untested`, unknown status, …) — leave it untouched.
-  return status === 'untested' ? 'untested' : 'error';
 }
 
 /** Overall probe verdict derived from the per-section statuses. */
@@ -757,6 +723,33 @@ export function isObservedNode(node: Pick<NetworkNode, 'connectionId'>): boolean
   return node.connectionId.startsWith('observed:');
 }
 
+function isListenerState(state: string): boolean {
+  const value = (state ?? '').trim().toUpperCase();
+  return value.includes('LISTEN') || value.includes('UNCONN');
+}
+
+function isActiveSocketState(state: string): boolean {
+  const value = (state ?? '').trim().toUpperCase();
+  return value === 'ESTABLISHED' || value === 'ESTAB' || value === 'SYN_SENT' || value === 'SYN_RECV';
+}
+
+function listenerMatches(
+  port: NetworkPort,
+  protocol: string,
+  portNumber: number,
+  localAddr: string,
+): boolean {
+  return port.protocol === protocol
+    && port.port === portNumber
+    && (
+      port.listenAddr === localAddr
+      || port.listenAddr === '0.0.0.0'
+      || port.listenAddr === '*'
+      || port.listenAddr === '::'
+      || port.listenAddr === '[::]'
+    );
+}
+
 export function makeObservedNode(ip: string, now: number): NetworkNode {
   const normalized = normalizeAddr(ip ?? '');
   return {
@@ -822,19 +815,32 @@ export function buildInterfaceIpIndex(
   allInterfaces: readonly NetworkInterface[],
 ): Map<string, string> {
   const known = new Set((nodes ?? []).map((n) => n.id));
+  const owners = new Map<string, Set<string>>();
   const index = new Map<string, string>();
   for (const iface of allInterfaces ?? []) {
     if (!known.has(iface.nodeId)) continue;
     for (const addr of [...(iface.ipv4Addrs ?? []), ...(iface.ipv6Addrs ?? [])]) {
       const ip = normalizeAddr(addr);
-      if (ip && !index.has(ip)) index.set(ip, iface.nodeId);
+      if (!ip) continue;
+      const set = owners.get(ip) ?? new Set<string>();
+      set.add(iface.nodeId);
+      owners.set(ip, set);
+      if (set.size === 1) index.set(ip, iface.nodeId);
+      else index.delete(ip);
     }
   }
   // Interface rows are authoritative when a node has multiple addresses; its
   // primary IP is still enough to resolve a display-only observed node.
   for (const node of nodes ?? []) {
     const ip = normalizeAddr(node.primaryIp ?? '');
-    if (ip && !index.has(ip)) index.set(ip, node.id);
+    if (!ip) continue;
+    const owner = owners.get(ip);
+    if (!owner) {
+      owners.set(ip, new Set([node.id]));
+      index.set(ip, node.id);
+    } else if (owner.size === 1) {
+      index.set(ip, [...owner][0] ?? node.id);
+    }
   }
   return index;
 }
@@ -859,10 +865,11 @@ export function inferLinksFromPeers(params: {
   peers: DetectedPeer[];
   knownNodes: NetworkNode[];
   interfacesIndex: Map<string, string>;
+  nodePorts?: NetworkPort[];
   existingLinks: NetworkLink[];
   now: number;
 }): { links: NetworkLink[]; added: number; confirmed: number } {
-  const { nodeId, peers, interfacesIndex, existingLinks, now } = params;
+  const { nodeId, peers, interfacesIndex, nodePorts = [], existingLinks, now } = params;
   // `knownNodes` is part of the contract but is already folded into
   // `interfacesIndex`/observed-node ids by the caller; nothing here opens a
   // connection to a peer.
@@ -875,6 +882,9 @@ export function inferLinksFromPeers(params: {
   let added = 0;
   let confirmed = 0;
   const handled = new Set<string>();
+  const listeningPorts = (nodePorts ?? []).filter(
+    (port) => port.missingSince === null && isListenerState(port.state),
+  );
   for (const peer of peers ?? []) {
     const remoteAddr = peer?.remoteAddr ?? '';
     if (!remoteAddr) continue;
@@ -886,8 +896,14 @@ export function inferLinksFromPeers(params: {
     if (targetNodeId === nodeId) continue;
 
     const protocol = peer.protocol === 'udp' ? 'udp' : 'tcp';
-    const port = peer.remotePort ?? null;
-    const key = linkNaturalKey({ sourceNodeId: nodeId, targetNodeId, protocol, port });
+    const localAddr = normalizeAddr(peer.localAddr ?? '');
+    const inbound = peer.localPort != null
+      && listeningPorts.some((port) => listenerMatches(port, protocol, peer.localPort as number, localAddr));
+    const sourceNodeId = inbound ? targetNodeId : nodeId;
+    const destinationNodeId = inbound ? nodeId : targetNodeId;
+    const port = inbound ? peer.localPort : peer.remotePort;
+    const status: LinkStatus = isActiveSocketState(peer.state) ? 'active' : 'observed';
+    const key = linkNaturalKey({ sourceNodeId, targetNodeId: destinationNodeId, protocol, port });
     if (handled.has(key)) continue;
     handled.add(key);
 
@@ -898,7 +914,7 @@ export function inferLinksFromPeers(params: {
         ...prev,
         // Re-confirm only (`status` + `lastConfirmedAt`); `source`, `evidence`,
         // `description`, `manualLabel` and `hidden` keep their stored values.
-        status: 'observed',
+        status,
         lastConfirmedAt: now,
         updatedAt: now,
       };
@@ -911,14 +927,16 @@ export function inferLinksFromPeers(params: {
 
     const link: NetworkLink = {
       id: generateId('link'),
-      sourceNodeId: nodeId,
-      targetNodeId,
+      sourceNodeId,
+      targetNodeId: destinationNodeId,
       protocol,
       port,
       linkType: inferLinkType(port ?? 0, peer.processName ?? ''),
-      status: 'observed',
+      status,
       source: 'auto',
-      evidence: `ss ESTABLISHED ${ip}:${port ?? ''}`,
+      evidence: inbound
+        ? `/proc ${peer.state}: ${ip} -> local:${port ?? ''}`
+        : `/proc ${peer.state}: local -> ${ip}:${peer.remotePort ?? ''}`,
       // ── M ──
       description: '',
       manualLabel: '',
@@ -945,19 +963,26 @@ export function portLinkNaturalKey(item: {
   sourceProtocol: string;
   sourcePort: number;
   targetNodeId: string | null;
+  targetPortId?: string | null;
   targetIp: string | null;
   targetProtocol: string;
   targetPort: number | null;
 }): string {
-  const source = item.sourceNodeId ?? item.sourceIp ?? '';
-  const target = item.targetNodeId ?? item.targetIp ?? '';
+  // A client ephemeral port is internal evidence, not a UI entity. Server-only
+  // endpoints therefore key by owner, while persisted listener endpoints key by
+  // their real port-row id.
+  const source = item.sourcePortId ?? item.sourceNodeId ?? item.sourceIp ?? '';
+  const target = item.targetPortId
+    ?? item.targetNodeId
+    ?? item.targetIp
+    ?? (item.targetPort === null ? '' : String(item.targetPort));
   return [
     source,
     item.sourceProtocol,
-    item.sourcePort,
+    item.sourcePortId ? item.sourcePort : '',
     target,
     item.targetProtocol,
-    item.targetPort ?? '',
+    item.targetPortId ? item.targetPort : (item.targetPort ?? ''),
   ].join('|');
 }
 
@@ -991,32 +1016,24 @@ export function inferPortLinksFromPeers(params: {
 }): { links: NetworkPortLink[]; added: number; confirmed: number } {
   const { nodeId, peers, nodePorts, allPorts = nodePorts, interfacesIndex, existingPortLinks, now } = params;
 
-  const portKey = (protocol: string, port: number) => `${protocol}|${port}`;
-  const isListenerState = (state: string) => {
-    const value = state.trim().toUpperCase();
-    return value.includes('LISTEN') || value.includes('UNCONN');
-  };
   const portIdForNode = (owner: string | null, protocol: string, port: number) => {
     if (!owner) return null;
-    return allPorts.find((p) =>
+    const matches = allPorts.filter((p) =>
       p.nodeId === owner &&
       p.protocol === protocol &&
       p.port === port &&
       p.missingSince === null &&
       isListenerState(p.state),
-    )?.id ?? null;
+    );
+    // Do not silently choose among several real listeners on different bind
+    // addresses/namespaces; the edge remains server-only until evidence or the
+    // user resolves the exact endpoint.
+    return matches.length === 1 ? matches[0].id : null;
   };
 
   const listeningPorts = (nodePorts ?? []).filter(
     (p) => p.missingSince === null && isListenerState(p.state),
   );
-
-  // Resolve the probed node's listening ports by (protocol, port) → port row.
-  const portByKey = new Map<string, NetworkPort>();
-  for (const p of listeningPorts) {
-    const key = portKey(p.protocol, p.port);
-    if (!portByKey.has(key)) portByKey.set(key, p);
-  }
 
   const existing = existingPortLinks ?? [];
   const byKey = new Map<string, NetworkPortLink>();
@@ -1038,11 +1055,13 @@ export function inferPortLinksFromPeers(params: {
     }
 
     const peerNodeId = interfacesIndex.get(ip) ?? observedNodeId(ip);
-    const localListener = portByKey.get(portKey(protocol, localPort));
+    const localListener = listeningPorts.find((port) =>
+      listenerMatches(port, protocol, localPort, normalizeAddr(peer.localAddr ?? '')));
     const normalizedProcess = (peer.processName ?? '').trim().toLowerCase();
-    const processListener = peer.processPid != null
-      ? listeningPorts.find((p) => p.pid === peer.processPid)
-      : listeningPorts.find((p) => normalizedProcess !== '' && p.processName.trim().toLowerCase() === normalizedProcess);
+    const processListeners = peer.processPid != null
+      ? listeningPorts.filter((p) => p.pid === peer.processPid)
+      : listeningPorts.filter((p) => normalizedProcess !== '' && p.processName.trim().toLowerCase() === normalizedProcess);
+    const processListener = processListeners.length === 1 ? processListeners[0] : undefined;
 
     // A listening local socket is the server side of the connection. Keep the
     // TCP direction truthful: remote:remotePort → currentNode:localPort.
@@ -1050,18 +1069,20 @@ export function inferPortLinksFromPeers(params: {
       const candidate: NetworkPortLink = {
         id: '',
         sourceNodeId: peerNodeId,
-        sourcePortId: portIdForNode(peerNodeId, protocol, targetPort),
+        // The remote endpoint is a client socket. Its ephemeral port is not a
+        // listener entity and must never be linked to a same-number port row.
+        sourcePortId: null,
         sourceIp: null,
         sourceProtocol: protocol,
-        sourcePort: targetPort,
+        sourcePort: 0,
         targetNodeId: nodeId,
         targetPortId: localListener.id,
         targetProtocol: protocol,
         targetPort: localPort,
         targetIp: null,
-        status: 'active',
+        status: isActiveSocketState(peer.state) ? 'active' : 'observed',
         source: 'auto',
-        evidence: `ss ESTABLISHED ${ip}:${targetPort} -> local:${localPort}`,
+        evidence: `/proc ${peer.state}: ${ip} -> local:${localPort}`,
         description: '',
         manualLabel: '',
         hidden: false,
@@ -1084,25 +1105,24 @@ export function inferPortLinksFromPeers(params: {
       continue;
     }
 
-    // An ephemeral local socket is outbound. Anchor it to the service port of
-    // the same process when possible (for example app:8080 → db:3306); without
-    // a service anchor the ephemeral socket is not a durable port node.
-    if (!processListener) continue;
+    // An outbound client socket is anchored to a real same-process listener
+    // when process evidence exists. Without that evidence the edge still runs
+    // from the server itself; the ephemeral client port is never materialized.
     const candidate: NetworkPortLink = {
       id: '',
       sourceNodeId: nodeId,
-      sourcePortId: processListener.id,
+      sourcePortId: processListener?.id ?? null,
       sourceIp: null,
       sourceProtocol: protocol,
-      sourcePort: processListener.port,
+      sourcePort: processListener?.port ?? 0,
       targetNodeId: peerNodeId,
       targetPortId: portIdForNode(peerNodeId, protocol, targetPort),
       targetProtocol: protocol,
       targetPort,
       targetIp: null,
-      status: 'active',
+      status: isActiveSocketState(peer.state) ? 'active' : 'observed',
       source: 'auto',
-      evidence: `ss ESTABLISHED local:${localPort} -> ${ip}:${targetPort}`,
+      evidence: `/proc ${peer.state}: local -> ${ip}:${targetPort}`,
       description: '',
       manualLabel: '',
       hidden: false,
@@ -1142,11 +1162,26 @@ export function resolvePortLinkTargets(params: {
 }): { links: NetworkPortLink[]; resolved: number } {
   const { nodeId, nodePorts, interfacesIndex, existingPortLinks, now } = params;
 
-  const portIdByKey = new Map<string, string>();
-  for (const p of nodePorts ?? []) {
-    const key = `${p.protocol}|${p.port}`;
-    if (!portIdByKey.has(key)) portIdByKey.set(key, p.id);
-  }
+  const resolveListenerId = (
+    protocol: string,
+    portNumber: number,
+    address: string | null,
+  ): string | null => {
+    const listeners = (nodePorts ?? []).filter((port) =>
+      port.missingSince === null
+      && isListenerState(port.state)
+      && port.protocol === protocol
+      && port.port === portNumber);
+    if (address) {
+      const normalized = normalizeAddr(address);
+      const exact = listeners.filter((port) => normalizeAddr(port.listenAddr) === normalized);
+      if (exact.length === 1) return exact[0].id;
+      const wildcard = listeners.filter((port) => ['0.0.0.0', '*', '::', '[::]'].includes(port.listenAddr));
+      if (wildcard.length === 1) return wildcard[0].id;
+      return null;
+    }
+    return listeners.length === 1 ? listeners[0].id : null;
+  };
 
   let resolved = 0;
   const links = (existingPortLinks ?? []).map((l): NetworkPortLink => {
@@ -1156,14 +1191,14 @@ export function resolvePortLinkTargets(params: {
       next = {
         ...next,
         targetNodeId: nodeId,
-        targetPortId: portIdByKey.get(`${next.targetProtocol}|${next.targetPort}`) ?? null,
+        targetPortId: resolveListenerId(next.targetProtocol, next.targetPort, next.targetIp),
         targetIp: null,
         lastConfirmedAt: now,
         updatedAt: now,
       };
       resolved += 1;
     } else if (next.targetNodeId === nodeId && next.targetPortId === null) {
-      const portId = portIdByKey.get(`${next.targetProtocol}|${next.targetPort}`) ?? null;
+      const portId = resolveListenerId(next.targetProtocol, next.targetPort, null);
       if (portId) {
         next = { ...next, targetPortId: portId, updatedAt: now };
         resolved += 1;
@@ -1174,16 +1209,17 @@ export function resolvePortLinkTargets(params: {
       next = {
         ...next,
         sourceNodeId: nodeId,
-        sourcePortId: portIdByKey.get(`${next.sourceProtocol}|${next.sourcePort}`) ?? null,
+        // A dangling source was normally an ephemeral client socket. Resolving
+        // its server ownership must not invent a listener endpoint.
+        sourcePortId: null,
         sourceIp: null,
         lastConfirmedAt: now,
         updatedAt: now,
       };
       resolved += 1;
     } else if (next.sourceNodeId === nodeId && next.sourcePortId === null) {
-      const portId = portIdByKey.get(`${next.sourceProtocol}|${next.sourcePort}`) ?? null;
-      if (portId) {
-        next = { ...next, sourcePortId: portId, updatedAt: now };
+      if (next.sourcePort === 0) {
+        next = { ...next, updatedAt: now };
         resolved += 1;
       }
     }

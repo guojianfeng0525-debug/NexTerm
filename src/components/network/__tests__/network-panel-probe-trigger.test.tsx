@@ -25,7 +25,6 @@ import {
 
 const api = vi.hoisted(() => ({
   probeServerTopology: vi.fn(),
-  probeTcpPorts: vi.fn(),
   applyProbeResult: vi.fn(),
 }));
 
@@ -51,7 +50,6 @@ const store = vi.hoisted(() => ({
 
 vi.mock('@/lib/network/topology-api', () => ({
   probeServerTopology: api.probeServerTopology,
-  probeTcpPorts: api.probeTcpPorts,
   applyProbeResult: api.applyProbeResult,
 }));
 
@@ -201,7 +199,7 @@ describe('NetworkPanel — probe is strictly user-triggered', () => {
     expect(unsubscribe).toHaveBeenCalledTimes(1);
   });
 
-  it('renders the TCP dialog inside the viewport and probes from the SSH server', async () => {
+  it('does not expose active TCP connectivity actions', () => {
     seedProbedNode();
     renderPanel();
 
@@ -209,16 +207,25 @@ describe('NetworkPanel — probe is strictly user-triggered', () => {
     fireEvent.pointerDown(portsTab, { button: 0 });
     fireEvent.mouseDown(portsTab, { button: 0 });
     fireEvent.click(portsTab, { button: 0 });
-    await waitFor(() => screen.getByRole('button', { name: /Test TCP connectivity/i }));
-    fireEvent.click(screen.getByRole('button', { name: /Test TCP connectivity/i }));
-    const dialog = await screen.findByRole('dialog');
-    expect(dialog.className).toContain('!inset-0');
-    expect(dialog.className).toContain('!m-auto');
-    expect(dialog.className).toContain('max-w-lg');
-    expect(dialog.className).toContain('overflow-hidden');
 
-    api.probeTcpPorts.mockResolvedValue([]);
-    fireEvent.click(screen.getByRole('button', { name: /Run test/i }));
-    await waitFor(() => expect(api.probeTcpPorts).toHaveBeenCalledWith('session-1', '10.0.0.5', [80], 1500));
+    expect(screen.queryByRole('button', { name: /Test TCP connectivity/i })).toBeNull();
+  });
+
+  it('keeps the compact sidebar panel scrollable instead of squeezing the body away', () => {
+    seedProbedNode();
+    const { container } = renderPanel();
+
+    const root = container.firstChild as HTMLElement;
+    const status = root.querySelector('.max-h-\\[45\\%\\]');
+    expect(root.className).toContain('h-full');
+    expect(root.className).toContain('min-h-0');
+    expect(status?.className).toContain('overflow-y-auto');
+
+    const tabs = screen.getAllByRole('tab');
+    expect(tabs.length).toBeGreaterThanOrEqual(5);
+    for (const tab of tabs) {
+      expect(tab.className).toContain('flex-1');
+      expect(tab.className).toContain('min-w-0');
+    }
   });
 });

@@ -2,8 +2,8 @@
  * Tauri command wrappers + the probe orchestration entry point.
  *
  * ── Triggering ─────────────────────────────────────────────────────────────
- * Nothing in this module runs automatically. Both commands are only ever
- * invoked from a user action (「探测当前服务器」/「测试 TCP 连通性」); do not
+ * Nothing in this module runs automatically. The command is only ever
+ * invoked from a user action (「探测当前服务器」); do not
  * add a call from an effect, a mount handler or an interval.
  *
  * ── Errors ─────────────────────────────────────────────────────────────────
@@ -12,7 +12,7 @@
  * UI decides how to surface it. Failures are never swallowed here.
  */
 import { invoke } from '@tauri-apps/api/core';
-import type { ApplyProbeSummary, ProbeResult, TcpProbeResult } from './topology-types';
+import type { ApplyProbeSummary, ProbeResult } from './topology-types';
 import {
   buildInterfaceIpIndex,
   deriveProbeStatus,
@@ -58,11 +58,6 @@ import {
  */
 export type { ApplyProbeSummary } from './topology-types';
 
-/** Hard ceiling on ports sent to one `probe_tcp_ports` call. */
-export const MAX_PROBE_PORTS = 200;
-/** Default per-port connect timeout (ms). */
-export const DEFAULT_PROBE_TIMEOUT_MS = 1500;
-
 /**
  * Tauri serializes command rejections as plain strings; normalize every shape
  * (string, Error, arbitrary object) into a real `Error`.
@@ -79,53 +74,6 @@ export async function probeServerTopology(connectionId: string): Promise<ProbeRe
     return await invoke<ProbeResult>('probe_network_topology', { connectionId });
   } catch (err) {
     throw toError(err, '探测网络拓扑失败');
-  }
-}
-
-/**
- * TCP-connect a list of ports on `host` from the selected SSH server.
- *
- * The existing SSH session is the probe origin, so a server reached through a
- * jump host is tested through that same route. No local-machine path is used.
- *
- * Front-end sanitization before hitting the backend: de-duplicate, drop
- * anything outside 1..65535, and cap the batch at `MAX_PROBE_PORTS`. An empty
- * result list short-circuits without an IPC round-trip.
- */
-export async function probeTcpPorts(
-  connectionId: string,
-  host: string,
-  ports: number[],
-  timeoutMs?: number,
-): Promise<TcpProbeResult[]> {
-  const origin = (connectionId ?? '').trim();
-  if (!origin) throw new Error('缺少 SSH 会话');
-  const target = (host ?? '').trim();
-  if (!target) throw new Error('缺少目标主机');
-
-  const normalized: number[] = [];
-  const seen = new Set<number>();
-  for (const port of ports ?? []) {
-    if (!Number.isInteger(port) || port < 1 || port > 65535) continue;
-    if (seen.has(port)) continue;
-    seen.add(port);
-    normalized.push(port);
-    if (normalized.length >= MAX_PROBE_PORTS) break;
-  }
-  if (normalized.length === 0) return [];
-
-  const rawTimeout = typeof timeoutMs === 'number' && Number.isFinite(timeoutMs) ? timeoutMs : DEFAULT_PROBE_TIMEOUT_MS;
-  const timeout = Math.min(Math.max(rawTimeout, 100), 30_000);
-
-  try {
-    return await invoke<TcpProbeResult[]>('probe_tcp_ports', {
-      connectionId: origin,
-      host: target,
-      ports: normalized,
-      timeoutMs: timeout,
-    });
-  } catch (err) {
-    throw toError(err, 'TCP 连通性测试失败');
   }
 }
 
@@ -217,11 +165,13 @@ export function applyProbeResult(input: ApplyProbeInput): ApplyProbeSummary {
     if (!knownIds.has(observed.id)) upsertNode(observed);
   }
   const interfacesIndex = buildInterfaceIpIndex(knownNodes, listInterfaces());
+  const nodePorts = getNodePorts(nodeId);
   const linkResult = inferLinksFromPeers({
     nodeId,
     peers: data?.peers ?? [],
     knownNodes,
     interfacesIndex,
+    nodePorts,
     existingLinks: listLinks(),
     now: probeAt,
   });
@@ -234,7 +184,7 @@ export function applyProbeResult(input: ApplyProbeInput): ApplyProbeSummary {
   const portLinkResult = inferPortLinksFromPeers({
     nodeId,
     peers: data?.peers ?? [],
-    nodePorts: getNodePorts(nodeId),
+    nodePorts,
     allPorts: listPorts(),
     interfacesIndex,
     existingPortLinks: listPortLinks(),
@@ -246,7 +196,7 @@ export function applyProbeResult(input: ApplyProbeInput): ApplyProbeSummary {
   // freshly-probed interfaces ("探测后关联", without re-probing the peer).
   const portLinkResolution = resolvePortLinkTargets({
     nodeId,
-    nodePorts: getNodePorts(nodeId),
+    nodePorts,
     interfacesIndex,
     existingPortLinks: listPortLinks(),
     now: probeAt,

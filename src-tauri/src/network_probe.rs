@@ -5,9 +5,10 @@
 //!    `>` / `>>` 重定向写文件、包管理命令（apt/yum/apk/dnf）、`iptables -A/-F/-I`、
 //!    `firewall-cmd --add-*`、`ufw enable/disable`、`systemctl start/stop`
 //!    等任何变更操作。脚本内**不使用 `set -e`**，任何一段失败都不能中断其余段。
-//! 2. **零安装（ZERO-INSTALL）** — 只使用系统自带工具（`ip` / `ifconfig` / `ss` /
-//!    `netstat` / `iptables` / `nft` / `firewall-cmd` / `ufw` / `hostname` /
-//!    `cat` / `grep` / `awk` …），不安装任何 Agent。工具缺失时对应分段标记
+//! 2. **零安装（ZERO-INSTALL）** — Linux socket 数据优先直接读取 `/proc`；
+//!    其余信息只使用系统自带工具（`ip` / `ifconfig` / `iptables` / `nft` /
+//!    `firewall-cmd` / `ufw` / `hostname` / `cat` / `grep` / `awk` …），
+//!    不安装任何 Agent。工具缺失时对应分段标记
 //!    `unavailable`，而不是判定为失败。
 //! 3. **不保存凭据（NO CREDENTIALS）** — 本模块返回的所有结构均不含 password /
 //!    private_key / passphrase / token 等任何认证字段；`raw_excerpt` 一律截断
@@ -21,7 +22,7 @@
 //!
 //! ── 范围约束 ────────────────────────────────────────────────────────────────
 //! `peers` 段拿到的对端 IP 只用于**标记拓扑关系候选**，本模块从不主动连接它们。
-//! 真正的对外 TCP 连通性测试是 `probe_tcp_ports` 的独立手工动作。
+//! 网络拓扑没有 TCP/UDP/DNS/ICMP 测试路径，也不会从 A 服务器访问 B 服务器。
 
 use crate::os_detect::OsInfo;
 use serde::{Deserialize, Serialize};
@@ -62,6 +63,7 @@ pub struct ProbeSections {
     pub rules: ProbeSection,
     pub ports: ProbeSection,
     pub peers: ProbeSection,
+    pub proc_sockets: ProbeSection,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -141,6 +143,7 @@ pub struct DetectedPort {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DetectedPeer {
+    pub local_addr: String,
     pub remote_addr: String,
     pub remote_port: Option<u16>,
     pub local_port: Option<u16>,
@@ -176,25 +179,12 @@ pub struct ProbeResult {
     pub raw_excerpt: Option<String>,
 }
 
-/// Pure TCP-layer verdict for one port. This says nothing about whether the
-/// server reports the port as listening — the frontend cross-references
-/// `net_ports` to reach the user-facing status (see design doc §5).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TcpProbeResult {
-    pub port: u16,
-    pub status: String,
-    pub tcp_ok: bool,
-    pub latency_ms: Option<u64>,
-    pub error_text: Option<String>,
-}
-
 // ═══════════════════════════════════════════════════════════════════════════
 // Section splitting
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Every section the probe script emits, in emission order.
-const SECTION_KEYS: [&str; 8] = [
+const SECTION_KEYS: [&str; 9] = [
     "hostname",
     "os",
     "interfaces",
@@ -203,6 +193,7 @@ const SECTION_KEYS: [&str; 8] = [
     "rules",
     "ports",
     "peers",
+    "proc_sockets",
 ];
 
 /// Recognise a `###NT:<name>###` marker line. `"end"` terminates the payload.
@@ -1755,9 +1746,10 @@ pub fn parse_peers(raw: &str) -> (Vec<DetectedPeer>, ProbeSection) {
                 continue;
             }
             let (remote_addr, remote_port) = split_host_port(tokens[5]);
-            let (_, local_port) = split_host_port(tokens[4]);
+            let (local_addr, local_port) = split_host_port(tokens[4]);
             let (name, pid, _) = parse_ss_process(t);
             peers.push(DetectedPeer {
+                local_addr,
                 remote_addr,
                 remote_port,
                 local_port,
@@ -1783,9 +1775,10 @@ pub fn parse_peers(raw: &str) -> (Vec<DetectedPeer>, ProbeSection) {
             continue;
         }
         let (remote_addr, remote_port) = split_host_port(tokens[4]);
-        let (_, local_port) = split_host_port(tokens[3]);
+        let (local_addr, local_port) = split_host_port(tokens[3]);
         let (name, pid, _) = parse_netstat_process(&proc_field);
         peers.push(DetectedPeer {
+            local_addr,
             remote_addr,
             remote_port,
             local_port,
@@ -1801,6 +1794,197 @@ pub fn parse_peers(raw: &str) -> (Vec<DetectedPeer>, ProbeSection) {
 
 fn is_established(state: &str) -> bool {
     matches!(state.to_uppercase().as_str(), "ESTABLISHED" | "ESTAB")
+}
+
+#[derive(Default)]
+struct ProcSockets {
+    ports: Vec<DetectedPort>,
+    peers: Vec<DetectedPeer>,
+    files: usize,
+}
+
+fn proc_state(code: &str) -> String {
+    match code.to_ascii_lowercase().as_str() {
+        "01" => "ESTABLISHED".to_string(),
+        "02" => "SYN_SENT".to_string(),
+        "03" => "SYN_RECV".to_string(),
+        "04" => "FIN_WAIT1".to_string(),
+        "05" => "FIN_WAIT2".to_string(),
+        "06" => "TIME_WAIT".to_string(),
+        "07" => "UNCONN".to_string(),
+        "08" => "CLOSE_WAIT".to_string(),
+        "09" => "LAST_ACK".to_string(),
+        "0a" | "0A" => "LISTEN".to_string(),
+        "0b" | "0B" => "CLOSING".to_string(),
+        "0c" | "0C" => "NEW_SYN_RECV".to_string(),
+        _ => String::new(),
+    }
+}
+
+/// Decode `/proc`'s little-endian address representation.
+///
+/// IPv4 is one reversed 32-bit word. IPv6 is four reversed 32-bit words, so
+/// each four-byte group must be reversed independently (not the whole 16-byte
+/// array).
+fn parse_proc_address(value: &str) -> String {
+    let Some((raw_addr, _)) = value.split_once(':') else {
+        return String::new();
+    };
+    if raw_addr.len() == 8 {
+        let mut bytes = [0u8; 4];
+        for (index, chunk) in raw_addr.as_bytes().chunks(2).enumerate() {
+            let value = u8::from_str_radix(&String::from_utf8_lossy(chunk), 16).unwrap_or(0);
+            bytes[3 - index] = value;
+        }
+        return std::net::Ipv4Addr::from(bytes).to_string();
+    }
+    if raw_addr.len() == 32 {
+        let mut bytes = Vec::with_capacity(16);
+        for group in raw_addr.as_bytes().chunks(8) {
+            let mut group_bytes = [0u8; 4];
+            for (index, chunk) in group.chunks(2).enumerate() {
+                let value = u8::from_str_radix(&String::from_utf8_lossy(chunk), 16).unwrap_or(0);
+                group_bytes[3 - index] = value;
+            }
+            bytes.extend_from_slice(&group_bytes);
+        }
+        let mut address = [0u8; 16];
+        address.copy_from_slice(&bytes);
+        return std::net::Ipv6Addr::from(address).to_string();
+    }
+    String::new()
+}
+
+fn parse_proc_port(value: &str) -> Option<u16> {
+    u16::from_str_radix(value, 16).ok()
+}
+
+/// Parse the zero-install `/proc` socket table.
+///
+/// Unlike `parse_peers`, this deliberately retains closing/TIME_WAIT TCP rows:
+/// they are evidence that a real connection recently existed. Ephemeral client
+/// ports stay in this internal payload for direction/deduplication only; the
+/// UI never renders them as port nodes.
+pub fn parse_proc_sockets(raw: &str) -> (Vec<DetectedPort>, Vec<DetectedPeer>, ProbeSection) {
+    let mut processes: HashMap<String, (u32, String)> = HashMap::new();
+    let mut current_proto = String::new();
+    let mut sockets = ProcSockets::default();
+    let mut seen = std::collections::HashSet::new();
+
+    // The process map is emitted after the files on some shells and after each
+    // row on others; collect it first in a separate pass so socket rows can use
+    // it regardless of ordering.
+    for line in raw.lines() {
+        let Some(rest) = line.strip_prefix("NT_PROC_PROCESS\t") else {
+            continue;
+        };
+        let mut parts = rest.split('\t');
+        let (Some(inode), Some(pid), Some(name)) = (parts.next(), parts.next(), parts.next()) else {
+            continue;
+        };
+        let Ok(pid) = pid.trim().parse::<u32>() else {
+            continue;
+        };
+        processes.insert(inode.trim().to_string(), (pid, name.trim().to_string()));
+    }
+
+    for line in raw.lines() {
+        let line = line.trim_end_matches('\r');
+        if let Some(rest) = line.strip_prefix("NT_PROC_FILE\t") {
+            if let Some(proto) = rest.split('\t').next() {
+                current_proto = normalize_protocol(proto);
+            }
+            sockets.files += 1;
+            continue;
+        }
+        if line.starts_with("NT_PROC_") || line.trim().is_empty() {
+            continue;
+        }
+
+        let tokens: Vec<&str> = line.split_whitespace().collect();
+        if tokens.len() < 10 || !tokens[1].contains(':') || !tokens[2].contains(':') {
+            continue;
+        }
+        let proto = normalize_protocol(&current_proto);
+        if proto != "tcp" && proto != "udp" {
+            continue;
+        }
+        let state = proc_state(tokens[3]);
+        if state.is_empty() {
+            continue;
+        }
+
+        let local_addr = parse_proc_address(tokens[1]);
+        let remote_addr = parse_proc_address(tokens[2]);
+        let Some(local_port) = parse_proc_port(tokens[1].rsplit(':').next().unwrap_or("")) else {
+            continue;
+        };
+        let remote_port = parse_proc_port(tokens[2].rsplit(':').next().unwrap_or(""))
+            .filter(|port| *port != 0);
+        let inode = tokens[9].to_string();
+        let dedup = format!("{proto}|{local_addr}|{local_port}|{remote_addr}|{remote_port:?}|{state}|{inode}");
+        if !seen.insert(dedup) {
+            continue;
+        }
+        let (pid, process_name) = processes
+            .get(&inode)
+            .cloned()
+            .map(|(pid, name)| (Some(pid), name))
+            .unwrap_or((None, String::new()));
+        let process_user = tokens.get(7).unwrap_or(&"").trim().to_string();
+
+        let is_listener = if proto == "tcp" {
+            state == "LISTEN"
+        } else {
+            // A connected UDP socket still owns a real local endpoint and can
+            // receive traffic on it. Keep it as a listener while also emitting
+            // its remote tuple below.
+            true
+        };
+        if is_listener {
+            sockets.ports.push(DetectedPort {
+                protocol: proto.clone(),
+                port: local_port,
+                listen_addr: local_addr.clone(),
+                state: state.clone(),
+                process_name: process_name.clone(),
+                pid,
+                process_user,
+            });
+        }
+
+        let has_remote = !remote_addr.is_empty()
+            && remote_addr != "0.0.0.0"
+            && remote_addr != "::";
+        if has_remote && remote_port.is_some() && !(proto == "tcp" && state == "LISTEN") {
+            sockets.peers.push(DetectedPeer {
+                local_addr,
+                remote_addr,
+                remote_port,
+                local_port: Some(local_port),
+                protocol: proto,
+                process_name: process_name.clone(),
+                process_pid: pid,
+                state,
+            });
+        }
+    }
+
+    let status = if sockets.files == 0 {
+        ProbeSection {
+            status: "unavailable".to_string(),
+            note: "/proc socket 表不可读".to_string(),
+        }
+    } else if processes.is_empty() && (!sockets.ports.is_empty() || !sockets.peers.is_empty()) {
+        ProbeSection {
+            status: "partial".to_string(),
+            note: "无法获取进程信息（可能需要更高权限）".to_string(),
+        }
+    } else {
+        ProbeSection::ok()
+    };
+
+    (sockets.ports, sockets.peers, status)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1871,6 +2055,7 @@ fn failed_sections() -> ProbeSections {
         rules: missing_section(),
         ports: missing_section(),
         peers: missing_section(),
+        proc_sockets: missing_section(),
     }
 }
 
@@ -1945,13 +2130,25 @@ pub async fn run_probe(client: &crate::ssh::SshClient, os: &OsInfo) -> ProbeResu
         Some(body) => parse_firewall_rules(body),
         None => (Vec::new(), missing_section()),
     };
-    let (ports, ports_section) = match sections.get("ports") {
-        Some(body) => parse_ports(body),
-        None => (Vec::new(), missing_section()),
+    let (proc_ports, proc_peers, proc_sockets_section) = match sections.get("proc_sockets") {
+        Some(body) => parse_proc_sockets(body),
+        None => (Vec::new(), Vec::new(), missing_section()),
     };
-    let (peers, peers_section) = match sections.get("peers") {
-        Some(body) => parse_peers(body),
-        None => (Vec::new(), missing_section()),
+    let (ports, ports_section) = if proc_sockets_section.status != "unavailable" {
+        (proc_ports.clone(), proc_sockets_section.clone())
+    } else {
+        match sections.get("ports") {
+            Some(body) => parse_ports(body),
+            None => (Vec::new(), missing_section()),
+        }
+    };
+    let (peers, peers_section) = if proc_sockets_section.status != "unavailable" {
+        (proc_peers, proc_sockets_section.clone())
+    } else {
+        match sections.get("peers") {
+            Some(body) => parse_peers(body),
+            None => (Vec::new(), missing_section()),
+        }
     };
 
     for (name, section) in [
@@ -1963,6 +2160,7 @@ pub async fn run_probe(client: &crate::ssh::SshClient, os: &OsInfo) -> ProbeResu
         ("rules", &rules_section),
         ("ports", &ports_section),
         ("peers", &peers_section),
+        ("proc_sockets", &proc_sockets_section),
     ] {
         if section.status == "failed" || section.status == "partial" {
             tracing::warn!(
@@ -1990,6 +2188,7 @@ pub async fn run_probe(client: &crate::ssh::SshClient, os: &OsInfo) -> ProbeResu
         &rules_section,
         &ports_section,
         &peers_section,
+        &proc_sockets_section,
     ];
     let success = all_sections
         .iter()
@@ -2011,6 +2210,7 @@ pub async fn run_probe(client: &crate::ssh::SshClient, os: &OsInfo) -> ProbeResu
             rules: rules_section,
             ports: ports_section,
             peers: peers_section,
+            proc_sockets: proc_sockets_section,
         },
         data: ProbeData {
             hostname,
@@ -2041,176 +2241,6 @@ fn empty_firewall() -> DetectedFirewall {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// TCP reachability probing (selected-server side, manual action only)
-// ═══════════════════════════════════════════════════════════════════════════
-
-const DEFAULT_TCP_TIMEOUT_MS: u64 = 1500;
-const MAX_TCP_TIMEOUT_MS: u64 = 10_000;
-const MAX_PORTS_PER_REQUEST: usize = 200;
-const TCP_CONCURRENCY: usize = 32;
-
-fn shell_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\"'\"'"))
-}
-
-/// Build a portable read-only TCP probe script for the selected SSH server.
-///
-/// It prefers system `nc`, then Bash `/dev/tcp` guarded by either `timeout` or
-/// a background `sleep`/`kill` watcher; no tool is installed and no firewall
-/// command is run. Jobs execute concurrently so a batch of timed-out ports does
-/// not become N × timeout seconds.
-pub fn build_remote_tcp_probe_script(host: &str, ports: &[u16], timeout_ms: u64) -> String {
-    let seconds = timeout_ms.max(1).div_ceil(1000).clamp(1, 10);
-    let mut script = String::new();
-    script.push_str("NT_HOST=");
-    script.push_str(&shell_quote(host.trim()));
-    script.push_str("\nNT_TIMEOUT=");
-    script.push_str(&seconds.to_string());
-    script.push_str("\ndev_tcp_probe() {\n");
-    script.push_str("  err=''\n");
-    script.push_str(
-        "  if command -v timeout >/dev/null 2>&1 && command -v bash >/dev/null 2>&1; then\n",
-    );
-    script.push_str("    err=$(timeout \"$NT_TIMEOUT\" bash -c 'exec 3<>/dev/tcp/$1/$2' nt_probe \"$NT_HOST\" \"$port\" 2>&1); rc=$?\n");
-    script.push_str("  elif command -v bash >/dev/null 2>&1 && command -v sleep >/dev/null 2>&1 && command -v kill >/dev/null 2>&1; then\n");
-    script.push_str("    err=$( (\n");
-    script.push_str(
-        "      bash -c 'exec 3<>/dev/tcp/$1/$2' nt_probe \"$NT_HOST\" \"$port\" & child=$!\n",
-    );
-    script.push_str(
-        "      (sleep \"$NT_TIMEOUT\"; kill -TERM \"$child\" 2>/dev/null) & watcher=$!\n",
-    );
-    script.push_str("      wait \"$child\"; tcp_rc=$?\n");
-    script.push_str("      kill \"$watcher\" 2>/dev/null\n");
-    script.push_str("      wait \"$watcher\" 2>/dev/null\n");
-    script.push_str("      exit \"$tcp_rc\"\n");
-    script.push_str("    ) 2>&1 ); rc=$?\n");
-    script.push_str("  else\n");
-    script.push_str(
-        "    rc=125; err='remote server has none of nc, timeout+bash, or bash+sleep+kill'\n",
-    );
-    script.push_str("  fi\n");
-    script.push_str("}\n");
-    script.push_str("\nprobe_one() {\n");
-    script.push_str("  port=$1\n");
-    script.push_str("  start=$(date +%s%3N 2>/dev/null || echo '')\n");
-    script.push_str("  case \"$start\" in ''|*[!0-9]*) start='';; esac\n");
-    script.push_str("  err=''\n");
-    script.push_str("  if command -v nc >/dev/null 2>&1; then\n");
-    script.push_str("    err=$(nc -z -w \"$NT_TIMEOUT\" \"$NT_HOST\" \"$port\" 2>&1); rc=$?\n");
-    script.push_str("    lower=$(printf '%s' \"$err\" | tr '[:upper:]' '[:lower:]')\n");
-    script.push_str("    case \"$lower\" in\n");
-    script.push_str("      *invalid\\ option*|*unrecognized\\ option*|*usage:*) dev_tcp_probe;;\n");
-    script.push_str("    esac\n");
-    script.push_str("  else\n");
-    script.push_str("    dev_tcp_probe\n");
-    script.push_str("  fi\n");
-    script.push_str("  latency=''\n");
-    script.push_str("  if [ -n \"$start\" ]; then\n");
-    script.push_str("    end=$(date +%s%3N 2>/dev/null || echo '')\n");
-    script.push_str("    case \"$end\" in ''|*[!0-9]*) end='';; esac\n");
-    script.push_str("    if [ -n \"$end\" ]; then latency=$((end-start)); fi\n");
-    script.push_str("  fi\n");
-    script.push_str("  err=$(printf '%s' \"$err\" | tr '\\n\\r\\t' '   ')\n");
-    script.push_str("  case \"$rc\" in\n");
-    script.push_str("    0) status='reachable'; err='';;\n");
-    script.push_str("    124|137|143) status='blocked'; err=${err:-connect timed out};;\n");
-    script.push_str("    *) lower=$(printf '%s' \"$err\" | tr '[:upper:]' '[:lower:]')\n");
-    script.push_str("       case \"$lower\" in\n");
-    script.push_str("         *refused*|*reset*|*closed*) status='not_listening';;\n");
-    script.push_str("         *timed\\ out*|*timeout*) status='blocked';;\n");
-    script.push_str("         *name\\ or\\ service\\ not\\ known*|*nodename\\ nor\\ servname*|*no\\ such\\ host*|*lookup*|*resolve*) status='dns_error';;\n");
-    script.push_str("         *) status='error';;\n");
-    script.push_str("       esac;;\n");
-    script.push_str("  esac\n");
-    script.push_str("  printf 'NT_TCP\\t%s\\t%s\\t%s\\t%s\\n' \"$port\" \"$status\" \"${latency:-}\" \"$err\"\n");
-    script.push_str("}\n");
-    for chunk in ports.chunks(TCP_CONCURRENCY.max(1)) {
-        script.push_str("for port in");
-        for port in chunk {
-            script.push_str(&format!(" {}", port));
-        }
-        script.push_str("; do probe_one \"$port\" & done\n");
-    }
-    script.push_str("wait");
-    script
-}
-
-/// Parse markers emitted by [`build_remote_tcp_probe_script`].
-pub fn parse_remote_tcp_probe_output(raw: &str) -> Vec<TcpProbeResult> {
-    let mut results = Vec::new();
-    for line in raw.lines() {
-        let Some(fields) = line.strip_prefix("NT_TCP\t") else {
-            continue;
-        };
-        let parts: Vec<&str> = fields.splitn(4, '\t').collect();
-        if parts.len() < 3 {
-            continue;
-        }
-        let Ok(port) = parts[0].parse::<u16>() else {
-            continue;
-        };
-        let status = match parts[1] {
-            "reachable" | "blocked" | "not_listening" | "dns_error" | "error" => parts[1],
-            _ => "error",
-        };
-        let error_text = parts
-            .get(3)
-            .map(|value| truncate_chars(value, 300))
-            .filter(|value| !value.is_empty());
-        results.push(TcpProbeResult {
-            port,
-            status: status.to_string(),
-            tcp_ok: status == "reachable",
-            latency_ms: parts[2].parse::<u64>().ok(),
-            error_text,
-        });
-    }
-    results
-}
-
-/// Batch TCP connectivity test from the selected SSH server.
-pub async fn run_remote_tcp_probe(
-    client: &crate::ssh::SshClient,
-    host: &str,
-    ports: &[u16],
-    timeout_ms: Option<u64>,
-) -> Vec<TcpProbeResult> {
-    let host = host.trim();
-    if host.is_empty() {
-        return Vec::new();
-    }
-
-    let mut unique: Vec<u16> = Vec::new();
-    for port in ports.iter().take(MAX_PORTS_PER_REQUEST) {
-        if !unique.contains(port) {
-            unique.push(*port);
-        }
-    }
-    if unique.is_empty() {
-        return Vec::new();
-    }
-
-    let timeout = timeout_ms
-        .unwrap_or(DEFAULT_TCP_TIMEOUT_MS)
-        .min(MAX_TCP_TIMEOUT_MS);
-    let script = build_remote_tcp_probe_script(host, &unique, timeout);
-    match client.execute_command(&script).await {
-        Ok(output) => parse_remote_tcp_probe_output(&output),
-        Err(err) => unique
-            .into_iter()
-            .map(|port| TcpProbeResult {
-                port,
-                status: "error".to_string(),
-                tcp_ok: false,
-                latency_ms: None,
-                error_text: Some(truncate_chars(&err.to_string(), 300)),
-            })
-            .collect(),
-    }
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
 // Tests
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -2222,7 +2252,7 @@ mod tests {
 
     #[test]
     fn splits_all_sections_in_order() {
-        let raw = "###NT:hostname###\nweb-01\n###NT:os###\nID=ubuntu\n###NT:interfaces###\n2: eth0\n###NT:routes###\ndefault via 10.0.0.1\n###NT:firewall###\nFW=ufw\n###NT:rules###\n##RULE_FMT:ufw##\n###NT:ports###\ntcp LISTEN\n###NT:peers###\ntcp ESTAB\n###NT:end###";
+        let raw = "###NT:hostname###\nweb-01\n###NT:os###\nID=ubuntu\n###NT:interfaces###\n2: eth0\n###NT:routes###\ndefault via 10.0.0.1\n###NT:firewall###\nFW=ufw\n###NT:rules###\n##RULE_FMT:ufw##\n###NT:ports###\ntcp LISTEN\n###NT:peers###\ntcp ESTAB\n###NT:proc_sockets###\nNT_PROC_BEGIN\n###NT:end###";
         let sections = split_sections(raw);
         for key in SECTION_KEYS {
             assert!(sections.contains_key(key), "missing section {key}");
@@ -2710,6 +2740,103 @@ mod tests {
         assert!(peers.is_empty());
     }
 
+    #[test]
+    fn proc_sockets_parse_listeners_all_tcp_states_and_processes() {
+        let raw = "\
+NT_PROC_BEGIN
+NT_PROC_FILE\ttcp\t/proc/net/tcp
+  sl local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
+   0: 00000000:1F90 00000000:0000 0A 00000000:000000 00:00000000 00000000     0        0 11111 1 0000000000000000 100 0 0 10 0
+   1: 0100000A:C5A2 0200000A:1538 01 00000000:000000 00:00000000 00000000     0        0 22222 1 0000000000000000 20 0 0 10 -1
+   2: 0100000A:C5A2 0200000A:1538 06 00000000:000000 00:00000000 00000000     0        0 33333 1 0000000000000000 20 0 0 10 -1
+NT_PROC_FILE\tudp\t/proc/net/udp
+   3: 00000000:0035 00000000:0000 07 00000000:000000 00:00000000 00000000     0        0 44444 1 0000000000000000 100 0 0 10 0
+NT_PROC_PROCESS\t22222\t99\tapp
+NT_PROC_END
+";
+        let (ports, peers, section) = parse_proc_sockets(raw);
+        assert_eq!(section.status, "ok");
+        assert_eq!(ports.len(), 2);
+        assert_eq!(ports[0].listen_addr, "0.0.0.0");
+        assert_eq!(ports[0].port, 8080);
+        assert_eq!(ports[0].state, "LISTEN");
+        assert_eq!(ports[1].protocol, "udp");
+        assert_eq!(ports[1].port, 53);
+
+        assert_eq!(peers.len(), 2);
+        assert_eq!(peers[0].local_addr, "10.0.0.1");
+        assert_eq!(peers[0].remote_addr, "10.0.0.2");
+        assert_eq!(peers[0].remote_port, Some(5432));
+        assert_eq!(peers[0].process_name, "app");
+        assert_eq!(peers[0].process_pid, Some(99));
+        assert_eq!(peers[1].state, "TIME_WAIT");
+    }
+
+    #[test]
+    fn proc_sockets_without_process_information_still_returns_sockets() {
+        let raw = "\
+NT_PROC_FILE\ttcp\t/proc/net/tcp
+   1: 0100000A:C5A2 0200000A:1538 01 00000000:000000 00:00000000 00000000 0 0 22222 1 0000000000000000 20 0 0 10 -1
+";
+        let (ports, peers, section) = parse_proc_sockets(raw);
+        assert!(ports.is_empty());
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].process_name, "");
+        assert_eq!(peers[0].process_pid, None);
+        assert_eq!(section.status, "partial");
+    }
+
+    #[test]
+    fn proc_sockets_keep_connected_udp_as_listener_and_relation() {
+        let raw = "\
+NT_PROC_FILE\tudp\t/proc/net/udp
+   0: 030015AC:0035 020015AC:1538 07 00000000:000000 00:00000000 00000000 0 0 55555 1 0000000000000000 100 0 0 10 -1
+";
+        let (ports, peers, section) = parse_proc_sockets(raw);
+        assert_eq!(section.status, "partial");
+        assert_eq!(ports.len(), 1);
+        assert_eq!(ports[0].protocol, "udp");
+        assert_eq!(ports[0].listen_addr, "172.21.0.3");
+        assert_eq!(ports[0].port, 53);
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].local_port, Some(53));
+        assert_eq!(peers[0].remote_addr, "172.21.0.2");
+        assert_eq!(peers[0].remote_port, Some(5432));
+    }
+
+    #[test]
+    fn proc_sockets_parse_real_docker_ipv4_and_ipv6_sides() {
+        let a = "\
+NT_PROC_FILE\ttcp\t/proc/net/tcp
+   0: 0B00007F:82B1 00000000:0000 0A 00000000:000000 00:00000000 00000000 0 0 10975 1 0000000000a1992188 100 0 0 10 0
+   1: 020015AC:A499 030015AC:1F90 01 00000000:000000 00:00000000 00000000 0 0 6937 1 0000000000d448874c 20 0 0 10 -1
+";
+        let (ports, peers, _) = parse_proc_sockets(a);
+        assert_eq!(ports.len(), 1);
+        assert_eq!(ports[0].listen_addr, "127.0.0.11");
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].local_addr, "172.21.0.2");
+        assert_eq!(peers[0].remote_addr, "172.21.0.3");
+        assert_eq!(peers[0].remote_port, Some(8080));
+        assert_eq!(peers[0].local_port, Some(42137));
+        assert_eq!(peers[0].state, "ESTABLISHED");
+
+        let b = "\
+NT_PROC_FILE\ttcp6\t/proc/net/tcp6
+   0: 00000000000000000000000000000000:1F90 00000000000000000000000000000000:0000 0A 00000000:000000 00:00000000 00000000 0 0 4859 1 0000000000fb436901 100 0 0 10 0
+   1: 0000000000000000FFFF0000030015AC:1F90 0000000000000000FFFF0000020015AC:A499 01 00000000:000000 00:00000000 00000000 0 0 4860 1 00000000006bc236dc 20 0 0 10 -1
+";
+        let (ports, peers, _) = parse_proc_sockets(b);
+        assert_eq!(ports.len(), 1);
+        assert_eq!(ports[0].listen_addr, "::");
+        assert_eq!(ports[0].port, 8080);
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].local_addr, "::ffff:172.21.0.3");
+        assert_eq!(peers[0].remote_addr, "::ffff:172.21.0.2");
+        assert_eq!(peers[0].local_port, Some(8080));
+        assert_eq!(peers[0].remote_port, Some(42137));
+    }
+
     // ── helpers ────────────────────────────────────────────────────────────
 
     #[test]
@@ -2829,6 +2956,12 @@ mod tests {
             "set -e",
             " > ",
             ">>",
+            "nc ",
+            "/dev/tcp",
+            "ping ",
+            "traceroute",
+            "dig ",
+            "nslookup ",
             "apt ",
             "yum ",
             "apk ",
@@ -2854,72 +2987,6 @@ mod tests {
             .arg(&script)
             .status();
         assert!(status.unwrap().success());
-    }
-
-    #[test]
-    fn remote_tcp_script_targets_selected_host_concurrently() {
-        let script = build_remote_tcp_probe_script("10.0.0.5", &[80, 443], 1_500);
-        assert!(script.contains("NT_HOST='10.0.0.5'"));
-        assert!(script.contains("NT_TIMEOUT=2"));
-        assert!(script.contains("for port in 80 443; do probe_one \"$port\" & done"));
-        assert!(script.contains("nc -z -w \"$NT_TIMEOUT\""));
-        assert!(script.contains("bash -c 'exec 3<>/dev/tcp/$1/$2'"));
-        assert!(script.contains("dev_tcp_probe"));
-        assert!(script.contains("sleep \"$NT_TIMEOUT\"; kill -TERM \"$child\""));
-        assert!(
-            script.contains("*invalid\\ option*|*unrecognized\\ option*|*usage:*) dev_tcp_probe")
-        );
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn remote_tcp_script_is_valid_posix_shell_syntax() {
-        let script = build_remote_tcp_probe_script("10.0.0.5", &[80, 443], 1_500);
-        let status = std::process::Command::new("/bin/sh")
-            .arg("-n")
-            .arg("-c")
-            .arg(&script)
-            .status();
-        assert!(status.unwrap().success());
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn remote_tcp_script_falls_back_without_nc_or_timeout() {
-        use std::net::TcpListener;
-
-        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let script = build_remote_tcp_probe_script("127.0.0.1", &[port], 1_000)
-            .replace("command -v nc >/dev/null", "false >/dev/null")
-            .replace("command -v timeout >/dev/null", "false >/dev/null");
-        let output = std::process::Command::new("/bin/sh")
-            .arg("-c")
-            .arg(&script)
-            .output()
-            .unwrap();
-        assert!(output.status.success());
-
-        let results = parse_remote_tcp_probe_output(&String::from_utf8_lossy(&output.stdout));
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].port, port);
-        assert_eq!(results[0].status, "reachable");
-        assert!(results[0].tcp_ok);
-    }
-
-    #[test]
-    fn parses_remote_tcp_results_and_classifies_errors() {
-        let results = parse_remote_tcp_probe_output(
-            "warning: unrelated\nNT_TCP\t80\treachable\t3\t\nNT_TCP\t443\tblocked\t\tconnect timed out\nNT_TCP\t8443\tbogus\t7\toops\n",
-        );
-        assert_eq!(results.len(), 3);
-        assert_eq!(results[0].port, 80);
-        assert!(results[0].tcp_ok);
-        assert_eq!(results[0].latency_ms, Some(3));
-        assert_eq!(results[1].status, "blocked");
-        assert_eq!(results[1].error_text.as_deref(), Some("connect timed out"));
-        assert_eq!(results[2].status, "error");
-        assert!(!results[2].tcp_ok);
     }
 
     #[test]

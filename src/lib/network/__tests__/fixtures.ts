@@ -41,6 +41,7 @@ export function sections(over: Partial<ProbeSections> = {}): ProbeSections {
     rules: section(),
     ports: section(),
     peers: section(),
+    procSockets: section(),
     ...over,
   };
 }
@@ -121,6 +122,7 @@ export function detectedRule(over: Partial<DetectedFirewallRule> = {}): Detected
 
 export function detectedPeer(over: Partial<DetectedPeer> = {}): DetectedPeer {
   return {
+    localAddr: '10.0.0.5',
     remoteAddr: '10.0.0.6',
     remotePort: 5432,
     localPort: 45678,

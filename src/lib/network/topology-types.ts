@@ -338,7 +338,7 @@ export interface NetworkLink {
   status: LinkStatus;
   /** `auto` = inferred from an observed connection; `manual` = user-authored. */
   source: LinkSource;
-  /** How an auto link was inferred, e.g. "ss ESTABLISHED 10.0.0.5:5432". */
+  /** How an auto link was inferred from the local kernel socket table. */
   evidence: string;
 
   /* M */
@@ -358,7 +358,7 @@ export const LINK_MANUAL_KEYS = ['description', 'manualLabel', 'hidden'] as cons
 
 /* ══ port-level topology links ════════════════════════════════════════════ */
 /**
- * A port-level connection: `源服务器:源端口 → 目标服务器:目标端口`.
+ * A port-level connection between real listener endpoints and/or servers.
  *
  * This is the level-2 drill-down of `NetworkLink`. Where `NetworkLink`
  * connects two *servers*, a port link connects two *ports*. Either endpoint
@@ -387,7 +387,7 @@ export interface NetworkPortLink {
    * IP. Unknown endpoints are never probed.
    */
   readonly sourceNodeId: string | null;
-  /** Source port row id; NULL for an ephemeral/unknown-source socket. */
+  /** Real source listener row id; NULL for a server-only endpoint. */
   readonly sourcePortId: string | null;
   /** Legacy bare IP for an unprobed source endpoint. */
   readonly sourceIp: string | null;
@@ -406,11 +406,11 @@ export interface NetworkPortLink {
   /** Legacy bare IP for an unprobed peer target. */
   targetIp: string | null;
 
-  /* A — inferred from observed peer connections / TCP reachability checks */
+  /* A — inferred from locally observed peer connections */
   status: PortLinkStatus;
   /** `auto` = inferred from an observed peer; `manual` = user-authored. */
   source: PortLinkSource;
-  /** How an auto link was inferred, e.g. "ss ESTABLISHED 10.0.0.5:5432". */
+  /** How an auto link was inferred from the local kernel socket table. */
   evidence: string;
 
   /* M */
@@ -456,6 +456,7 @@ export interface ProbeSections {
   rules: ProbeSection;
   ports: ProbeSection;
   peers: ProbeSection;
+  procSockets: ProbeSection;
 }
 
 export interface DetectedInterface {
@@ -528,6 +529,8 @@ export interface DetectedPort {
  * connects to a peer on its own.
  */
 export interface DetectedPeer {
+  /** Exact local bind address from `/proc`; used for listener matching only. */
+  localAddr?: string;
   remoteAddr: string;
   remotePort: number | null;
   localPort: number | null;
@@ -558,15 +561,6 @@ export interface ProbeResult {
   probedAtMs: number;
   /** Truncated (<=2000 chars) raw excerpt for troubleshooting only. */
   rawExcerpt: string | null;
-}
-
-/** Response item of the `probe_tcp_ports` Tauri command. */
-export interface TcpProbeResult {
-  port: number;
-  status: ReachabilityStatus;
-  tcpOk: boolean;
-  latencyMs: number | null;
-  errorText: string | null;
 }
 
 /** Aggregated snapshot handed to the UI after a probe + merge completes. */

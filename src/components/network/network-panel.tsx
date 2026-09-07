@@ -5,29 +5,18 @@ import { Loader2, Radar } from 'lucide-react';
 import { toast } from 'sonner';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import { Checkbox } from '@/components/ui/checkbox';
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from '@/components/ui/dialog';
-import { Input } from '@/components/ui/input';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { NodeSummary } from './node-summary';
 import { InterfaceTable } from './interface-table';
 import { RouteTable } from './route-table';
 import { FirewallView } from './firewall-view';
-import { PortTable, ReachabilityBadge } from './port-table';
+import { PortTable } from './port-table';
 import { PortTopologyView } from './port-topology';
 import { ProbeEmptyState } from './probe-empty-state';
 import { cn } from '@/lib/utils';
-import { applyProbeResult, probeServerTopology, probeTcpPorts } from '@/lib/network/topology-api';
+import { applyProbeResult, probeServerTopology } from '@/lib/network/topology-api';
 import {
-  appendPortProbe,
   getNodeByConnectionId,
   getNodeFirewall,
   getNodeFirewallRules,
@@ -35,18 +24,14 @@ import {
   getNodeInterfaces,
   getNodePorts,
   getNodeRoutes,
-  getPortProbes,
   listPortLinks,
   patchFirewallRuleManual,
   patchInterfaceManual,
   patchPortManual,
-  patchPortReachability,
   patchRouteManual,
   subscribeTopology,
   upsertNode,
 } from '@/lib/network/topology-storage';
-import { resolveReachability } from '@/lib/network/topology-merge';
-import { generateId } from '@/lib/toolbox/toolbox-storage';
 import type {
   NetworkFirewall,
   NetworkFirewallRule,
@@ -55,18 +40,16 @@ import type {
   NetworkPort,
   NetworkPortLink,
   NetworkRoute,
-  PortProbeRecord,
   ProbeSections,
   ProbeStatus,
-  TcpProbeResult,
 } from '@/lib/network/topology-types';
 
 /* ════════════════════════════════════════════════════════════════════════
  * HARD CONSTRAINT — PROBING IS MANUAL ONLY
  * ────────────────────────────────────────────────────────────────────────
- * Nothing in this file may ever trigger `probeServerTopology` or
- * `probeTcpPorts` from a `useEffect`. The only call sites are the two click
- * handlers below (`handleProbe` / `handleTcpRun`). Mounting this panel,
+ * Nothing in this file may ever trigger `probeServerTopology` from a
+ * `useEffect`. The only call site is the click handler below (`handleProbe`).
+ * Mounting this panel,
  * switching servers, or starting the app must produce ZERO network activity.
  * Reading already-persisted data via the storage getters is allowed — that is
  * a local read, not a probe.
@@ -80,7 +63,6 @@ interface NodePanelData {
   firewall: NetworkFirewall | null;
   rules: NetworkFirewallRule[];
   ports: NetworkPort[];
-  portProbes: PortProbeRecord[];
   portLinks: NetworkPortLink[];
 }
 
@@ -107,9 +89,8 @@ const SECTION_LABEL_KEYS = {
   rules: 'network.section.rules',
   ports: 'network.section.ports',
   peers: 'network.section.peers',
+  procSockets: 'network.section.procSockets',
 } as const satisfies Record<keyof ProbeSections, string>;
-
-const DEFAULT_TCP_TIMEOUT_MS = 1500;
 
 function readNodeData(assetId: string): NodePanelData | null {
   const node = getNodeByConnectionId(assetId);
@@ -121,7 +102,6 @@ function readNodeData(assetId: string): NodePanelData | null {
     firewall: getNodeFirewall(node.id),
     rules: getNodeFirewallRules(node.id),
     ports: getNodePorts(node.id),
-    portProbes: getPortProbes(node.id),
     portLinks: listPortLinks(),
   };
 }
@@ -137,7 +117,7 @@ export interface NetworkPanelProps {
   connectionId: string;
   /** Display name of the tab, stored on the node. */
   connectionName: string;
-  /** Target host for the client-side TCP reachability test. */
+  /** Display host used by port labels; never used to open a connection. */
   host: string;
   /** Stable id used to locate the persisted node: `originalConnectionId ?? connectionId`. */
   assetConnectionId?: string;
@@ -159,13 +139,6 @@ export function NetworkPanel({
   const [activeTab, setActiveTab] = useState('summary');
   /** Level-2 drill-down: when set, the panel shows that port's topology. */
   const [selectedPort, setSelectedPort] = useState<{ nodeId: string; portId: string; host: string } | null>(null);
-
-  // Manual TCP reachability state. Keyed by assetId so switching servers can
-  // never show another server's results.
-  const [tcpRunning, setTcpRunning] = useState(false);
-  const [tcpRun, setTcpRun] = useState<{ assetId: string; results: TcpProbeResult[] } | null>(null);
-  const [tcpDialogOpen, setTcpDialogOpen] = useState(false);
-  const [tcpDialogKey, setTcpDialogKey] = useState(0);
 
   // Drives the "3 分钟前" label forward. UI-only — never triggers a probe.
   const [now, setNow] = useState(() => Date.now());
@@ -221,66 +194,6 @@ export function NetworkPanel({
     }
   };
 
-  // ── Manual TCP reachability test ───────────────────────────────────────
-  const tcpCandidates = (data?.ports ?? []).filter(
-    port => port.protocol === 'tcp' && port.state.trim().toUpperCase().includes('LISTEN'),
-  );
-
-  const handleTcpRun = async (ports: number[], timeoutMs: number) => {
-    const nodeId = data?.node.id;
-    if (tcpRunning || ports.length === 0 || !nodeId) return;
-    setTcpRunning(true);
-    try {
-      const raw = await probeTcpPorts(connectionId, host, ports, timeoutMs);
-
-      // Cross-reference the client-side TCP verdict with "does the server
-      // report this port as listening" (design doc §5). `tcpCandidates` only
-      // holds LISTEN tcp ports, so a hit means listening === true.
-      const byPort = new Map(tcpCandidates.map(port => [port.port, port]));
-      const resolved = raw.map(item => ({
-        ...item,
-        status: resolveReachability({ listening: byPort.has(item.port), tcp: item }),
-      }));
-
-      const probedAt = Date.now();
-      for (const item of resolved) {
-        const port = byPort.get(item.port);
-        appendPortProbe({
-          id: generateId('probe'),
-          nodeId,
-          portId: port?.id ?? null,
-          protocol: 'tcp',
-          port: item.port,
-          targetHost: host,
-          status: item.status,
-          tcpOk: item.tcpOk,
-          latencyMs: item.latencyMs,
-          errorText: item.errorText,
-          probedAt,
-          triggeredBy: 'manual',
-        });
-        if (port) patchPortReachability(nodeId, port.id, item.status, probedAt);
-      }
-
-      setTcpRun({ assetId, results: resolved });
-      setStoreVersion(v => v + 1);
-      toast.success(t('network.tcp.done'), {
-        description: t('network.tcp.doneDetail', { count: resolved.length }),
-      });
-    } catch (err) {
-      toast.error(t('network.tcp.failed'), {
-        description: err instanceof Error ? err.message : String(err),
-      });
-    } finally {
-      setTcpRunning(false);
-    }
-  };
-
-  const openTcpDialog = () => {
-    setTcpDialogKey(k => k + 1); // remount → fresh selection / timeout state
-    setTcpDialogOpen(true);
-  };
-
   // ── Manual-field patches (never touched by a re-probe) ─────────────────
   const node = data?.node;
   const handleNodePatch = (
@@ -294,27 +207,6 @@ export function NetworkPanel({
 
   const refresh = () => setStoreVersion(v => v + 1);
 
-  // Latest verdict per `protocol:port`, built once per render. Live results
-  // from the current session shadow the persisted history.
-  const liveReachability = new Map<string, TcpProbeResult>();
-  if (tcpRun?.assetId === assetId) {
-    for (const item of tcpRun.results) liveReachability.set(`tcp:${item.port}`, item);
-  }
-  const storedReachability = new Map<string, PortProbeRecord>();
-  for (const record of data?.portProbes ?? []) {
-    const key = `${record.protocol}:${record.port}`;
-    const prev = storedReachability.get(key);
-    if (!prev || record.probedAt > prev.probedAt) storedReachability.set(key, record);
-  }
-
-  const reachabilityOf = (port: NetworkPort) => {
-    const key = `${port.protocol}:${port.port}`;
-    const live = liveReachability.get(key);
-    if (live) return { status: live.status, latencyMs: live.latencyMs };
-    const stored = storedReachability.get(key);
-    return stored ? { status: stored.status, latencyMs: stored.latencyMs } : undefined;
-  };
-
   const degradedSections = lastSections
     ? (Object.keys(lastSections) as Array<keyof ProbeSections>)
         .map(key => ({ key, section: lastSections[key] }))
@@ -324,9 +216,9 @@ export function NetworkPanel({
   const status: ProbeStatus = node?.lastProbeStatus ?? 'never';
 
   return (
-    <div className="flex h-full min-h-0 flex-col gap-2 p-2">
+    <div className="flex h-full min-h-0 flex-col gap-1.5 p-1.5">
       {/* ── top status bar ──────────────────────────────────────────────── */}
-      <div className="shrink-0 space-y-1.5">
+      <div className="max-h-[45%] shrink-0 space-y-1.5 overflow-y-auto">
         <Button
           type="button"
           size="sm"
@@ -409,20 +301,20 @@ export function NetworkPanel({
           onValueChange={setActiveTab}
           className="flex min-h-0 flex-1 flex-col gap-1.5"
         >
-          <TabsList className="h-7 w-full shrink-0 rounded-md p-0.5">
-            <TabsTrigger value="summary" className="h-6 rounded px-1 text-[10px]">
+          <TabsList className="flex h-7 w-full shrink-0 rounded-md p-0.5">
+            <TabsTrigger value="summary" className="h-6 min-w-0 flex-1 rounded px-1 text-[10px]">
               {t('network.tabs.summary')}
             </TabsTrigger>
-            <TabsTrigger value="interfaces" className="h-6 rounded px-1 text-[10px]">
+            <TabsTrigger value="interfaces" className="h-6 min-w-0 flex-1 rounded px-1 text-[10px]">
               {t('network.tabs.interfaces')}
             </TabsTrigger>
-            <TabsTrigger value="routes" className="h-6 rounded px-1 text-[10px]">
+            <TabsTrigger value="routes" className="h-6 min-w-0 flex-1 rounded px-1 text-[10px]">
               {t('network.tabs.routes')}
             </TabsTrigger>
-            <TabsTrigger value="firewall" className="h-6 rounded px-1 text-[10px]">
+            <TabsTrigger value="firewall" className="h-6 min-w-0 flex-1 rounded px-1 text-[10px]">
               {t('network.tabs.firewall')}
             </TabsTrigger>
-            <TabsTrigger value="ports" className="h-6 rounded px-1 text-[10px]">
+            <TabsTrigger value="ports" className="h-6 min-w-0 flex-1 rounded px-1 text-[10px]">
               {t('network.tabs.ports')}
             </TabsTrigger>
           </TabsList>
@@ -490,10 +382,6 @@ export function NetworkPanel({
                   ports={data.ports}
                   host={host}
                   links={data.portLinks}
-                  reachabilityOf={reachabilityOf}
-                  testing={tcpRunning}
-                  tcpDisabled={host.trim() === ''}
-                  onTestConnectivity={openTcpDialog}
                   onDrillDown={(port) => setSelectedPort({ nodeId: node.id, portId: port.id, host })}
                   onPatch={(portId, patch) => {
                     patchPortManual(node.id, portId, patch);
@@ -506,16 +394,6 @@ export function NetworkPanel({
         </Tabs>
       )}
 
-      <TcpProbeDialog
-        key={tcpDialogKey}
-        open={tcpDialogOpen}
-        onOpenChange={setTcpDialogOpen}
-        host={host}
-        candidates={tcpCandidates}
-        running={tcpRunning}
-        results={tcpRun?.assetId === assetId ? tcpRun.results : []}
-        onRun={ports => void handleTcpRun(ports, DEFAULT_TCP_TIMEOUT_MS)}
-      />
     </div>
   );
 }
@@ -530,152 +408,4 @@ function formatRelative(timestamp: number, now: number, t: TFunction): string {
   const hours = Math.round(minutes / 60);
   if (hours < 24) return t('network.time.hoursAgo', { count: hours });
   return t('network.time.daysAgo', { count: Math.round(hours / 24) });
-}
-
-interface TcpProbeDialogProps {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-  host: string;
-  candidates: NetworkPort[];
-  running: boolean;
-  results: TcpProbeResult[];
-  onRun: (ports: number[], timeoutMs: number) => void;
-}
-
-/**
- * Manual TCP reachability dialog. Selecting ports and pressing the button is
- * the only thing that opens outbound connections from the client.
- */
-function TcpProbeDialog({
-  open,
-  onOpenChange,
-  host,
-  candidates,
-  running,
-  results,
-  onRun,
-}: TcpProbeDialogProps) {
-  const { t } = useTranslation();
-  const [selected, setSelected] = useState<Set<number>>(() => new Set(candidates.map(p => p.port)));
-  const [timeoutMs, setTimeoutMs] = useState(String(DEFAULT_TCP_TIMEOUT_MS));
-
-  const parsedTimeout = Number.parseInt(timeoutMs, 10);
-  const effectiveTimeout = Number.isFinite(parsedTimeout) && parsedTimeout > 0
-    ? parsedTimeout
-    : DEFAULT_TCP_TIMEOUT_MS;
-  const selectedPorts = candidates
-    .map(port => port.port)
-    .filter(port => selected.has(port));
-  const allSelected = selectedPorts.length === candidates.length && candidates.length > 0;
-
-  const toggleAll = (next: boolean) => {
-    setSelected(next ? new Set(candidates.map(port => port.port)) : new Set<number>());
-  };
-
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="!inset-0 !m-auto !h-fit !translate-x-0 !translate-y-0 flex max-h-[85vh] !w-[calc(100vw-2rem)] !max-w-none flex-col gap-3 overflow-hidden sm:!max-w-lg">
-        <DialogHeader>
-          <DialogTitle className="text-sm">{t('network.tcp.title')}</DialogTitle>
-          <DialogDescription className="text-xs">
-            {t('network.tcp.description', { host: host || t('network.common.na') })}
-          </DialogDescription>
-        </DialogHeader>
-
-        <div className="flex flex-wrap items-center gap-2">
-          <label className="flex items-center gap-1 text-[11px] text-muted-foreground">
-            {t('network.tcp.timeout')}
-            <Input
-              value={timeoutMs}
-              inputMode="numeric"
-              onChange={event => setTimeoutMs(event.target.value.replace(/[^0-9]/g, ''))}
-              className="h-6 w-20 px-1.5 text-[11px]"
-              aria-label={t('network.tcp.timeout')}
-            />
-            ms
-          </label>
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            className="h-6 px-1.5 text-[10px]"
-            disabled={candidates.length === 0}
-            onClick={() => toggleAll(!allSelected)}
-          >
-            {allSelected ? t('network.tcp.selectNone') : t('network.tcp.selectAll')}
-          </Button>
-          <span className="text-[10px] text-muted-foreground">
-            {t('network.tcp.selected', { count: selectedPorts.length })}
-          </span>
-        </div>
-
-        {candidates.length === 0 ? (
-          <p className="py-4 text-center text-[11px] text-muted-foreground">
-            {t('network.tcp.noCandidates')}
-          </p>
-        ) : (
-          <ScrollArea className="h-48 rounded-md border">
-            <div className="space-y-1 p-1.5">
-              {candidates.map(port => (
-                <label
-                  key={port.id}
-                  className="flex cursor-pointer items-center gap-2 rounded px-1 py-0.5 text-[11px] hover:bg-accent"
-                >
-                  <Checkbox
-                    checked={selected.has(port.port)}
-                    onCheckedChange={checked => {
-                      setSelected(prev => {
-                        const next = new Set(prev);
-                        if (checked === true) next.add(port.port);
-                        else next.delete(port.port);
-                        return next;
-                      });
-                    }}
-                  />
-                  <span className="w-14 shrink-0 font-mono">{port.port}/tcp</span>
-                  <span className="min-w-0 flex-1 truncate text-muted-foreground">
-                    {port.serviceName || port.processName || t('network.common.na')}
-                  </span>
-                </label>
-              ))}
-            </div>
-          </ScrollArea>
-        )}
-
-        {results.length > 0 && (
-          <div className="space-y-1 rounded-md border p-1.5">
-            <p className="text-[10px] font-medium text-muted-foreground">{t('network.tcp.results')}</p>
-            <div className="max-h-40 space-y-1 overflow-y-auto">
-              {results.map(item => (
-                <div key={item.port} className="flex items-center gap-2 text-[11px]">
-                  <span className="w-14 shrink-0 font-mono">{item.port}/tcp</span>
-                  <ReachabilityBadge status={item.status} latencyMs={item.latencyMs} />
-                  {item.errorText && (
-                    <span className="min-w-0 flex-1 truncate text-[10px] text-muted-foreground" title={item.errorText}>
-                      {item.errorText}
-                    </span>
-                  )}
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-
-        <DialogFooter>
-          <Button type="button" variant="outline" size="sm" onClick={() => onOpenChange(false)}>
-            {t('common.close')}
-          </Button>
-          <Button
-            type="button"
-            size="sm"
-            disabled={running || selectedPorts.length === 0}
-            onClick={() => onRun(selectedPorts, effectiveTimeout)}
-          >
-            {running && <Loader2 className="mr-1 h-3 w-3 animate-spin" />}
-            {running ? t('network.tcp.running') : t('network.tcp.run')}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  );
 }

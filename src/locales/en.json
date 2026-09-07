@@ -2620,7 +2620,8 @@
       "firewall": "防火墙",
       "rules": "防火墙规则",
       "ports": "监听端口",
-      "peers": "活动连接"
+      "peers": "Active connections",
+    "procSockets": "Kernel socket table"
     },
     "roleHint": {
       "web": "Web",
@@ -2810,9 +2811,11 @@
       "firewallConflict": "Conflicting rules",
       "firewallInactive": "Firewall inactive",
       "firewallUnknown": "Unknown",
+      "firewallMetadataAvailable": "Policy metadata",
+      "firewallNotApplicable": "Not applicable",
       "drillDownBadge": "Level-2: port topology",
       "drillDownDescription": "Port-level view using persisted data only; expansion does not probe.",
-      "stateHint": "Listening, firewall policy, client TCP reachability, and observed connections are judged separately."
+      "stateHint": "Only locally observed listeners and connections are shown; firewall policy is metadata and never implies reachability."
     },
     "portLinks": {
       "title": "Port link",
@@ -2840,7 +2843,9 @@
       "peerType": "Peer type",
       "sourceServer": "Source server",
       "targetServer": "Target server",
-      "peerIp": "Peer IP"
+      "peerIp": "Peer IP",
+      "serverOnly": "Server only",
+      "realPortOnlyHint": "Ports must be real collected listeners; uncollected peers connect to the server node."
     }
   },
   "topology": {

@@ -12,7 +12,7 @@ import type {
   ReachabilityStatus,
 } from './topology-types';
 
-export type PortFirewallStatus = 'allowed' | 'denied' | 'conflict' | 'inactive' | 'unknown';
+export type PortFirewallStatus = 'allowed' | 'denied' | 'conflict' | 'not_applicable' | 'unknown';
 export type PortConnectionFilter = 'all' | 'listening' | 'missing' | 'connected' | 'disconnected';
 
 export interface PortLinkStats {
@@ -74,7 +74,7 @@ export function evaluatePortFirewall(
   rules: readonly NetworkFirewallRule[] = [],
 ): PortFirewallStatus {
   if (!firewall) return 'unknown';
-  if (!firewall.active) return 'inactive';
+  if (!firewall.active) return 'not_applicable';
 
   const active = rules.filter((rule) => rule.missingSince === null && protocolMatches(rule, port.protocol) && portInRange(rule.dstPort, port.port));
   const allowed = active.some((rule) => actionMatches(rule, 'allow'));

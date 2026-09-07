@@ -4892,7 +4892,7 @@ mod encoding_tests {
 // ═══════════════════════════════════════════════════════════════════════════
 // Network topology & diagnostics
 //
-// Both commands are strictly user-triggered: nothing in the backend ever
+// The command is strictly user-triggered: nothing in the backend ever
 // schedules a probe on connect, tab switch, or app start. `probe_network_
 // topology` only touches the ONE connection passed in — it never reaches out
 // to a peer address observed in the `peers` section.
@@ -4918,43 +4918,4 @@ pub async fn probe_network_topology(
     let os_info = get_os_info(&connection_id, &client, state.inner()).await;
 
     Ok(crate::network_probe::run_probe(&client, &os_info).await)
-}
-
-/// Test TCP reachability from the selected SSH server to `host` on each port.
-///
-/// Returns the **TCP layer** verdict only. It does not know whether the server
-/// reports a port as listening — the frontend cross-references `net_ports`
-/// with these results to reach the user-facing status (design doc §5):
-///
-/// | listening | tcp result | status          |
-/// |-----------|------------|-----------------|
-/// | yes       | connected  | `reachable`     |
-/// | yes       | refused    | `not_listening` |
-/// | yes       | timeout    | `blocked`       |
-/// | no        | connected  | `unexpected_open` (frontend-side) |
-/// | —         | dns fails  | `dns_error`     |
-#[tauri::command]
-pub async fn probe_tcp_ports(
-    connection_id: String,
-    host: String,
-    ports: Vec<u16>,
-    timeout_ms: Option<u64>,
-    state: State<'_, Arc<ConnectionManager>>,
-) -> Result<Vec<crate::network_probe::TcpProbeResult>, String> {
-    let connection = state
-        .get_connection(&connection_id)
-        .await
-        .ok_or("Connection not found")?;
-    let client = connection.read().await;
-    // Sanitise at the boundary: a malformed call must never fan out into an
-    // unbounded number of outbound connections.
-    let host = host.trim().to_string();
-    if host.is_empty() {
-        return Err("host must not be empty".to_string());
-    }
-    if ports.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    Ok(crate::network_probe::run_remote_tcp_probe(&client, &host, &ports, timeout_ms).await)
 }

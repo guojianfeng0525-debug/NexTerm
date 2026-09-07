@@ -603,6 +603,48 @@ done
         }
     }
 
+    /// Zero-install Linux socket source.
+    ///
+    /// `/proc/net/{tcp,tcp6,udp,udp6}` is the kernel socket table. Unlike the
+    /// `ss`/`netstat` fallbacks it is available without installing iproute2 or
+    /// net-tools, performs no name resolution, and emits *every* state. The
+    /// process association is best-effort: it only reads symlinks below
+    /// `/proc/<pid>/fd` and never launches a helper on the remote host.
+    pub fn proc_sockets_probe_cmd(&self) -> &'static str {
+        r#"
+echo "NT_PROC_BEGIN"
+for spec in "tcp /proc/net/tcp" "tcp6 /proc/net/tcp6" "udp /proc/net/udp" "udp6 /proc/net/udp6"; do
+    set -- $spec
+    proto=$1
+    path=$2
+    if [ -r "$path" ]; then
+        printf 'NT_PROC_FILE\t%s\t%s\n' "$proto" "$path"
+        cat "$path" 2>/dev/null
+    fi
+done
+for proc in /proc/[0-9]*; do
+    [ -d "$proc" ] || continue
+    pid=${proc##*/}
+    comm=''
+    if [ -r "$proc/comm" ]; then
+        comm=$(cat "$proc/comm" 2>/dev/null)
+    fi
+    for fd in "$proc"/fd/*; do
+        [ -e "$fd" ] || continue
+        target=$(readlink "$fd" 2>/dev/null) || continue
+        case "$target" in
+            socket:\[*\])
+                inode=${target#socket:[}
+                inode=${inode%]}
+                printf 'NT_PROC_PROCESS\t%s\t%s\t%s\n' "$inode" "$pid" "$comm"
+                ;;
+        esac
+    done
+done
+echo "NT_PROC_END"
+"#
+    }
+
     /// Firewall type / state probe.
     ///
     /// Emits `FW=<type>`, `FW_STATE=…`, `FW_VERSION=…`, an `FW_ZONES_BEGIN` …
@@ -701,10 +743,17 @@ done
         s.push_str(&self.firewall_probe_cmd());
         s.push_str("echo \"###NT:rules###\";\n");
         s.push_str(&self.firewall_rules_probe_cmd());
-        s.push_str("echo \"###NT:ports###\"; ");
-        s.push_str(self.ports_probe_cmd());
-        s.push_str("\necho \"###NT:peers###\"; ");
-        s.push_str(self.peers_probe_cmd());
+        if matches!(self.family, OsFamily::MacOS | OsFamily::Bsd) {
+            s.push_str("echo \"###NT:ports###\"; ");
+            s.push_str(self.ports_probe_cmd());
+            s.push_str("\necho \"###NT:peers###\"; ");
+            s.push_str(self.peers_probe_cmd());
+        } else {
+            s.push_str("echo \"###NT:ports###\";\necho \"NT_PROC_SOCKETS\"\n");
+            s.push_str("echo \"###NT:peers###\";\necho \"NT_PROC_SOCKETS\"\n");
+            s.push_str("echo \"###NT:proc_sockets###\";\n");
+            s.push_str(self.proc_sockets_probe_cmd());
+        }
         s.push_str("\necho \"###NT:end###\"");
         s
     }
@@ -857,6 +906,7 @@ mod tests {
             "###NT:rules###",
             "###NT:ports###",
             "###NT:peers###",
+            "###NT:proc_sockets###",
             "###NT:end###",
         ];
         let mut cursor = 0usize;
@@ -883,6 +933,12 @@ mod tests {
             "set -e",
             " > ",
             ">>",
+            "nc ",
+            "/dev/tcp",
+            "ping ",
+            "traceroute",
+            "dig ",
+            "nslookup ",
             "apt ",
             "yum ",
             "apk ",
@@ -914,7 +970,8 @@ mod tests {
         .topology_probe_cmd();
         assert!(script.contains("ip -o addr"));
         assert!(script.contains("ip route"));
-        assert!(script.contains("ss -tulpnH"));
+        assert!(script.contains("/proc/net/tcp"));
+        assert!(script.contains("NT_PROC_PROCESS"));
     }
 
     #[test]
@@ -926,7 +983,7 @@ mod tests {
             ..Default::default()
         }
         .topology_probe_cmd();
-        assert!(script.contains("netstat -tulpn"));
+        assert!(script.contains("/proc/net/tcp"));
 
         let macos = OsInfo {
             family: OsFamily::MacOS,

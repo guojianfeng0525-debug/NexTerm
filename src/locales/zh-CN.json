@@ -2620,7 +2620,8 @@
       "firewall": "防火墙",
       "rules": "防火墙规则",
       "ports": "监听端口",
-      "peers": "活动连接"
+      "peers": "活动连接",
+    "procSockets": "内核 Socket 表"
     },
     "roleHint": {
       "web": "Web 服务",
@@ -2810,9 +2811,11 @@
       "firewallConflict": "规则冲突",
       "firewallInactive": "防火墙未启用",
       "firewallUnknown": "未知",
+      "firewallMetadataAvailable": "策略元数据",
+      "firewallNotApplicable": "不适用",
       "drillDownBadge": "二级：端口拓扑",
       "drillDownDescription": "仅读取已保存数据的端口视图；展开不会发起探测。",
-      "stateHint": "监听、防火墙策略、客户端 TCP 可达性和实际连接分别判定，互不等价。"
+      "stateHint": "仅展示本机被动观测到的真实监听与连接；防火墙策略只作元数据，不代表可达性。"
     },
     "portLinks": {
       "title": "端口连接",
@@ -2840,7 +2843,9 @@
       "peerType": "对端类型",
       "sourceServer": "源服务器",
       "targetServer": "目标服务器",
-      "peerIp": "对端 IP"
+      "peerIp": "对端 IP",
+      "serverOnly": "仅服务器",
+      "realPortOnlyHint": "端口只能选择已采集到的真实监听端口；未采集时连接到服务器节点。"
     }
   },
   "topology": {
