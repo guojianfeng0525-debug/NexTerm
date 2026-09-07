@@ -221,7 +221,7 @@ export function TopologyNodeDialog({
   return (
     <>
       <Dialog open={open} onOpenChange={onOpenChange}>
-        <DialogContent className="!inset-0 !m-auto flex max-h-[85vh] w-[92vw] max-w-2xl flex-col gap-0 p-0">
+        <DialogContent className="!inset-0 !m-auto !h-[640px] !translate-x-0 !translate-y-0 flex max-h-[85vh] !w-[calc(100vw-2rem)] !max-w-none flex-col gap-0 overflow-hidden p-0 sm:!max-w-2xl">
           <DialogHeader className="shrink-0 border-b border-border px-6 py-4">
             <DialogTitle>{t('topology.nodeDialog.title')}</DialogTitle>
             <DialogDescription>
@@ -397,7 +397,7 @@ export function TopologyNodeDialog({
 
       {/* Sibling dialog instead of a nested one — keeps focus handling sane. */}
       <Dialog open={confirmingDelete} onOpenChange={setConfirmingDelete}>
-        <DialogContent className="!inset-0 !m-auto w-[92vw] max-w-sm">
+        <DialogContent className="!inset-0 !m-auto !h-fit !translate-x-0 !translate-y-0 max-h-[85vh] !w-[calc(100vw-2rem)] !max-w-none overflow-y-auto sm:!max-w-sm">
           <DialogHeader>
             <DialogTitle>{t('topology.nodeDialog.deleteTitle')}</DialogTitle>
             <DialogDescription>

@@ -200,4 +200,25 @@ describe('NetworkPanel — probe is strictly user-triggered', () => {
     unmount();
     expect(unsubscribe).toHaveBeenCalledTimes(1);
   });
+
+  it('renders the TCP dialog inside the viewport and probes from the SSH server', async () => {
+    seedProbedNode();
+    renderPanel();
+
+    const portsTab = screen.getByRole('tab', { name: /Ports/i });
+    fireEvent.pointerDown(portsTab, { button: 0 });
+    fireEvent.mouseDown(portsTab, { button: 0 });
+    fireEvent.click(portsTab, { button: 0 });
+    await waitFor(() => screen.getByRole('button', { name: /Test TCP connectivity/i }));
+    fireEvent.click(screen.getByRole('button', { name: /Test TCP connectivity/i }));
+    const dialog = await screen.findByRole('dialog');
+    expect(dialog.className).toContain('!inset-0');
+    expect(dialog.className).toContain('!m-auto');
+    expect(dialog.className).toContain('max-w-lg');
+    expect(dialog.className).toContain('overflow-hidden');
+
+    api.probeTcpPorts.mockResolvedValue([]);
+    fireEvent.click(screen.getByRole('button', { name: /Run test/i }));
+    await waitFor(() => expect(api.probeTcpPorts).toHaveBeenCalledWith('session-1', '10.0.0.5', [80], 1500));
+  });
 });

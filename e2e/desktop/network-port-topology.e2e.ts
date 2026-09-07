@@ -43,6 +43,11 @@ describe('Network port topology drill-down', () => {
     const topologyButton = await waitForVisible('[data-testid="toolbox-nav-topology"]');
     await topologyButton.click();
     await waitForVisible('[data-node-id="e2e-node-a"]');
+    await waitForVisible('[data-node-id="observed:10.10.1.30"]');
+    await expectElementText(await $('[data-node-id="observed:10.10.1.30"]'), '10.10.1.30');
+    await expectElementText(await $('[data-node-id="observed:10.10.1.30"]'), '未探测');
+    await waitForVisible('[data-link-id="e2e-link-observed"]');
+    await browser.saveScreenshot('./test-results/wdio/network-port-topology-global.png');
 
     const serverNode = await waitForVisible('[data-node-id="e2e-node-a"]');
     await browser.execute(
@@ -70,6 +75,8 @@ describe('Network port topology drill-down', () => {
     await portButton.click();
 
     const portView = await waitForVisible('[data-testid="port-topology-view"]');
+    await waitForVisible('[data-link-id="e2e-plink-out"]');
+    await browser.saveScreenshot('./test-results/wdio/network-port-topology-all.png');
     await expectElementText(portView, '10.10.1.20:8080');
     await expectElementText(portView, 'gateway-a');
     await expectElementText(portView, 'web entry');
@@ -93,6 +100,26 @@ describe('Network port topology drill-down', () => {
     const addButton = await waitForVisible('[data-testid="port-link-add"]');
     await addButton.click();
     await waitForVisible('[data-testid="port-link-editor"]');
+    const dialogMetrics = await browser.execute(() => {
+      const el = document.querySelector('[data-testid="port-link-editor"]');
+      if (!el) throw new Error('port link dialog missing');
+      const rect = el.getBoundingClientRect();
+      return {
+        top: rect.top,
+        bottom: rect.bottom,
+        left: rect.left,
+        right: rect.right,
+        viewportWidth: window.innerWidth,
+        viewportHeight: window.innerHeight,
+      };
+    });
+    expect(Math.abs((dialogMetrics.top + dialogMetrics.bottom) / 2 - dialogMetrics.viewportHeight / 2))
+      .toBeLessThanOrEqual(4);
+    expect(Math.abs((dialogMetrics.left + dialogMetrics.right) / 2 - dialogMetrics.viewportWidth / 2))
+      .toBeLessThanOrEqual(4);
+    expect(dialogMetrics.bottom).toBeLessThanOrEqual(dialogMetrics.viewportHeight);
+    expect(dialogMetrics.top).toBeGreaterThanOrEqual(0);
+    await browser.saveScreenshot('./test-results/wdio/network-port-link-dialog.png');
     await (await $('[data-testid="port-link-peer-port"]')).setValue('8080');
     await (await $('[data-testid="port-link-save"]')).click();
     await $('[data-testid="port-link-editor"]').waitForExist({ reverse: true });

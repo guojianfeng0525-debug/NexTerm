@@ -163,7 +163,8 @@
       "colorDepth": "色彩深度",
       "jumpPickFromServers": "从服务器列表选择",
       "jumpFromServer": "跳板机来自",
-      "jumpClearServer": "清除"
+      "jumpClearServer": "清除",
+      "noDirectJumpServers": "没有直连服务器可选"
     },
     "placeholder": {
       "connectionName": "我的服务器",
@@ -1897,10 +1898,10 @@
       "batchStopped": "已停止 {count} 个隧道",
       "batchFailed": "{count} 个失败",
       "jumpFromServer": "从服务器列表选择",
-      "jumpFromServerHint": "选择一个已保存的服务器自动填充跳板机信息",
+      "jumpFromServerHint": "只有未通过其它跳板机连接的 SSH/SFTP 服务器可作为跳板机",
       "selectServerPlaceholder": "选择服务器…",
       "jumpServerCleared": "已清空跳板机",
-      "jumpFromServerNoSsh": "无可用服务器",
+      "jumpFromServerNoSsh": "没有直连服务器",
       "hostKeyTitle": "信任跳板机主机密钥？",
       "hostKeyDescription": "将固定 {{host}}:{{port}} 的跳板机主机密钥。如果指纹发生变化，可能是服务器重装，也可能是中间人攻击。仅在确认可信后继续。",
       "hostKeyTrust": "信任并启动",
@@ -2593,7 +2594,7 @@
     },
     "tcp": {
       "title": "TCP 连通性测试",
-      "description": "由本机向服务器发起 TCP 连接，用于区分端口监听、防火墙放行与实际网络可达三种状态。",
+      "description": "从当前选中的服务器向 {{host}} 发起 TCP 连接，用于区分端口监听、防火墙放行与实际网络可达三种状态。",
       "run": "开始测试",
       "running": "测试中…",
       "selectAll": "全选",
@@ -2933,6 +2934,7 @@
       "gateway": "网关",
       "loadbalancer": "负载均衡",
       "database": "数据库",
+      "observed-server": "观测到的服务器（未探测）",
       "other": "其它"
     },
     "environment": {

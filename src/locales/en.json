@@ -163,7 +163,8 @@
       "colorDepth": "Color Depth",
       "jumpPickFromServers": "Pick from saved servers",
       "jumpFromServer": "Jump host from",
-      "jumpClearServer": "Clear"
+      "jumpClearServer": "Clear",
+      "noDirectJumpServers": "No directly connected servers"
     },
     "placeholder": {
       "connectionName": "My Server",
@@ -1897,10 +1898,10 @@
       "batchStopped": "Stopped {count} tunnels",
       "batchFailed": "{count} failed",
       "jumpFromServer": "Pick from saved servers",
-      "jumpFromServerHint": "Pick a saved server to prefill the jump host fields",
+      "jumpFromServerHint": "Only directly connected SSH/SFTP servers can be jump hosts",
       "selectServerPlaceholder": "Select a server…",
       "jumpServerCleared": "Jump host cleared",
-      "jumpFromServerNoSsh": "No saved servers",
+      "jumpFromServerNoSsh": "No directly connected servers",
       "hostKeyTitle": "Trust jump-host key?",
       "hostKeyDescription": "The host key for {{host}}:{{port}} will be pinned. A changed fingerprint can mean the server was reinstalled, but it can also indicate a man-in-the-middle attack. Continue only after verifying it.",
       "hostKeyTrust": "Trust and start",
@@ -2593,7 +2594,7 @@
     },
     "tcp": {
       "title": "TCP connectivity test",
-      "description": "Opens TCP connections from this machine to the server, separating \"listening\", \"allowed by firewall\" and \"actually reachable\".",
+      "description": "Opens TCP connections from the selected server to {{host}}, separating \"listening\", \"allowed by firewall\" and \"actually reachable\".",
       "run": "Run test",
       "running": "Testing…",
       "selectAll": "Select all",
@@ -2933,6 +2934,7 @@
       "gateway": "Gateway",
       "loadbalancer": "Load balancer",
       "database": "Database",
+      "observed-server": "Observed server (not probed)",
       "other": "Other"
     },
     "environment": {

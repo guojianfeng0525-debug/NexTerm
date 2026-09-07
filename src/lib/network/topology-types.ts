@@ -48,7 +48,7 @@ export type NetProtocol = 'tcp' | 'udp';
 
 /**
  * Cross-referenced reachability verdict: combines "the server reports the
- * port is listening" with "the Windows client could complete a TCP connect".
+ * port is listening" with "the selected server could complete a TCP connect".
  */
 export type ReachabilityStatus =
   | 'reachable' // listening + firewall allowed + network reachable
@@ -58,7 +58,7 @@ export type ReachabilityStatus =
   | 'unexpected_open' // not reported listening, yet the client connected
   | 'dns_error' // target host could not be resolved
   | 'error' // probe itself failed
-  | 'untested'; // never tested from the client
+  | 'untested'; // never tested
 
 /** Who produced a topology relationship. */
 export type LinkSource = 'auto' | 'manual';
@@ -365,10 +365,9 @@ export const LINK_MANUAL_KEYS = ['description', 'manualLabel', 'hidden'] as cons
  * may be:
  *
  *   · a port on another already-probed node (`targetNodeId` set), or
- *   · a bare `IP:port` peer seen in an ESTABLISHED connection but never probed
- *     by NexTerm (`sourceNodeId` / `targetNodeId === null`). Such an endpoint
- *     is recorded but NEVER auto-probed; it resolves to a node only once the
- *     user manually probes that server.
+ *   · an observed server node (`observed:<ip>`) with no synthetic port rows.
+ *     Such an endpoint is drawn but NEVER auto-probed; it is promoted in place
+ *     only if the user explicitly probes that server.
  *
  * Field ownership follows the same A/M/S discipline as every other entity:
  * a re-probe may overwrite auto fields but must never touch a manual link's
@@ -384,30 +383,27 @@ export type PortLinkStatus = 'active' | 'observed' | 'stale' | 'unknown';
 export interface NetworkPortLink {
   readonly id: string;
   /**
-   * Source server node id. NULL when an observed client is only known by IP.
-   * Unknown endpoints are never probed; they resolve after a user probes that
-   * server and its interface addresses match.
+   * Source server node id. NULL only for legacy rows whose endpoint is a bare
+   * IP. Unknown endpoints are never probed.
    */
   readonly sourceNodeId: string | null;
   /** Source port row id; NULL for an ephemeral/unknown-source socket. */
   readonly sourcePortId: string | null;
-  /** Bare IP for an unprobed source endpoint; NULL once `sourceNodeId` resolves. */
+  /** Legacy bare IP for an unprobed source endpoint. */
   readonly sourceIp: string | null;
   sourceProtocol: NetProtocol;
   sourcePort: number;
 
   /**
-   * Target server node id. NULL when the target is an unprobed peer — in that
-   * case only `targetIp` / `targetProtocol` / `targetPort` carry identity and
-   * the link is NEVER auto-probed. Resolved to a node once that server is
-   * probed and its interfaces/ports correlate.
+   * Target server node id. Unknown peers use a display-only observed node and
+   * are never auto-probed.
    */
   targetNodeId: string | null;
   /** Resolved target port row id; NULL until the target node is probed. */
   targetPortId: string | null;
   targetProtocol: NetProtocol;
   targetPort: number;
-  /** Bare IP for an unprobed peer target; NULL once `targetNodeId` resolves. */
+  /** Legacy bare IP for an unprobed peer target. */
   targetIp: string | null;
 
   /* A — inferred from observed peer connections / TCP reachability checks */

@@ -44,6 +44,7 @@ import {
   getNodeSnapshot,
   listLinks,
   listNodes,
+  listPortLinks,
   patchFirewallRuleManual,
   patchInterfaceManual,
   patchNodeManual,
@@ -109,40 +110,42 @@ describe('probeTcpPorts', () => {
     backend.handler = () => [];
     const ports = [80, 80, 443, 0, -1, 65536, 70000, 22.5, 8080];
 
-    await probeTcpPorts('10.0.0.5', ports);
+    await probeTcpPorts('conn-a', '10.0.0.5', ports);
 
     const call = backend.calls.find((c) => c.cmd === 'probe_tcp_ports');
     expect(call?.args.host).toBe('10.0.0.5');
+    expect(call?.args.connectionId).toBe('conn-a');
     expect(call?.args.ports).toEqual([80, 443, 8080]);
     expect(call?.args.timeoutMs).toBe(DEFAULT_PROBE_TIMEOUT_MS);
   });
 
   it('honours an explicit timeout within bounds', async () => {
     backend.handler = () => [];
-    await probeTcpPorts('h', [80], 3_000);
+    await probeTcpPorts('conn-a', 'h', [80], 3_000);
     expect(backend.calls.at(-1)?.args.timeoutMs).toBe(3_000);
 
-    await probeTcpPorts('h', [80], 10);
+    await probeTcpPorts('conn-a', 'h', [80], 10);
     expect(backend.calls.at(-1)?.args.timeoutMs).toBe(100);
 
-    await probeTcpPorts('h', [80], 999_999);
+    await probeTcpPorts('conn-a', 'h', [80], 999_999);
     expect(backend.calls.at(-1)?.args.timeoutMs).toBe(30_000);
   });
 
   it('caps the batch at 200 ports', async () => {
     backend.handler = () => [];
     const ports = Array.from({ length: 500 }, (_, i) => i + 1);
-    await probeTcpPorts('h', ports);
+    await probeTcpPorts('conn-a', 'h', ports);
     expect((backend.calls.at(-1)?.args.ports as number[]).length).toBe(MAX_PROBE_PORTS);
   });
 
   it('short-circuits without an IPC round-trip when nothing is valid', async () => {
-    await expect(probeTcpPorts('h', [0, -3, 99999])).resolves.toEqual([]);
+    await expect(probeTcpPorts('conn-a', 'h', [0, -3, 99999])).resolves.toEqual([]);
     expect(backend.calls.some((c) => c.cmd === 'probe_tcp_ports')).toBe(false);
   });
 
-  it('rejects an empty host instead of probing nothing', async () => {
-    await expect(probeTcpPorts('   ', [80])).rejects.toThrow('缺少目标主机');
+  it('requires both an SSH origin and a target host instead of probing nothing', async () => {
+    await expect(probeTcpPorts('   ', '10.0.0.5', [80])).rejects.toThrow('缺少 SSH 会话');
+    await expect(probeTcpPorts('conn-a', '   ', [80])).rejects.toThrow('缺少目标主机');
   });
 
   it('returns the backend verdicts and normalizes failures', async () => {
@@ -150,13 +153,13 @@ describe('probeTcpPorts', () => {
       { port: 80, status: 'reachable', tcpOk: true, latencyMs: 3, errorText: null },
     ];
     backend.handler = () => results;
-    await expect(probeTcpPorts('h', [80])).resolves.toEqual(results);
+    await expect(probeTcpPorts('conn-a', 'h', [80])).resolves.toEqual(results);
 
     backend.handler = () => {
       // eslint-disable-next-line @typescript-eslint/only-throw-error
       throw 'connect failed';
     };
-    await expect(probeTcpPorts('h', [80])).rejects.toThrow('connect failed');
+    await expect(probeTcpPorts('conn-a', 'h', [80])).rejects.toThrow('connect failed');
   });
 });
 
@@ -292,7 +295,7 @@ describe('applyProbeResult', () => {
     expect(getNodeSnapshot(nodeId)?.node.id).toBe(nodeId);
   });
 
-  it('links two probed servers without ever inventing a node for an unknown peer', () => {
+  it('draws unknown peers as port-less observed servers and promotes them in place', () => {
     applyProbeResult({
       connectionId: 'conn-a',
       connectionName: 'A',
@@ -307,9 +310,24 @@ describe('applyProbeResult', () => {
       probeAt: 1_000,
     });
 
-    // B has not been probed yet → the peer is discarded, no node, no link.
-    expect(listNodes()).toHaveLength(1);
-    expect(listLinks()).toHaveLength(0);
+    // B has not been probed. Its IP is still drawn as an observed server, but
+    // NexTerm does not connect to it and invents no port/interface data.
+    const observed = listNodes().find((node) => node.primaryIp === '10.0.0.6');
+    expect(listNodes()).toHaveLength(2);
+    expect(observed).toMatchObject({
+      connectionId: 'observed:10.0.0.6',
+      nodeType: 'observed-server',
+      lastProbeStatus: 'never',
+    });
+    expect(getNodePorts(observed?.id ?? '')).toHaveLength(0);
+    expect(listLinks()).toHaveLength(1);
+    expect(listLinks()[0].targetNodeId).toBe(observed?.id);
+    expect(listPortLinks()[0]).toMatchObject({
+      sourceNodeId: expect.any(String),
+      targetNodeId: observed?.id,
+      targetPort: 5432,
+      targetPortId: null,
+    });
 
     applyProbeResult({
       connectionId: 'conn-b',
@@ -319,15 +337,21 @@ describe('applyProbeResult', () => {
           ...probeResult().data,
           hostname: 'b',
           interfaces: [detectedInterface({ ifaceName: 'eth0', ipv4Addrs: ['10.0.0.6/24'] })],
+          ports: [detectedPort({ port: 5432, processName: 'postgres', pid: 201 })],
           peers: [detectedPeer({ remoteAddr: '203.0.113.9', remotePort: 443 })],
         },
       }),
       probeAt: 2_000,
     });
-    expect(listNodes()).toHaveLength(2);
-    expect(listLinks()).toHaveLength(0);
+    // The explicitly probed B reuses the observed node id, preserving the edge.
+    const promoted = getNodeByConnectionId('conn-b');
+    expect(promoted?.id).toBe(observed?.id);
+    expect(promoted?.connectionId).toBe('conn-b');
+    expect(getNodePorts(promoted?.id ?? '')).toHaveLength(1);
+    expect(listLinks()).toHaveLength(2);
 
-    // Re-probing A now resolves the peer to node B.
+    // Re-probing A confirms the same edge instead of duplicating it, and the
+    // target port now points at B's real 5432 row.
     const summary = applyProbeResult({
       connectionId: 'conn-a',
       connectionName: 'A',
@@ -342,9 +366,11 @@ describe('applyProbeResult', () => {
       probeAt: 3_000,
     });
 
-    expect(summary.linksAdded).toBe(1);
-    expect(listLinks()).toHaveLength(1);
-    expect(listLinks()[0]).toMatchObject({
+    expect(summary.linksAdded).toBe(0);
+    expect(summary.linksConfirmed).toBe(1);
+    const aToB = listLinks().filter((link) => link.sourceNodeId !== promoted?.id);
+    expect(aToB).toHaveLength(1);
+    expect(aToB[0]).toMatchObject({
       source: 'auto',
       status: 'observed',
       linkType: 'database',

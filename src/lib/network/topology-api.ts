@@ -18,12 +18,15 @@ import {
   deriveProbeStatus,
   inferLinksFromPeers,
   inferPortLinksFromPeers,
+  inferObservedNodes,
+  isObservedNode,
   mergeFirewallRules,
   mergeFirewalls,
   mergeInterfaces,
   mergeNode,
   mergePorts,
   mergeRoutes,
+  normalizeTopologyAddress,
   resolvePortLinkTargets,
 } from './topology-merge';
 import {
@@ -80,17 +83,23 @@ export async function probeServerTopology(connectionId: string): Promise<ProbeRe
 }
 
 /**
- * TCP-connect a list of ports on `host` from the Windows client.
+ * TCP-connect a list of ports on `host` from the selected SSH server.
+ *
+ * The existing SSH session is the probe origin, so a server reached through a
+ * jump host is tested through that same route. No local-machine path is used.
  *
  * Front-end sanitization before hitting the backend: de-duplicate, drop
  * anything outside 1..65535, and cap the batch at `MAX_PROBE_PORTS`. An empty
  * result list short-circuits without an IPC round-trip.
  */
 export async function probeTcpPorts(
+  connectionId: string,
   host: string,
   ports: number[],
   timeoutMs?: number,
 ): Promise<TcpProbeResult[]> {
+  const origin = (connectionId ?? '').trim();
+  if (!origin) throw new Error('缺少 SSH 会话');
   const target = (host ?? '').trim();
   if (!target) throw new Error('缺少目标主机');
 
@@ -110,6 +119,7 @@ export async function probeTcpPorts(
 
   try {
     return await invoke<TcpProbeResult[]>('probe_tcp_ports', {
+      connectionId: origin,
       host: target,
       ports: normalized,
       timeoutMs: timeout,
@@ -139,16 +149,28 @@ export interface ApplyProbeInput {
  * while leaving the user's display name, port purposes, notes, hidden flags
  * and layout coordinates exactly as they were.
  *
- * Peers are correlated against already-probed nodes only; unknown IPs produce
- * nothing (no LAN discovery, no new nodes).
+ * Unknown peer IPs become display-only observed nodes so their server edges are
+ * visible. They are not probed and receive no port data until explicitly selected.
  */
 export function applyProbeResult(input: ApplyProbeInput): ApplyProbeSummary {
   const probeAt = input.probeAt ?? Date.now();
   const data = input.result?.data;
   const status = deriveProbeStatus(input.result);
+  const detectedAddresses = new Set<string>();
+  const interfaceAddresses = (data?.interfaces ?? []).flatMap((item) => [
+    ...(item.ipv4Addrs ?? []),
+    ...(item.ipv6Addrs ?? []),
+  ]);
+  for (const addr of [data?.primaryIp ?? '', ...interfaceAddresses]) {
+    const normalized = normalizeTopologyAddress(addr);
+    if (normalized) detectedAddresses.add(normalized);
+  }
+  const observedCandidate = data
+    ? listNodes().find((node) => isObservedNode(node) && detectedAddresses.has(normalizeTopologyAddress(node.primaryIp)))
+    : undefined;
 
   const node = mergeNode(
-    getNodeByConnectionId(input.connectionId),
+    getNodeByConnectionId(input.connectionId) ?? observedCandidate,
     data,
     input.connectionId,
     probeAt,
@@ -183,12 +205,23 @@ export function applyProbeResult(input: ApplyProbeInput): ApplyProbeSummary {
   const ports = mergePorts(getNodePorts(nodeId), data?.ports ?? [], nodeId, probeAt);
   saveNodePorts(nodeId, ports.items);
 
-  const knownNodes = listNodes();
+  const nodesBefore = listNodes();
+  const knownNodes = inferObservedNodes({
+    nodeId,
+    peers: data?.peers ?? [],
+    knownNodes: nodesBefore,
+    now: probeAt,
+  });
+  const knownIds = new Set(nodesBefore.map((item) => item.id));
+  for (const observed of knownNodes) {
+    if (!knownIds.has(observed.id)) upsertNode(observed);
+  }
+  const interfacesIndex = buildInterfaceIpIndex(knownNodes, listInterfaces());
   const linkResult = inferLinksFromPeers({
     nodeId,
     peers: data?.peers ?? [],
     knownNodes,
-    interfacesIndex: buildInterfaceIpIndex(knownNodes, listInterfaces()),
+    interfacesIndex,
     existingLinks: listLinks(),
     now: probeAt,
   });
@@ -196,14 +229,14 @@ export function applyProbeResult(input: ApplyProbeInput): ApplyProbeSummary {
 
   // ── port-level links (level-2 drill-down) ──
   // Infer port links from the same observed peers, anchored at the probed
-  // node's listening ports. Unknown peers are kept as bare IP:port targets
-  // (never auto-probed); they resolve to a node once that server is probed.
+  // node's listening ports. Unknown peers become observed server nodes with no
+  // port rows; they are never auto-probed.
   const portLinkResult = inferPortLinksFromPeers({
     nodeId,
     peers: data?.peers ?? [],
     nodePorts: getNodePorts(nodeId),
     allPorts: listPorts(),
-    interfacesIndex: buildInterfaceIpIndex(knownNodes, listInterfaces()),
+    interfacesIndex,
     existingPortLinks: listPortLinks(),
     now: probeAt,
   });
@@ -214,7 +247,7 @@ export function applyProbeResult(input: ApplyProbeInput): ApplyProbeSummary {
   const portLinkResolution = resolvePortLinkTargets({
     nodeId,
     nodePorts: getNodePorts(nodeId),
-    interfacesIndex: buildInterfaceIpIndex(knownNodes, listInterfaces()),
+    interfacesIndex,
     existingPortLinks: listPortLinks(),
     now: probeAt,
   });

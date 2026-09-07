@@ -4920,7 +4920,7 @@ pub async fn probe_network_topology(
     Ok(crate::network_probe::run_probe(&client, &os_info).await)
 }
 
-/// Test TCP reachability from this client to `host` on each requested port.
+/// Test TCP reachability from the selected SSH server to `host` on each port.
 ///
 /// Returns the **TCP layer** verdict only. It does not know whether the server
 /// reports a port as listening — the frontend cross-references `net_ports`
@@ -4935,10 +4935,17 @@ pub async fn probe_network_topology(
 /// | —         | dns fails  | `dns_error`     |
 #[tauri::command]
 pub async fn probe_tcp_ports(
+    connection_id: String,
     host: String,
     ports: Vec<u16>,
     timeout_ms: Option<u64>,
+    state: State<'_, Arc<ConnectionManager>>,
 ) -> Result<Vec<crate::network_probe::TcpProbeResult>, String> {
+    let connection = state
+        .get_connection(&connection_id)
+        .await
+        .ok_or("Connection not found")?;
+    let client = connection.read().await;
     // Sanitise at the boundary: a malformed call must never fan out into an
     // unbounded number of outbound connections.
     let host = host.trim().to_string();
@@ -4949,5 +4956,5 @@ pub async fn probe_tcp_ports(
         return Ok(Vec::new());
     }
 
-    Ok(crate::network_probe::probe_tcp_ports(&host, &ports, timeout_ms).await)
+    Ok(crate::network_probe::run_remote_tcp_probe(&client, &host, &ports, timeout_ms).await)
 }

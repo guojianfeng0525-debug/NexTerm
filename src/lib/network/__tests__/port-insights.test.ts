@@ -24,6 +24,20 @@ describe('evaluatePortFirewall', () => {
     const rule = makeRule({ action: 'accept', protocol: '', dstPort: 'ssh' });
     expect(evaluatePortFirewall(port, firewall, [rule])).toBe('unknown');
   });
+
+  it('treats iptables NAT redirects as explicit firewall permits', () => {
+    const port = makePort({ port: 8080 });
+    const firewall = makeFirewall({ fwType: 'iptables', active: true, defaultInPolicy: 'drop' });
+    const rule = makeRule({
+      tableName: 'nat',
+      chain: 'PREROUTING',
+      action: 'DNAT',
+      protocol: 'tcp',
+      dstPort: '8080',
+      rawRule: '-A PREROUTING -p tcp --dport 8080 -j DNAT --to-destination 10.0.0.5:80',
+    });
+    expect(evaluatePortFirewall(port, firewall, [rule])).toBe('allowed');
+  });
 });
 
 describe('port filtering and link counts', () => {

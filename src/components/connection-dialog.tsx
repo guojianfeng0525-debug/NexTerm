@@ -22,6 +22,7 @@ import {
 } from './ui/dropdown-menu';
 import { ConnectionProfileManager, type ConnectionProfile } from '../lib/connection-profiles';
 import { ConnectionStorageManager } from '../lib/connection-storage';
+import { selectJumpHostCandidates } from '../lib/jump-host';
 import { buildSshConnectRequest } from '../lib/ssh-connect-request';
 import { toast } from 'sonner';
 import {
@@ -815,14 +816,10 @@ const handleCancelConnectionAttempt = async () => {
   };
 
   // Saved SSH/SFTP servers that can serve as a jump host (exclude the
-  // connection being edited itself).
+  // connection being edited itself). Only directly reachable servers qualify;
+  // a server that itself requires a jump host cannot become the next hop.
   const jumpCandidates = useMemo(
-    () =>
-      ConnectionStorageManager.getConnections().filter((c) => {
-        const proto = (c.protocol || '').toUpperCase();
-        if (proto !== 'SSH' && proto !== 'SFTP') return false;
-        return c.id !== editingConnection?.id;
-      }),
+    () => selectJumpHostCandidates(ConnectionStorageManager.getConnections(), editingConnection?.id),
     [editingConnection],
   );
 
@@ -1439,7 +1436,7 @@ const handleCancelConnectionAttempt = async () => {
                           <DropdownMenuContent align="end" className="max-h-64 overflow-y-auto w-64">
                             {jumpCandidates.length === 0 ? (
                               <DropdownMenuItem disabled className="text-xs text-muted-foreground">
-                                {t('connectionDialog.noSavedServers')}
+                                {t('connectionDialog.label.noDirectJumpServers')}
                               </DropdownMenuItem>
                             ) : (
                               jumpCandidates.map((s) => (

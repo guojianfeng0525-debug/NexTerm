@@ -489,7 +489,7 @@ export function ToolTopology() {
         open={!!deleteNodeTarget}
         onOpenChange={(open) => !open && setDeleteNodeTarget(null)}
       >
-        <AlertDialogContent>
+        <AlertDialogContent className="!inset-0 !m-auto !h-fit !translate-x-0 !translate-y-0 max-h-[85vh] !w-[calc(100vw-2rem)] !max-w-none overflow-y-auto sm:!max-w-sm">
           <AlertDialogHeader>
             <AlertDialogTitle>{t('topology.deleteNodeTitle')}</AlertDialogTitle>
             <AlertDialogDescription>
@@ -517,7 +517,7 @@ export function ToolTopology() {
         open={!!deleteLinkTarget}
         onOpenChange={(open) => !open && setDeleteLinkTarget(null)}
       >
-        <AlertDialogContent>
+        <AlertDialogContent className="!inset-0 !m-auto !h-fit !translate-x-0 !translate-y-0 max-h-[85vh] !w-[calc(100vw-2rem)] !max-w-none overflow-y-auto sm:!max-w-sm">
           <AlertDialogHeader>
             <AlertDialogTitle>{t('topology.linkDialog.deleteTitle')}</AlertDialogTitle>
             <AlertDialogDescription>{t('topology.linkDialog.deleteDesc')}</AlertDialogDescription>

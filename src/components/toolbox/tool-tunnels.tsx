@@ -43,6 +43,7 @@ import {
 import { TunnelsStorage, generateId } from '@/lib/toolbox/toolbox-storage';
 import type { TunnelConfig, TunnelActivity } from '@/lib/toolbox/toolbox-types';
 import { ConnectionStorageManager, type ConnectionData } from '@/lib/connection-storage';
+import { selectJumpHostCandidates } from '@/lib/jump-host';
 import {
   ArrowLeftRight,
   Plus,
@@ -114,12 +115,9 @@ export function ToolTunnels() {
   /** Id of the saved server currently selected as the jump host (if any). */
   const [jumpServerId, setJumpServerId] = useState('');
 
-  /** Saved servers that can act as an SSH jump host (SSH/SFTP use SSH auth). */
+  /** Saved, directly reachable servers that can act as an SSH jump host. */
   const servers = useMemo<ConnectionData[]>(
-    () =>
-      ConnectionStorageManager.getConnections().filter(
-        (c) => c.protocol === 'SSH' || c.protocol === 'SFTP',
-      ),
+    () => selectJumpHostCandidates(ConnectionStorageManager.getConnections()),
     // Connection cache is hydrated once at app start; re-read when the dialog opens.
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [formOpen],
@@ -791,7 +789,7 @@ export function ToolTunnels() {
                 {t('toolbox.tunnels.jump')}
               </p>
               {/* Pick a jump host from the saved server list */}
-              {servers.length > 0 && (
+              {servers.length > 0 ? (
                 <div className="space-y-1.5">
                   <Label htmlFor="tun-jump-server">{t('toolbox.tunnels.jumpFromServer')}</Label>
                   <Select value={jumpServerId} onValueChange={handleJumpServerPick}>
@@ -811,6 +809,8 @@ export function ToolTunnels() {
                   </Select>
                   <p className="text-[10px] text-muted-foreground">{t('toolbox.tunnels.jumpFromServerHint')}</p>
                 </div>
+              ) : (
+                <p className="text-[10px] text-muted-foreground">{t('toolbox.tunnels.jumpFromServerNoSsh')}</p>
               )}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div className="space-y-1.5">

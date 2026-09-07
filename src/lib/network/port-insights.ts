@@ -61,7 +61,9 @@ function protocolMatches(rule: NetworkFirewallRule, protocol: NetProtocol): bool
 
 function actionMatches(rule: NetworkFirewallRule, kind: 'allow' | 'deny'): boolean {
   const action = rule.action.trim().toLowerCase();
-  if (kind === 'allow') return ['allow', 'accept', 'pass'].includes(action);
+    if (kind === 'allow') {
+      return ['allow', 'accept', 'pass', 'dnat', 'redirect', 'snat', 'masquerade'].includes(action);
+    }
   return ['deny', 'drop', 'reject', 'block'].includes(action);
 }
 

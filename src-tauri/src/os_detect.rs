@@ -611,54 +611,47 @@ done
     /// line (including stderr) so the parser can turn `Permission denied`
     /// into a `需要 root 权限` note instead of a hard failure.
     pub fn firewall_probe_cmd(&self) -> String {
-        let mut s = String::from(
-            "if command -v firewall-cmd >/dev/null 2>&1; then\n\
-             echo \"FW=firewalld\"\n\
-             echo \"FW_STATE=$(firewall-cmd --state 2>&1 | head -n 1)\"\n\
-             echo \"FW_VERSION=$(firewall-cmd --version 2>&1 | head -n 1)\"\n\
-             echo \"FW_RAW=$(firewall-cmd --state 2>&1 | head -n 1)\"\n\
-             echo \"FW_ZONES_BEGIN\"\n\
-             firewall-cmd --get-active-zones 2>&1 | head -n 20\n\
-             echo \"FW_ZONES_END\"\n\
-             elif command -v ufw >/dev/null 2>&1; then\n\
-             echo \"FW=ufw\"\n\
-             echo \"FW_STATE=$(ufw status 2>&1 | head -n 1)\"\n\
-             echo \"FW_VERSION=$(ufw version 2>&1 | head -n 1)\"\n\
-             echo \"FW_RAW=$(ufw status 2>&1 | head -n 1)\"\n\
-             echo \"FW_ZONES_BEGIN\"\n\
-             echo \"FW_ZONES_END\"\n\
-             elif command -v nft >/dev/null 2>&1; then\n\
-             echo \"FW=nftables\"\n\
-             if nft list ruleset >/dev/null 2>&1; then echo \"FW_STATE=running\"; else echo \"FW_STATE=not running\"; fi\n\
-             echo \"FW_VERSION=$(nft --version 2>&1 | head -n 1)\"\n\
-             echo \"FW_RAW=$(nft list ruleset 2>&1 | head -n 1)\"\n\
-             echo \"FW_ZONES_BEGIN\"\n\
-             echo \"FW_ZONES_END\"\n\
-             elif command -v iptables >/dev/null 2>&1; then\n\
-             echo \"FW=iptables\"\n\
-             if iptables -S >/dev/null 2>&1; then echo \"FW_STATE=running\"; else echo \"FW_STATE=not running\"; fi\n\
-             echo \"FW_VERSION=$(iptables --version 2>&1 | head -n 1)\"\n\
-             echo \"FW_RAW=$(iptables -S 2>&1 | head -n 1)\"\n\
-             echo \"FW_ZONES_BEGIN\"\n\
-             echo \"FW_ZONES_END\"\n",
+        let mut s = String::from("FW=none\nFW_STATE=not running\nFW_VERSION=\nFW_RAW=\n");
+        s.push_str(
+            "if command -v firewall-cmd >/dev/null 2>&1 && [ \"$(firewall-cmd --state 2>/dev/null)\" = running ]; then\n\
+             FW=firewalld; FW_STATE=running\n\
+             elif command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -Eq 'Status: active|^active'; then\n\
+             FW=ufw; FW_STATE=active\n",
         );
         if matches!(self.family, OsFamily::MacOS | OsFamily::Bsd) {
             s.push_str(
-                "elif command -v pfctl >/dev/null 2>&1; then\n\
-                 echo \"FW=pf\"\n\
-                 echo \"FW_STATE=$(pfctl -s info 2>&1 | grep -i '^Status' | head -n 1)\"\n\
-                 echo \"FW_VERSION=\"\n\
-                 echo \"FW_RAW=$(pfctl -s info 2>&1 | head -n 1)\"\n\
-                 echo \"FW_ZONES_BEGIN\"\n\
-                 echo \"FW_ZONES_END\"\n",
+                "elif command -v pfctl >/dev/null 2>&1 && pfctl -s info 2>/dev/null | grep -qi '^Status: Enabled'; then\n\
+                 FW=pf; FW_STATE=enabled\n",
             );
         }
         s.push_str(
-            "else\n\
-             echo \"FW=none\"\n\
+            "elif command -v iptables-save >/dev/null 2>&1 && iptables-save 2>/dev/null | grep -Eq '^(\\*|:)'; then\n\
+             FW=iptables; FW_STATE=running\n\
+             elif command -v nft >/dev/null 2>&1 && nft list ruleset 2>/dev/null | grep -Eqi '(table|chain|hook)'; then\n\
+             FW=nftables; FW_STATE=running\n\
+             elif command -v iptables >/dev/null 2>&1 && iptables -S 2>/dev/null | grep -q '^-'; then\n\
+             FW=iptables; FW_STATE=running\n\
              fi\n\
+             echo \"FW=$FW\"\n\
+             echo \"FW_STATE=$FW_STATE\"\n\
+             case \"$FW\" in\n\
+               firewalld) echo \"FW_VERSION=$(firewall-cmd --version 2>&1 | head -n 1)\"; echo \"FW_RAW=$(firewall-cmd --state 2>&1 | head -n 1)\";;\n\
+               ufw) echo \"FW_VERSION=$(ufw version 2>&1 | head -n 1)\"; echo \"FW_RAW=$(ufw status 2>&1 | head -n 1)\";;\n\
+               nftables) echo \"FW_VERSION=$(nft --version 2>&1 | head -n 1)\"; echo \"FW_RAW=$(nft list ruleset 2>&1 | head -n 1)\";;\n\
+               iptables) echo \"FW_VERSION=$(iptables --version 2>&1 | head -n 1)\"; echo \"FW_RAW=$(iptables-save 2>&1 | head -n 1)\";;\n",
+        );
+        if matches!(self.family, OsFamily::MacOS | OsFamily::Bsd) {
+            s.push_str(
+                "pf) echo \"FW_VERSION=\"; echo \"FW_RAW=$(pfctl -s info 2>&1 | head -n 1)\";;\n",
+            );
+        }
+        s.push_str(
+            "esac\n\
+             echo \"FW_ZONES_BEGIN\"\n\
+             if [ \"$FW\" = firewalld ]; then firewall-cmd --get-active-zones 2>&1 | head -n 20; fi\n\
+             echo \"FW_ZONES_END\"\n\
              echo \"FW_POLICY_BEGIN\"\n\
-             iptables -S 2>&1 | grep -E '^-P ' | head -n 6\n\
+             if command -v iptables >/dev/null 2>&1; then iptables -S 2>&1 | grep -E '^-P ' | head -n 6; fi\n\
              echo \"FW_POLICY_END\"\n",
         );
         s
@@ -672,7 +665,7 @@ done
             "if command -v firewall-cmd >/dev/null 2>&1; then echo \"##RULE_FMT:firewalld##\"; firewall-cmd --list-all-zones 2>&1 | head -n 120; fi\n\
              if command -v ufw >/dev/null 2>&1; then echo \"##RULE_FMT:ufw##\"; ufw status verbose 2>&1 | head -n 80; fi\n\
              if command -v nft >/dev/null 2>&1; then echo \"##RULE_FMT:nft##\"; nft list ruleset 2>&1 | head -n 120; fi\n\
-             if command -v iptables >/dev/null 2>&1; then echo \"##RULE_FMT:iptables##\"; iptables -S 2>&1 | head -n 120; fi\n",
+             if command -v iptables-save >/dev/null 2>&1; then echo \"##RULE_FMT:iptables##\"; iptables-save 2>&1 | head -n 160; elif command -v iptables >/dev/null 2>&1; then echo \"##RULE_FMT:iptables##\"; iptables -S 2>&1 | head -n 120; fi\n",
         );
         if matches!(self.family, OsFamily::MacOS | OsFamily::Bsd) {
             s.push_str(

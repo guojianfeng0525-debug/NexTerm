@@ -1162,7 +1162,7 @@ fn is_fw_active(state: &str) -> bool {
 /// `rules` section — dispatches on the `##RULE_FMT:<backend>##` markers.
 ///
 /// Supported backends: `firewall-cmd --list-all-zones`, `ufw status verbose`,
-/// `nft list ruleset`, `iptables -S` (and `pfctl -sr` on BSD/macOS).
+/// `nft list ruleset`, `iptables-save` / `iptables -S` (and `pfctl -sr`).
 pub fn parse_firewall_rules(raw: &str) -> (Vec<DetectedFirewallRule>, ProbeSection) {
     let section = evaluate_section(raw);
     let mut rules: Vec<DetectedFirewallRule> = Vec::new();
@@ -1191,7 +1191,20 @@ pub fn parse_firewall_rules(raw: &str) -> (Vec<DetectedFirewallRule>, ProbeSecti
             "firewalld" => parse_firewalld_line(t, &mut zone, &mut rules),
             "ufw" => parse_ufw_line(tt, &mut rules),
             "nft" => parse_nft_line(tt, &mut table, &mut chain, &mut rules),
-            "iptables" => parse_iptables_line(tt, &mut rules),
+            "iptables" => {
+                if let Some(name) = tt.strip_prefix('*') {
+                    table = name.to_string();
+                } else if tt == "COMMIT" {
+                    table = String::new();
+                }
+                let table_name = table.trim();
+                let table_name = if table_name.is_empty() {
+                    "filter"
+                } else {
+                    table_name
+                };
+                parse_iptables_line(tt, table_name, &mut rules);
+            }
             "pf" => parse_pf_line(tt, &mut rules),
             _ => {}
         }
@@ -1481,15 +1494,15 @@ fn parse_nft_line(
     push_rule(rules, rule);
 }
 
-/// `iptables -S`:
+/// `iptables -S` / `iptables-save`:
 /// `-A INPUT -p tcp -m tcp --dport 22 -j ACCEPT`
-fn parse_iptables_line(line: &str, rules: &mut Vec<DetectedFirewallRule>) {
+fn parse_iptables_line(line: &str, table: &str, rules: &mut Vec<DetectedFirewallRule>) {
     let t = line.trim();
     if t.is_empty() || t.starts_with("#") {
         return;
     }
     let tokens: Vec<&str> = t.split_whitespace().collect();
-    if tokens.len() < 3 {
+    if tokens.len() < 3 || tokens[0].starts_with('*') || tokens[0].starts_with(':') {
         return;
     }
     // `-P CHAIN POLICY` is a chain policy, not a rule; `-N CHAIN` creates one.
@@ -1501,7 +1514,7 @@ fn parse_iptables_line(line: &str, rules: &mut Vec<DetectedFirewallRule>) {
     }
 
     let mut rule = empty_rule();
-    rule.table_name = "filter".to_string();
+    rule.table_name = table.to_string();
     rule.chain = tokens.get(1).unwrap_or(&"").to_string();
 
     let mut i = 2;
@@ -2028,7 +2041,7 @@ fn empty_firewall() -> DetectedFirewall {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// TCP reachability probing (client side, manual action only)
+// TCP reachability probing (selected-server side, manual action only)
 // ═══════════════════════════════════════════════════════════════════════════
 
 const DEFAULT_TCP_TIMEOUT_MS: u64 = 1500;
@@ -2036,68 +2049,129 @@ const MAX_TCP_TIMEOUT_MS: u64 = 10_000;
 const MAX_PORTS_PER_REQUEST: usize = 200;
 const TCP_CONCURRENCY: usize = 32;
 
-/// Pure TCP-layer connectivity test from this client to `host:port`.
-///
-/// This knows nothing about whether the server reports the port as listening —
-/// the frontend cross-references `net_ports` to reach the user-facing verdict
-/// (`reachable` / `blocked` / `not_listening` / `unexpected_open`, design
-/// doc §5). Here `blocked` simply means "the connect timed out".
-async fn probe_one_tcp_port(host: &str, port: u16, timeout: std::time::Duration) -> TcpProbeResult {
-    use std::io::ErrorKind;
-    use tokio::net::TcpStream;
-
-    let start = std::time::Instant::now();
-    match tokio::time::timeout(timeout, TcpStream::connect((host, port))).await {
-        Ok(Ok(_)) => TcpProbeResult {
-            port,
-            status: "reachable".to_string(),
-            tcp_ok: true,
-            latency_ms: Some(start.elapsed().as_millis() as u64),
-            error_text: None,
-        },
-        Ok(Err(e)) => {
-            let status = match e.kind() {
-                ErrorKind::ConnectionRefused => "not_listening",
-                ErrorKind::TimedOut => "blocked",
-                _ => {
-                    let msg = e.to_string().to_lowercase();
-                    if msg.contains("lookup")
-                        || msg.contains("resolve")
-                        || msg.contains("name or service not known")
-                        || msg.contains("nodename nor servname")
-                        || msg.contains("no such host")
-                    {
-                        "dns_error"
-                    } else {
-                        "error"
-                    }
-                }
-            };
-            tracing::warn!("tcp probe {}:{} -> {} ({})", host, port, status, e);
-            TcpProbeResult {
-                port,
-                status: status.to_string(),
-                tcp_ok: false,
-                latency_ms: None,
-                error_text: Some(truncate_chars(&e.to_string(), 300)),
-            }
-        }
-        Err(_) => TcpProbeResult {
-            port,
-            status: "blocked".to_string(),
-            tcp_ok: false,
-            latency_ms: None,
-            error_text: Some("连接超时".to_string()),
-        },
-    }
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
-/// Batch TCP connectivity test.
+/// Build a portable read-only TCP probe script for the selected SSH server.
 ///
-/// Arguments are sanitised here (host trimmed, timeout clamped, ports
-/// de-duplicated and capped) so a malformed frontend call can never fan out
-/// into an unbounded number of outbound connections.
-pub async fn probe_tcp_ports(
+/// It prefers system `nc`, then Bash `/dev/tcp` guarded by either `timeout` or
+/// a background `sleep`/`kill` watcher; no tool is installed and no firewall
+/// command is run. Jobs execute concurrently so a batch of timed-out ports does
+/// not become N × timeout seconds.
+pub fn build_remote_tcp_probe_script(host: &str, ports: &[u16], timeout_ms: u64) -> String {
+    let seconds = timeout_ms.max(1).div_ceil(1000).clamp(1, 10);
+    let mut script = String::new();
+    script.push_str("NT_HOST=");
+    script.push_str(&shell_quote(host.trim()));
+    script.push_str("\nNT_TIMEOUT=");
+    script.push_str(&seconds.to_string());
+    script.push_str("\ndev_tcp_probe() {\n");
+    script.push_str("  err=''\n");
+    script.push_str(
+        "  if command -v timeout >/dev/null 2>&1 && command -v bash >/dev/null 2>&1; then\n",
+    );
+    script.push_str("    err=$(timeout \"$NT_TIMEOUT\" bash -c 'exec 3<>/dev/tcp/$1/$2' nt_probe \"$NT_HOST\" \"$port\" 2>&1); rc=$?\n");
+    script.push_str("  elif command -v bash >/dev/null 2>&1 && command -v sleep >/dev/null 2>&1 && command -v kill >/dev/null 2>&1; then\n");
+    script.push_str("    err=$( (\n");
+    script.push_str(
+        "      bash -c 'exec 3<>/dev/tcp/$1/$2' nt_probe \"$NT_HOST\" \"$port\" & child=$!\n",
+    );
+    script.push_str(
+        "      (sleep \"$NT_TIMEOUT\"; kill -TERM \"$child\" 2>/dev/null) & watcher=$!\n",
+    );
+    script.push_str("      wait \"$child\"; tcp_rc=$?\n");
+    script.push_str("      kill \"$watcher\" 2>/dev/null\n");
+    script.push_str("      wait \"$watcher\" 2>/dev/null\n");
+    script.push_str("      exit \"$tcp_rc\"\n");
+    script.push_str("    ) 2>&1 ); rc=$?\n");
+    script.push_str("  else\n");
+    script.push_str(
+        "    rc=125; err='remote server has none of nc, timeout+bash, or bash+sleep+kill'\n",
+    );
+    script.push_str("  fi\n");
+    script.push_str("}\n");
+    script.push_str("\nprobe_one() {\n");
+    script.push_str("  port=$1\n");
+    script.push_str("  start=$(date +%s%3N 2>/dev/null || echo '')\n");
+    script.push_str("  case \"$start\" in ''|*[!0-9]*) start='';; esac\n");
+    script.push_str("  err=''\n");
+    script.push_str("  if command -v nc >/dev/null 2>&1; then\n");
+    script.push_str("    err=$(nc -z -w \"$NT_TIMEOUT\" \"$NT_HOST\" \"$port\" 2>&1); rc=$?\n");
+    script.push_str("    lower=$(printf '%s' \"$err\" | tr '[:upper:]' '[:lower:]')\n");
+    script.push_str("    case \"$lower\" in\n");
+    script.push_str("      *invalid\\ option*|*unrecognized\\ option*|*usage:*) dev_tcp_probe;;\n");
+    script.push_str("    esac\n");
+    script.push_str("  else\n");
+    script.push_str("    dev_tcp_probe\n");
+    script.push_str("  fi\n");
+    script.push_str("  latency=''\n");
+    script.push_str("  if [ -n \"$start\" ]; then\n");
+    script.push_str("    end=$(date +%s%3N 2>/dev/null || echo '')\n");
+    script.push_str("    case \"$end\" in ''|*[!0-9]*) end='';; esac\n");
+    script.push_str("    if [ -n \"$end\" ]; then latency=$((end-start)); fi\n");
+    script.push_str("  fi\n");
+    script.push_str("  err=$(printf '%s' \"$err\" | tr '\\n\\r\\t' '   ')\n");
+    script.push_str("  case \"$rc\" in\n");
+    script.push_str("    0) status='reachable'; err='';;\n");
+    script.push_str("    124|137|143) status='blocked'; err=${err:-connect timed out};;\n");
+    script.push_str("    *) lower=$(printf '%s' \"$err\" | tr '[:upper:]' '[:lower:]')\n");
+    script.push_str("       case \"$lower\" in\n");
+    script.push_str("         *refused*|*reset*|*closed*) status='not_listening';;\n");
+    script.push_str("         *timed\\ out*|*timeout*) status='blocked';;\n");
+    script.push_str("         *name\\ or\\ service\\ not\\ known*|*nodename\\ nor\\ servname*|*no\\ such\\ host*|*lookup*|*resolve*) status='dns_error';;\n");
+    script.push_str("         *) status='error';;\n");
+    script.push_str("       esac;;\n");
+    script.push_str("  esac\n");
+    script.push_str("  printf 'NT_TCP\\t%s\\t%s\\t%s\\t%s\\n' \"$port\" \"$status\" \"${latency:-}\" \"$err\"\n");
+    script.push_str("}\n");
+    for chunk in ports.chunks(TCP_CONCURRENCY.max(1)) {
+        script.push_str("for port in");
+        for port in chunk {
+            script.push_str(&format!(" {}", port));
+        }
+        script.push_str("; do probe_one \"$port\" & done\n");
+    }
+    script.push_str("wait");
+    script
+}
+
+/// Parse markers emitted by [`build_remote_tcp_probe_script`].
+pub fn parse_remote_tcp_probe_output(raw: &str) -> Vec<TcpProbeResult> {
+    let mut results = Vec::new();
+    for line in raw.lines() {
+        let Some(fields) = line.strip_prefix("NT_TCP\t") else {
+            continue;
+        };
+        let parts: Vec<&str> = fields.splitn(4, '\t').collect();
+        if parts.len() < 3 {
+            continue;
+        }
+        let Ok(port) = parts[0].parse::<u16>() else {
+            continue;
+        };
+        let status = match parts[1] {
+            "reachable" | "blocked" | "not_listening" | "dns_error" | "error" => parts[1],
+            _ => "error",
+        };
+        let error_text = parts
+            .get(3)
+            .map(|value| truncate_chars(value, 300))
+            .filter(|value| !value.is_empty());
+        results.push(TcpProbeResult {
+            port,
+            status: status.to_string(),
+            tcp_ok: status == "reachable",
+            latency_ms: parts[2].parse::<u64>().ok(),
+            error_text,
+        });
+    }
+    results
+}
+
+/// Batch TCP connectivity test from the selected SSH server.
+pub async fn run_remote_tcp_probe(
+    client: &crate::ssh::SshClient,
     host: &str,
     ports: &[u16],
     timeout_ms: Option<u64>,
@@ -2106,11 +2180,6 @@ pub async fn probe_tcp_ports(
     if host.is_empty() {
         return Vec::new();
     }
-    let timeout = std::time::Duration::from_millis(
-        timeout_ms
-            .unwrap_or(DEFAULT_TCP_TIMEOUT_MS)
-            .min(MAX_TCP_TIMEOUT_MS),
-    );
 
     let mut unique: Vec<u16> = Vec::new();
     for port in ports.iter().take(MAX_PORTS_PER_REQUEST) {
@@ -2118,16 +2187,27 @@ pub async fn probe_tcp_ports(
             unique.push(*port);
         }
     }
-
-    let mut results: Vec<TcpProbeResult> = Vec::with_capacity(unique.len());
-    for chunk in unique.chunks(TCP_CONCURRENCY) {
-        let futs: Vec<_> = chunk
-            .iter()
-            .map(|port| probe_one_tcp_port(host, *port, timeout))
-            .collect();
-        results.extend(futures::future::join_all(futs).await);
+    if unique.is_empty() {
+        return Vec::new();
     }
-    results
+
+    let timeout = timeout_ms
+        .unwrap_or(DEFAULT_TCP_TIMEOUT_MS)
+        .min(MAX_TCP_TIMEOUT_MS);
+    let script = build_remote_tcp_probe_script(host, &unique, timeout);
+    match client.execute_command(&script).await {
+        Ok(output) => parse_remote_tcp_probe_output(&output),
+        Err(err) => unique
+            .into_iter()
+            .map(|port| TcpProbeResult {
+                port,
+                status: "error".to_string(),
+                tcp_ok: false,
+                latency_ms: None,
+                error_text: Some(truncate_chars(&err.to_string(), 300)),
+            })
+            .collect(),
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -2762,5 +2842,94 @@ mod tests {
         ] {
             assert!(!code.contains(forbidden), "found forbidden {forbidden:?}");
         }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn topology_probe_script_is_valid_posix_shell_syntax() {
+        let script = build_probe_script(&OsInfo::default());
+        let status = std::process::Command::new("/bin/sh")
+            .arg("-n")
+            .arg("-c")
+            .arg(&script)
+            .status();
+        assert!(status.unwrap().success());
+    }
+
+    #[test]
+    fn remote_tcp_script_targets_selected_host_concurrently() {
+        let script = build_remote_tcp_probe_script("10.0.0.5", &[80, 443], 1_500);
+        assert!(script.contains("NT_HOST='10.0.0.5'"));
+        assert!(script.contains("NT_TIMEOUT=2"));
+        assert!(script.contains("for port in 80 443; do probe_one \"$port\" & done"));
+        assert!(script.contains("nc -z -w \"$NT_TIMEOUT\""));
+        assert!(script.contains("bash -c 'exec 3<>/dev/tcp/$1/$2'"));
+        assert!(script.contains("dev_tcp_probe"));
+        assert!(script.contains("sleep \"$NT_TIMEOUT\"; kill -TERM \"$child\""));
+        assert!(
+            script.contains("*invalid\\ option*|*unrecognized\\ option*|*usage:*) dev_tcp_probe")
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn remote_tcp_script_is_valid_posix_shell_syntax() {
+        let script = build_remote_tcp_probe_script("10.0.0.5", &[80, 443], 1_500);
+        let status = std::process::Command::new("/bin/sh")
+            .arg("-n")
+            .arg("-c")
+            .arg(&script)
+            .status();
+        assert!(status.unwrap().success());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn remote_tcp_script_falls_back_without_nc_or_timeout() {
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let script = build_remote_tcp_probe_script("127.0.0.1", &[port], 1_000)
+            .replace("command -v nc >/dev/null", "false >/dev/null")
+            .replace("command -v timeout >/dev/null", "false >/dev/null");
+        let output = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(&script)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+
+        let results = parse_remote_tcp_probe_output(&String::from_utf8_lossy(&output.stdout));
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].port, port);
+        assert_eq!(results[0].status, "reachable");
+        assert!(results[0].tcp_ok);
+    }
+
+    #[test]
+    fn parses_remote_tcp_results_and_classifies_errors() {
+        let results = parse_remote_tcp_probe_output(
+            "warning: unrelated\nNT_TCP\t80\treachable\t3\t\nNT_TCP\t443\tblocked\t\tconnect timed out\nNT_TCP\t8443\tbogus\t7\toops\n",
+        );
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0].port, 80);
+        assert!(results[0].tcp_ok);
+        assert_eq!(results[0].latency_ms, Some(3));
+        assert_eq!(results[1].status, "blocked");
+        assert_eq!(results[1].error_text.as_deref(), Some("connect timed out"));
+        assert_eq!(results[2].status, "error");
+        assert!(!results[2].tcp_ok);
+    }
+
+    #[test]
+    fn parses_iptables_save_tables() {
+        let raw = "##RULE_FMT:iptables##\n*nat\n:PREROUTING ACCEPT [0:0]\n-A PREROUTING -p tcp --dport 8080 -j DNAT --to-destination 10.0.0.5:80\nCOMMIT\n*filter\n-A INPUT -p tcp --dport 22 -j ACCEPT\nCOMMIT";
+        let (rules, _) = parse_firewall_rules(raw);
+        assert_eq!(rules.len(), 2);
+        assert_eq!(rules[0].table_name, "nat");
+        assert_eq!(rules[0].chain, "PREROUTING");
+        assert_eq!(rules[0].dst_port, "8080");
+        assert_eq!(rules[1].table_name, "filter");
     }
 }

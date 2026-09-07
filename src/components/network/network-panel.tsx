@@ -231,7 +231,7 @@ export function NetworkPanel({
     if (tcpRunning || ports.length === 0 || !nodeId) return;
     setTcpRunning(true);
     try {
-      const raw = await probeTcpPorts(host, ports, timeoutMs);
+      const raw = await probeTcpPorts(connectionId, host, ports, timeoutMs);
 
       // Cross-reference the client-side TCP verdict with "does the server
       // report this port as listening" (design doc §5). `tcpCandidates` only
@@ -574,7 +574,7 @@ function TcpProbeDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="flex max-h-[85vh] max-w-md flex-col gap-3">
+      <DialogContent className="!inset-0 !m-auto !h-fit !translate-x-0 !translate-y-0 flex max-h-[85vh] !w-[calc(100vw-2rem)] !max-w-none flex-col gap-3 overflow-hidden sm:!max-w-lg">
         <DialogHeader>
           <DialogTitle className="text-sm">{t('network.tcp.title')}</DialogTitle>
           <DialogDescription className="text-xs">

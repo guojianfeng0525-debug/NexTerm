@@ -236,7 +236,7 @@ export function PortLinkEditorDialog({
     <>
       <Dialog open={open} onOpenChange={onOpenChange}>
         <DialogContent
-          className="!inset-0 !m-auto flex max-h-[85vh] w-[92vw] max-w-xl flex-col gap-0 p-0"
+          className="!inset-0 !m-auto !h-[700px] !translate-x-0 !translate-y-0 flex max-h-[85vh] !w-[calc(100vw-2rem)] !max-w-none flex-col gap-0 overflow-hidden p-0 sm:!max-w-xl"
           data-testid="port-link-editor"
         >
           <DialogHeader className="shrink-0 border-b border-border px-6 py-4">
@@ -450,7 +450,7 @@ export function PortLinkEditorDialog({
       </Dialog>
 
       <Dialog open={confirmingDelete} onOpenChange={setConfirmingDelete}>
-        <DialogContent className="!inset-0 !m-auto w-[92vw] max-w-sm">
+        <DialogContent className="!inset-0 !m-auto !h-fit !translate-x-0 !translate-y-0 max-h-[85vh] !w-[calc(100vw-2rem)] !max-w-none overflow-y-auto sm:!max-w-sm">
           <DialogHeader>
             <DialogTitle>{t('network.portLinks.deleteTitle')}</DialogTitle>
             <DialogDescription>{t('network.portLinks.deleteDesc')}</DialogDescription>

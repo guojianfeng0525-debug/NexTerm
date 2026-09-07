@@ -721,7 +721,7 @@ describe('inferLinksFromPeers', () => {
     expect(link.firstSeenAt).toBe(2_000);
   });
 
-  it('discards unknown peers — no node and no link is created', () => {
+  it('keeps unknown peers as stable observed endpoints without probing them', () => {
     const out = inferLinksFromPeers({
       nodeId: 'node-a',
       peers: [
@@ -735,8 +735,11 @@ describe('inferLinksFromPeers', () => {
       now: 2_000,
     });
 
-    expect(out.links).toHaveLength(0);
-    expect(out.added).toBe(0);
+    expect(out.added).toBe(2);
+    expect(out.links.map((link) => link.targetNodeId)).toEqual([
+      'observed:203.0.113.9',
+      'observed:10.0.0.99',
+    ]);
     expect(out.confirmed).toBe(0);
   });
 
@@ -905,9 +908,9 @@ describe('port-level topology links', () => {
 
     expect(result.added).toBe(1);
     expect(result.links[0]).toMatchObject({
-      sourceNodeId: null,
+      sourceNodeId: 'observed:203.0.113.9',
       sourcePortId: null,
-      sourceIp: '203.0.113.9',
+      sourceIp: null,
       sourcePort: 51000,
       targetNodeId: 'node-b',
       targetPortId: 'port-b8080',

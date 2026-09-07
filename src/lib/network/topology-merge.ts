@@ -16,9 +16,9 @@
  * ── Other invariants ───────────────────────────────────────────────────────
  * · Disappeared rows are never deleted — they are marked `missingSince` so the
  *   UI can grey them out ("not seen in this probe") without losing annotations.
- * · Peer addresses are only ever correlated against ALREADY-PROBED nodes.
- *   Unknown IPs are discarded; this module never creates nodes for them and
- *   never connects anywhere (see the "no LAN scanning" rule in the design doc).
+ * · Peer addresses are only ever correlated against known/observed nodes.
+ *   Unknown IPs receive a display-only observed node, never port data, and are
+ *   never connected to (see the "no LAN scanning" rule in the design doc).
  * · No credential is ever read, produced or persisted here.
  *
  * Every exported function is pure — same input, same output, no I/O.
@@ -208,12 +208,16 @@ export function mergeDetected<T extends { id: string }>(params: {
 /* ══ classification / inference (pure helpers) ═════════════════════════════ */
 
 /** Strip a CIDR suffix and any bracket wrapping: `10.0.0.5/24` → `10.0.0.5`. */
-function normalizeAddr(value: string): string {
+export function normalizeTopologyAddress(value: string): string {
   let out = value.trim();
   if (out.startsWith('[') && out.endsWith(']')) out = out.slice(1, -1);
   const slash = out.indexOf('/');
   if (slash !== -1) out = out.slice(0, slash);
   return out;
+}
+
+function normalizeAddr(value: string): string {
+  return normalizeTopologyAddress(value);
 }
 
 /**
@@ -428,7 +432,9 @@ export function mergeNode(
     roleHint,
   };
 
-  const next: NetworkNode = { ...base };
+  // A display-only observed node is promoted in place when the user explicitly
+  // probes the matching saved connection. Keeping its id preserves every edge.
+  const next: NetworkNode = { ...base, connectionId };
   // Whitelist copy — `displayName` / `nodeType` / `environment` / `notes` /
   // `hidden` / `posX` / `posY` are manual and are deliberately absent from
   // NODE_AUTO_KEYS, so they survive here untouched.
@@ -739,6 +745,63 @@ export function mergePorts(
 
 /* ══ topology links ════════════════════════════════════════════════════════ */
 
+/**
+ * Stable identity for a server seen as a socket peer but not explicitly probed.
+ * The node is display-only: NexTerm never connects to it and never invents ports.
+ */
+export function observedNodeId(ip: string): string {
+  return `observed:${normalizeAddr(ip ?? '')}`;
+}
+
+export function isObservedNode(node: Pick<NetworkNode, 'connectionId'>): boolean {
+  return node.connectionId.startsWith('observed:');
+}
+
+export function makeObservedNode(ip: string, now: number): NetworkNode {
+  const normalized = normalizeAddr(ip ?? '');
+  return {
+    id: observedNodeId(normalized),
+    connectionId: observedNodeId(normalized),
+    hostname: normalized,
+    osName: '',
+    primaryIp: normalized,
+    roleHint: 'general',
+    displayName: '',
+    nodeType: 'observed-server',
+    environment: '',
+    notes: '',
+    hidden: false,
+    posX: null,
+    posY: null,
+    lastProbeAt: null,
+    lastProbeStatus: 'never',
+    lastProbeError: null,
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+/**
+ * Materialize display-only nodes for addresses already present in the current
+ * probe's peer rows. This is not discovery and performs no I/O.
+ */
+export function inferObservedNodes(params: {
+  nodeId: string;
+  peers: DetectedPeer[];
+  knownNodes: NetworkNode[];
+  now: number;
+}): NetworkNode[] {
+  const { nodeId, peers, knownNodes, now } = params;
+  const byId = new Map((knownNodes ?? []).map((node) => [node.id, node]));
+  for (const peer of peers ?? []) {
+    const ip = normalizeAddr(peer?.remoteAddr ?? '');
+    if (!ip || ip === '0.0.0.0' || ip === '::') continue;
+    const id = observedNodeId(ip);
+    if (!byId.has(id)) byId.set(id, makeObservedNode(ip, now));
+  }
+  return [...byId.values()].filter((node) => node.id !== nodeId);
+}
+
 export function linkNaturalKey(item: {
   sourceNodeId: string;
   targetNodeId: string;
@@ -767,6 +830,12 @@ export function buildInterfaceIpIndex(
       if (ip && !index.has(ip)) index.set(ip, iface.nodeId);
     }
   }
+  // Interface rows are authoritative when a node has multiple addresses; its
+  // primary IP is still enough to resolve a display-only observed node.
+  for (const node of nodes ?? []) {
+    const ip = normalizeAddr(node.primaryIp ?? '');
+    if (ip && !index.has(ip)) index.set(ip, node.id);
+  }
   return index;
 }
 
@@ -774,10 +843,10 @@ export function buildInterfaceIpIndex(
  * Turn observed ESTABLISHED peer addresses into topology links.
  *
  * ── No LAN scanning ────────────────────────────────────────────────────────
- * A peer IP is used ONLY to look it up in `interfacesIndex`. When it does not
- * belong to an already-probed node it is DISCARDED: no node is created for it,
- * nothing is recorded, and no connection is ever opened towards it. This is
- * what keeps the feature inside its "current server only" boundary.
+ * A peer IP is used ONLY to look it up in `interfacesIndex` or, when unknown,
+ * to create a display-only observed node. No peer is probed and no ports are
+ * invented for it. This keeps the feature inside the current-server boundary
+ * while still drawing the observed server-to-server relationship.
  *
  * ── No clobbering ─────────────────────────────────────────────────────────
  * An already-known link is only re-confirmed (`lastConfirmedAt` + `status`).
@@ -795,8 +864,8 @@ export function inferLinksFromPeers(params: {
 }): { links: NetworkLink[]; added: number; confirmed: number } {
   const { nodeId, peers, interfacesIndex, existingLinks, now } = params;
   // `knownNodes` is part of the contract but is already folded into
-  // `interfacesIndex` by `buildInterfaceIpIndex`; nothing here may reach for a
-  // node that is not in the index (see the no-LAN-scanning rule above).
+  // `interfacesIndex`/observed-node ids by the caller; nothing here opens a
+  // connection to a peer.
 
   const existing = existingLinks ?? [];
   const byKey = new Map<string, NetworkLink>();
@@ -811,9 +880,10 @@ export function inferLinksFromPeers(params: {
     if (!remoteAddr) continue;
 
     const ip = normalizeAddr(remoteAddr);
-    const targetNodeId = interfacesIndex.get(ip);
-    // Unknown (or self) peer → discard. Never invent a node, never connect.
-    if (!targetNodeId || targetNodeId === nodeId) continue;
+    const targetNodeId = interfacesIndex.get(ip) ?? observedNodeId(ip);
+    // Self-links are not topology edges. Unknown peers become observed nodes;
+    // they are never probed and never receive synthetic port data.
+    if (targetNodeId === nodeId) continue;
 
     const protocol = peer.protocol === 'udp' ? 'udp' : 'tcp';
     const port = peer.remotePort ?? null;
@@ -901,10 +971,10 @@ export function portLinkNaturalKey(item: {
  * socket shape instead of assuming the probed server is always the client.
  *
  * ── Unknown peers are KEPT, never probed ───────────────────────────────────
- * Unlike the server-level inference, an unknown peer (not an already-probed
- * node) is NOT discarded here: it is recorded as a bare `IP:port` target with
- * `targetNodeId === null`. The link is never auto-probed; it is resolved to a
- * node only once the user manually probes that server (see resolvePortLinkTargets).
+ * An unknown peer is represented by a display-only observed server node. It
+ * receives no port rows until the user explicitly probes that server; that
+ * probe promotes the observed node in place so existing edges and annotations
+ * survive.
  *
  * ── No clobbering ──────────────────────────────────────────────────────────
  * An already-known link is only re-confirmed. Manual fields, `source` and
@@ -963,9 +1033,11 @@ export function inferPortLinksFromPeers(params: {
     if (!ip) continue;
     const targetPort = peer.remotePort ?? null;
     if (targetPort == null) continue;
-    if (interfacesIndex.get(ip) === nodeId) continue; // loopback to own interface
+    if (interfacesIndex.get(ip) === nodeId || ip === '127.0.0.1' || ip === '::1') {
+      continue; // loopback / own interface
+    }
 
-    const peerNodeId = interfacesIndex.get(ip) ?? null;
+    const peerNodeId = interfacesIndex.get(ip) ?? observedNodeId(ip);
     const localListener = portByKey.get(portKey(protocol, localPort));
     const normalizedProcess = (peer.processName ?? '').trim().toLowerCase();
     const processListener = peer.processPid != null
@@ -979,7 +1051,7 @@ export function inferPortLinksFromPeers(params: {
         id: '',
         sourceNodeId: peerNodeId,
         sourcePortId: portIdForNode(peerNodeId, protocol, targetPort),
-        sourceIp: peerNodeId ? null : ip,
+        sourceIp: null,
         sourceProtocol: protocol,
         sourcePort: targetPort,
         targetNodeId: nodeId,
@@ -1027,7 +1099,7 @@ export function inferPortLinksFromPeers(params: {
       targetPortId: portIdForNode(peerNodeId, protocol, targetPort),
       targetProtocol: protocol,
       targetPort,
-      targetIp: peerNodeId ? null : ip,
+      targetIp: null,
       status: 'active',
       source: 'auto',
       evidence: `ss ESTABLISHED local:${localPort} -> ${ip}:${targetPort}`,
