@@ -1111,6 +1111,7 @@ export function TopologyGraph({
                     <ContextMenuSeparator />
                     <ContextMenuItem
                       variant="destructive"
+                      data-testid="topology-node-delete"
                       onSelect={() => onRequestDeleteNode(node.id)}
                     >
                       <Trash2 className="mr-2 h-3.5 w-3.5" />

@@ -86,6 +86,7 @@ import {
   saveNodeInterfaces,
   saveNodePorts,
   saveNodeRoutes,
+  syncNodeGroupPaths,
   subscribeTopology,
   upsertLink,
   upsertPortLink,
@@ -286,6 +287,47 @@ describe('node cache', () => {
     expect(listLinks().map((l) => l.id)).toEqual([]);
     expect(getNodePorts('n3').map((p) => p.id)).toEqual(['p3']);
     expect(store.tables.get('net_nodes')?.has('n2')).toBe(false);
+  });
+});
+
+describe('node group sync', () => {
+  it('repairs saved nodes and legacy observed peers from current folders', async () => {
+    upsertNode(makeNode({
+      id: 'saved',
+      connectionId: 'conn-1',
+      groupPath: 'All Connections',
+    }));
+    upsertNode(makeNode({
+      id: 'observed:10.10.1.30',
+      connectionId: 'observed:10.10.1.30',
+      groupPath: 'All Connections',
+    }));
+    upsertLink(makeLink({
+      id: 'link-observed',
+      sourceNodeId: 'saved',
+      targetNodeId: 'observed:10.10.1.30',
+    }));
+    await flush();
+
+    expect(syncNodeGroupPaths(new Map([
+      ['conn-1', 'All Connections/Production'],
+    ]))).toBe(2);
+    await flush();
+
+    expect(getNode('saved')?.groupPath).toBe('All Connections/Production');
+    expect(getNode('observed:10.10.1.30')?.groupPath).toBe('All Connections/Production');
+    expect(store.tables.get('net_nodes')?.get('saved')?.group_path).toBe('All Connections/Production');
+  });
+
+  it('keeps observed nodes unchanged when they are not linked to a saved node', () => {
+    upsertNode(makeNode({
+      id: 'observed:10.10.1.40',
+      connectionId: 'observed:10.10.1.40',
+      groupPath: 'All Connections',
+    }));
+
+    expect(syncNodeGroupPaths(new Map())).toBe(0);
+    expect(getNode('observed:10.10.1.40')?.groupPath).toBe('All Connections');
   });
 });
 

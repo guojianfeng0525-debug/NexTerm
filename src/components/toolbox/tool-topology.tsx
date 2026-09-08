@@ -97,17 +97,24 @@ export function ToolTopology() {
     setLinks(listLinks());
   }, []);
 
-  const scopeOf = useCallback((node: NetworkNode): string =>
-    node.groupPath?.trim()
-    || ConnectionStorageManager.getConnection(node.connectionId)?.folder
-    || SERVER_GROUP_ROOT, []);
+  const scopeOf = useCallback((node: NetworkNode): string => {
+    if (node.connectionId.startsWith('observed:')) {
+      return node.groupPath?.trim() || SERVER_GROUP_ROOT;
+    }
+    return ConnectionStorageManager.getConnection(node.connectionId)?.folder
+      || node.groupPath?.trim()
+      || SERVER_GROUP_ROOT;
+  }, []);
 
   const groups = useMemo(() => {
-    const saved = ConnectionStorageManager.getFolders().map(folder => folder.path);
     const observed = nodes.map(scopeOf);
-    return [...new Set([SERVER_GROUP_ROOT, ...saved, ...observed])]
+    return [...new Set([SERVER_GROUP_ROOT, ...observed])]
       .sort((a, b) => a === SERVER_GROUP_ROOT ? -1 : b === SERVER_GROUP_ROOT ? 1 : a.localeCompare(b));
   }, [nodes, scopeOf]);
+
+  useEffect(() => {
+    if (!groups.includes(isolationGroup)) setIsolationGroup(SERVER_GROUP_ROOT);
+  }, [groups, isolationGroup]);
 
   // The per-server panel writes to the same tables — keep the graph live.
   useEffect(() => {
@@ -367,12 +374,18 @@ export function ToolTopology() {
               aria-label={t('topology.isolationGroup')}
               data-testid="topology-isolation-group"
             >
-              <SelectValue />
+              <SelectValue>
+                {isolationGroup === SERVER_GROUP_ROOT
+                  ? t('connectionDialog.allConnections')
+                  : isolationGroup.split('/').pop() || isolationGroup}
+              </SelectValue>
             </SelectTrigger>
             <SelectContent>
               {groups.map(group => (
-                <SelectItem key={group} value={group} className="text-xs">
-                  {group === SERVER_GROUP_ROOT ? t('connectionDialog.allConnections') : group}
+                <SelectItem key={group} value={group} className="text-xs" title={group}>
+                  {group === SERVER_GROUP_ROOT
+                    ? t('connectionDialog.allConnections')
+                    : group.split('/').pop() || group}
                 </SelectItem>
               ))}
             </SelectContent>
@@ -582,7 +595,7 @@ export function ToolTopology() {
         open={!!deleteNodeTarget}
         onOpenChange={(open) => !open && setDeleteNodeTarget(null)}
       >
-        <AlertDialogContent className="!inset-0 !m-auto !h-fit !translate-x-0 !translate-y-0 max-h-[85vh] !w-[calc(100vw-2rem)] !max-w-none overflow-y-auto sm:!max-w-sm">
+        <AlertDialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-sm">
           <AlertDialogHeader>
             <AlertDialogTitle>{t('topology.deleteNodeTitle')}</AlertDialogTitle>
             <AlertDialogDescription>
@@ -595,6 +608,7 @@ export function ToolTopology() {
             <AlertDialogCancel>{t('common.cancel')}</AlertDialogCancel>
             <AlertDialogAction
               className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              data-testid="topology-delete-node-confirm"
               onClick={() => {
                 if (deleteNodeTarget) handleDeleteNode(deleteNodeTarget.id);
                 setDeleteNodeTarget(null);
@@ -610,7 +624,7 @@ export function ToolTopology() {
         open={bulkDeleteTargets.length > 0}
         onOpenChange={(open) => !open && setBulkDeleteTargets([])}
       >
-        <AlertDialogContent className="!inset-0 !m-auto !h-fit !translate-x-0 !translate-y-0 max-h-[85vh] !w-[calc(100vw-2rem)] !max-w-none overflow-y-auto sm:!max-w-sm">
+        <AlertDialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-sm">
           <AlertDialogHeader>
             <AlertDialogTitle>{t('topology.deleteSelectedTitle')}</AlertDialogTitle>
             <AlertDialogDescription>
@@ -637,7 +651,7 @@ export function ToolTopology() {
         open={!!deleteLinkTarget}
         onOpenChange={(open) => !open && setDeleteLinkTarget(null)}
       >
-        <AlertDialogContent className="!inset-0 !m-auto !h-fit !translate-x-0 !translate-y-0 max-h-[85vh] !w-[calc(100vw-2rem)] !max-w-none overflow-y-auto sm:!max-w-sm">
+        <AlertDialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-sm">
           <AlertDialogHeader>
             <AlertDialogTitle>{t('topology.linkDialog.deleteTitle')}</AlertDialogTitle>
             <AlertDialogDescription>{t('topology.linkDialog.deleteDesc')}</AlertDialogDescription>

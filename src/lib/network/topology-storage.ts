@@ -715,6 +715,78 @@ export function removeNode(id: string): void {
   removeNodes([id]);
 }
 
+/**
+ * Align saved-connection nodes with the connection's current folder.
+ *
+ * `group_path` was added after the topology shipped. Rows created before that
+ * migration legitimately contain the default root value, so the UI cannot tell
+ * "user chose root" from "row was written before folders existed". The storage
+ * initializer knows the hydrated connection cache and performs this one-time
+ * repair on every launch.
+ */
+export function syncNodeGroupPaths(folderByConnectionId: ReadonlyMap<string, string>): number {
+  const root = 'All Connections';
+  const changed: NetworkNode[] = [];
+  const assignedObserved = new Set<string>();
+  const groupsById = new Map<string, string>();
+  const nextNodes = listNodes().map((node): NetworkNode => {
+    const isObserved = node.connectionId.startsWith('observed:');
+    const folder = folderByConnectionId.get(node.connectionId);
+    const group = isObserved || folder === undefined
+      ? (node.groupPath || root)
+      : (folder || root);
+    if (!isObserved) {
+      groupsById.set(node.id, group);
+    }
+    if (group === node.groupPath) return node;
+    const next = { ...node, groupPath: group, updatedAt: Date.now() };
+    changed.push(next);
+    return next;
+  });
+
+  // Legacy observed peers were also written with the default root group. Move
+  // each one to the group of the saved server that observed it. A peer linked
+  // from multiple isolated groups has ambiguous ownership; keep its first
+  // assignment, and cross-group links simply fall out of both group views.
+  for (const link of listLinks()) {
+    const sourceGroup = groupsById.get(link.sourceNodeId);
+    const targetGroup = groupsById.get(link.targetNodeId);
+    const savedGroup = sourceGroup ?? targetGroup;
+    if (!savedGroup || (sourceGroup !== undefined && targetGroup !== undefined && sourceGroup === targetGroup)) continue;
+    const observedId = nodeIsObservedId(link.sourceNodeId)
+      ? link.sourceNodeId
+      : nodeIsObservedId(link.targetNodeId)
+        ? link.targetNodeId
+        : null;
+    if (observedId && !assignedObserved.has(observedId)) {
+      groupsById.set(observedId, savedGroup);
+      assignedObserved.add(observedId);
+    }
+  }
+
+  const observedChanged: NetworkNode[] = [];
+  for (let index = 0; index < nextNodes.length; index += 1) {
+    const node = nextNodes[index];
+    if (!nodeIsObservedId(node.id)) continue;
+    const group = assignedObserved.has(node.id) ? groupsById.get(node.id) : undefined;
+    if (!group || group === node.groupPath) continue;
+    const next = { ...node, groupPath: group, updatedAt: Date.now() };
+    nextNodes[index] = next;
+    observedChanged.push(next);
+  }
+
+  if (changed.length === 0 && observedChanged.length === 0) return 0;
+  cache.nodes = nextNodes;
+  for (const node of [...changed, ...observedChanged]) commitUpsert('nodes', toRow('nodes', node));
+  notifyTopologyChanged();
+  return changed.length + observedChanged.length;
+}
+
+function nodeIsObservedId(id: string): boolean {
+  return id.startsWith('observed:');
+}
+
+
 /* ── detail reads ────────────────────────────────────────────────────────── */
 
 export function listInterfaces(): NetworkInterface[] {

@@ -50,6 +50,50 @@ describe('Network port topology drill-down', () => {
     await waitForVisible('[data-link-id="e2e-link-observed"]');
     await browser.saveScreenshot('./test-results/wdio/network-port-topology-global.png');
 
+    // Regression guard for context-menu -> confirmation handoff: the modal must
+    // be centered in the app viewport, not positioned like the context menu.
+    const menuNode = await waitForVisible('[data-node-id="e2e-node-a"]');
+    await browser.execute((node: SVGGElement) => {
+      const rect = node.getBoundingClientRect();
+      // Same dispatch sequence as v216-sftp-context-menu.e2e.ts: the fixed
+      // ContextMenuTrigger wrapper synthesizes a contextmenu from mousedown;
+      // the explicit contextmenu afterwards is idempotent on the open menu.
+      const init: MouseEventInit = {
+        bubbles: true,
+        cancelable: true,
+        view: window,
+        button: 2,
+        buttons: 2,
+        clientX: rect.left + rect.width / 2,
+        clientY: rect.top + rect.height / 2,
+      };
+      node.dispatchEvent(new MouseEvent('mousedown', init));
+      node.dispatchEvent(new MouseEvent('mouseup', { ...init, buttons: 0 }));
+      node.dispatchEvent(new MouseEvent('contextmenu', init));
+    }, menuNode);
+    await (await waitForVisible('[data-testid="topology-node-delete"]')).click();
+    const deleteConfirm = await waitForVisible('[data-testid="topology-delete-node-confirm"]');
+    await browser.saveScreenshot('./test-results/wdio/topology-context-delete-dialog.png');
+    const contextDialogMetrics = await browser.execute((button: HTMLElement) => {
+      const dialog = button.closest('[data-slot="alert-dialog-content"]');
+      if (!dialog) throw new Error('delete dialog missing');
+      const rect = dialog.getBoundingClientRect();
+      return {
+        top: rect.top,
+        bottom: rect.bottom,
+        left: rect.left,
+        right: rect.right,
+        viewportWidth: window.innerWidth,
+        viewportHeight: window.innerHeight,
+      };
+    }, deleteConfirm);
+    expect(Math.abs((contextDialogMetrics.top + contextDialogMetrics.bottom) / 2 - contextDialogMetrics.viewportHeight / 2))
+      .toBeLessThanOrEqual(4);
+    expect(Math.abs((contextDialogMetrics.left + contextDialogMetrics.right) / 2 - contextDialogMetrics.viewportWidth / 2))
+      .toBeLessThanOrEqual(4);
+    await (await $('button[data-slot="alert-dialog-cancel"]')).click();
+    await waitForVisible('[data-node-id="e2e-node-a"]');
+
     const serverNode = await waitForVisible('[data-node-id="e2e-node-a"]');
     await browser.execute(
       (node: SVGGElement) => {
