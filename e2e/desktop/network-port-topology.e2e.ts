@@ -146,6 +146,68 @@ describe('Network port topology drill-down', () => {
     });
     expect(manualRows).toHaveLength(0);
 
+    // Return to the server graph and exercise Ctrl rubber-band selection plus
+    // the Delete shortcut. This intentionally runs last because it removes the
+    // seeded graph rows used by the assertions above.
+    await (await $('[data-testid="port-topology-back"]')).click();
+    await waitForVisible('[data-node-id="e2e-node-a"]');
+    const marquee = await browser.execute(async () => {
+      const nodes = [...document.querySelectorAll<SVGGElement>('[data-node-id]')];
+      const rects = nodes.map((node) => node.getBoundingClientRect());
+      const minX = Math.min(...rects.map((rect) => rect.left));
+      const minY = Math.min(...rects.map((rect) => rect.top));
+      const maxX = Math.max(...rects.map((rect) => rect.right));
+      const maxY = Math.max(...rects.map((rect) => rect.bottom));
+      const svg = document.querySelector<SVGSVGElement>('svg[role="application"]');
+      if (!svg) throw new Error('topology svg missing');
+      svg.focus();
+      const start = { x: minX - 16, y: minY - 16 };
+      const end = { x: maxX + 16, y: maxY + 16 };
+      const init = {
+        bubbles: true,
+        cancelable: true,
+        pointerId: 1,
+        pointerType: 'mouse',
+        isPrimary: true,
+        ctrlKey: true,
+      };
+      svg.dispatchEvent(new PointerEvent('pointerdown', {
+        ...init,
+        button: 0,
+        buttons: 1,
+        clientX: start.x,
+        clientY: start.y,
+      }));
+      svg.dispatchEvent(new PointerEvent('pointermove', {
+        ...init,
+        buttons: 1,
+        clientX: end.x,
+        clientY: end.y,
+      }));
+      svg.dispatchEvent(new PointerEvent('pointerup', {
+        ...init,
+        button: 0,
+        buttons: 0,
+        clientX: end.x,
+        clientY: end.y,
+      }));
+      // Let React flush the batched selection state before WebDriver reads it.
+      await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      return {
+        selected: document.querySelectorAll('[data-node-id][data-selected="true"]').length,
+      };
+    });
+    const deleteButton = await waitForVisible('[data-testid="topology-delete-selected"]');
+    await expectElementText(deleteButton, '3');
+    await browser.saveScreenshot('./test-results/wdio/topology-marquee.png');
+    await browser.keys('Delete');
+    const confirm = await waitForVisible('[data-testid="topology-delete-selected-confirm"]');
+    await confirm.click();
+    await $('[data-node-id="e2e-node-a"]').waitForExist({ reverse: true });
+    await $('[data-node-id="e2e-node-b"]').waitForExist({ reverse: true });
+    await $('[data-node-id="observed:10.10.1.30"]').waitForExist({ reverse: true });
+    expect(marquee.selected).toBe(3);
+
     const commands = await browser.execute(
       () => (window as unknown as { __e2eNetworkCommands?: string[] }).__e2eNetworkCommands ?? [],
     );

@@ -13,6 +13,7 @@
 4. **零安装**：Linux socket 数据直接读取 `/proc`；接口、路由与防火墙只使用系统自带命令。缺失时按段降级，不安装工具。
 5. **不保存凭据**：`net_*` 表不得出现 password / privateKey / passphrase / token。节点只按 `connectionId` 引用已保存连接。
 6. **自动 / 人工字段分离**：重新采集只允许覆盖白名单中的自动字段，人工备注、标签、布局和隐藏状态必须保留。
+7. **负载上限**：一次探测只占一个 SSH exec；Rust 外层 25 秒超时，进程级全局信号量保证同时最多探测一台服务器。
 
 ---
 
@@ -55,6 +56,7 @@ A 不访问 B，B 不访问 A，NexTerm 也不访问 A/B 的业务端口。通�
 - `TIME_WAIT` / closing 状态生成 observed 关系，不冒充当前活跃连接。
 - UDP 只有远端地址和端口非零才生成关系；未连接 UDP 只作为真实本地监听端口。
 - `/proc/<pid>/fd` 与 `socket:[inode]` 只做尽力进程关联；失败不影响连线。
+- 进程扫描先从 kernel socket 表收集 inode，再只输出命中这些 inode 的 `/proc/<pid>/fd` 链接；忙碌主机不会物化全量 fd 映射。
 
 进程信息缺失时：
 

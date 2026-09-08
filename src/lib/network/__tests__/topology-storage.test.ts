@@ -78,6 +78,7 @@ import {
   patchRouteManual,
   removeLink,
   removeNode,
+  removeNodes,
   resetTopologyStore,
   saveNodeFirewallRules,
   savePortLinks,
@@ -265,6 +266,26 @@ describe('node cache', () => {
     expect(store.tables.get('net_ports')?.has('p1')).toBe(false);
     expect(store.tables.get('net_nodes')?.has('n1')).toBe(false);
     expect(store.tables.get('net_links')?.has('l1')).toBe(false);
+  });
+
+  it('deletes a selected node batch in one storage notification', async () => {
+    upsertNode(makeNode({ id: 'n1' }));
+    upsertNode(makeNode({ id: 'n2', connectionId: 'conn-2' }));
+    upsertNode(makeNode({ id: 'n3', connectionId: 'conn-3' }));
+    saveNodePorts('n1', [makePort({ id: 'p1', nodeId: 'n1' })]);
+    saveNodePorts('n2', [makePort({ id: 'p2', nodeId: 'n2' })]);
+    saveNodePorts('n3', [makePort({ id: 'p3', nodeId: 'n3' })]);
+    upsertLink(makeLink({ id: 'l12', sourceNodeId: 'n1', targetNodeId: 'n2' }));
+    upsertLink(makeLink({ id: 'l3x', sourceNodeId: 'n3', targetNodeId: 'n1' }));
+    await flush();
+
+    removeNodes(['n1', 'n2']);
+    await flush();
+
+    expect(listNodes().map((n) => n.id)).toEqual(['n3']);
+    expect(listLinks().map((l) => l.id)).toEqual([]);
+    expect(getNodePorts('n3').map((p) => p.id)).toEqual(['p3']);
+    expect(store.tables.get('net_nodes')?.has('n2')).toBe(false);
   });
 });
 

@@ -2851,7 +2851,8 @@
   "topology": {
     "title": "网络拓扑",
     "isolationGroup": "隔离分组",
-    "canvasHint": "拖拽空白处平移，按住 Ctrl 滚动滚轮或使用 +/- 按钮缩放，拖拽节点可调整位置。",
+    "canvas": "网络拓扑画布",
+    "canvasHint": "拖拽空白处平移；按住 Ctrl 拖拽可框选多个节点；按 Delete 删除选中节点。",
     "search": "搜索",
     "searchPlaceholder": "按名称、主机名或 IP 搜索节点",
     "showHidden": "显示隐藏节点",
@@ -2985,6 +2986,12 @@
     "stats": "{{nodes}} 个节点 · {{links}} 条关系",
     "deleteNodeTitle": "删除节点",
     "deleteNodeDesc": "将同时删除该节点的网络接口、路由、防火墙与端口数据，以及与之相关的连接关系，此操作不可撤销。",
+    "deleteSelected": "删除选中",
+    "deleteSelectedCount_one": "删除 {{count}} 个选中项",
+    "deleteSelectedCount_other": "删除 {{count}} 个选中项",
+    "deleteSelectedTitle": "删除选中节点",
+    "deleteSelectedDesc_one": "将删除 {{count}} 个节点及其网络接口、路由、防火墙与端口数据，以及相关连接关系，此操作不可撤销。",
+    "deleteSelectedDesc_other": "将删除 {{count}} 个节点及其网络接口、路由、防火墙与端口数据，以及相关连接关系，此操作不可撤销。",
     "details": {
       "title": "详情",
       "noSelection": "未选中任何对象",
@@ -2997,6 +3004,8 @@
     "toast": {
       "nodeSaved": "节点已保存",
       "nodeDeleted": "节点已删除",
+      "nodesDeleted_one": "已删除 {{count}} 个节点",
+      "nodesDeleted_other": "已删除 {{count}} 个节点",
       "nodeHidden": "节点已隐藏",
       "nodeShown": "节点已取消隐藏",
       "linkSaved": "拓扑关系已保存",

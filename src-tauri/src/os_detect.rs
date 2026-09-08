@@ -613,13 +613,20 @@ done
     pub fn proc_sockets_probe_cmd(&self) -> &'static str {
         r#"
 echo "NT_PROC_BEGIN"
+socket_inodes="|"
 for spec in "tcp /proc/net/tcp" "tcp6 /proc/net/tcp6" "udp /proc/net/udp" "udp6 /proc/net/udp6"; do
     set -- $spec
     proto=$1
     path=$2
     if [ -r "$path" ]; then
         printf 'NT_PROC_FILE\t%s\t%s\n' "$proto" "$path"
-        cat "$path" 2>/dev/null
+        while read -r _f1 _f2 _f3 _f4 _f5 _f6 _f7 _f8 inode _rest; do
+            printf '%s\n' "$_f1 $_f2 $_f3 $_f4 $_f5 $_f6 $_f7 $_f8 $inode $_rest"
+            case "$inode" in
+                ''|*[!0-9]*) continue ;;
+            esac
+            socket_inodes="$socket_inodes$inode|"
+        done < "$path"
     fi
 done
 for proc in /proc/[0-9]*; do
@@ -636,7 +643,14 @@ for proc in /proc/[0-9]*; do
             socket:\[*\])
                 inode=${target#socket:[}
                 inode=${inode%]}
-                printf 'NT_PROC_PROCESS\t%s\t%s\t%s\n' "$inode" "$pid" "$comm"
+                # Skip every fd whose socket is not in one of the four kernel
+                # tables read above. This keeps the scan from materializing the
+                # full fd map of busy application/container hosts.
+                case "$socket_inodes" in
+                    *"|$inode|"*)
+                        printf 'NT_PROC_PROCESS\t%s\t%s\t%s\n' "$inode" "$pid" "$comm"
+                        ;;
+                esac
                 ;;
         esac
     done

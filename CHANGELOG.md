@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 新增
+
+- **拓扑批量选择与删除**：支持 `Ctrl`/`Cmd` + 鼠标拖拽框选节点，也支持 `Ctrl`/`Cmd` + 单击追加或移除选中项；工具栏显示批量删除入口，`Delete` / `Backspace` 会弹出批量确认，确认后级联删除节点接口、路由、防火墙、端口、探测记录和相关连线。
+
+### 安全
+
+- **进一步约束探测负载**：Rust 侧为网络拓扑命令加入进程级单并发信号量，避免用户快速切换服务器时多个手动探测同时在远端执行；Linux `/proc` 进程关联改为先收集 kernel socket inode，再只输出命中的 `/proc/<pid>/fd` 映射，避免在忙碌主机上物化全量 fd 映射。
+
 ### 修复
 
 - **网络拓扑只保留服务器侧信息**：回环地址（如 `127.0.0.1`、`::1`）、容器 / Docker 网桥、Kubernetes Pod / Service 地址不再作为服务器节点、端口监听地址或拓扑对端展示；服务器主 IP 优先取真实出口网卡，不再落入容器地址。

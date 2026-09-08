@@ -41,7 +41,8 @@ describe('network topology dialog layout audit', () => {
 
     // All user-visible popups currently in the topology module:
     // Node edit/delete, server-link edit/delete, port edit, port-link
-    // edit/delete, and global node/link delete confirmations.
-    expect(audited).toBe(9);
+    // edit/delete, global node/link delete confirmations, and batch-node
+    // delete confirmation.
+    expect(audited).toBe(10);
   });
 });

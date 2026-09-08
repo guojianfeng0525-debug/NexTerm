@@ -354,7 +354,15 @@ export function PortTopologyView({ nodeId, portId, host, onBack, onOpenPort }: P
     >
       <div className="shrink-0 space-y-1.5">
         <div className="flex items-center gap-1.5">
-          <Button type="button" variant="ghost" size="icon" className="h-6 w-6 shrink-0" onClick={onBack} aria-label={t('network.portTopology.back')}>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            className="h-6 w-6 shrink-0"
+            onClick={onBack}
+            aria-label={t('network.portTopology.back')}
+            data-testid="port-topology-back"
+          >
             <ArrowLeft className="h-3.5 w-3.5" />
           </Button>
           <div className="min-w-0 flex-1">
@@ -439,6 +447,7 @@ export function PortTopologyView({ nodeId, portId, host, onBack, onOpenPort }: P
             selectedLinkId={selectedLinkId}
             layoutSeed={layoutVersion}
             onSelectNode={setSelectedNodeId}
+            onSelectedNodeIdsChange={(ids) => setSelectedNodeId(ids.at(-1) ?? centralNodeId)}
             onSelectLink={setSelectedLinkId}
             onEditNode={(id) => {
               if (id === centralNodeId) {
@@ -461,6 +470,7 @@ export function PortTopologyView({ nodeId, portId, host, onBack, onOpenPort }: P
             }}
             onHideNode={() => undefined}
             onRequestDeleteNode={() => undefined}
+            onRequestDeleteNodes={() => undefined}
             onMoveNode={handleMoveNode}
           />
         )}

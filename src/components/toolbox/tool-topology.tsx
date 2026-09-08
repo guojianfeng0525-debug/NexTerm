@@ -33,8 +33,9 @@ import {
   getNodePorts,
   listLinks,
   listNodes,
-  removeLink,
   removeNode,
+  removeLink,
+  removeNodes,
   subscribeTopology,
   upsertLink,
   upsertNode,
@@ -79,6 +80,7 @@ export function ToolTopology() {
   const [showHidden, setShowHidden] = useState(false);
   const [isolationGroup, setIsolationGroup] = useState(SERVER_GROUP_ROOT);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const [selectedNodeIds, setSelectedNodeIds] = useState<string[]>([]);
   const [selectedLinkId, setSelectedLinkId] = useState<string | null>(null);
   const [layoutSeed, setLayoutSeed] = useState(0);
 
@@ -86,6 +88,7 @@ export function ToolTopology() {
   const [linkDialogOpen, setLinkDialogOpen] = useState(false);
   const [editingLink, setEditingLink] = useState<NetworkLink | null>(null);
   const [deleteNodeTarget, setDeleteNodeTarget] = useState<NetworkNode | null>(null);
+  const [bulkDeleteTargets, setBulkDeleteTargets] = useState<NetworkNode[]>([]);
   const [deleteLinkTarget, setDeleteLinkTarget] = useState<NetworkLink | null>(null);
   const [drillDownPort, setDrillDownPort] = useState<{ nodeId: string; portId: string; host: string } | null>(null);
 
@@ -141,6 +144,12 @@ export function ToolTopology() {
     () => visibleNodes.find((node) => node.id === selectedNodeId) ?? null,
     [visibleNodes, selectedNodeId],
   );
+  const selectedVisibleIds = useMemo(() => {
+    const visibleIds = new Set(visibleNodes.map(node => node.id));
+    const ids = new Set(selectedNodeIds);
+    if (selectedNodeId) ids.add(selectedNodeId);
+    return new Set([...ids].filter(id => visibleIds.has(id)));
+  }, [selectedNodeId, selectedNodeIds, visibleNodes]);
   const selectedLink = useMemo(
     () => visibleLinks.find((link) => link.id === selectedLinkId) ?? null,
     [visibleLinks, selectedLinkId],
@@ -167,6 +176,18 @@ export function ToolTopology() {
   }, [selectedNode]);
 
   /* ── node actions ─────────────────────────────────────────────────────── */
+
+  const handleSelectNode = useCallback((id: string | null) => {
+    setSelectedNodeId(id);
+    setSelectedNodeIds(id ? [id] : []);
+    setSelectedLinkId(null);
+  }, []);
+
+  const handleSelectedNodeIdsChange = useCallback((ids: string[]) => {
+    setSelectedNodeIds(ids);
+    setSelectedNodeId(ids.at(-1) ?? null);
+    setSelectedLinkId(null);
+  }, []);
 
   const handleEditNode = useCallback((id: string) => {
     setSelectedNodeId(id);
@@ -213,6 +234,7 @@ export function ToolTopology() {
       const node = nodes.find((item) => item.id === id);
       removeNode(id);
       if (selectedNodeId === id) setSelectedNodeId(null);
+      setSelectedNodeIds((current) => current.filter(itemId => itemId !== id));
       reload();
       toast.success(t('topology.toast.nodeDeleted'), {
         description: node ? nodeLabel(node) : undefined,
@@ -220,6 +242,23 @@ export function ToolTopology() {
     },
     [nodes, reload, selectedNodeId, t],
   );
+
+  const handleDeleteNodes = useCallback(
+    (ids: string[]) => {
+      const targets = visibleNodes.filter(node => ids.includes(node.id));
+      if (targets.length === 0) return;
+      removeNodes(targets.map(node => node.id));
+      setSelectedNodeId(null);
+      setSelectedNodeIds([]);
+      reload();
+      toast.success(t('topology.toast.nodesDeleted', { count: targets.length }));
+    },
+    [reload, t, visibleNodes],
+  );
+
+  const openBulkNodeDelete = useCallback(() => {
+    setBulkDeleteTargets(visibleNodes.filter(node => selectedVisibleIds.has(node.id)));
+  }, [selectedVisibleIds, visibleNodes]);
 
   const handleMoveNode = useCallback(
     (id: string, x: number, y: number) => {
@@ -376,6 +415,20 @@ export function ToolTopology() {
             {t('topology.newLink')}
           </Button>
 
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-7 gap-1 border-destructive/30 text-destructive hover:bg-destructive/10 hover:text-destructive"
+            onClick={openBulkNodeDelete}
+            disabled={selectedVisibleIds.size === 0 || !!drillDownPort}
+            data-testid="topology-delete-selected"
+          >
+            <Trash2 className="h-3.5 w-3.5" />
+            {selectedVisibleIds.size > 1
+              ? t('topology.deleteSelectedCount', { count: selectedVisibleIds.size })
+              : t('topology.deleteSelected')}
+          </Button>
+
           <div className="flex items-center overflow-hidden rounded-md border border-border">
             <button
               type="button"
@@ -444,8 +497,10 @@ export function ToolTopology() {
               links={visibleLinks}
               selectedNodeId={selectedNodeId}
               selectedLinkId={selectedLinkId}
+              selectedNodeIds={selectedVisibleIds}
               layoutSeed={layoutSeed}
-              onSelectNode={setSelectedNodeId}
+              onSelectNode={handleSelectNode}
+              onSelectedNodeIdsChange={handleSelectedNodeIdsChange}
               onSelectLink={setSelectedLinkId}
               onEditNode={handleEditNode}
               onEditLink={handleEditLink}
@@ -453,6 +508,9 @@ export function ToolTopology() {
               onRequestDeleteNode={(id) =>
                 setDeleteNodeTarget(nodes.find((item) => item.id === id) ?? null)
               }
+              onRequestDeleteNodes={(ids) => {
+                setBulkDeleteTargets(visibleNodes.filter(node => ids.includes(node.id)));
+              }}
               onMoveNode={handleMoveNode}
             />
           </div>
@@ -540,6 +598,33 @@ export function ToolTopology() {
               onClick={() => {
                 if (deleteNodeTarget) handleDeleteNode(deleteNodeTarget.id);
                 setDeleteNodeTarget(null);
+              }}
+            >
+              {t('common.delete')}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog
+        open={bulkDeleteTargets.length > 0}
+        onOpenChange={(open) => !open && setBulkDeleteTargets([])}
+      >
+        <AlertDialogContent className="!inset-0 !m-auto !h-fit !translate-x-0 !translate-y-0 max-h-[85vh] !w-[calc(100vw-2rem)] !max-w-none overflow-y-auto sm:!max-w-sm">
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t('topology.deleteSelectedTitle')}</AlertDialogTitle>
+            <AlertDialogDescription>
+              {t('topology.deleteSelectedDesc', { count: bulkDeleteTargets.length })}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>{t('common.cancel')}</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              data-testid="topology-delete-selected-confirm"
+              onClick={() => {
+                handleDeleteNodes(bulkDeleteTargets.map(node => node.id));
+                setBulkDeleteTargets([]);
               }}
             >
               {t('common.delete')}

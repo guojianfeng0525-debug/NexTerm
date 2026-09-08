@@ -669,20 +669,22 @@ export function patchNodeManual(
  * firewall rules, ports, probe history, and every link that touches the node
  * (as source or target).
  */
-export function removeNode(id: string): void {
+export function removeNodes(ids: readonly string[]): void {
+  const idSet = new Set(ids);
+  if (idSet.size === 0) return;
   const kinds: Kind[] = ['interfaces', 'routes', 'firewalls', 'rules', 'ports', 'probes'];
   for (const kind of kinds) {
     const rows = list<{ readonly id: string; readonly nodeId: string }>(kind);
-    const owned = rows.filter((r) => r.nodeId === id);
+    const owned = rows.filter((r) => idSet.has(r.nodeId));
     if (owned.length === 0) continue;
-    cache[kind] = rows.filter((r) => r.nodeId !== id);
+    cache[kind] = rows.filter((r) => !idSet.has(r.nodeId));
     for (const row of owned) commitDelete(kind, row.id);
   }
 
   const links = list<NetworkLink>('links');
-  const doomed = links.filter((l) => l.sourceNodeId === id || l.targetNodeId === id);
+  const doomed = links.filter((l) => idSet.has(l.sourceNodeId) || idSet.has(l.targetNodeId));
   if (doomed.length > 0) {
-    cache.links = links.filter((l) => l.sourceNodeId !== id && l.targetNodeId !== id);
+    cache.links = links.filter((l) => !idSet.has(l.sourceNodeId) && !idSet.has(l.targetNodeId));
     for (const link of doomed) commitDelete('links', link.id);
   }
 
@@ -691,15 +693,26 @@ export function removeNode(id: string): void {
   // on a resolved target node. A target that was never probed simply keeps its
   // dangling targetIp — it is not orphaned because it has no node to lose.
   const portLinks = list<NetworkPortLink>('port_links');
-  const doomedPortLinks = portLinks.filter((l) => l.sourceNodeId === id || l.targetNodeId === id);
+  const doomedPortLinks = portLinks.filter(
+    (l) => (l.sourceNodeId !== null && idSet.has(l.sourceNodeId))
+      || (l.targetNodeId !== null && idSet.has(l.targetNodeId)),
+  );
   if (doomedPortLinks.length > 0) {
-    cache.port_links = portLinks.filter((l) => l.sourceNodeId !== id && l.targetNodeId !== id);
+    cache.port_links = portLinks.filter(
+      (l) => (l.sourceNodeId === null || !idSet.has(l.sourceNodeId))
+        && (l.targetNodeId === null || !idSet.has(l.targetNodeId)),
+    );
     for (const link of doomedPortLinks) commitDelete('port_links', link.id);
   }
 
-  cache.nodes = list<NetworkNode>('nodes').filter((n) => n.id !== id);
-  commitDelete('nodes', id);
+  cache.nodes = list<NetworkNode>('nodes').filter((n) => !idSet.has(n.id));
+  for (const id of idSet) commitDelete('nodes', id);
   notifyTopologyChanged();
+}
+
+/** Convenience wrapper for the existing single-node actions. */
+export function removeNode(id: string): void {
+  removeNodes([id]);
 }
 
 /* ── detail reads ────────────────────────────────────────────────────────── */

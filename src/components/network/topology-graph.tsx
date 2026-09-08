@@ -486,6 +486,14 @@ type DragState =
       readonly originX: number;
       readonly originY: number;
       moved: boolean;
+    }
+  | {
+      readonly kind: 'marquee';
+      readonly pointerId: number;
+      readonly startClientX: number;
+      readonly startClientY: number;
+      readonly startWorld: Vec2;
+      moved: boolean;
     };
 
 interface HoverLink {
@@ -501,6 +509,10 @@ export interface TopologyGraphProps {
   readonly links: NetworkLink[];
   readonly selectedNodeId: string | null;
   readonly selectedLinkId: string | null;
+  /** All card ids selected by Ctrl+click or a Ctrl rubber-band selection. */
+  readonly selectedNodeIds?: ReadonlySet<string>;
+  /** Called whenever rubber-band selection changes the complete id set. */
+  readonly onSelectedNodeIdsChange: (ids: string[]) => void;
   /** Bump to invalidate the memoised automatic layout. */
   readonly layoutSeed: number;
   readonly onSelectNode: (id: string | null) => void;
@@ -509,6 +521,8 @@ export interface TopologyGraphProps {
   readonly onEditLink: (id: string) => void;
   readonly onHideNode: (id: string) => void;
   readonly onRequestDeleteNode: (id: string) => void;
+  /** Invoked by Delete/Backspace for the current multi-node selection. */
+  readonly onRequestDeleteNodes: (ids: string[]) => void;
   readonly onMoveNode: (id: string, x: number, y: number) => void;
   readonly ref?: React.Ref<TopologyGraphHandle>;
 }
@@ -519,6 +533,8 @@ export function TopologyGraph({
   links,
   selectedNodeId,
   selectedLinkId,
+  selectedNodeIds,
+  onSelectedNodeIdsChange,
   layoutSeed,
   onSelectNode,
   onSelectLink,
@@ -526,6 +542,7 @@ export function TopologyGraph({
   onEditLink,
   onHideNode,
   onRequestDeleteNode,
+  onRequestDeleteNodes,
   onMoveNode,
 }: TopologyGraphProps) {
   const { t } = useTranslation();
@@ -539,6 +556,13 @@ export function TopologyGraph({
   const [dragNode, setDragNode] = useState<{ id: string; x: number; y: number } | null>(null);
   const [focusedId, setFocusedId] = useState<string | null>(null);
   const [hoverLink, setHoverLink] = useState<HoverLink | null>(null);
+  const [marquee, setMarquee] = useState<{ start: Vec2; current: Vec2 } | null>(null);
+
+  const selectedIdSet = useMemo(() => {
+    const ids = new Set(selectedNodeIds ?? []);
+    if (selectedNodeId) ids.add(selectedNodeId);
+    return ids;
+  }, [selectedNodeId, selectedNodeIds]);
 
   /* ── layout ───────────────────────────────────────────────────────────── */
 
@@ -581,6 +605,27 @@ export function TopologyGraph({
     },
     [nodeById],
   );
+
+  const clientToWorld = useCallback(
+    (clientX: number, clientY: number): Vec2 => {
+      const rect = containerRef.current?.getBoundingClientRect();
+      const left = rect?.left ?? 0;
+      const top = rect?.top ?? 0;
+      return {
+        x: (clientX - left - view.x) / view.k,
+        y: (clientY - top - view.y) / view.k,
+      };
+    },
+    [view.k, view.x, view.y],
+  );
+
+  const capturePointer = useCallback((pointerId: number) => {
+    try {
+      svgRef.current?.setPointerCapture(pointerId);
+    } catch {
+      // Synthetic E2E pointers are not always active; move/up still run on SVG.
+    }
+  }, []);
 
   /* ── viewport ─────────────────────────────────────────────────────────── */
 
@@ -695,7 +740,37 @@ export function TopologyGraph({
       if (event.button !== 0) return;
       const target = event.target as Element | null;
       const nodeElement = target?.closest?.('[data-node-id]') ?? null;
-      svgRef.current?.setPointerCapture(event.pointerId);
+
+      // Ctrl+click adds/removes one node; Ctrl+drag on empty canvas draws the
+      // rubber-band selector. This intentionally does not pan the canvas.
+      if (event.ctrlKey || event.metaKey) {
+        if (nodeElement) {
+          const id = nodeElement.getAttribute('data-node-id');
+          if (!id) return;
+          const next = new Set(selectedIdSet);
+          if (next.has(id)) next.delete(id);
+          else next.add(id);
+          const ids = [...next];
+          onSelectNode(id);
+          onSelectLink(null);
+          onSelectedNodeIdsChange(ids);
+          return;
+        }
+        const startWorld = clientToWorld(event.clientX, event.clientY);
+        capturePointer(event.pointerId);
+        dragRef.current = {
+          kind: 'marquee',
+          pointerId: event.pointerId,
+          startClientX: event.clientX,
+          startClientY: event.clientY,
+          startWorld,
+          moved: false,
+        };
+        setMarquee({ start: startWorld, current: startWorld });
+        return;
+      }
+
+      capturePointer(event.pointerId);
       if (nodeElement) {
         const id = nodeElement.getAttribute('data-node-id');
         if (!id) return;
@@ -723,7 +798,17 @@ export function TopologyGraph({
         moved: false,
       };
     },
-    [positions, view.x, view.y],
+    [
+      capturePointer,
+      clientToWorld,
+      onSelectedNodeIdsChange,
+      onSelectLink,
+      onSelectNode,
+      positions,
+      selectedIdSet,
+      view.x,
+      view.y,
+    ],
   );
 
   const handlePointerMove = useCallback(
@@ -736,6 +821,26 @@ export function TopologyGraph({
       if (!drag.moved) return;
       if (drag.kind === 'pan') {
         setView((current) => ({ ...current, x: drag.originX + dx, y: drag.originY + dy }));
+      } else if (drag.kind === 'marquee') {
+        const current = clientToWorld(event.clientX, event.clientY);
+        setMarquee((previous) => previous ? { ...previous, current } : previous);
+        const minX = Math.min(drag.startWorld.x, current.x);
+        const minY = Math.min(drag.startWorld.y, current.y);
+        const maxX = Math.max(drag.startWorld.x, current.x);
+        const maxY = Math.max(drag.startWorld.y, current.y);
+        const ids = nodes
+          .filter((node) => {
+            const point = positions.get(node.id);
+            if (!point) return false;
+            return point.x + NODE_WIDTH / 2 >= minX
+              && point.x - NODE_WIDTH / 2 <= maxX
+              && point.y + NODE_HEIGHT / 2 >= minY
+              && point.y - NODE_HEIGHT / 2 <= maxY;
+          })
+          .map((node) => node.id);
+        onSelectLink(null);
+        onSelectNode(ids.at(-1) ?? null);
+        onSelectedNodeIdsChange(ids);
       } else {
         setDragNode({
           id: drag.id,
@@ -744,7 +849,15 @@ export function TopologyGraph({
         });
       }
     },
-    [view.k],
+    [
+      clientToWorld,
+      nodes,
+      onSelectedNodeIdsChange,
+      onSelectLink,
+      onSelectNode,
+      positions,
+      view.k,
+    ],
   );
 
   const endDrag = useCallback(
@@ -752,8 +865,15 @@ export function TopologyGraph({
       const drag = dragRef.current;
       if (!drag || drag.pointerId !== event.pointerId) return;
       dragRef.current = null;
-      if (svgRef.current?.hasPointerCapture(event.pointerId)) {
-        svgRef.current.releasePointerCapture(event.pointerId);
+      if (drag.kind === 'marquee') {
+        setMarquee(null);
+      }
+      try {
+        if (svgRef.current?.hasPointerCapture(event.pointerId)) {
+          svgRef.current.releasePointerCapture(event.pointerId);
+        }
+      } catch {
+        // The synthetic pointer may already be inactive.
       }
       if (!drag.moved) {
         // A press without travel counts as a click on the canvas background.
@@ -770,6 +890,17 @@ export function TopologyGraph({
       setDragNode(null);
     },
     [dragNode, onMoveNode, onSelectLink, onSelectNode],
+  );
+
+  const handleCanvasKeyDown = useCallback(
+    (event: React.KeyboardEvent<SVGSVGElement>) => {
+      if (event.key !== 'Delete' && event.key !== 'Backspace') return;
+      const ids = [...selectedIdSet].filter(id => nodeById.has(id));
+      if (ids.length === 0) return;
+      event.preventDefault();
+      onRequestDeleteNodes(ids);
+    },
+    [nodeById, onRequestDeleteNodes, selectedIdSet],
   );
 
   /* ── derived render data ──────────────────────────────────────────────── */
@@ -800,8 +931,12 @@ export function TopologyGraph({
         ref={svgRef}
         className={cn(
           'h-full w-full touch-none select-none outline-none',
-          dragNode ? 'cursor-grabbing' : 'cursor-grab',
+          dragNode ? 'cursor-grabbing' : marquee ? 'cursor-crosshair' : 'cursor-grab',
         )}
+        tabIndex={0}
+        role="application"
+        aria-label={t('topology.canvas')}
+        onKeyDown={handleCanvasKeyDown}
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
         onPointerUp={endDrag}
@@ -929,6 +1064,7 @@ export function TopologyGraph({
                   <ContextMenuTrigger asChild>
                     <g
                       data-node-id={node.id}
+                      data-selected={selectedIdSet.has(node.id) ? 'true' : 'false'}
                       transform={`translate(${point.x.toFixed(1)} ${point.y.toFixed(1)})`}
                       tabIndex={0}
                       role="button"
@@ -956,7 +1092,7 @@ export function TopologyGraph({
                         footer={[typeLabel, roleLabel].filter(Boolean).join(' · ')}
                         envLabel={envLabel}
                         statusColor={PROBE_COLORS[node.lastProbeStatus] ?? PROBE_COLORS.never}
-                        selected={selectedNodeId === node.id}
+                        selected={selectedIdSet.has(node.id)}
                         focused={focusedId === node.id}
                         dimmed={node.hidden}
                         neverProbed={node.lastProbeStatus === 'never'}
@@ -985,6 +1121,18 @@ export function TopologyGraph({
               );
             })}
           </g>
+          {marquee && (
+            <rect
+              data-testid="topology-marquee"
+              x={Math.min(marquee.start.x, marquee.current.x)}
+              y={Math.min(marquee.start.y, marquee.current.y)}
+              width={Math.abs(marquee.current.x - marquee.start.x)}
+              height={Math.abs(marquee.current.y - marquee.start.y)}
+              className="pointer-events-none fill-primary/10 stroke-primary"
+              strokeWidth={1 / view.k}
+              strokeDasharray={`${4 / view.k} ${3 / view.k}`}
+            />
+          )}
         </g>
       </svg>
 

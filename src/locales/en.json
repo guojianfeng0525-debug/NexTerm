@@ -2851,7 +2851,8 @@
   "topology": {
     "title": "Network Topology",
     "isolationGroup": "Isolation group",
-    "canvasHint": "Drag empty space to pan, hold Ctrl and scroll (or use the +/- buttons) to zoom, drag a node to reposition it.",
+    "canvas": "Network topology canvas",
+    "canvasHint": "Drag empty space to pan; hold Ctrl and drag to select multiple nodes; press Delete to remove them.",
     "search": "Search",
     "searchPlaceholder": "Search nodes by name, hostname or IP",
     "showHidden": "Show hidden nodes",
@@ -2985,6 +2986,12 @@
     "stats": "{{nodes}} nodes · {{links}} links",
     "deleteNodeTitle": "Delete node",
     "deleteNodeDesc": "This also deletes the node's interfaces, routes, firewall and port data, plus every related link. This cannot be undone.",
+    "deleteSelected": "Delete selected",
+    "deleteSelectedCount_one": "Delete {{count}} selected",
+    "deleteSelectedCount_other": "Delete {{count}} selected",
+    "deleteSelectedTitle": "Delete selected nodes",
+    "deleteSelectedDesc_one": "This deletes {{count}} node with its interfaces, routes, firewall and port data, plus every related link. This cannot be undone.",
+    "deleteSelectedDesc_other": "This deletes {{count}} nodes with their interfaces, routes, firewall and port data, plus every related link. This cannot be undone.",
     "details": {
       "title": "Details",
       "noSelection": "Nothing selected",
@@ -2997,6 +3004,8 @@
     "toast": {
       "nodeSaved": "Node saved",
       "nodeDeleted": "Node deleted",
+      "nodesDeleted_one": "{{count}} node deleted",
+      "nodesDeleted_other": "{{count}} nodes deleted",
       "nodeHidden": "Node hidden",
       "nodeShown": "Node shown",
       "linkSaved": "Relationship saved",

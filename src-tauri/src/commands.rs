@@ -7,6 +7,15 @@ use crate::ssh::{AuthMethod, JumpConfig, SshConfig};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tauri::State;
+use tokio::sync::Semaphore;
+
+/// Global, process-wide serialization for topology probes.
+///
+/// A user can switch tabs and click another server before the first manual
+/// probe finishes. One permit prevents those independent UI actions from
+/// stacking simultaneous remote scans; the 25-second probe timeout guarantees
+/// that the permit is eventually released.
+static TOPOLOGY_PROBE_LIMIT: Semaphore = Semaphore::const_new(1);
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ConnectRequest {
@@ -4902,12 +4911,19 @@ mod encoding_tests {
 ///
 /// Runs exactly one read-only shell script over the existing SSH session and
 /// parses it into `ProbeResult`. Never auto-invoked — the frontend calls it
-/// from the manual "探测当前服务器" action only.
+/// from the manual "探测当前服务器" action only. The global permit also keeps
+/// at most one server probe active, even if several desktop panels queue a
+/// manual action.
 #[tauri::command]
 pub async fn probe_network_topology(
     connection_id: String,
     state: State<'_, Arc<ConnectionManager>>,
 ) -> Result<crate::network_probe::ProbeResult, String> {
+    let _probe_permit = TOPOLOGY_PROBE_LIMIT
+        .acquire()
+        .await
+        .map_err(|_| "network topology probe scheduler closed")?;
+
     let connection = state
         .get_connection(&connection_id)
         .await
