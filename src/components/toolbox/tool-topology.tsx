@@ -41,6 +41,8 @@ import {
 } from '@/lib/network/topology-storage';
 import type { NetworkLink, NetworkNode, NetworkPort } from '@/lib/network/topology-types';
 import { cn } from '@/lib/utils';
+import { ConnectionStorageManager } from '@/lib/connection-storage';
+import { isServerPeerAddress, SERVER_GROUP_ROOT } from '@/lib/network/address-scope';
 import {
   TopologyGraph,
   computeAutoLayout,
@@ -50,6 +52,7 @@ import {
 import { TopologyNodeDialog } from '@/components/network/topology-node-dialog';
 import { LinkEditorDialog } from '@/components/network/link-editor-dialog';
 import { PortTopologyView } from '@/components/network/port-topology';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 
 const LINK_TYPE_BADGE: Record<string, string> = {
   ssh: 'bg-chart-1/15 text-chart-1 border-chart-1/30',
@@ -74,6 +77,7 @@ export function ToolTopology() {
   const [links, setLinks] = useState<NetworkLink[]>([]);
   const [search, setSearch] = useState('');
   const [showHidden, setShowHidden] = useState(false);
+  const [isolationGroup, setIsolationGroup] = useState(SERVER_GROUP_ROOT);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [selectedLinkId, setSelectedLinkId] = useState<string | null>(null);
   const [layoutSeed, setLayoutSeed] = useState(0);
@@ -90,6 +94,18 @@ export function ToolTopology() {
     setLinks(listLinks());
   }, []);
 
+  const scopeOf = useCallback((node: NetworkNode): string =>
+    node.groupPath?.trim()
+    || ConnectionStorageManager.getConnection(node.connectionId)?.folder
+    || SERVER_GROUP_ROOT, []);
+
+  const groups = useMemo(() => {
+    const saved = ConnectionStorageManager.getFolders().map(folder => folder.path);
+    const observed = nodes.map(scopeOf);
+    return [...new Set([SERVER_GROUP_ROOT, ...saved, ...observed])]
+      .sort((a, b) => a === SERVER_GROUP_ROOT ? -1 : b === SERVER_GROUP_ROOT ? 1 : a.localeCompare(b));
+  }, [nodes, scopeOf]);
+
   // The per-server panel writes to the same tables — keep the graph live.
   useEffect(() => {
     reload();
@@ -100,6 +116,8 @@ export function ToolTopology() {
     const query = search.trim().toLowerCase();
     return nodes.filter((node) => {
       if (node.hidden && !showHidden) return false;
+      if (scopeOf(node) !== isolationGroup) return false;
+      if (node.connectionId.startsWith('observed:') && !isServerPeerAddress(node.primaryIp)) return false;
       if (!query) return true;
       return (
         nodeLabel(node).toLowerCase().includes(query) ||
@@ -107,7 +125,7 @@ export function ToolTopology() {
         node.primaryIp.toLowerCase().includes(query)
       );
     });
-  }, [nodes, search, showHidden]);
+  }, [isolationGroup, nodes, scopeOf, search, showHidden]);
 
   const visibleLinks = useMemo(() => {
     const ids = new Set(visibleNodes.map((node) => node.id));
@@ -120,12 +138,12 @@ export function ToolTopology() {
   }, [links, showHidden, visibleNodes]);
 
   const selectedNode = useMemo(
-    () => nodes.find((node) => node.id === selectedNodeId) ?? null,
-    [nodes, selectedNodeId],
+    () => visibleNodes.find((node) => node.id === selectedNodeId) ?? null,
+    [visibleNodes, selectedNodeId],
   );
   const selectedLink = useMemo(
-    () => links.find((link) => link.id === selectedLinkId) ?? null,
-    [links, selectedLinkId],
+    () => visibleLinks.find((link) => link.id === selectedLinkId) ?? null,
+    [visibleLinks, selectedLinkId],
   );
   const selectedNodePorts = useMemo(
     () => (selectedNode ? getNodePorts(selectedNode.id) : []),
@@ -214,9 +232,9 @@ export function ToolTopology() {
   );
 
   const handleAutoLayout = useCallback(() => {
-    if (nodes.length === 0) return;
-    const positions = computeAutoLayout(nodes, links, { force: true });
-    for (const node of nodes) {
+    if (visibleNodes.length === 0) return;
+    const positions = computeAutoLayout(visibleNodes, visibleLinks, { force: true });
+    for (const node of visibleNodes) {
       const point = positions.get(node.id);
       if (!point) continue;
       upsertNode({
@@ -231,7 +249,7 @@ export function ToolTopology() {
     toast.success(t('topology.toast.layoutApplied'));
     // Give the freshly persisted coordinates a frame before fitting.
     requestAnimationFrame(() => graphRef.current?.fitToView());
-  }, [links, nodes, reload, t]);
+  }, [reload, t, visibleLinks, visibleNodes]);
 
   /* ── link actions ─────────────────────────────────────────────────────── */
 
@@ -271,7 +289,7 @@ export function ToolTopology() {
 
   /* ── render ───────────────────────────────────────────────────────────── */
 
-  const hasAnyNode = nodes.length > 0;
+  const hasAnyNode = visibleNodes.length > 0;
 
   return (
     <div className="h-full flex flex-col overflow-hidden">
@@ -304,6 +322,23 @@ export function ToolTopology() {
             />
           </div>
 
+          <Select value={isolationGroup} onValueChange={setIsolationGroup}>
+            <SelectTrigger
+              className="h-7 w-[168px] text-xs"
+              aria-label={t('topology.isolationGroup')}
+              data-testid="topology-isolation-group"
+            >
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {groups.map(group => (
+                <SelectItem key={group} value={group} className="text-xs">
+                  {group === SERVER_GROUP_ROOT ? t('connectionDialog.allConnections') : group}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+
           <div className="flex items-center gap-1.5 rounded-md border border-border px-2 py-1">
             <Switch
               id="topology-show-hidden"
@@ -335,7 +370,7 @@ export function ToolTopology() {
             variant="outline"
             className="h-7 gap-1 text-xs"
             onClick={openCreateLink}
-            disabled={nodes.length < 2}
+            disabled={visibleNodes.length < 2}
           >
             <Plus className="h-3.5 w-3.5" />
             {t('topology.newLink')}
@@ -479,7 +514,7 @@ export function ToolTopology() {
         open={linkDialogOpen}
         onOpenChange={setLinkDialogOpen}
         link={editingLink}
-        nodes={nodes}
+        nodes={visibleNodes}
         defaultSourceId={selectedNodeId}
         onSave={handleSaveLink}
         onDelete={handleDeleteLink}

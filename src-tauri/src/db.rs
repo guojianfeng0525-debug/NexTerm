@@ -253,6 +253,11 @@ impl DbState {
             ("net_ports", "notes", "notes TEXT NOT NULL DEFAULT ''"),
             ("net_ports", "tags", "tags TEXT NOT NULL DEFAULT '[]'"),
             ("net_port_links", "source_ip", "source_ip TEXT"),
+            (
+                "net_nodes",
+                "group_path",
+                "group_path TEXT NOT NULL DEFAULT 'All Connections'",
+            ),
         ] {
             ensure_column(&conn, table, column, ddl)?;
         }
@@ -1625,6 +1630,7 @@ CREATE INDEX IF NOT EXISTS idx_jar_subtypes_project ON jar_subtypes(project_id);
 CREATE TABLE IF NOT EXISTS "net_nodes" (
   id TEXT PRIMARY KEY,
   connection_id TEXT NOT NULL,
+  group_path TEXT NOT NULL DEFAULT 'All Connections',
   hostname TEXT NOT NULL DEFAULT '',
   os_name TEXT NOT NULL DEFAULT '',
   primary_ip TEXT NOT NULL DEFAULT '',

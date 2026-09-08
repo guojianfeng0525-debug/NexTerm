@@ -2850,6 +2850,7 @@
   },
   "topology": {
     "title": "网络拓扑",
+    "isolationGroup": "隔离分组",
     "canvasHint": "拖拽空白处平移，按住 Ctrl 滚动滚轮或使用 +/- 按钮缩放，拖拽节点可调整位置。",
     "search": "搜索",
     "searchPlaceholder": "按名称、主机名或 IP 搜索节点",

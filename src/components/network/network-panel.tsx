@@ -17,6 +17,10 @@ import { ProbeEmptyState } from './probe-empty-state';
 import { cn } from '@/lib/utils';
 import { applyProbeResult, probeServerTopology } from '@/lib/network/topology-api';
 import {
+  isExternallyBoundListenAddress,
+  isServerInterfaceAddress,
+} from '@/lib/network/address-scope';
+import {
   getNodeByConnectionId,
   getNodeFirewall,
   getNodeFirewallRules,
@@ -24,6 +28,7 @@ import {
   getNodeInterfaces,
   getNodePorts,
   getNodeRoutes,
+  listNodes,
   listPortLinks,
   patchFirewallRuleManual,
   patchInterfaceManual,
@@ -92,17 +97,35 @@ const SECTION_LABEL_KEYS = {
   procSockets: 'network.section.procSockets',
 } as const satisfies Record<keyof ProbeSections, string>;
 
-function readNodeData(assetId: string): NodePanelData | null {
-  const node = getNodeByConnectionId(assetId);
+function readNodeData(assetId: string, host = ''): NodePanelData | null {
+  const hostIp = host.trim();
+  const node = getNodeByConnectionId(assetId)
+    // A same-server probe can reuse another saved connection's node; host is
+    // only a secondary hint because the saved connection id remains primary.
+    ?? (hostIp ? listNodes().find(candidate => candidate.primaryIp.trim() === hostIp) : undefined);
   if (!node) return null;
+  const interfaces = getNodeInterfaces(node.id).filter(iface =>
+    !iface.isLoopback
+    && isServerInterfaceAddress(
+      iface.ipv4Addrs[0] ?? iface.ipv6Addrs[0] ?? '',
+      iface.ifaceName,
+    ));
+  const serverAddresses = interfaces.flatMap(iface => [
+    ...(iface.ipv4Addrs ?? []),
+    ...(iface.ipv6Addrs ?? []),
+  ].map(address => ({ address, ifaceName: iface.ifaceName })));
   return {
     node,
-    interfaces: getNodeInterfaces(node.id),
+    interfaces,
     routes: getNodeRoutes(node.id),
     firewall: getNodeFirewall(node.id),
     rules: getNodeFirewallRules(node.id),
-    ports: getNodePorts(node.id),
-    portLinks: listPortLinks(),
+    ports: getNodePorts(node.id).filter(port =>
+      port.missingSince === null
+      && isExternallyBoundListenAddress(port.listenAddr, serverAddresses)),
+    portLinks: listPortLinks().filter(link =>
+      link.sourceNodeId === node.id
+      || getNode(link.targetNodeId ?? '')?.groupPath === node.groupPath),
   };
 }
 
@@ -152,9 +175,9 @@ export function NetworkPanel({
   // global topology view edits the store.
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- hydrating from an external store is an effect
-    setData(readNodeData(assetId));
+    setData(readNodeData(assetId, host));
     setLastSections(null);
-  }, [assetId, storeVersion]);
+  }, [assetId, host, storeVersion]);
 
   // Drilling into a port is scoped to one server; leaving it resets the view.
   useEffect(() => {
@@ -173,7 +196,7 @@ export function NetworkPanel({
       const result = await probeServerTopology(connectionId);
       const summary = applyProbeResult({ connectionId: assetId, connectionName, result });
 
-      setData(readNodeData(assetId));
+    setData(readNodeData(assetId, host));
       setLastSections(result.sections);
       setStoreVersion(v => v + 1);
 

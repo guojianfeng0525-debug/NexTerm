@@ -37,6 +37,7 @@ const store = vi.hoisted(() => ({
   getNodeFirewallRules: vi.fn(),
   getNodePorts: vi.fn(),
   getPortProbes: vi.fn(),
+  listNodes: vi.fn(),
   listPortLinks: vi.fn(),
   subscribeTopology: vi.fn(),
   appendPortProbe: vi.fn(),
@@ -104,6 +105,7 @@ describe('NetworkPanel — probe is strictly user-triggered', () => {
     store.getNodeFirewallRules.mockReturnValue([]);
     store.getNodePorts.mockReturnValue([]);
     store.getPortProbes.mockReturnValue([]);
+    store.listNodes.mockReturnValue([]);
     store.listPortLinks.mockReturnValue([]);
     api.probeServerTopology.mockResolvedValue(probeResult());
     api.applyProbeResult.mockReturnValue({

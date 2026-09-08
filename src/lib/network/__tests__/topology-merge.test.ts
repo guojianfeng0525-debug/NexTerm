@@ -6,6 +6,7 @@ import {
   hashRule,
   inferLinkType,
   inferLinksFromPeers,
+  inferObservedNodes,
   inferPortLinksFromPeers,
   inferRoleHint,
   interfaceNaturalKey,
@@ -17,6 +18,7 @@ import {
   mergeNode,
   mergePorts,
   mergeRoutes,
+  sanitizeProbeData,
   portNaturalKey,
   resolvePortLinkTargets,
   resolveRouteType,
@@ -629,10 +631,71 @@ describe('buildInterfaceIpIndex', () => {
     ];
 
     const index = buildInterfaceIpIndex(nodes, ifaces);
-    expect(index.get('10.0.0.5')).toBe('node-a');
-    expect(index.get('10.0.0.6')).toBe('node-b');
-    expect(index.get('fe80::1')).toBe('node-a');
+    expect(index.get('All Connections\u000010.0.0.5')).toBe('node-a');
+    expect(index.get('All Connections\u000010.0.0.6')).toBe('node-b');
+    // Link-local addresses never identify a server.
+    expect(index.has('fe80::1')).toBe(false);
     expect(index.has('10.0.0.9')).toBe(false);
+  });
+});
+
+describe('server-only probe sanitization and group isolation', () => {
+  it('keeps server listeners and peers while dropping loopback/container traffic', () => {
+    const clean = sanitizeProbeData(probeData({
+      primaryIp: '',
+      interfaces: [
+        detectedInterface({ ifaceName: 'eth0', ipv4Addrs: ['192.168.50.9/24'] }),
+        detectedInterface({ ifaceName: 'docker0', ipv4Addrs: ['172.17.0.1/16'] }),
+        detectedInterface({ ifaceName: 'lo', isLoopback: true, ipv4Addrs: ['127.0.0.1/8'] }),
+      ],
+      ports: [
+        detectedPort({ port: 80, listenAddr: '0.0.0.0' }),
+        detectedPort({ port: 5432, listenAddr: '127.0.0.1' }),
+        detectedPort({ port: 5433, listenAddr: '172.17.0.2' }),
+      ],
+      peers: [
+        detectedPeer({ localAddr: '192.168.50.9', remoteAddr: '192.168.50.10' }),
+        detectedPeer({ localAddr: '127.0.0.1', remoteAddr: '127.0.0.2' }),
+        detectedPeer({ localAddr: '172.17.0.2', remoteAddr: '172.17.0.3' }),
+      ],
+    }));
+
+    expect(clean.interfaces.map(item => item.ifaceName)).toEqual(['eth0']);
+    expect(clean.primaryIp).toBe('192.168.50.9');
+    expect(clean.ports.map(port => port.port)).toEqual([80]);
+    expect(clean.peers).toHaveLength(1);
+    expect(clean.peers[0].remoteAddr).toBe('192.168.50.10');
+  });
+
+  it('scopes observed endpoint identity and interface ownership by isolation group', () => {
+    const groupA = [makeNode({ id: 'node-a', groupPath: 'Prod', primaryIp: '10.0.0.5' })];
+    const groupB = [makeNode({ id: 'node-b', connectionId: 'conn-b', groupPath: 'Dev', primaryIp: '10.0.0.5' })];
+    const index = buildInterfaceIpIndex(
+      [...groupA, ...groupB],
+      [
+        makeInterface({ nodeId: 'node-a', ipv4Addrs: ['10.0.0.5/24'] }),
+        makeInterface({ id: 'i2', nodeId: 'node-b', ipv4Addrs: ['10.0.0.5/24'] }),
+      ],
+    );
+
+    expect(index.get('Prod\u000010.0.0.5')).toBe('node-a');
+    expect(index.get('Dev\u000010.0.0.5')).toBe('node-b');
+
+    const observedA = inferObservedNodes({
+      nodeId: 'node-a',
+      peers: [detectedPeer({ remoteAddr: '10.0.0.9' })],
+      knownNodes: groupA,
+      now: 1_000,
+    });
+    const observedB = inferObservedNodes({
+      nodeId: 'node-b',
+      peers: [detectedPeer({ remoteAddr: '10.0.0.9' })],
+      knownNodes: groupB,
+      now: 1_000,
+    });
+
+    expect(observedA.at(-1)?.id).toBe('observed:Prod:10.0.0.9');
+    expect(observedB.at(-1)?.id).toBe('observed:Dev:10.0.0.9');
   });
 });
 
@@ -794,19 +857,19 @@ describe('inferLinksFromPeers', () => {
     );
   });
 
-  it('normalizes IPv4-mapped IPv6 peers so both sides of a Docker connection meet', () => {
+  it('normalizes IPv4-mapped IPv6 peers so both sides of a server connection meet', () => {
     const out = inferLinksFromPeers({
       nodeId: 'node-b',
       peers: [detectedPeer({
-        localAddr: '::ffff:172.21.0.3',
-        remoteAddr: '::ffff:172.21.0.2',
+        localAddr: '::ffff:192.168.50.3',
+        remoteAddr: '::ffff:192.168.50.2',
         remotePort: 42000,
         localPort: 8080,
       })],
       knownNodes: nodes,
       interfacesIndex: buildInterfaceIpIndex(nodes, [
-        makeInterface({ nodeId: 'node-a', ipv4Addrs: ['172.21.0.2/16'], ipv6Addrs: [] }),
-        makeInterface({ id: 'i2', nodeId: 'node-b', ipv4Addrs: ['172.21.0.3/16'], ipv6Addrs: [] }),
+        makeInterface({ nodeId: 'node-a', ipv4Addrs: ['192.168.50.2/24'], ipv6Addrs: [] }),
+        makeInterface({ id: 'i2', nodeId: 'node-b', ipv4Addrs: ['192.168.50.3/24'], ipv6Addrs: [] }),
       ]),
       nodePorts: [makePort({ nodeId: 'node-b', port: 8080, listenAddr: '::' })],
       existingLinks: [],
@@ -823,9 +886,9 @@ describe('inferLinksFromPeers', () => {
   });
 
   it('confirms reciprocal /proc observations without exposing the client ephemeral port', () => {
-    const dockerIndex = buildInterfaceIpIndex(nodes, [
-      makeInterface({ nodeId: 'node-a', ipv4Addrs: ['172.21.0.2/16'], ipv6Addrs: [] }),
-      makeInterface({ id: 'i2', nodeId: 'node-b', ipv4Addrs: ['172.21.0.3/16'], ipv6Addrs: [] }),
+    const serverIndex = buildInterfaceIpIndex(nodes, [
+      makeInterface({ nodeId: 'node-a', ipv4Addrs: ['192.168.50.2/24'], ipv6Addrs: [] }),
+      makeInterface({ id: 'i2', nodeId: 'node-b', ipv4Addrs: ['192.168.50.3/24'], ipv6Addrs: [] }),
     ]);
     const listener = makePort({
       id: 'port-b8080',
@@ -838,13 +901,13 @@ describe('inferLinksFromPeers', () => {
     const outbound = inferLinksFromPeers({
       nodeId: 'node-a',
       peers: [detectedPeer({
-        localAddr: '172.21.0.2',
-        remoteAddr: '172.21.0.3',
+        localAddr: '192.168.50.2',
+        remoteAddr: '192.168.50.3',
         remotePort: 8080,
         localPort: 42137,
       })],
       knownNodes: nodes,
-      interfacesIndex: dockerIndex,
+      interfacesIndex: serverIndex,
       nodePorts: [],
       existingLinks: [],
       now: 1_000,
@@ -852,13 +915,13 @@ describe('inferLinksFromPeers', () => {
     const confirmed = inferLinksFromPeers({
       nodeId: 'node-b',
       peers: [detectedPeer({
-        localAddr: '::ffff:172.21.0.3',
-        remoteAddr: '::ffff:172.21.0.2',
+        localAddr: '::ffff:192.168.50.3',
+        remoteAddr: '::ffff:192.168.50.2',
         remotePort: 42137,
         localPort: 8080,
       })],
       knownNodes: nodes,
-      interfacesIndex: dockerIndex,
+      interfacesIndex: serverIndex,
       nodePorts: [listener],
       existingLinks: outbound.links,
       now: 2_000,
@@ -879,28 +942,30 @@ describe('inferLinksFromPeers', () => {
     const portOutbound = inferPortLinksFromPeers({
       nodeId: 'node-a',
       peers: [detectedPeer({
-        localAddr: '172.21.0.2',
-        remoteAddr: '172.21.0.3',
+        localAddr: '192.168.50.2',
+        remoteAddr: '192.168.50.3',
         remotePort: 8080,
         localPort: 42137,
       })],
       nodePorts: [],
       allPorts: [listener],
-      interfacesIndex: dockerIndex,
+      interfacesIndex: serverIndex,
+      knownNodes: nodes,
       existingPortLinks: [],
       now: 1_000,
     });
     const portInbound = inferPortLinksFromPeers({
       nodeId: 'node-b',
       peers: [detectedPeer({
-        localAddr: '::ffff:172.21.0.3',
-        remoteAddr: '::ffff:172.21.0.2',
+        localAddr: '::ffff:192.168.50.3',
+        remoteAddr: '::ffff:192.168.50.2',
         remotePort: 42137,
         localPort: 8080,
       })],
       nodePorts: [listener],
       allPorts: [listener],
-      interfacesIndex: dockerIndex,
+      interfacesIndex: serverIndex,
+      knownNodes: nodes,
       existingPortLinks: portOutbound.links,
       now: 2_000,
     });
@@ -921,9 +986,10 @@ describe('inferLinksFromPeers', () => {
 });
 
 describe('port-level topology links', () => {
-  const interfacesIndex = new Map([
-    ['10.10.1.20', 'node-a'],
-    ['10.10.1.21', 'node-b'],
+  const nodes = [makeNode({ id: 'node-a', primaryIp: '10.10.1.20' }), makeNode({ id: 'node-b', connectionId: 'conn-b', primaryIp: '10.10.1.21' })];
+  const interfacesIndex = buildInterfaceIpIndex(nodes, [
+    makeInterface({ nodeId: 'node-a', ipv4Addrs: ['10.10.1.20/24'] }),
+    makeInterface({ id: 'i2', nodeId: 'node-b', ipv4Addrs: ['10.10.1.21/24'] }),
   ]);
   const currentPorts = [
     makePort({ id: 'port-a8080', nodeId: 'node-a', port: 8080, processName: 'app', pid: 10 }),
@@ -946,6 +1012,7 @@ describe('port-level topology links', () => {
       nodePorts: currentPorts,
       allPorts,
       interfacesIndex,
+      knownNodes: nodes,
       existingPortLinks: [],
       now: 2_000,
     });
@@ -973,6 +1040,7 @@ describe('port-level topology links', () => {
       nodePorts: serverPorts,
       allPorts: serverPorts,
       interfacesIndex,
+      knownNodes: nodes,
       existingPortLinks: [],
       now: 2_000,
     });
@@ -1006,6 +1074,7 @@ describe('port-level topology links', () => {
       ],
       allPorts: [makePort({ id: 'port-b3306', nodeId: 'node-b', port: 3306 })],
       interfacesIndex,
+      knownNodes: nodes,
       existingPortLinks: [],
       now: 2_000,
     });
@@ -1041,6 +1110,7 @@ describe('port-level topology links', () => {
       nodePorts: currentPorts,
       allPorts,
       interfacesIndex,
+      knownNodes: nodes,
       existingPortLinks: [existing],
       now: 2_000,
     });
@@ -1083,6 +1153,7 @@ describe('port-level topology links', () => {
       nodeId: 'node-b',
       nodePorts: [makePort({ id: 'port-b3306', nodeId: 'node-b', port: 3306 })],
       interfacesIndex,
+      knownNodes: nodes,
       existingPortLinks: [danglingTarget, danglingSource],
       now: 2_000,
     });

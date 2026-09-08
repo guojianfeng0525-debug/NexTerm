@@ -126,6 +126,7 @@ function nodeToRow(n: NetworkNode): Row {
   return {
     id: n.id,
     connection_id: n.connectionId,
+    group_path: n.groupPath || 'All Connections',
     hostname: n.hostname,
     os_name: n.osName,
     primary_ip: n.primaryIp,
@@ -149,6 +150,7 @@ function rowToNode(row: Row): NetworkNode {
   return {
     id: str(row.id),
     connectionId: str(row.connection_id),
+    groupPath: str(row.group_path) || 'All Connections',
     hostname: str(row.hostname),
     osName: str(row.os_name),
     primaryIp: str(row.primary_ip),

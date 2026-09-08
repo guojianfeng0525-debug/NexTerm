@@ -43,6 +43,7 @@ describe('Network port topology drill-down', () => {
     const topologyButton = await waitForVisible('[data-testid="toolbox-nav-topology"]');
     await topologyButton.click();
     await waitForVisible('[data-node-id="e2e-node-a"]');
+    await waitForVisible('[data-testid="topology-isolation-group"]');
     await waitForVisible('[data-node-id="observed:10.10.1.30"]');
     await expectElementText(await $('[data-node-id="observed:10.10.1.30"]'), '10.10.1.30');
     await expectElementText(await $('[data-node-id="observed:10.10.1.30"]'), '未探测');

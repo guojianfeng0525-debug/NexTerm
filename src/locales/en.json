@@ -2850,6 +2850,7 @@
   },
   "topology": {
     "title": "Network Topology",
+    "isolationGroup": "Isolation group",
     "canvasHint": "Drag empty space to pan, hold Ctrl and scroll (or use the +/- buttons) to zoom, drag a node to reposition it.",
     "search": "Search",
     "searchPlaceholder": "Search nodes by name, hostname or IP",

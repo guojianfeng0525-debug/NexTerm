@@ -167,6 +167,7 @@ export function makeNode(over: Partial<NetworkNode> = {}): NetworkNode {
   return {
     id: 'node-a',
     connectionId: 'conn-a',
+    groupPath: 'All Connections',
     hostname: 'web-01',
     osName: 'Ubuntu 22.04',
     primaryIp: '10.0.0.5',

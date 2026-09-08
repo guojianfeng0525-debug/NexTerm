@@ -78,6 +78,11 @@ export interface NetworkNode {
   readonly id: string;
   /** Saved-connection id this node describes (`originalConnectionId ?? tabId`). */
   readonly connectionId: string;
+  /**
+   * Saved-server folder path. Topology correlation is scoped by this value so
+   * the same address in two isolation groups never becomes one asset or edge.
+   */
+  groupPath: string;
 
   /* ── A: probe-collected ── */
   hostname: string;

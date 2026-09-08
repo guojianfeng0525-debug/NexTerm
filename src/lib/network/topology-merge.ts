@@ -62,6 +62,13 @@ import {
   ROUTE_MANUAL_KEYS,
 } from './topology-types';
 import { generateId } from '../toolbox/toolbox-storage';
+import {
+  SERVER_GROUP_ROOT,
+  isExternallyBoundListenAddress,
+  isServerInterfaceAddress,
+  isServerPeerAddress,
+  normalizeScopeAddress,
+} from './address-scope';
 
 /* ══ shared helpers ════════════════════════════════════════════════════════ */
 
@@ -343,12 +350,15 @@ export interface MergeNodeOptions {
   readonly error?: string | null;
   /** Seed for `displayName` when the node is created — never applied later. */
   readonly initialDisplayName?: string;
+  /** Saved-server folder path used for topology isolation. */
+  readonly groupPath?: string;
 }
 
 function emptyNode(connectionId: string, now: number): NetworkNode {
   return {
     id: generateId('node'),
     connectionId,
+    groupPath: SERVER_GROUP_ROOT,
     hostname: '',
     osName: '',
     primaryIp: '',
@@ -390,6 +400,7 @@ export function mergeNode(
   const roleHint = inferRoleHint(detected?.ports ?? []);
 
   const base: NetworkNode = existing ?? { ...emptyNode(connectionId, now), displayName: options.initialDisplayName ?? '' };
+  const groupPath = options.groupPath?.trim() || base.groupPath?.trim() || SERVER_GROUP_ROOT;
 
   const auto: Partial<NetworkNode> = {
     hostname: detected?.hostname ?? '',
@@ -400,7 +411,7 @@ export function mergeNode(
 
   // A display-only observed node is promoted in place when the user explicitly
   // probes the matching saved connection. Keeping its id preserves every edge.
-  const next: NetworkNode = { ...base, connectionId };
+  const next: NetworkNode = { ...base, connectionId, groupPath };
   // Whitelist copy — `displayName` / `nodeType` / `environment` / `notes` /
   // `hidden` / `posX` / `posY` are manual and are deliberately absent from
   // NODE_AUTO_KEYS, so they survive here untouched.
@@ -669,6 +680,46 @@ export function portNaturalKey(item: {
   return `${item.nodeId ?? ''}|${item.protocol ?? ''}|${item.listenAddr ?? ''}|${item.port ?? ''}`;
 }
 
+/**
+ * Reduce a raw probe payload to the server-facing information requested by the
+ * topology. Container/loopback listeners and peers never enter the store.
+ */
+export function sanitizeProbeData(data: ProbeData): ProbeData {
+  const interfaces = (data?.interfaces ?? []).filter((iface) =>
+    !iface.isLoopback && isServerInterfaceAddress(iface.ipv4Addrs?.[0] ?? iface.ipv6Addrs?.[0] ?? '', iface.ifaceName));
+
+  // A container/pod address can otherwise be selected as the primary IP when a
+  // host has no default-route sample. Prefer the interface chosen by the probe
+  // only if it survives the scope rules.
+  const primaryFromProbe = normalizeScopeAddress(data?.primaryIp ?? '');
+  const primaryCandidate = interfaces
+    .flatMap(iface => [
+      ...(iface.ipv4Addrs ?? []),
+      ...(iface.ipv6Addrs ?? []),
+    ].map(address => ({ address, ifaceName: iface.ifaceName })))
+    .find(item => isServerInterfaceAddress(item.address, item.ifaceName));
+  const primaryIp = isServerInterfaceAddress(primaryFromProbe)
+    ? primaryFromProbe
+    : normalizeScopeAddress(primaryCandidate?.address ?? '');
+
+  const serverAddresses = interfaces.flatMap(iface => [
+    ...(iface.ipv4Addrs ?? []),
+    ...(iface.ipv6Addrs ?? []),
+  ].map(address => ({ address, ifaceName: iface.ifaceName })));
+
+  return {
+    ...data,
+    primaryIp,
+    interfaces,
+    ports: (data?.ports ?? []).filter(port =>
+      isListenerState(port.state)
+      && isExternallyBoundListenAddress(port.listenAddr, serverAddresses)),
+    peers: (data?.peers ?? []).filter(peer =>
+      isServerPeerAddress(peer?.localAddr ?? '')
+      && isServerPeerAddress(peer?.remoteAddr ?? '')),
+  };
+}
+
 export function mergePorts(
   existing: readonly NetworkPort[],
   detected: readonly DetectedPort[],
@@ -715,8 +766,10 @@ export function mergePorts(
  * Stable identity for a server seen as a socket peer but not explicitly probed.
  * The node is display-only: NexTerm never connects to it and never invents ports.
  */
-export function observedNodeId(ip: string): string {
-  return `observed:${normalizeAddr(ip ?? '')}`;
+export function observedNodeId(ip: string, groupPath = SERVER_GROUP_ROOT): string {
+  const group = groupPath?.trim() || SERVER_GROUP_ROOT;
+  const prefix = group === SERVER_GROUP_ROOT ? '' : `${encodeURIComponent(group)}:`;
+  return `observed:${prefix}${normalizeAddr(ip ?? '')}`;
 }
 
 export function isObservedNode(node: Pick<NetworkNode, 'connectionId'>): boolean {
@@ -750,11 +803,13 @@ function listenerMatches(
     );
 }
 
-export function makeObservedNode(ip: string, now: number): NetworkNode {
+export function makeObservedNode(ip: string, now: number, groupPath = SERVER_GROUP_ROOT): NetworkNode {
   const normalized = normalizeAddr(ip ?? '');
+  const group = groupPath?.trim() || SERVER_GROUP_ROOT;
   return {
-    id: observedNodeId(normalized),
-    connectionId: observedNodeId(normalized),
+    id: observedNodeId(normalized, group),
+    connectionId: observedNodeId(normalized, group),
+    groupPath: group,
     hostname: normalized,
     osName: '',
     primaryIp: normalized,
@@ -785,14 +840,30 @@ export function inferObservedNodes(params: {
   now: number;
 }): NetworkNode[] {
   const { nodeId, peers, knownNodes, now } = params;
-  const byId = new Map((knownNodes ?? []).map((node) => [node.id, node]));
+  const currentNode = (knownNodes ?? []).find(node => node.id === nodeId);
+  const group = currentNode?.groupPath?.trim() || SERVER_GROUP_ROOT;
+  const byId = new Map((knownNodes ?? [])
+    .filter(node => (node.groupPath?.trim() || SERVER_GROUP_ROOT) === group)
+    .map((node) => [node.id, node]));
   for (const peer of peers ?? []) {
     const ip = normalizeAddr(peer?.remoteAddr ?? '');
-    if (!ip || ip === '0.0.0.0' || ip === '::') continue;
-    const id = observedNodeId(ip);
-    if (!byId.has(id)) byId.set(id, makeObservedNode(ip, now));
+    if (!isServerPeerAddress(ip) || isUnspecified(ip)) continue;
+    const id = observedNodeId(ip, group);
+    if (!byId.has(id)) byId.set(id, makeObservedNode(ip, now, group));
   }
   return [...byId.values()].filter((node) => node.id !== nodeId);
+}
+
+function isUnspecified(ip: string): boolean {
+  return ip === '0.0.0.0' || ip === '::';
+}
+
+function groupOf(nodes: readonly NetworkNode[], nodeId: string): string {
+  return nodes.find(node => node.id === nodeId)?.groupPath?.trim() || SERVER_GROUP_ROOT;
+}
+
+function scopedAddressKey(groupPath: string, ip: string): string {
+  return `${groupPath || SERVER_GROUP_ROOT}\u0000${normalizeAddr(ip)}`;
 }
 
 export function linkNaturalKey(item: {
@@ -814,6 +885,10 @@ export function buildInterfaceIpIndex(
   nodes: readonly NetworkNode[],
   allInterfaces: readonly NetworkInterface[],
 ): Map<string, string> {
+  const groupById = new Map((nodes ?? []).map(node => [
+    node.id,
+    node.groupPath?.trim() || SERVER_GROUP_ROOT,
+  ]));
   const known = new Set((nodes ?? []).map((n) => n.id));
   const owners = new Map<string, Set<string>>();
   const index = new Map<string, string>();
@@ -821,25 +896,27 @@ export function buildInterfaceIpIndex(
     if (!known.has(iface.nodeId)) continue;
     for (const addr of [...(iface.ipv4Addrs ?? []), ...(iface.ipv6Addrs ?? [])]) {
       const ip = normalizeAddr(addr);
-      if (!ip) continue;
-      const set = owners.get(ip) ?? new Set<string>();
+      if (!ip || !isServerPeerAddress(ip)) continue;
+      const key = scopedAddressKey(groupById.get(iface.nodeId) ?? SERVER_GROUP_ROOT, ip);
+      const set = owners.get(key) ?? new Set<string>();
       set.add(iface.nodeId);
-      owners.set(ip, set);
-      if (set.size === 1) index.set(ip, iface.nodeId);
-      else index.delete(ip);
+      owners.set(key, set);
+      if (set.size === 1) index.set(key, iface.nodeId);
+      else index.delete(key);
     }
   }
   // Interface rows are authoritative when a node has multiple addresses; its
   // primary IP is still enough to resolve a display-only observed node.
   for (const node of nodes ?? []) {
     const ip = normalizeAddr(node.primaryIp ?? '');
-    if (!ip) continue;
-    const owner = owners.get(ip);
+    if (!ip || !isServerPeerAddress(ip)) continue;
+    const key = scopedAddressKey(groupById.get(node.id) ?? SERVER_GROUP_ROOT, ip);
+    const owner = owners.get(key);
     if (!owner) {
-      owners.set(ip, new Set([node.id]));
-      index.set(ip, node.id);
+      owners.set(key, new Set([node.id]));
+      index.set(key, node.id);
     } else if (owner.size === 1) {
-      index.set(ip, [...owner][0] ?? node.id);
+      index.set(key, [...owner][0] ?? node.id);
     }
   }
   return index;
@@ -882,6 +959,9 @@ export function inferLinksFromPeers(params: {
   let added = 0;
   let confirmed = 0;
   const handled = new Set<string>();
+  const group = groupOf(params.knownNodes ?? [], nodeId);
+  const addressOwner = (ip: string): string | undefined =>
+    interfacesIndex.get(scopedAddressKey(group, ip));
   const listeningPorts = (nodePorts ?? []).filter(
     (port) => port.missingSince === null && isListenerState(port.state),
   );
@@ -890,7 +970,8 @@ export function inferLinksFromPeers(params: {
     if (!remoteAddr) continue;
 
     const ip = normalizeAddr(remoteAddr);
-    const targetNodeId = interfacesIndex.get(ip) ?? observedNodeId(ip);
+    if (!isServerPeerAddress(ip) || isUnspecified(ip)) continue;
+    const targetNodeId = addressOwner(ip) ?? observedNodeId(ip, group);
     // Self-links are not topology edges. Unknown peers become observed nodes;
     // they are never probed and never receive synthetic port data.
     if (targetNodeId === nodeId) continue;
@@ -1011,10 +1092,14 @@ export function inferPortLinksFromPeers(params: {
   nodePorts: NetworkPort[];
   allPorts?: NetworkPort[];
   interfacesIndex: Map<string, string>;
+  knownNodes?: NetworkNode[];
   existingPortLinks: NetworkPortLink[];
   now: number;
 }): { links: NetworkPortLink[]; added: number; confirmed: number } {
   const { nodeId, peers, nodePorts, allPorts = nodePorts, interfacesIndex, existingPortLinks, now } = params;
+  const group = groupOf(params.knownNodes ?? [], nodeId);
+  const addressOwner = (ip: string): string | undefined =>
+    interfacesIndex.get(scopedAddressKey(group, ip));
 
   const portIdForNode = (owner: string | null, protocol: string, port: number) => {
     if (!owner) return null;
@@ -1050,11 +1135,11 @@ export function inferPortLinksFromPeers(params: {
     if (!ip) continue;
     const targetPort = peer.remotePort ?? null;
     if (targetPort == null) continue;
-    if (interfacesIndex.get(ip) === nodeId || ip === '127.0.0.1' || ip === '::1') {
+    if (addressOwner(ip) === nodeId || !isServerPeerAddress(ip) || isUnspecified(ip)) {
       continue; // loopback / own interface
     }
 
-    const peerNodeId = interfacesIndex.get(ip) ?? observedNodeId(ip);
+    const peerNodeId = addressOwner(ip) ?? observedNodeId(ip, group);
     const localListener = listeningPorts.find((port) =>
       listenerMatches(port, protocol, localPort, normalizeAddr(peer.localAddr ?? '')));
     const normalizedProcess = (peer.processName ?? '').trim().toLowerCase();
@@ -1157,10 +1242,14 @@ export function resolvePortLinkTargets(params: {
   nodeId: string;
   nodePorts: NetworkPort[];
   interfacesIndex: Map<string, string>;
+  knownNodes?: NetworkNode[];
   existingPortLinks: NetworkPortLink[];
   now: number;
 }): { links: NetworkPortLink[]; resolved: number } {
   const { nodeId, nodePorts, interfacesIndex, existingPortLinks, now } = params;
+  const group = groupOf(params.knownNodes ?? [], nodeId);
+  const addressOwner = (ip: string): string | undefined =>
+    interfacesIndex.get(scopedAddressKey(group, ip));
 
   const resolveListenerId = (
     protocol: string,
@@ -1187,7 +1276,7 @@ export function resolvePortLinkTargets(params: {
   const links = (existingPortLinks ?? []).map((l): NetworkPortLink => {
     let next = l;
 
-    if (next.targetIp && interfacesIndex.get(next.targetIp) === nodeId) {
+    if (next.targetIp && isServerPeerAddress(next.targetIp) && addressOwner(next.targetIp) === nodeId) {
       next = {
         ...next,
         targetNodeId: nodeId,
@@ -1205,7 +1294,7 @@ export function resolvePortLinkTargets(params: {
       }
     }
 
-    if (next.sourceIp && interfacesIndex.get(next.sourceIp) === nodeId) {
+    if (next.sourceIp && isServerPeerAddress(next.sourceIp) && addressOwner(next.sourceIp) === nodeId) {
       next = {
         ...next,
         sourceNodeId: nodeId,

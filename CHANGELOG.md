@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### 修复
+
+- **网络拓扑只保留服务器侧信息**：回环地址（如 `127.0.0.1`、`::1`）、容器 / Docker 网桥、Kubernetes Pod / Service 地址不再作为服务器节点、端口监听地址或拓扑对端展示；服务器主 IP 优先取真实出口网卡，不再落入容器地址。
+- **端口视图收敛到对外开放端口**：仅保留通配监听或绑定在真实服务器网卡上的监听端口，本机回环服务和容器内监听不再进入网络面板；历史残留行会在界面中隐藏，人工备注仍保留在本地数据中。
+- **相同 IP 在同一分组内识别为同一服务器**：再次探测或使用另一个连接别名探测同一地址时复用既有节点，不会生成重复服务器资产；已观测的未知节点在被显式探测后仍原位升级，拓扑连线不丢失。
+- **拓扑按服务器分组隔离**：`net_nodes` 新增分组路径并按连接所在目录写入；接口地址归属、未知对端节点和连线推断都限定在同一分组内，不同分组即使包含相同 IP 也不会互相合并或连边。全局拓扑新增“隔离分组”选择器，避免跨分组混排。
+
 ## [2.17.2] - 2026-09-07
 
 ### 安全

@@ -317,6 +317,26 @@ describe('applyProbeResult', () => {
     });
   });
 
+  it('uses the same server IP inside one group as the same server asset', () => {
+    const first = applyProbeResult({
+      connectionId: 'conn-a',
+      connectionName: 'A alias',
+      result: probeResult({ data: { ...probeResult().data, primaryIp: '10.0.0.5' } }),
+      probeAt: 1_000,
+    });
+    const second = applyProbeResult({
+      connectionId: 'conn-b',
+      connectionName: 'B alias',
+      result: probeResult({ data: { ...probeResult().data, primaryIp: '10.0.0.5' } }),
+      probeAt: 2_000,
+    });
+
+    expect(second.nodeId).toBe(first.nodeId);
+    expect(listNodes()).toHaveLength(1);
+    expect(getNodeByConnectionId('conn-b')?.id).toBe(first.nodeId);
+    expect(getNodeByConnectionId('conn-a')).toBeUndefined();
+  });
+
   it('only re-confirms an existing link on a repeat probe', () => {
     const data = probeResult().data;
     const peerData = {

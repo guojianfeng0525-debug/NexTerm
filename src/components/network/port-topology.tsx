@@ -17,7 +17,9 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Textarea } from '@/components/ui/textarea';
 import { TopologyGraph, nodeLabel } from './topology-graph';
 import { PortLinkEditorDialog } from './port-link-editor-dialog';
+import { isServerPeerAddress } from '@/lib/network/address-scope';
 import {
+  getNode,
   getNodeFirewall,
   getNodePorts,
   getPortLinksForPort,
@@ -63,10 +65,17 @@ const FIREWALL_APPLICABILITY_KEYS = {
   notApplicable: 'network.portTopology.firewallNotApplicable',
 } as const;
 
-function makeNode(id: string, label: string, subtitle: string, nodeType: string): NetworkNode {
+function makeNode(
+  id: string,
+  label: string,
+  subtitle: string,
+  nodeType: string,
+  groupPath: string,
+): NetworkNode {
   return {
     id,
     connectionId: id,
+    groupPath,
     hostname: label,
     osName: '',
     primaryIp: subtitle,
@@ -160,11 +169,14 @@ export function PortTopologyView({ nodeId, portId, host, onBack, onOpenPort }: P
     [focused, nodeId, portId, storeVersion],
   );
   const nodes = useMemo(() => listNodes(), [storeVersion]);
+  const group = useMemo(() => getNode(nodeId)?.groupPath || '', [nodeId, storeVersion]);
+  const nodesInGroup = useMemo(() => nodes.filter(node => (node.groupPath || '') === group), [group, nodes]);
   const nodesById = useMemo(() => new Map(nodes.map((node) => [node.id, node])), [nodes]);
   const portsByNode = useMemo(() => {
     const map: Record<string, NetworkPort[]> = {};
+    const ids = new Set(nodesInGroup.map(node => node.id));
     for (const port of listPorts()) {
-      map[port.nodeId] = [...(map[port.nodeId] ?? []), port];
+      if (ids.has(port.nodeId)) map[port.nodeId] = [...(map[port.nodeId] ?? []), port];
     }
     return map;
   }, [storeVersion]);
@@ -177,20 +189,30 @@ export function PortTopologyView({ nodeId, portId, host, onBack, onOpenPort }: P
     },
     [focused, nodeId, storeVersion],
   );
+  const scopedInbound = useMemo(
+    () => inbound.filter(link => link.sourceIp == null || isServerPeerAddress(link.sourceIp)),
+    [inbound],
+  );
+
+  const scopedOutbound = useMemo(
+    () => outbound.filter(link => link.targetIp == null || isServerPeerAddress(link.targetIp)),
+    [outbound],
+  );
+
   const relatedServers = useMemo(() => {
     const ids = new Set<string>();
-    for (const link of [...inbound, ...outbound]) {
+    for (const link of [...scopedInbound, ...scopedOutbound]) {
       if (link.sourceNodeId && link.sourceNodeId !== nodeId) ids.add(link.sourceNodeId);
       if (link.targetNodeId && link.targetNodeId !== nodeId) ids.add(link.targetNodeId);
     }
     return ids.size;
-  }, [inbound, outbound, nodeId]);
+  }, [scopedInbound, scopedOutbound, nodeId]);
 
   const allLinks = useMemo(() => {
-    if (direction === 'inbound') return inbound;
-    if (direction === 'outbound') return outbound;
-    return [...inbound, ...outbound];
-  }, [direction, inbound, outbound]);
+    if (direction === 'inbound') return scopedInbound;
+    if (direction === 'outbound') return scopedOutbound;
+    return [...scopedInbound, ...scopedOutbound];
+  }, [direction, scopedInbound, scopedOutbound]);
 
   const endpointOf = useMemo(() => {
     const describe = (link: NetworkPortLink, source: boolean) => {
@@ -248,6 +270,7 @@ export function PortTopologyView({ nodeId, portId, host, onBack, onOpenPort }: P
       `${focused.port}/${focused.protocol}`,
       `${host || focused.listenAddr} · ${focused.listenAddr}`,
       'port',
+      group,
     );
     const syntheticNodes = [central];
     const syntheticLinks: NetworkLink[] = [];
@@ -256,7 +279,7 @@ export function PortTopologyView({ nodeId, portId, host, onBack, onOpenPort }: P
       const { isOutbound, peer } = endpointOf(link);
       const peerKey = `peer:${peer.nodeId ?? peer.ip}:${peer.protocol}:${peer.portId ?? 'server'}`;
       if (!syntheticNodes.some((node) => node.id === peerKey)) {
-        syntheticNodes.push(makeNode(peerKey, peer.label, peer.subtitle, peer.type));
+        syntheticNodes.push(makeNode(peerKey, peer.label, peer.subtitle, peer.type, group));
       }
       syntheticLinks.push(
         makeLink(
@@ -282,7 +305,7 @@ export function PortTopologyView({ nodeId, portId, host, onBack, onOpenPort }: P
       }
     }
     return { graphNodes: syntheticNodes, graphLinks: syntheticLinks };
-  }, [focused, filteredLinks, endpointOf, host, portId]);
+  }, [focused, filteredLinks, endpointOf, group, host, portId]);
 
   const openPort = (nodeId: string, portId: string) => {
     onOpenPort?.(nodeId, portId);
@@ -318,8 +341,8 @@ export function PortTopologyView({ nodeId, portId, host, onBack, onOpenPort }: P
     { label: t('network.portTopology.purpose'), value: focused.purpose || t('network.common.na') },
     { label: t('network.portTopology.firewallStatus'), value: t(FIREWALL_APPLICABILITY_KEYS[firewallApplicability]) },
     { label: t('network.portTopology.relatedServers'), value: relatedServers },
-    { label: t('network.portTopology.inboundCount'), value: inbound.length },
-    { label: t('network.portTopology.outboundCount'), value: outbound.length },
+    { label: t('network.portTopology.inboundCount'), value: scopedInbound.length },
+    { label: t('network.portTopology.outboundCount'), value: scopedOutbound.length },
     { label: t('network.portTopology.lastProbe'), value: formatTimestamp(focused.lastSeenAt) },
   ];
 
@@ -512,7 +535,7 @@ export function PortTopologyView({ nodeId, portId, host, onBack, onOpenPort }: P
         link={editingLink}
         focusNodeId={nodeId}
         focusPort={focused}
-        nodes={nodes}
+        nodes={nodesInGroup}
         portsByNode={portsByNode}
         onSave={upsertPortLink}
         onDelete={removePortLink}

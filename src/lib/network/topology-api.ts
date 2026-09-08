@@ -12,6 +12,7 @@
  * UI decides how to surface it. Failures are never swallowed here.
  */
 import { invoke } from '@tauri-apps/api/core';
+import { ConnectionStorageManager } from '../connection-storage';
 import type { ApplyProbeSummary, ProbeResult } from './topology-types';
 import {
   buildInterfaceIpIndex,
@@ -28,6 +29,7 @@ import {
   mergeRoutes,
   normalizeTopologyAddress,
   resolvePortLinkTargets,
+  sanitizeProbeData,
 } from './topology-merge';
 import {
   getNodeByConnectionId,
@@ -102,8 +104,12 @@ export interface ApplyProbeInput {
  */
 export function applyProbeResult(input: ApplyProbeInput): ApplyProbeSummary {
   const probeAt = input.probeAt ?? Date.now();
-  const data = input.result?.data;
+  const data = sanitizeProbeData(input.result?.data ?? {
+    hostname: '', osName: '', primaryIp: '', interfaces: [], routes: [],
+    firewall: null, firewallRules: [], ports: [], peers: [],
+  });
   const status = deriveProbeStatus(input.result);
+  const groupPath = ConnectionStorageManager.getConnection(input.connectionId)?.folder || 'All Connections';
   const detectedAddresses = new Set<string>();
   const interfaceAddresses = (data?.interfaces ?? []).flatMap((item) => [
     ...(item.ipv4Addrs ?? []),
@@ -114,16 +120,42 @@ export function applyProbeResult(input: ApplyProbeInput): ApplyProbeSummary {
     if (normalized) detectedAddresses.add(normalized);
   }
   const observedCandidate = data
-    ? listNodes().find((node) => isObservedNode(node) && detectedAddresses.has(normalizeTopologyAddress(node.primaryIp)))
+    ? listNodes().find((node) => (
+        isObservedNode(node)
+        && (node.groupPath?.trim() || 'All Connections') === groupPath
+        && detectedAddresses.has(normalizeTopologyAddress(node.primaryIp))
+      ))
+    : undefined;
+  const existingByConnection = getNodeByConnectionId(input.connectionId);
+  // Within one isolation group, an address is the asset identity. This merges
+  // duplicate saved connections to the same server and promotes an observed
+  // endpoint instead of creating a second server.
+  const existingByIp = data
+    ? listNodes().find((node) => (
+        node.id !== observedCandidate?.id
+        && (node.groupPath?.trim() || 'All Connections') === groupPath
+        && (
+          detectedAddresses.has(normalizeTopologyAddress(node.primaryIp))
+          || getNodeInterfaces(node.id).some(iface => [
+            ...(iface.ipv4Addrs ?? []),
+            ...(iface.ipv6Addrs ?? []),
+          ].some(addr => detectedAddresses.has(normalizeTopologyAddress(addr))))
+        )
+      ))
     : undefined;
 
   const node = mergeNode(
-    getNodeByConnectionId(input.connectionId) ?? observedCandidate,
+    existingByConnection ?? observedCandidate ?? existingByIp,
     data,
     input.connectionId,
     probeAt,
     probeAt,
-    { status, error: input.result?.error ?? null, initialDisplayName: input.connectionName ?? '' },
+    {
+      status,
+      error: input.result?.error ?? null,
+      initialDisplayName: input.connectionName ?? '',
+      groupPath,
+    },
   );
   upsertNode(node);
   const nodeId = node.id;
@@ -187,6 +219,7 @@ export function applyProbeResult(input: ApplyProbeInput): ApplyProbeSummary {
     nodePorts,
     allPorts: listPorts(),
     interfacesIndex,
+    knownNodes,
     existingPortLinks: listPortLinks(),
     now: probeAt,
   });
@@ -198,6 +231,7 @@ export function applyProbeResult(input: ApplyProbeInput): ApplyProbeSummary {
     nodeId,
     nodePorts,
     interfacesIndex,
+    knownNodes,
     existingPortLinks: listPortLinks(),
     now: probeAt,
   });

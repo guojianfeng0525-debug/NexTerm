@@ -1879,7 +1879,8 @@ pub fn parse_proc_sockets(raw: &str) -> (Vec<DetectedPort>, Vec<DetectedPeer>, P
             continue;
         };
         let mut parts = rest.split('\t');
-        let (Some(inode), Some(pid), Some(name)) = (parts.next(), parts.next(), parts.next()) else {
+        let (Some(inode), Some(pid), Some(name)) = (parts.next(), parts.next(), parts.next())
+        else {
             continue;
         };
         let Ok(pid) = pid.trim().parse::<u32>() else {
@@ -1919,10 +1920,12 @@ pub fn parse_proc_sockets(raw: &str) -> (Vec<DetectedPort>, Vec<DetectedPeer>, P
         let Some(local_port) = parse_proc_port(tokens[1].rsplit(':').next().unwrap_or("")) else {
             continue;
         };
-        let remote_port = parse_proc_port(tokens[2].rsplit(':').next().unwrap_or(""))
-            .filter(|port| *port != 0);
+        let remote_port =
+            parse_proc_port(tokens[2].rsplit(':').next().unwrap_or("")).filter(|port| *port != 0);
         let inode = tokens[9].to_string();
-        let dedup = format!("{proto}|{local_addr}|{local_port}|{remote_addr}|{remote_port:?}|{state}|{inode}");
+        let dedup = format!(
+            "{proto}|{local_addr}|{local_port}|{remote_addr}|{remote_port:?}|{state}|{inode}"
+        );
         if !seen.insert(dedup) {
             continue;
         }
@@ -1953,9 +1956,7 @@ pub fn parse_proc_sockets(raw: &str) -> (Vec<DetectedPort>, Vec<DetectedPeer>, P
             });
         }
 
-        let has_remote = !remote_addr.is_empty()
-            && remote_addr != "0.0.0.0"
-            && remote_addr != "::";
+        let has_remote = !remote_addr.is_empty() && remote_addr != "0.0.0.0" && remote_addr != "::";
         if has_remote && remote_port.is_some() && !(proto == "tcp" && state == "LISTEN") {
             sockets.peers.push(DetectedPeer {
                 local_addr,
@@ -1999,8 +2000,43 @@ pub fn build_probe_script(os: &OsInfo) -> String {
     os.topology_probe_cmd()
 }
 
+/// Container/CNI interfaces and their pod/service addresses describe the
+/// workload namespace, not the physical/virtual server exposed to users.
+fn is_server_facing_interface(iface: &DetectedInterface) -> bool {
+    if iface.is_loopback || iface.ipv4_addrs.is_empty() {
+        return false;
+    }
+    let name = iface.iface_name.to_ascii_lowercase();
+    let infrastructure = name == "tunl0"
+        || name == "kube-ipvs0"
+        || name.starts_with("docker")
+        || name.starts_with("br-")
+        || name.starts_with("veth")
+        || name.starts_with("cni")
+        || name.starts_with("cali")
+        || name.starts_with("flannel")
+        || name.starts_with("cilium")
+        || name.starts_with("weave")
+        || name.starts_with("podman")
+        || name.starts_with("virbr");
+    !infrastructure
+}
+
+fn is_container_primary_ip(addr: &str) -> bool {
+    let Some(ip) = strip_cidr(addr).parse::<std::net::Ipv4Addr>().ok() else {
+        return true; // IPv6 link/unique-local candidates are not a primary server IP.
+    };
+    let o = ip.octets();
+    o[0] == 127
+        || (o[0] == 169 && o[1] == 254)
+        || (o[0] == 172 && (16..=31).contains(&o[1]))
+        || (o[0] == 10 && matches!(o[1], 42 | 43 | 244))
+        || (o[0] == 10 && (96..=111).contains(&o[1]))
+        || (o[0] == 100 && (64..=127).contains(&o[1]))
+}
+
 /// Pick the node's primary IPv4: the address on the interface that carries the
-/// default route, falling back to the first non-loopback IPv4.
+/// default route, falling back to the first server-facing IPv4.
 pub fn pick_primary_ip(routes: &[DetectedRoute], interfaces: &[DetectedInterface]) -> String {
     let default_iface = routes
         .iter()
@@ -2010,16 +2046,24 @@ pub fn pick_primary_ip(routes: &[DetectedRoute], interfaces: &[DetectedInterface
 
     if let Some(name) = default_iface {
         for iface in interfaces {
-            if iface.iface_name == name && !iface.is_loopback {
-                if let Some(ip) = iface.ipv4_addrs.first() {
+            if iface.iface_name == name && is_server_facing_interface(iface) {
+                if let Some(ip) = iface
+                    .ipv4_addrs
+                    .iter()
+                    .find(|ip| !is_container_primary_ip(ip))
+                {
                     return strip_cidr(ip);
                 }
             }
         }
     }
     for iface in interfaces {
-        if !iface.is_loopback {
-            if let Some(ip) = iface.ipv4_addrs.first() {
+        if is_server_facing_interface(iface) {
+            if let Some(ip) = iface
+                .ipv4_addrs
+                .iter()
+                .find(|ip| !is_container_primary_ip(ip))
+            {
                 return strip_cidr(ip);
             }
         }
@@ -2928,9 +2972,35 @@ NT_PROC_FILE\ttcp6\t/proc/net/tcp6
     }
 
     #[test]
-    fn pick_primary_ip_falls_back_to_first_non_loopback() {
+    fn pick_primary_ip_falls_back_to_first_server_facing_address() {
+        let interfaces = vec![
+            DetectedInterface {
+                iface_name: "docker0".to_string(),
+                mac: String::new(),
+                state: "UP".to_string(),
+                mtu: None,
+                is_loopback: false,
+                ipv4_addrs: vec!["172.17.0.1/16".to_string()],
+                ipv6_addrs: vec![],
+            },
+            DetectedInterface {
+                iface_name: "eth5".to_string(),
+                mac: String::new(),
+                state: "UP".to_string(),
+                mtu: None,
+                is_loopback: false,
+                ipv4_addrs: vec!["192.168.50.9/24".to_string()],
+                ipv6_addrs: vec![],
+            },
+        ];
+        assert_eq!(pick_primary_ip(&[], &interfaces), "192.168.50.9");
+        assert_eq!(pick_primary_ip(&[], &[]), "");
+    }
+
+    #[test]
+    fn pick_primary_ip_never_uses_container_address() {
         let interfaces = vec![DetectedInterface {
-            iface_name: "eth5".to_string(),
+            iface_name: "docker0".to_string(),
             mac: String::new(),
             state: "UP".to_string(),
             mtu: None,
@@ -2938,7 +3008,7 @@ NT_PROC_FILE\ttcp6\t/proc/net/tcp6
             ipv4_addrs: vec!["172.16.0.9/16".to_string()],
             ipv6_addrs: vec![],
         }];
-        assert_eq!(pick_primary_ip(&[], &interfaces), "172.16.0.9");
+        assert_eq!(pick_primary_ip(&[], &interfaces), "");
         assert_eq!(pick_primary_ip(&[], &[]), "");
     }
 
