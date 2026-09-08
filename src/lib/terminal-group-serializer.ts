@@ -42,16 +42,15 @@ export function deserialize(json: string): TerminalGroupState | null {
 }
 
 /**
- * saveState — persist state into the normalized workspace tables (one row per
- * tab / group / grid node) when hydrated, else keep it in the in-memory cache.
- * Editor tabs are ephemeral and excluded from persistence.
+ * saveState — stage the latest in-memory state only. The normalized SQLite
+ * tables are intentionally NOT rewritten on every reducer action: a workspace
+ * snapshot is meaningful only when the app closes, and live persistence makes
+ * stale partial layouts survive a crash. `flushWorkspace` is called from the
+ * window close-request handler after staging.
  */
 export function saveState(state: TerminalGroupState): void {
   const filtered = stripEditorTabs(state);
   cachedState = filtered;
-  if (hydrated) {
-    void queueWorkspacePersist(filtered);
-  }
 }
 
 /* Serializes the clear+rewrite cycles: concurrent persistWorkspace runs could
@@ -60,12 +59,25 @@ export function saveState(state: TerminalGroupState): void {
 let workspacePersistQueue: Promise<void> = Promise.resolve();
 
 function queueWorkspacePersist(state: TerminalGroupState): Promise<void> {
-  workspacePersistQueue = workspacePersistQueue
+  const run = workspacePersistQueue
     .then(() => persistWorkspace(state))
     .catch((error: unknown) => {
       console.error('[workspace] persistence failed:', error);
+      throw error;
     });
+  // Keep subsequent close-time writes queued even if this write failed.
+  workspacePersistQueue = run.catch(() => undefined);
   return workspacePersistQueue;
+}
+
+/**
+ * Write the staged workspace snapshot once and wait for the SQLite replace to
+ * finish. Called only from the app close path; failures propagate so the
+ * caller can decide whether it is safe to destroy the window.
+ */
+export async function flushWorkspace(): Promise<void> {
+  if (!hydrated || !cachedState) return;
+  await queueWorkspacePersist(cachedState);
 }
 
 function stripEditorTabs(state: TerminalGroupState): TerminalGroupState {

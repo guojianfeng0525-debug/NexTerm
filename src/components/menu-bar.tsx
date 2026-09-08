@@ -40,14 +40,7 @@ import {
   PanelBottomOpen,
   Maximize2,
   LayoutGrid,
-  AppWindow,
-  KeyRound,
-  ArrowLeftRight,
-  Server,
-  StickyNote,
-  Network,
 } from 'lucide-react';
-import type { ToolboxViewId } from '@/lib/toolbox/toolbox-types';
 
 interface MenuBarProps {
   onNewConnection?: () => void;
@@ -66,7 +59,6 @@ interface MenuBarProps {
   onToggleFullscreen?: () => void;
   onOpenSettings?: () => void;
   onOpenSFTP?: () => void;
-  onOpenTool?: (view: ToolboxViewId) => void;
   onNewTab?: () => void;
   onCloneTab?: () => void;
   onNextTab?: () => void;
@@ -107,7 +99,6 @@ export function MenuBar({
   onToggleFullscreen: _onToggleFullscreen,
   onOpenSettings,
   onOpenSFTP: _onOpenSFTP,
-  onOpenTool,
   onNewTab,
   onCloneTab,
   onNextTab,
@@ -235,7 +226,7 @@ export function MenuBar({
             {t('menuBar.options')}
           </DropdownMenuItem>
           <DropdownMenuSeparator />
-          <DropdownMenuItem>
+          <DropdownMenuItem onClick={() => void getCurrentWindow().close()}>
             <X className="mr-2 h-4 w-4" />
             {t('menuBar.exit')}
             <DropdownMenuShortcut>{formatShortcut('Ctrl+Q')}</DropdownMenuShortcut>
@@ -321,79 +312,6 @@ export function MenuBar({
             <RefreshCw className="mr-2 h-4 w-4" />
             {t('menuBar.clearScreen')}
             <DropdownMenuShortcut>{formatShortcut('Ctrl+L')}</DropdownMenuShortcut>
-          </DropdownMenuItem>
-        </DropdownMenuContent>
-      </DropdownMenu>
-
-      {/* ── Toolbox menus — one top-level menu per tool ── */}
-      <DropdownMenu>
-        <DropdownMenuTrigger asChild>
-          <Button variant="ghost" size="sm">{t('toolbox.apps.title')}</Button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="start">
-          <DropdownMenuItem onClick={() => onOpenTool?.('apps')}>
-            <AppWindow className="mr-2 h-4 w-4" />
-            {t('toolbox.apps.open')}
-          </DropdownMenuItem>
-        </DropdownMenuContent>
-      </DropdownMenu>
-
-      <DropdownMenu>
-        <DropdownMenuTrigger asChild>
-          <Button variant="ghost" size="sm">{t('toolbox.vault.title')}</Button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="start">
-          <DropdownMenuItem onClick={() => onOpenTool?.('vault')}>
-            <KeyRound className="mr-2 h-4 w-4" />
-            {t('toolbox.vault.open')}
-          </DropdownMenuItem>
-        </DropdownMenuContent>
-      </DropdownMenu>
-
-      <DropdownMenu>
-        <DropdownMenuTrigger asChild>
-          <Button variant="ghost" size="sm">{t('toolbox.tunnels.title')}</Button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="start">
-          <DropdownMenuItem onClick={() => onOpenTool?.('tunnels')}>
-            <ArrowLeftRight className="mr-2 h-4 w-4" />
-            {t('toolbox.tunnels.open')}
-          </DropdownMenuItem>
-        </DropdownMenuContent>
-      </DropdownMenu>
-
-      <DropdownMenu>
-        <DropdownMenuTrigger asChild>
-          <Button variant="ghost" size="sm">{t('toolbox.services.title')}</Button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="start">
-          <DropdownMenuItem onClick={() => onOpenTool?.('services')}>
-            <Server className="mr-2 h-4 w-4" />
-            {t('toolbox.services.open')}
-          </DropdownMenuItem>
-        </DropdownMenuContent>
-      </DropdownMenu>
-
-      <DropdownMenu>
-        <DropdownMenuTrigger asChild>
-          <Button variant="ghost" size="sm">{t('toolbox.notes.title')}</Button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="start">
-          <DropdownMenuItem onClick={() => onOpenTool?.('notes')}>
-            <StickyNote className="mr-2 h-4 w-4" />
-            {t('toolbox.notes.open')}
-          </DropdownMenuItem>
-        </DropdownMenuContent>
-      </DropdownMenu>
-
-      <DropdownMenu>
-        <DropdownMenuTrigger asChild>
-          <Button variant="ghost" size="sm">{t('toolbox.topology.title')}</Button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="start">
-          <DropdownMenuItem onClick={() => onOpenTool?.('topology')}>
-            <Network className="mr-2 h-4 w-4" />
-            {t('toolbox.topology.open')}
           </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>

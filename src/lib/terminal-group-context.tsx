@@ -1,8 +1,9 @@
 import React, { createContext, useContext, useReducer, useEffect, useRef, useMemo } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import type { TerminalGroupState, TerminalGroupAction, TerminalGroup, TerminalTab } from './terminal-group-types';
 import { terminalGroupReducer, createDefaultState } from './terminal-group-reducer';
-import { saveState, loadState } from './terminal-group-serializer';
+import { saveState, loadState, flushWorkspace } from './terminal-group-serializer';
 
 /**
  * Disconnect the backend session for a closed tab (best-effort). Terminal tabs
@@ -83,9 +84,46 @@ export function TerminalGroupProvider({ children }: { children: React.ReactNode 
   const [state, dispatch] = useReducer(terminalGroupReducer, undefined, initializeState);
 
   const isInitialMount = useRef(true);
+  const stateRef = useRef(state);
   const prevGroupCountRef = useRef(Object.keys(state.groups).length);
 
-  // Save state on every change (skip the initial mount to avoid re-saving loaded state)
+  // Keep the close-time snapshot current without touching SQLite after every
+  // UI action. SQLite is rewritten once by the close-request handler below.
+  useEffect(() => {
+    stateRef.current = state;
+    if (isInitialMount.current) {
+      isInitialMount.current = false;
+    }
+  }, [state]);
+
+  // Tauri delivers a cancellable close request, so we can persist the exact
+  // final state before destroying the window. If persistence fails, closing
+  // still wins: never trap the user in the app because of a storage error.
+  useEffect(() => {
+    const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
+    if (!isTauri) return;
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+
+    void getCurrentWindow().onCloseRequested(async (event) => {
+      event.preventDefault();
+      saveState(stateRef.current);
+      try {
+        await flushWorkspace();
+      } catch (error) {
+        console.error('[workspace] close-time persistence failed:', error);
+      }
+      if (!disposed) await getCurrentWindow().destroy();
+    }).then((dispose) => {
+      if (disposed) dispose();
+      else unlisten = dispose;
+    });
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
   useEffect(() => {
     if (isInitialMount.current) {
       isInitialMount.current = false;

@@ -5,6 +5,7 @@ import {
   deserialize,
   saveState,
   loadState,
+  flushWorkspace,
   resetWorkspaceCache,
   createDefaultState,
   STATE_VERSION,
@@ -148,7 +149,7 @@ describe('workspace SQLite persistence (save → restart → restore)', () => {
     resetWorkspaceCache();
   });
 
-  it('persists layout to the workspace tables and restores it after re-hydrate', async () => {
+  it('stages during use and persists only on an explicit close flush', async () => {
     const { hydrateWorkspace } = await import('../lib/terminal-group-serializer');
     // Unlock-time hydrate: empty store → nothing cached.
     await hydrateWorkspace();
@@ -165,7 +166,14 @@ describe('workspace SQLite persistence (save → restart → restore)', () => {
       nextGroupId: 3,
     };
     saveState(state);
-    await new Promise(r => setTimeout(r, 10));
+
+    // Live reducer updates must not make SQLite look like a completed session.
+    expect(ipc.DB.workspace_meta?.length ?? 0).toBe(0);
+    expect(ipc.DB.workspace_groups?.length ?? 0).toBe(0);
+    expect(ipc.DB.workspace_tabs?.length ?? 0).toBe(0);
+
+    // This is the exact operation invoked by the window close handler.
+    await flushWorkspace();
 
     // The normalized tables now hold the rows.
     expect(ipc.DB.workspace_meta?.length ?? 0).toBeGreaterThan(0);
@@ -178,7 +186,7 @@ describe('workspace SQLite persistence (save → restart → restore)', () => {
     expect(loadState()).toEqual(state);
   });
 
-  it('drops editor tabs from persistence (ephemeral, never restored)', async () => {
+  it('drops editor tabs from the close snapshot (ephemeral, never restored)', async () => {
     const { hydrateWorkspace } = await import('../lib/terminal-group-serializer');
     await hydrateWorkspace();
 
@@ -199,7 +207,7 @@ describe('workspace SQLite persistence (save → restart → restore)', () => {
       nextGroupId: 2,
     };
     saveState(state);
-    await new Promise(r => setTimeout(r, 10));
+    await flushWorkspace();
 
     // Only the terminal tab survives.
     expect(ipc.DB.workspace_tabs?.length ?? 0).toBe(1);

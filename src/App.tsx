@@ -1772,7 +1772,6 @@ function AppContent() {
         onFindPrevious={() => runActiveTerminalCommand('find-previous')}
         onClearScreen={() => runActiveTerminalCommand('clear-screen')}
         onOpenSettings={handleOpenSettings}
-        onOpenTool={handleOpenTool}
         closeConnectionShortcutLabel={keyboardShortcutSettings.closeTab}
         nextTabShortcutLabel={keyboardShortcutSettings.nextTab}
         previousTabShortcutLabel={keyboardShortcutSettings.prevTab}
