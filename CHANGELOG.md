@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [2.18.0] - 2026-09-08
 
 ### 新增
 
@@ -22,6 +22,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### 修复
 
+- **拓扑分组跟随连接所在目录**：全局拓扑节点的分组归属以连接的当前目录为准（移动连接后拓扑即时跟随，无需重新探测）；启动时自动修复分组功能上线前写入的旧节点数据，并把通过连线发现的对端节点归入探测它的服务器所在分组。分组下拉只列出实际有节点的分组，超长路径只显示末级目录名（悬停可看完整路径）。
+- **拓扑删除确认弹窗样式修复**：右键菜单「删除节点」、批量删除、连线删除等确认弹窗此前被 Tailwind v4 不兼容的 `!important` 前缀写法拉伸到接近整窗高度（`height: fit-content` 在 WKWebView 的 inset-0 拉伸盒上不生效），现回归标准居中弹窗样式；同一样式的节点编辑 / 连线编辑 / 端口连线编辑器内的删除确认一并修复。
 - **网络拓扑只保留服务器侧信息**：回环地址（如 `127.0.0.1`、`::1`）、容器 / Docker 网桥、Kubernetes Pod / Service 地址不再作为服务器节点、端口监听地址或拓扑对端展示；服务器主 IP 优先取真实出口网卡，不再落入容器地址。
 - **端口视图收敛到对外开放端口**：仅保留通配监听或绑定在真实服务器网卡上的监听端口，本机回环服务和容器内监听不再进入网络面板；历史残留行会在界面中隐藏，人工备注仍保留在本地数据中。
 - **相同 IP 在同一分组内识别为同一服务器**：再次探测或使用另一个连接别名探测同一地址时复用既有节点，不会生成重复服务器资产；已观测的未知节点在被显式探测后仍原位升级，拓扑连线不丢失。
