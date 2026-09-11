@@ -443,7 +443,41 @@ export const PORT_LINK_AUTO_KEYS = [
 ] as const;
 export const PORT_LINK_MANUAL_KEYS = ['description', 'manualLabel', 'hidden'] as const;
 
-/* ══ probe payload (Rust ↔ TS) ════════════════════════════════════════════ */
+/**
+ * A server-to-server SERVICE dependency reported by the backend parser.
+ *
+ * This is the v2.18.1 contract: both endpoints are LISTENING ports whenever
+ * attribution allows it (`A:p1 → B:p2`, e.g. `web-01:80 → db-01:3306`).
+ * Ephemeral client ports are intermediate values only — the backend never
+ * emits them and the UI never renders them.
+ *
+ * Degradation is explicit, never fabricated:
+ * · `direction: 'outbound'` with `localPort: null` — the connecting process
+ *   owns no listener (e.g. `curl`), or the fd map is partial (non-root probes
+ *   cannot read other users' /proc/<pid>/fd).
+ * · `direction: 'inbound'` always has `localPort` (my listener) and never
+ *   carries the peer's ephemeral source port (`remotePort: null`). The full
+ *   `A:p1` attribution for the same relationship arrives when A itself is
+ *   probed (its outbound row) and is merged client-side.
+ */
+export interface DetectedServiceLink {
+  /** `inbound` = peer connected to my listener; `outbound` = I connected out. */
+  direction: 'inbound' | 'outbound';
+  /** Peer IP (normalized). */
+  remoteAddr: string;
+  /** Peer's LISTENING port; null for inbound rows. */
+  remotePort: number | null;
+  /** Local bind address of the connection (wildcard for unbound listeners). */
+  localAddr: string;
+  /** My LISTENING port; null only when attribution is unavailable. */
+  localPort: number | null;
+  protocol: NetProtocol;
+  state: string;
+  /** Live connections collapsed into this aggregated link. */
+  connections: number;
+}
+
+/** ══ probe payload (Rust ↔ TS) ════════════════════════════════════════════ */
 
 /** A remote command's raw section output plus its outcome. */
 export interface ProbeSection {
@@ -456,12 +490,14 @@ export interface ProbeSections {
   hostname: ProbeSection;
   os: ProbeSection;
   interfaces: ProbeSection;
+  /** No longer emitted by the script (dropped v2.18.1); kept for old payloads. */
   routes: ProbeSection;
   firewall: ProbeSection;
   rules: ProbeSection;
   ports: ProbeSection;
   peers: ProbeSection;
   procSockets: ProbeSection;
+  fdmap: ProbeSection;
 }
 
 export interface DetectedInterface {
@@ -550,11 +586,20 @@ export interface ProbeData {
   osName: string;
   primaryIp: string;
   interfaces: DetectedInterface[];
+  /** No longer collected (dropped v2.18.1); kept for old payloads. */
   routes: DetectedRoute[];
   firewall: DetectedFirewall | null;
   firewallRules: DetectedFirewallRule[];
+  /**
+   * False when the probe skipped the firewall sections because the client-side
+   * 10-minute TTL cache was still fresh; stored firewall rows must then be
+   * left untouched instead of marked missing.
+   */
+  firewallCollected?: boolean;
   ports: DetectedPort[];
   peers: DetectedPeer[];
+  /** Requirement-driven service dependency edges (`A:p1 → B:p2`). */
+  serviceLinks: DetectedServiceLink[];
 }
 
 /** Response of the `probe_network_topology` Tauri command. */

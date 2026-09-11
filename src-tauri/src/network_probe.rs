@@ -64,6 +64,7 @@ pub struct ProbeSections {
     pub ports: ProbeSection,
     pub peers: ProbeSection,
     pub proc_sockets: ProbeSection,
+    pub fdmap: ProbeSection,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -153,6 +154,46 @@ pub struct DetectedPeer {
     pub state: String,
 }
 
+/// A server-to-server SERVICE dependency observed on the probed server.
+///
+/// This is the v2.18.1 contract: both endpoints are LISTENING ports whenever
+/// attribution allows it — the initiator's listening port (`p1`, resolved via
+/// the fd map: connection inode → owning pid → that pid's listener) and the
+/// peer's listening port (`p2`). Ephemeral client ports are intermediate
+/// values only; they never leave this struct's `remote_port: None` hole.
+///
+/// Degradation is explicit, never fabricated:
+/// · `outbound` with `local_port: None` — the connecting process owns no
+///   listener (e.g. `curl`), or the fd map is partial (non-root probes cannot
+///   read other users' /proc/<pid>/fd).
+/// · `inbound` always has `local_port` (my listener) and never carries the
+///   peer's ephemeral source port (`remote_port: None`). The full `A:p1`
+///   attribution for the same relationship arrives when A itself is probed
+///   (its outbound row), and the frontend merges the two.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DetectedServiceLink {
+    /// `inbound` = the peer connected to my listener; `outbound` = I connected
+    /// to the peer's listener.
+    pub direction: String,
+    /// Peer IP (normalized dotted/colon notation).
+    pub remote_addr: String,
+    /// Peer's LISTENING port. `None` for inbound rows (ephemeral source port
+    /// deliberately dropped).
+    pub remote_port: Option<u16>,
+    /// My local bind address for this connection (wildcard `0.0.0.0`/`::` for
+    /// listeners without an explicit bind) — lets the frontend resolve the
+    /// exact listener port row.
+    pub local_addr: String,
+    /// My LISTENING port: the accepted port for inbound, the initiator
+    /// process's own listener for outbound (`None` = attribution unavailable).
+    pub local_port: Option<u16>,
+    pub protocol: String,
+    pub state: String,
+    /// How many live connections collapsed into this aggregated link.
+    pub connections: u32,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProbeData {
@@ -163,8 +204,15 @@ pub struct ProbeData {
     pub routes: Vec<DetectedRoute>,
     pub firewall: Option<DetectedFirewall>,
     pub firewall_rules: Vec<DetectedFirewallRule>,
+    /// False when the caller skipped the firewall sections (client-side TTL
+    /// cache still fresh) — the frontend must then leave stored firewall data
+    /// untouched instead of marking it missing.
+    pub firewall_collected: bool,
     pub ports: Vec<DetectedPort>,
     pub peers: Vec<DetectedPeer>,
+    /// Requirement-driven service dependency edges (see [`DetectedServiceLink`]).
+    /// Empty on macOS/BSD where the fd map is unavailable.
+    pub service_links: Vec<DetectedServiceLink>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -183,8 +231,10 @@ pub struct ProbeResult {
 // Section splitting
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Every section the probe script emits, in emission order.
-const SECTION_KEYS: [&str; 9] = [
+/// Every section the probe script emits, in emission order. `routes` is no
+/// longer emitted by the script (dropped in v2.18.1) but stays recognisable so
+/// payloads recorded by older builds still split cleanly.
+const SECTION_KEYS: [&str; 10] = [
     "hostname",
     "os",
     "interfaces",
@@ -194,6 +244,7 @@ const SECTION_KEYS: [&str; 9] = [
     "ports",
     "peers",
     "proc_sockets",
+    "fdmap",
 ];
 
 /// Recognise a `###NT:<name>###` marker line. `"end"` terminates the payload.
@@ -1859,36 +1910,96 @@ fn parse_proc_port(value: &str) -> Option<u16> {
     u16::from_str_radix(value, 16).ok()
 }
 
-/// Parse the zero-install `/proc` socket table.
+fn is_loopback_addr(addr: &str) -> bool {
+    match addr.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(v4)) => v4.is_loopback(),
+        Ok(std::net::IpAddr::V6(v6)) => v6.is_loopback() || v6.to_string() == "::1",
+        Err(_) => addr.trim() == "localhost",
+    }
+}
+
+fn is_unspecified_addr(addr: &str) -> bool {
+    addr == "0.0.0.0" || addr == "::" || addr.is_empty()
+}
+
+/// Parse the `fdmap` section into socket inode → owning pid.
 ///
-/// Unlike `parse_peers`, this deliberately retains closing/TIME_WAIT TCP rows:
-/// they are evidence that a real connection recently existed. Ephemeral client
-/// ports stay in this internal payload for direction/deduplication only; the
-/// UI never renders them as port nodes.
-pub fn parse_proc_sockets(raw: &str) -> (Vec<DetectedPort>, Vec<DetectedPeer>, ProbeSection) {
-    let mut processes: HashMap<String, (u32, String)> = HashMap::new();
+/// Two shapes are accepted, matching [`crate::os_detect::OsInfo::fdmap_probe_cmd`]:
+/// · GNU find `-printf '%p %l\n'`: `/proc/1234/fd/5 socket:[98765]`
+/// · BusyBox `ls -l /proc/[0-9]*/fd`: a `/proc/1234/fd:` header line followed
+///   by `lrwxrwxrwx ... 5 -> socket:[98765]` entries.
+pub fn parse_fdmap(raw: &str) -> HashMap<String, u32> {
+    let mut map = HashMap::new();
+    let mut current_pid: Option<u32> = None;
+    for line in raw.lines() {
+        let line = line.trim_end_matches('\r').trim();
+        if line == "NT_FDMAP_UNAVAILABLE" || line.starts_with("NT_PROC_") {
+            continue;
+        }
+        // find -printf shape: path + link target on one line.
+        if let Some((path, target)) = line.split_once(' ') {
+            if let (Some(pid), Some(inode)) = (pid_from_proc_path(path), socket_inode(target)) {
+                map.insert(inode, pid);
+                continue;
+            }
+        }
+        // ls -l directory header: `/proc/1234/fd:`
+        if let Some(pid) = line
+            .strip_suffix("/fd:")
+            .and_then(pid_from_proc_path)
+        {
+            current_pid = Some(pid);
+            continue;
+        }
+        // ls -l entry line: `... 5 -> socket:[98765]`
+        if let Some((_, target)) = line.split_once(" -> ") {
+            if let (Some(pid), Some(inode)) = (current_pid, socket_inode(target)) {
+                map.insert(inode, pid);
+            }
+        }
+    }
+    map
+}
+
+fn pid_from_proc_path(path: &str) -> Option<u32> {
+    // /proc/<pid>/fd[/<n>]
+    let rest = path.strip_prefix("/proc/")?;
+    let pid_text = rest.split('/').next()?;
+    pid_text.parse::<u32>().ok().filter(|pid| *pid > 0)
+}
+
+fn socket_inode(target: &str) -> Option<String> {
+    let inode = target
+        .trim()
+        .strip_prefix("socket:[")?
+        .strip_suffix(']')?
+        .trim()
+        .to_string();
+    if inode.is_empty() || !inode.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    Some(inode)
+}
+
+/// Parse the zero-install `/proc` socket table plus the fd ownership map.
+///
+/// Produces three things:
+/// 1. listening ports (state LISTEN for TCP; every bound UDP row),
+/// 2. raw peer rows (both endpoint ports verbatim, macOS parity + legacy),
+/// 3. [`DetectedServiceLink`] aggregates — the requirement-driven edges where
+///    both endpoints are LISTENING ports (`A:p1 → B:p2`), with the initiator's
+///    `p1` resolved through fd attribution and explicit degradation otherwise.
+pub fn parse_proc_sockets(
+    raw: &str,
+    fdmap: &HashMap<String, u32>,
+) -> (Vec<DetectedPort>, Vec<DetectedPeer>, Vec<DetectedServiceLink>, ProbeSection) {
     let mut current_proto = String::new();
     let mut sockets = ProcSockets::default();
     let mut seen = std::collections::HashSet::new();
 
-    // The process map is emitted after the files on some shells and after each
-    // row on others; collect it first in a separate pass so socket rows can use
-    // it regardless of ordering.
-    for line in raw.lines() {
-        let Some(rest) = line.strip_prefix("NT_PROC_PROCESS\t") else {
-            continue;
-        };
-        let mut parts = rest.split('\t');
-        let (Some(inode), Some(pid), Some(name)) = (parts.next(), parts.next(), parts.next())
-        else {
-            continue;
-        };
-        let Ok(pid) = pid.trim().parse::<u32>() else {
-            continue;
-        };
-        processes.insert(inode.trim().to_string(), (pid, name.trim().to_string()));
-    }
-
+    // Pass 1 — collect listener rows so direction/attribution can be resolved
+    // in one further sweep regardless of row ordering.
+    let mut listen_inodes: HashMap<String, (String, u16)> = HashMap::new();
     for line in raw.lines() {
         let line = line.trim_end_matches('\r');
         if let Some(rest) = line.strip_prefix("NT_PROC_FILE\t") {
@@ -1901,7 +2012,98 @@ pub fn parse_proc_sockets(raw: &str) -> (Vec<DetectedPort>, Vec<DetectedPeer>, P
         if line.starts_with("NT_PROC_") || line.trim().is_empty() {
             continue;
         }
+        let tokens: Vec<&str> = line.split_whitespace().collect();
+        if tokens.len() < 10 || !tokens[1].contains(':') || !tokens[2].contains(':') {
+            continue;
+        }
+        let proto = normalize_protocol(&current_proto);
+        if proto != "tcp" && proto != "udp" {
+            continue;
+        }
+        let state = proc_state(tokens[3]);
+        if state.is_empty() {
+            continue;
+        }
+        let Some(local_port) = parse_proc_port(tokens[1].rsplit(':').next().unwrap_or("")) else {
+            continue;
+        };
+        let is_listener = if proto == "tcp" {
+            state == "LISTEN"
+        } else {
+            // A connected UDP socket still owns a real local endpoint.
+            true
+        };
+        if is_listener {
+            listen_inodes.insert(tokens[9].to_string(), (proto.clone(), local_port));
+        }
+    }
 
+    // pid → set of listening ports it owns (via the fd map). A pid owning
+    // several listeners cannot be uniquely attributed, so it stays in the map
+    // as a multi-candidate and only single-listener pids get a `p1`.
+    let mut pid_listeners: HashMap<u32, Vec<u16>> = HashMap::new();
+    for (inode, pid) in fdmap {
+        if let Some((proto, port)) = listen_inodes.get(inode) {
+            if proto == "tcp" {
+                pid_listeners.entry(*pid).or_default().push(*port);
+            }
+        }
+    }
+    let unique_listener_port: HashMap<u32, u16> = pid_listeners
+        .iter()
+        .filter_map(|(pid, ports)| {
+            let mut deduped = ports.clone();
+            deduped.dedup();
+            if deduped.len() == 1 {
+                Some((*pid, deduped[0]))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    let listen_keys: std::collections::HashSet<(String, u16)> = listen_inodes
+        .values()
+        .cloned()
+        .collect();
+
+    let mut link_agg: HashMap<
+        (String, String, Option<u16>, Option<u16>, String),
+        (String, u32, String),
+    > = HashMap::new();
+    let push_link = |link: DetectedServiceLink,
+                     agg: &mut HashMap<
+        (String, String, Option<u16>, Option<u16>, String),
+        (String, u32, String),
+    >| {
+        let key = (
+            link.direction.clone(),
+            link.remote_addr.clone(),
+            link.remote_port,
+            link.local_port,
+            link.protocol.clone(),
+        );
+        // First local bind address wins when several connections collapse
+        // into one aggregate (e.g. wildcard and explicit binds).
+        let entry = agg
+            .entry(key)
+            .or_insert((link.state.clone(), 0, link.local_addr.clone()));
+        entry.1 += link.connections;
+    };
+
+    for line in raw.lines() {
+        let line = line.trim_end_matches('\r');
+        if let Some(rest) = line.strip_prefix("NT_PROC_FILE\t") {
+            // Pass 2 must keep tracking the file boundaries: socket rows carry
+            // no protocol of their own, they inherit it from the last header.
+            if let Some(proto) = rest.split('\t').next() {
+                current_proto = normalize_protocol(proto);
+            }
+            continue;
+        }
+        if line.starts_with("NT_PROC_") || line.trim().is_empty() {
+            continue;
+        }
         let tokens: Vec<&str> = line.split_whitespace().collect();
         if tokens.len() < 10 || !tokens[1].contains(':') || !tokens[2].contains(':') {
             continue;
@@ -1929,19 +2131,11 @@ pub fn parse_proc_sockets(raw: &str) -> (Vec<DetectedPort>, Vec<DetectedPeer>, P
         if !seen.insert(dedup) {
             continue;
         }
-        let (pid, process_name) = processes
-            .get(&inode)
-            .cloned()
-            .map(|(pid, name)| (Some(pid), name))
-            .unwrap_or((None, String::new()));
-        let process_user = tokens.get(7).unwrap_or(&"").trim().to_string();
+        let pid = fdmap.get(&inode).copied();
 
         let is_listener = if proto == "tcp" {
             state == "LISTEN"
         } else {
-            // A connected UDP socket still owns a real local endpoint and can
-            // receive traffic on it. Keep it as a listener while also emitting
-            // its remote tuple below.
             true
         };
         if is_listener {
@@ -1950,42 +2144,129 @@ pub fn parse_proc_sockets(raw: &str) -> (Vec<DetectedPort>, Vec<DetectedPeer>, P
                 port: local_port,
                 listen_addr: local_addr.clone(),
                 state: state.clone(),
-                process_name: process_name.clone(),
+                process_name: String::new(),
                 pid,
-                process_user,
+                process_user: String::new(),
             });
         }
 
-        let has_remote = !remote_addr.is_empty() && remote_addr != "0.0.0.0" && remote_addr != "::";
+        let has_remote = !is_unspecified_addr(&remote_addr);
         if has_remote && remote_port.is_some() && !(proto == "tcp" && state == "LISTEN") {
             sockets.peers.push(DetectedPeer {
-                local_addr,
-                remote_addr,
+                local_addr: local_addr.clone(),
+                remote_addr: remote_addr.clone(),
                 remote_port,
                 local_port: Some(local_port),
-                protocol: proto,
-                process_name: process_name.clone(),
+                protocol: proto.clone(),
+                process_name: String::new(),
                 process_pid: pid,
-                state,
+                state: state.clone(),
             });
         }
+
+        // ── service-link derivation (requirement: both ports are listeners) ──
+        if is_unspecified_addr(&local_addr) || is_unspecified_addr(&remote_addr) {
+            continue;
+        }
+        if is_loopback_addr(&local_addr) || is_loopback_addr(&remote_addr) {
+            continue;
+        }
+        if local_addr == remote_addr {
+            continue; // self-connection
+        }
+        let established = proto == "tcp" && state == "ESTABLISHED";
+        let connected_udp = proto == "udp" && remote_port.is_some();
+        if !established && !connected_udp {
+            continue;
+        }
+        if proto == "tcp" {
+            let inbound = listen_keys.contains(&(proto.clone(), local_port));
+            let link = if inbound {
+                // Peer connected to MY listener: p2 = local_port, peer's
+                // ephemeral source port deliberately dropped.
+                DetectedServiceLink {
+                    direction: "inbound".to_string(),
+                    remote_addr: remote_addr.clone(),
+                    remote_port: None,
+                    local_addr: local_addr.clone(),
+                    local_port: Some(local_port),
+                    protocol: proto.clone(),
+                    state: state.clone(),
+                    connections: 1,
+                }
+            } else {
+                // I connected to the peer's listener: p2 = remote_port,
+                // p1 = the initiating process's own listener (if unique).
+                let p1 = pid
+                    .and_then(|pid| unique_listener_port.get(&pid).copied());
+                DetectedServiceLink {
+                    direction: "outbound".to_string(),
+                    remote_addr: remote_addr.clone(),
+                    remote_port,
+                    local_addr: local_addr.clone(),
+                    local_port: p1,
+                    protocol: proto.clone(),
+                    state: state.clone(),
+                    connections: 1,
+                }
+            };
+            push_link(link, &mut link_agg);
+        } else {
+            // Connected UDP: the remote endpoint is a bound service socket.
+            let link = DetectedServiceLink {
+                direction: "outbound".to_string(),
+                remote_addr: remote_addr.clone(),
+                remote_port,
+                local_addr: local_addr.clone(),
+                local_port: None,
+                protocol: proto.clone(),
+                state: state.clone(),
+                connections: 1,
+            };
+            push_link(link, &mut link_agg);
+        }
     }
+
+    let mut service_links: Vec<DetectedServiceLink> = link_agg
+        .into_iter()
+        .map(
+            |((direction, remote_addr, remote_port, local_port, protocol), (state, connections, local_addr))| {
+                DetectedServiceLink {
+                    direction,
+                    remote_addr,
+                    remote_port,
+                    local_addr,
+                    local_port,
+                    protocol,
+                    state,
+                    connections,
+                }
+            },
+        )
+        .collect();
+    service_links.sort_by(|a, b| {
+        a.remote_addr
+            .cmp(&b.remote_addr)
+            .then(a.direction.cmp(&b.direction))
+            .then(a.remote_port.cmp(&b.remote_port))
+            .then(a.local_port.cmp(&b.local_port))
+    });
 
     let status = if sockets.files == 0 {
         ProbeSection {
             status: "unavailable".to_string(),
             note: "/proc socket 表不可读".to_string(),
         }
-    } else if processes.is_empty() && (!sockets.ports.is_empty() || !sockets.peers.is_empty()) {
+    } else if fdmap.is_empty() && !sockets.ports.is_empty() {
         ProbeSection {
             status: "partial".to_string(),
-            note: "无法获取进程信息（可能需要更高权限）".to_string(),
+            note: "无法获取进程归属（可能需要更高权限），服务端口归因将降级".to_string(),
         }
     } else {
         ProbeSection::ok()
     };
 
-    (sockets.ports, sockets.peers, status)
+    (sockets.ports, sockets.peers, service_links, status)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1995,9 +2276,10 @@ pub fn parse_proc_sockets(raw: &str) -> (Vec<DetectedPort>, Vec<DetectedPeer>, P
 /// Build the single read-only probe script for the given host.
 ///
 /// Delegates to [`OsInfo::topology_probe_cmd`] so every command stays
-/// distro-aware (see design doc §4.2).
-pub fn build_probe_script(os: &OsInfo) -> String {
-    os.topology_probe_cmd()
+/// distro-aware (see design doc §4.2). `include_firewall=false` skips the
+/// iptables/nft/ufw dumps entirely (client-side TTL cache still fresh).
+pub fn build_probe_script(os: &OsInfo, include_firewall: bool) -> String {
+    os.topology_probe_cmd(include_firewall)
 }
 
 /// Container/CNI interfaces and their pod/service addresses describe the
@@ -2084,8 +2366,10 @@ fn empty_probe_data() -> ProbeData {
         routes: Vec::new(),
         firewall: None,
         firewall_rules: Vec::new(),
+        firewall_collected: true,
         ports: Vec::new(),
         peers: Vec::new(),
+        service_links: Vec::new(),
     }
 }
 
@@ -2100,6 +2384,7 @@ fn failed_sections() -> ProbeSections {
         ports: missing_section(),
         peers: missing_section(),
         proc_sockets: missing_section(),
+        fdmap: missing_section(),
     }
 }
 
@@ -2112,9 +2397,13 @@ fn failed_sections() -> ProbeSections {
 /// structured (partial) result instead of being killed mid-flight.
 ///
 /// Never panics: every failure is logged and turned into a section status.
-pub async fn run_probe(client: &crate::ssh::SshClient, os: &OsInfo) -> ProbeResult {
+pub async fn run_probe(
+    client: &crate::ssh::SshClient,
+    os: &OsInfo,
+    include_firewall: bool,
+) -> ProbeResult {
     let probed_at_ms = now_millis();
-    let script = build_probe_script(os);
+    let script = build_probe_script(os, include_firewall);
 
     let raw = match tokio::time::timeout(
         std::time::Duration::from_secs(25),
@@ -2162,21 +2451,34 @@ pub async fn run_probe(client: &crate::ssh::SshClient, os: &OsInfo) -> ProbeResu
         Some(body) => parse_interfaces(body),
         None => (Vec::new(), missing_section()),
     };
-    let (routes, routes_section) = match sections.get("routes") {
-        Some(body) => parse_routes(body),
-        None => (Vec::new(), missing_section()),
-    };
     let (firewall, firewall_section) = match sections.get("firewall") {
         Some(body) => parse_firewall(body),
-        None => (empty_firewall(), missing_section()),
+        None => (empty_firewall(), if include_firewall {
+            missing_section()
+        } else {
+            // Skipped on purpose (client-side TTL cache); not an error.
+            ProbeSection {
+                status: "unavailable".to_string(),
+                note: "防火墙缓存未过期，本次探测跳过".to_string(),
+            }
+        }),
     };
     let (firewall_rules, rules_section) = match sections.get("rules") {
         Some(body) => parse_firewall_rules(body),
-        None => (Vec::new(), missing_section()),
+        None => (Vec::new(), firewall_section.clone()),
     };
-    let (proc_ports, proc_peers, proc_sockets_section) = match sections.get("proc_sockets") {
-        Some(body) => parse_proc_sockets(body),
-        None => (Vec::new(), Vec::new(), missing_section()),
+    let fdmap = match sections.get("fdmap") {
+        Some(body) => parse_fdmap(body),
+        None => HashMap::new(),
+    };
+    let (proc_ports, proc_peers, service_links, proc_sockets_section) = match sections.get("proc_sockets") {
+        Some(body) => parse_proc_sockets(body, &fdmap),
+        None => (
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            missing_section(),
+        ),
     };
     let (ports, ports_section) = if proc_sockets_section.status != "unavailable" {
         (proc_ports.clone(), proc_sockets_section.clone())
@@ -2199,7 +2501,6 @@ pub async fn run_probe(client: &crate::ssh::SshClient, os: &OsInfo) -> ProbeResu
         ("hostname", &hostname_section),
         ("os", &os_section),
         ("interfaces", &interfaces_section),
-        ("routes", &routes_section),
         ("firewall", &firewall_section),
         ("rules", &rules_section),
         ("ports", &ports_section),
@@ -2216,7 +2517,7 @@ pub async fn run_probe(client: &crate::ssh::SshClient, os: &OsInfo) -> ProbeResu
         }
     }
 
-    let primary_ip = pick_primary_ip(&routes, &interfaces);
+    let primary_ip = pick_primary_ip(&[], &interfaces);
     let firewall = if matches!(firewall_section.status.as_str(), "ok" | "partial") {
         Some(firewall)
     } else {
@@ -2227,7 +2528,6 @@ pub async fn run_probe(client: &crate::ssh::SshClient, os: &OsInfo) -> ProbeResu
         &hostname_section,
         &os_section,
         &interfaces_section,
-        &routes_section,
         &firewall_section,
         &rules_section,
         &ports_section,
@@ -2249,23 +2549,26 @@ pub async fn run_probe(client: &crate::ssh::SshClient, os: &OsInfo) -> ProbeResu
             hostname: hostname_section,
             os: os_section,
             interfaces: interfaces_section,
-            routes: routes_section,
+            routes: missing_section(),
             firewall: firewall_section,
             rules: rules_section,
             ports: ports_section,
             peers: peers_section,
             proc_sockets: proc_sockets_section,
+            fdmap: ProbeSection::ok(),
         },
         data: ProbeData {
             hostname,
             os_name,
             primary_ip,
             interfaces,
-            routes,
+            routes: Vec::new(),
             firewall,
             firewall_rules,
+            firewall_collected: include_firewall,
             ports,
             peers,
+            service_links,
         },
         probed_at_ms,
         raw_excerpt: excerpt,
@@ -2296,7 +2599,7 @@ mod tests {
 
     #[test]
     fn splits_all_sections_in_order() {
-        let raw = "###NT:hostname###\nweb-01\n###NT:os###\nID=ubuntu\n###NT:interfaces###\n2: eth0\n###NT:routes###\ndefault via 10.0.0.1\n###NT:firewall###\nFW=ufw\n###NT:rules###\n##RULE_FMT:ufw##\n###NT:ports###\ntcp LISTEN\n###NT:peers###\ntcp ESTAB\n###NT:proc_sockets###\nNT_PROC_BEGIN\n###NT:end###";
+        let raw = "###NT:hostname###\nweb-01\n###NT:os###\nID=ubuntu\n###NT:interfaces###\n2: eth0\n###NT:routes###\ndefault via 10.0.0.1\n###NT:firewall###\nFW=ufw\n###NT:rules###\n##RULE_FMT:ufw##\n###NT:ports###\ntcp LISTEN\n###NT:peers###\ntcp ESTAB\n###NT:proc_sockets###\nNT_PROC_BEGIN\n###NT:fdmap###\n/proc/1/fd/3 socket:[1]\n###NT:end###";
         let sections = split_sections(raw);
         for key in SECTION_KEYS {
             assert!(sections.contains_key(key), "missing section {key}");
@@ -2304,7 +2607,12 @@ mod tests {
         assert_eq!(sections.get("hostname").map(|s| s.as_str()), Some("web-01"));
         assert_eq!(
             sections.get("routes").map(|s| s.as_str()),
-            Some("default via 10.0.0.1")
+            Some("default via 10.0.0.1"),
+            "legacy payloads with a routes section must still split"
+        );
+        assert_eq!(
+            sections.get("fdmap").map(|s| s.as_str()),
+            Some("/proc/1/fd/3 socket:[1]")
         );
         assert!(!sections.contains_key("end"));
     }
@@ -2785,7 +3093,7 @@ mod tests {
     }
 
     #[test]
-    fn proc_sockets_parse_listeners_all_tcp_states_and_processes() {
+    fn proc_sockets_parse_listeners_all_tcp_states() {
         let raw = "\
 NT_PROC_BEGIN
 NT_PROC_FILE\ttcp\t/proc/net/tcp
@@ -2795,11 +3103,10 @@ NT_PROC_FILE\ttcp\t/proc/net/tcp
    2: 0100000A:C5A2 0200000A:1538 06 00000000:000000 00:00000000 00000000     0        0 33333 1 0000000000000000 20 0 0 10 -1
 NT_PROC_FILE\tudp\t/proc/net/udp
    3: 00000000:0035 00000000:0000 07 00000000:000000 00:00000000 00000000     0        0 44444 1 0000000000000000 100 0 0 10 0
-NT_PROC_PROCESS\t22222\t99\tapp
 NT_PROC_END
 ";
-        let (ports, peers, section) = parse_proc_sockets(raw);
-        assert_eq!(section.status, "ok");
+        let (ports, peers, links, section) = parse_proc_sockets(raw, &HashMap::new());
+        assert_eq!(section.status, "partial");
         assert_eq!(ports.len(), 2);
         assert_eq!(ports[0].listen_addr, "0.0.0.0");
         assert_eq!(ports[0].port, 8080);
@@ -2811,23 +3118,128 @@ NT_PROC_END
         assert_eq!(peers[0].local_addr, "10.0.0.1");
         assert_eq!(peers[0].remote_addr, "10.0.0.2");
         assert_eq!(peers[0].remote_port, Some(5432));
-        assert_eq!(peers[0].process_name, "app");
-        assert_eq!(peers[0].process_pid, Some(99));
         assert_eq!(peers[1].state, "TIME_WAIT");
+
+        // No fd map → outbound attribution degrades, nothing fabricated.
+        assert!(links.is_empty() || links.iter().all(|l| l.local_port.is_none() || l.direction == "inbound"));
     }
 
     #[test]
-    fn proc_sockets_without_process_information_still_returns_sockets() {
+    fn parse_fdmap_gnu_find_shape() {
+        let raw = "\
+/proc/412/fd/6 socket:[11111]
+/proc/99/fd/9 socket:[22222]
+/proc/99/fd/11 socket:[88888]
+not-a-match
+/proc/x/fd/1 socket:[99999]
+";
+        let map = parse_fdmap(raw);
+        assert_eq!(map.get("11111"), Some(&412));
+        assert_eq!(map.get("22222"), Some(&99));
+        assert_eq!(map.get("88888"), Some(&99));
+        assert!(!map.contains_key("99999"));
+    }
+
+    #[test]
+    fn parse_fdmap_busybox_ls_shape() {
+        let raw = "\
+/proc/412/fd:
+total 0
+lrwxrwxrwx 1 root root 64 Sep  9 10:00 6 -> socket:[11111]
+lrwxrwxrwx 1 root root 64 Sep  9 10:00 7 -> pipe:[123]
+/proc/99/fd:
+lrwxrwxrwx 1 app app 64 Sep  9 10:00 9 -> socket:[22222]
+";
+        let map = parse_fdmap(raw);
+        assert_eq!(map.get("11111"), Some(&412));
+        assert_eq!(map.get("22222"), Some(&99));
+        assert_eq!(map.len(), 2, "pipe fds must be ignored");
+    }
+
+    #[test]
+    fn service_links_inbound_and_attributed_outbound() {
+        // pid 99 listens on 5432 (LISTEN inode 22222) and initiates the
+        // ESTABLISHED row on inode 44444 → its ephemeral local port maps back
+        // to its own listener: p1 = 5432. The peer that connected to my 8080
+        // listener (pid 7) is inbound; its ephemeral source port is dropped.
+        let raw = "\
+NT_PROC_FILE\ttcp\t/proc/net/tcp
+   0: 00000000:1F90 00000000:0000 0A 00000000:000000 00:00000000 00000000 0 0 11111 1 0000000000000000 100 0 0 10 0
+   1: 0200000A:1538 00000000:0000 0A 00000000:000000 00:00000000 00000000 0 0 22222 1 0000000000000000 100 0 0 10 0
+   2: 0100000A:1F90 0900000A:C350 01 00000000:000000 00:00000000 00000000 0 0 33333 1 0000000000000000 20 0 0 10 -1
+   3: 0200000A:AD9C 0300000A:18EB 01 00000000:000000 00:00000000 00000000 0 0 44444 1 0000000000000000 20 0 0 10 -1
+";
+        let fdmap = HashMap::from([
+            ("11111".to_string(), 7u32),
+            ("22222".to_string(), 99u32),
+            ("33333".to_string(), 7u32),
+            ("44444".to_string(), 99u32),
+        ]);
+        let (ports, peers, links, section) = parse_proc_sockets(raw, &fdmap);
+        assert_eq!(section.status, "ok");
+        assert_eq!(ports.len(), 2, "listeners on 8080 and 5432");
+        assert_eq!(peers.len(), 2);
+
+        // Row 2: accepted on my 8080 listener → inbound, ephemeral dropped.
+        let inbound = links
+            .iter()
+            .find(|l| l.direction == "inbound")
+            .expect("inbound link");
+        assert_eq!(inbound.remote_addr, "10.0.0.9");
+        assert_eq!(inbound.remote_port, None, "peer ephemeral port dropped");
+        assert_eq!(inbound.local_port, Some(8080));
+
+        // Row 3: pid 99 (owner of listener 5432) connected to 10.0.0.3:6379
+        // → full service dependency A:5432 → B:6379.
+        let outbound = links
+            .iter()
+            .find(|l| l.direction == "outbound")
+            .expect("outbound link");
+        assert_eq!(outbound.remote_addr, "10.0.0.3");
+        assert_eq!(outbound.remote_port, Some(6379));
+        assert_eq!(
+            outbound.local_port,
+            Some(5432),
+            "p1 = initiating process's own listener"
+        );
+    }
+
+    #[test]
+    fn service_links_outbound_degrades_without_listener() {
+        // pid 99 owns the connection inode but listens on nothing → p1 = None.
         let raw = "\
 NT_PROC_FILE\ttcp\t/proc/net/tcp
    1: 0100000A:C5A2 0200000A:1538 01 00000000:000000 00:00000000 00000000 0 0 22222 1 0000000000000000 20 0 0 10 -1
 ";
-        let (ports, peers, section) = parse_proc_sockets(raw);
-        assert!(ports.is_empty());
-        assert_eq!(peers.len(), 1);
-        assert_eq!(peers[0].process_name, "");
-        assert_eq!(peers[0].process_pid, None);
-        assert_eq!(section.status, "partial");
+        let fdmap = HashMap::from([("22222".to_string(), 99u32)]);
+        let (_, _, links, _) = parse_proc_sockets(raw, &fdmap);
+        assert_eq!(links.len(), 1);
+        let link = &links[0];
+        assert_eq!(link.direction, "outbound");
+        assert_eq!(link.remote_addr, "10.0.0.2");
+        assert_eq!(link.remote_port, Some(5432));
+        assert_eq!(link.local_port, None, "no fabricated p1");
+    }
+
+    #[test]
+    fn service_links_exclude_loopback_self_and_aggregate() {
+        let raw = "\
+NT_PROC_FILE\ttcp\t/proc/net/tcp
+   0: 0100007F:1F90 0100007F:1538 01 00000000:000000 00:00000000 00000000 0 0 11111 1 0000000000000000 20 0 0 10 -1
+   1: 0100000A:1F90 0100000A:1F90 01 00000000:000000 00:00000000 00000000 0 0 22222 1 0000000000000000 20 0 0 10 -1
+   2: 0100000A:1F90 0300000A:1538 01 00000000:000000 00:00000000 00000000 0 0 33333 1 0000000000000000 20 0 0 10 -1
+   3: 0200000A:1539 0300000A:1538 01 00000000:000000 00:00000000 00000000 0 0 44444 1 0000000000000000 20 0 0 10 -1
+";
+        let (_, _, links, _) = parse_proc_sockets(raw, &HashMap::new());
+        // Row 0 loopback, row 1 self — dropped. Rows 2+3 aggregate: both are
+        // ephemeral-local outbound connections to 10.0.0.3:5432 (no listener
+        // table → p1 unavailable), same tuple → connections = 2.
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].direction, "outbound");
+        assert_eq!(links[0].remote_addr, "10.0.0.3");
+        assert_eq!(links[0].remote_port, Some(5432));
+        assert_eq!(links[0].local_port, None);
+        assert_eq!(links[0].connections, 2);
     }
 
     #[test]
@@ -2836,7 +3248,7 @@ NT_PROC_FILE\ttcp\t/proc/net/tcp
 NT_PROC_FILE\tudp\t/proc/net/udp
    0: 030015AC:0035 020015AC:1538 07 00000000:000000 00:00000000 00000000 0 0 55555 1 0000000000000000 100 0 0 10 -1
 ";
-        let (ports, peers, section) = parse_proc_sockets(raw);
+        let (ports, peers, links, section) = parse_proc_sockets(raw, &HashMap::new());
         assert_eq!(section.status, "partial");
         assert_eq!(ports.len(), 1);
         assert_eq!(ports[0].protocol, "udp");
@@ -2846,6 +3258,10 @@ NT_PROC_FILE\tudp\t/proc/net/udp
         assert_eq!(peers[0].local_port, Some(53));
         assert_eq!(peers[0].remote_addr, "172.21.0.2");
         assert_eq!(peers[0].remote_port, Some(5432));
+        assert_eq!(links.len(), 1, "connected UDP yields one service link");
+        assert_eq!(links[0].remote_addr, "172.21.0.2");
+        assert_eq!(links[0].remote_port, Some(5432));
+        assert_eq!(links[0].protocol, "udp");
     }
 
     #[test]
@@ -2855,7 +3271,7 @@ NT_PROC_FILE\ttcp\t/proc/net/tcp
    0: 0B00007F:82B1 00000000:0000 0A 00000000:000000 00:00000000 00000000 0 0 10975 1 0000000000a1992188 100 0 0 10 0
    1: 020015AC:A499 030015AC:1F90 01 00000000:000000 00:00000000 00000000 0 0 6937 1 0000000000d448874c 20 0 0 10 -1
 ";
-        let (ports, peers, _) = parse_proc_sockets(a);
+        let (ports, peers, links, _) = parse_proc_sockets(a, &HashMap::new());
         assert_eq!(ports.len(), 1);
         assert_eq!(ports[0].listen_addr, "127.0.0.11");
         assert_eq!(peers.len(), 1);
@@ -2864,13 +3280,18 @@ NT_PROC_FILE\ttcp\t/proc/net/tcp
         assert_eq!(peers[0].remote_port, Some(8080));
         assert_eq!(peers[0].local_port, Some(42137));
         assert_eq!(peers[0].state, "ESTABLISHED");
+        // 42137 is ephemeral (not a listener) → outbound to peer's 8080.
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].direction, "outbound");
+        assert_eq!(links[0].remote_addr, "172.21.0.3");
+        assert_eq!(links[0].remote_port, Some(8080));
 
         let b = "\
 NT_PROC_FILE\ttcp6\t/proc/net/tcp6
    0: 00000000000000000000000000000000:1F90 00000000000000000000000000000000:0000 0A 00000000:000000 00:00000000 00000000 0 0 4859 1 0000000000fb436901 100 0 0 10 0
    1: 0000000000000000FFFF0000030015AC:1F90 0000000000000000FFFF0000020015AC:A499 01 00000000:000000 00:00000000 00000000 0 0 4860 1 00000000006bc236dc 20 0 0 10 -1
 ";
-        let (ports, peers, _) = parse_proc_sockets(b);
+        let (ports, peers, links, _) = parse_proc_sockets(b, &HashMap::new());
         assert_eq!(ports.len(), 1);
         assert_eq!(ports[0].listen_addr, "::");
         assert_eq!(ports[0].port, 8080);
@@ -2879,6 +3300,11 @@ NT_PROC_FILE\ttcp6\t/proc/net/tcp6
         assert_eq!(peers[0].remote_addr, "::ffff:172.21.0.2");
         assert_eq!(peers[0].local_port, Some(8080));
         assert_eq!(peers[0].remote_port, Some(42137));
+        // Local port 8080 IS a listener → inbound from ::ffff:172.21.0.2.
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].direction, "inbound");
+        assert_eq!(links[0].local_port, Some(8080));
+        assert_eq!(links[0].remote_port, None);
     }
 
     // ── helpers ────────────────────────────────────────────────────────────
@@ -3014,7 +3440,7 @@ NT_PROC_FILE\ttcp6\t/proc/net/tcp6
 
     #[test]
     fn probe_script_stays_read_only() {
-        let script = build_probe_script(&OsInfo::default());
+        let script = build_probe_script(&OsInfo::default(), true);
         // Only inspect executable lines — the header comment deliberately
         // *mentions* the constructs it promises never to use.
         let code: String = script
@@ -3050,13 +3476,17 @@ NT_PROC_FILE\ttcp6\t/proc/net/tcp6
     #[test]
     #[cfg(unix)]
     fn topology_probe_script_is_valid_posix_shell_syntax() {
-        let script = build_probe_script(&OsInfo::default());
-        let status = std::process::Command::new("/bin/sh")
-            .arg("-n")
-            .arg("-c")
-            .arg(&script)
-            .status();
-        assert!(status.unwrap().success());
+        // Both TTL modes must parse as POSIX shell (sh -n): the BusyBox ls
+        // fallback lives on the same `||` line and must not break syntax.
+        for include_firewall in [true, false] {
+            let script = build_probe_script(&OsInfo::default(), include_firewall);
+            let status = std::process::Command::new("/bin/sh")
+                .arg("-n")
+                .arg("-c")
+                .arg(&script)
+                .status();
+            assert!(status.unwrap().success());
+        }
     }
 
     #[test]

@@ -30,6 +30,7 @@ import {
   type DetectedPeer,
   type DetectedPort,
   type DetectedRoute,
+  type DetectedServiceLink,
   type FirewallType,
   type LinkStatus,
   type LinkType,
@@ -717,6 +718,9 @@ export function sanitizeProbeData(data: ProbeData): ProbeData {
     peers: (data?.peers ?? []).filter(peer =>
       isServerPeerAddress(peer?.localAddr ?? '')
       && isServerPeerAddress(peer?.remoteAddr ?? '')),
+    // Service links are already filtered remote-side (loopback / unspecified /
+    // self dropped by the Rust parser); keep the pass-through explicit.
+    serviceLinks: data?.serviceLinks ?? [],
   };
 }
 
@@ -764,16 +768,44 @@ export function mergePorts(
 
 /**
  * Stable identity for a server seen as a socket peer but not explicitly probed.
- * The node is display-only: NexTerm never connects to it and never invents ports.
+ *
+ * v2.18.1: the id is the normalized IP ONLY — an address is one asset no
+ * matter which folder observed it. The old group-scoped ids
+ * (`observed:<group>:<ip>`) are migrated at startup by
+ * `migrateObservedNodeIds`.
  */
-export function observedNodeId(ip: string, groupPath = SERVER_GROUP_ROOT): string {
-  const group = groupPath?.trim() || SERVER_GROUP_ROOT;
-  const prefix = group === SERVER_GROUP_ROOT ? '' : `${encodeURIComponent(group)}:`;
-  return `observed:${prefix}${normalizeAddr(ip ?? '')}`;
+export function observedNodeId(ip: string): string {
+  return `observed:${normalizeAddr(ip ?? '')}`;
 }
 
 export function isObservedNode(node: Pick<NetworkNode, 'connectionId'>): boolean {
   return node.connectionId.startsWith('observed:');
+}
+
+/**
+ * Peer addresses that must never become nodes: loopback, unspecified and
+ * link-local. The v2.18.0 container-range blacklist (172.16/12, 100.64/10 …)
+ * is GONE from the visibility path — those are legitimate private/Tailscale
+ * ranges and hiding them made edges silently disappear.
+ */
+function isExcludedPeerIp(ip: string): boolean {
+  if (!ip || isUnspecified(ip)) return true;
+  const v4 = ip.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
+  if (v4) {
+    const octets = v4.slice(1).map(Number);
+    if (octets[0] === 127) return true; // loopback
+    if (octets[0] === 169 && octets[1] === 254) return true; // link-local
+    return false;
+  }
+  const lower = ip.toLowerCase();
+  if (lower === '::1' || lower === 'localhost') return true;
+  if (lower.startsWith('fe8') || lower.startsWith('fe9') || lower.startsWith('fea') || lower.startsWith('feb')) {
+    return true; // IPv6 link-local
+  }
+  if (lower.startsWith('::ffff:')) {
+    return isExcludedPeerIp(lower.slice('::ffff:'.length));
+  }
+  return false;
 }
 
 function isListenerState(state: string): boolean {
@@ -805,11 +837,12 @@ function listenerMatches(
 
 export function makeObservedNode(ip: string, now: number, groupPath = SERVER_GROUP_ROOT): NetworkNode {
   const normalized = normalizeAddr(ip ?? '');
-  const group = groupPath?.trim() || SERVER_GROUP_ROOT;
   return {
-    id: observedNodeId(normalized, group),
-    connectionId: observedNodeId(normalized, group),
-    groupPath: group,
+    id: observedNodeId(normalized),
+    connectionId: observedNodeId(normalized),
+    // Inherited from the observing node; purely informational now that node
+    // identity is the IP — the group dropdown is a view filter, not a scope.
+    groupPath: groupPath?.trim() || SERVER_GROUP_ROOT,
     hostname: normalized,
     osName: '',
     primaryIp: normalized,
@@ -830,25 +863,33 @@ export function makeObservedNode(ip: string, now: number, groupPath = SERVER_GRO
 }
 
 /**
- * Materialize display-only nodes for addresses already present in the current
- * probe's peer rows. This is not discovery and performs no I/O.
+ * Materialize display-only nodes for addresses already present in the probe's
+ * peer data (service links first, raw peers as macOS fallback). This is not
+ * discovery and performs no I/O. Unknown OUTBOUND peers deliberately do not
+ * create nodes — see `inferServiceLinks`.
  */
 export function inferObservedNodes(params: {
   nodeId: string;
   peers: DetectedPeer[];
+  serviceLinks?: DetectedServiceLink[];
   knownNodes: NetworkNode[];
   now: number;
 }): NetworkNode[] {
-  const { nodeId, peers, knownNodes, now } = params;
+  const { nodeId, peers, serviceLinks, knownNodes, now } = params;
   const currentNode = (knownNodes ?? []).find(node => node.id === nodeId);
   const group = currentNode?.groupPath?.trim() || SERVER_GROUP_ROOT;
-  const byId = new Map((knownNodes ?? [])
-    .filter(node => (node.groupPath?.trim() || SERVER_GROUP_ROOT) === group)
-    .map((node) => [node.id, node]));
+  const byId = new Map((knownNodes ?? []).map((node) => [node.id, node]));
+  for (const link of serviceLinks ?? []) {
+    if (link.direction === 'outbound') continue; // only inbound strangers become nodes
+    const ip = normalizeAddr(link?.remoteAddr ?? '');
+    if (isExcludedPeerIp(ip)) continue;
+    const id = observedNodeId(ip);
+    if (!byId.has(id)) byId.set(id, makeObservedNode(ip, now, group));
+  }
   for (const peer of peers ?? []) {
     const ip = normalizeAddr(peer?.remoteAddr ?? '');
-    if (!isServerPeerAddress(ip) || isUnspecified(ip)) continue;
-    const id = observedNodeId(ip, group);
+    if (isExcludedPeerIp(ip)) continue;
+    const id = observedNodeId(ip);
     if (!byId.has(id)) byId.set(id, makeObservedNode(ip, now, group));
   }
   return [...byId.values()].filter((node) => node.id !== nodeId);
@@ -856,14 +897,6 @@ export function inferObservedNodes(params: {
 
 function isUnspecified(ip: string): boolean {
   return ip === '0.0.0.0' || ip === '::';
-}
-
-function groupOf(nodes: readonly NetworkNode[], nodeId: string): string {
-  return nodes.find(node => node.id === nodeId)?.groupPath?.trim() || SERVER_GROUP_ROOT;
-}
-
-function scopedAddressKey(groupPath: string, ip: string): string {
-  return `${groupPath || SERVER_GROUP_ROOT}\u0000${normalizeAddr(ip)}`;
 }
 
 export function linkNaturalKey(item: {
@@ -878,17 +911,14 @@ export function linkNaturalKey(item: {
 /**
  * Index every interface address of the given nodes → owning node id.
  *
- * Addresses are normalized (CIDR suffix and IPv6 brackets removed) so a peer
- * seen as `10.0.0.5` matches the stored `10.0.0.5/24`.
+ * v2.18.1: the index is GLOBAL — one IP maps to exactly one node regardless of
+ * folder. That is the "one IP, one node" contract: a peer address observed by
+ * any server always resolves to the same asset.
  */
 export function buildInterfaceIpIndex(
   nodes: readonly NetworkNode[],
   allInterfaces: readonly NetworkInterface[],
 ): Map<string, string> {
-  const groupById = new Map((nodes ?? []).map(node => [
-    node.id,
-    node.groupPath?.trim() || SERVER_GROUP_ROOT,
-  ]));
   const known = new Set((nodes ?? []).map((n) => n.id));
   const owners = new Map<string, Set<string>>();
   const index = new Map<string, string>();
@@ -896,40 +926,45 @@ export function buildInterfaceIpIndex(
     if (!known.has(iface.nodeId)) continue;
     for (const addr of [...(iface.ipv4Addrs ?? []), ...(iface.ipv6Addrs ?? [])]) {
       const ip = normalizeAddr(addr);
-      if (!ip || !isServerPeerAddress(ip)) continue;
-      const key = scopedAddressKey(groupById.get(iface.nodeId) ?? SERVER_GROUP_ROOT, ip);
-      const set = owners.get(key) ?? new Set<string>();
+      if (!ip || isExcludedPeerIp(ip)) continue;
+      const set = owners.get(ip) ?? new Set<string>();
       set.add(iface.nodeId);
-      owners.set(key, set);
-      if (set.size === 1) index.set(key, iface.nodeId);
-      else index.delete(key);
+      owners.set(ip, set);
+      if (set.size === 1) index.set(ip, iface.nodeId);
+      else index.delete(ip); // ambiguous → no owner
     }
   }
   // Interface rows are authoritative when a node has multiple addresses; its
   // primary IP is still enough to resolve a display-only observed node.
   for (const node of nodes ?? []) {
     const ip = normalizeAddr(node.primaryIp ?? '');
-    if (!ip || !isServerPeerAddress(ip)) continue;
-    const key = scopedAddressKey(groupById.get(node.id) ?? SERVER_GROUP_ROOT, ip);
-    const owner = owners.get(key);
+    if (!ip || isExcludedPeerIp(ip)) continue;
+    const owner = owners.get(ip);
     if (!owner) {
-      owners.set(key, new Set([node.id]));
-      index.set(key, node.id);
+      owners.set(ip, new Set([node.id]));
+      index.set(ip, node.id);
     } else if (owner.size === 1) {
-      index.set(key, [...owner][0] ?? node.id);
+      index.set(ip, [...owner][0] ?? node.id);
     }
   }
   return index;
 }
 
 /**
- * Turn observed ESTABLISHED peer addresses into topology links.
+ * Turn observed service dependencies into server-level topology links.
  *
- * ── No LAN scanning ────────────────────────────────────────────────────────
- * A peer IP is used ONLY to look it up in `interfacesIndex` or, when unknown,
- * to create a display-only observed node. No peer is probed and no ports are
- * invented for it. This keeps the feature inside the current-server boundary
- * while still drawing the observed server-to-server relationship.
+ * ── Primary input: service links (v2.18.1) ─────────────────────────────────
+ * `serviceLinks` carry direction + both LISTENING endpoints. Inbound rows
+ * (`peer → me:listener`) create/confirm `remote → me` edges even when the peer
+ * is unknown (it becomes a display-only observed node — someone connected TO
+ * us, that must stay visible). Outbound rows only land when the peer is
+ * already known, so stray public endpoints (apt mirrors, DNS) never become
+ * nodes.
+ *
+ * ── Fallback: raw peers (macOS/BSD payloads) ───────────────────────────────
+ * When no service links are present, the legacy peer-derived path still runs:
+ * direction is derived from the listener match and unknown peers become
+ * observed nodes exactly as before.
  *
  * ── No clobbering ─────────────────────────────────────────────────────────
  * An already-known link is only re-confirmed (`lastConfirmedAt` + `status`).
@@ -940,16 +975,14 @@ export function buildInterfaceIpIndex(
 export function inferLinksFromPeers(params: {
   nodeId: string;
   peers: DetectedPeer[];
-  knownNodes: NetworkNode[];
+  serviceLinks?: DetectedServiceLink[];
+  knownNodes?: NetworkNode[];
   interfacesIndex: Map<string, string>;
   nodePorts?: NetworkPort[];
   existingLinks: NetworkLink[];
   now: number;
 }): { links: NetworkLink[]; added: number; confirmed: number } {
-  const { nodeId, peers, interfacesIndex, nodePorts = [], existingLinks, now } = params;
-  // `knownNodes` is part of the contract but is already folded into
-  // `interfacesIndex`/observed-node ids by the caller; nothing here opens a
-  // connection to a peer.
+  const { nodeId, peers, serviceLinks, interfacesIndex, nodePorts = [], existingLinks, now } = params;
 
   const existing = existingLinks ?? [];
   const byKey = new Map<string, NetworkLink>();
@@ -958,20 +991,107 @@ export function inferLinksFromPeers(params: {
 
   let added = 0;
   let confirmed = 0;
-  const handled = new Set<string>();
-  const group = groupOf(params.knownNodes ?? [], nodeId);
-  const addressOwner = (ip: string): string | undefined =>
-    interfacesIndex.get(scopedAddressKey(group, ip));
+  const addressOwner = (ip: string): string | undefined => interfacesIndex.get(ip);
   const listeningPorts = (nodePorts ?? []).filter(
     (port) => port.missingSince === null && isListenerState(port.state),
   );
+
+  const upsert = (
+    sourceNodeId: string,
+    targetNodeId: string,
+    protocol: 'tcp' | 'udp',
+    port: number | null,
+    status: LinkStatus,
+    evidence: string,
+  ): void => {
+    if (sourceNodeId === targetNodeId) return;
+    const key = linkNaturalKey({ sourceNodeId, targetNodeId, protocol, port });
+    const prev = byKey.get(key);
+    if (prev) {
+      // Re-confirm only: manual fields, source and evidence stay untouched.
+      const next: NetworkLink = {
+        ...prev,
+        status,
+        lastConfirmedAt: now,
+        updatedAt: now,
+      };
+      const index = links.findIndex((l) => l.id === prev.id);
+      if (index !== -1) links[index] = next;
+      byKey.set(key, next);
+      confirmed += 1;
+      return;
+    }
+    const link: NetworkLink = {
+      id: generateId('link'),
+      sourceNodeId,
+      targetNodeId,
+      protocol,
+      port,
+      linkType: inferLinkType(port ?? 0, ''),
+      status,
+      source: 'auto',
+      evidence,
+      description: '',
+      manualLabel: '',
+      hidden: false,
+      firstSeenAt: now,
+      lastConfirmedAt: now,
+      createdAt: now,
+      updatedAt: now,
+    };
+    links.push(link);
+    byKey.set(key, link);
+    added += 1;
+  };
+
+  if ((serviceLinks ?? []).length > 0) {
+    for (const link of serviceLinks ?? []) {
+      const ip = normalizeAddr(link?.remoteAddr ?? '');
+      if (isExcludedPeerIp(ip)) continue;
+      const remoteNodeId = addressOwner(ip);
+      const protocol = link.protocol === 'udp' ? 'udp' : 'tcp';
+      const status: LinkStatus = isActiveSocketState(link.state) ? 'active' : 'observed';
+      const countSuffix = link.connections > 1 ? ` (×${link.connections})` : '';
+      if (link.direction === 'inbound') {
+        // Peer → my listener. Unknown peers MUST stay visible.
+        const sourceNodeId = remoteNodeId ?? observedNodeId(ip);
+        const port = link.localPort ?? null;
+        upsert(
+          sourceNodeId,
+          nodeId,
+          protocol,
+          port,
+          status,
+          `/proc ${link.state}: ${ip} → 本机:${port ?? ''}${countSuffix}`,
+        );
+      } else {
+        // Outbound: only land on KNOWN peers — a stranger never becomes a
+        // node just because we called out to it.
+        if (!remoteNodeId) continue;
+        const port = link.remotePort ?? null;
+        const p1 = link.localPort ?? null;
+        upsert(
+          nodeId,
+          remoteNodeId,
+          protocol,
+          port,
+          status,
+          `/proc ${link.state}: 本机${p1 != null ? `:${p1}` : ''} → ${ip}:${port ?? ''}${countSuffix}`,
+        );
+      }
+    }
+    return { links, added, confirmed };
+  }
+
+  // ── legacy fallback: derive from raw peers (macOS/BSD / old payloads) ──
+  const handled = new Set<string>();
   for (const peer of peers ?? []) {
     const remoteAddr = peer?.remoteAddr ?? '';
     if (!remoteAddr) continue;
 
     const ip = normalizeAddr(remoteAddr);
-    if (!isServerPeerAddress(ip) || isUnspecified(ip)) continue;
-    const targetNodeId = addressOwner(ip) ?? observedNodeId(ip, group);
+    if (isExcludedPeerIp(ip)) continue;
+    const targetNodeId = addressOwner(ip) ?? observedNodeId(ip);
     // Self-links are not topology edges. Unknown peers become observed nodes;
     // they are never probed and never receive synthetic port data.
     if (targetNodeId === nodeId) continue;
@@ -987,49 +1107,16 @@ export function inferLinksFromPeers(params: {
     const key = linkNaturalKey({ sourceNodeId, targetNodeId: destinationNodeId, protocol, port });
     if (handled.has(key)) continue;
     handled.add(key);
-
-    const prev = byKey.get(key);
-    if (prev) {
-      // Re-confirm only: manual fields, source and evidence stay untouched.
-      const next: NetworkLink = {
-        ...prev,
-        // Re-confirm only (`status` + `lastConfirmedAt`); `source`, `evidence`,
-        // `description`, `manualLabel` and `hidden` keep their stored values.
-        status,
-        lastConfirmedAt: now,
-        updatedAt: now,
-      };
-      const index = links.findIndex((l) => l.id === prev.id);
-      if (index !== -1) links[index] = next;
-      byKey.set(key, next);
-      confirmed += 1;
-      continue;
-    }
-
-    const link: NetworkLink = {
-      id: generateId('link'),
+    upsert(
       sourceNodeId,
-      targetNodeId: destinationNodeId,
+      destinationNodeId,
       protocol,
       port,
-      linkType: inferLinkType(port ?? 0, peer.processName ?? ''),
       status,
-      source: 'auto',
-      evidence: inbound
+      inbound
         ? `/proc ${peer.state}: ${ip} -> local:${port ?? ''}`
         : `/proc ${peer.state}: local -> ${ip}:${peer.remotePort ?? ''}`,
-      // ── M ──
-      description: '',
-      manualLabel: '',
-      hidden: false,
-      firstSeenAt: now,
-      lastConfirmedAt: now,
-      createdAt: now,
-      updatedAt: now,
-    };
-    links.push(link);
-    byKey.set(key, link);
-    added += 1;
+    );
   }
 
   return { links, added, confirmed };
@@ -1089,6 +1176,7 @@ export function portLinkNaturalKey(item: {
 export function inferPortLinksFromPeers(params: {
   nodeId: string;
   peers: DetectedPeer[];
+  serviceLinks?: DetectedServiceLink[];
   nodePorts: NetworkPort[];
   allPorts?: NetworkPort[];
   interfacesIndex: Map<string, string>;
@@ -1096,10 +1184,8 @@ export function inferPortLinksFromPeers(params: {
   existingPortLinks: NetworkPortLink[];
   now: number;
 }): { links: NetworkPortLink[]; added: number; confirmed: number } {
-  const { nodeId, peers, nodePorts, allPorts = nodePorts, interfacesIndex, existingPortLinks, now } = params;
-  const group = groupOf(params.knownNodes ?? [], nodeId);
-  const addressOwner = (ip: string): string | undefined =>
-    interfacesIndex.get(scopedAddressKey(group, ip));
+  const { nodeId, peers, serviceLinks, nodePorts, allPorts = nodePorts, interfacesIndex, existingPortLinks, now } = params;
+  const addressOwner = (ip: string): string | undefined => interfacesIndex.get(ip);
 
   const portIdForNode = (owner: string | null, protocol: string, port: number) => {
     if (!owner) return null;
@@ -1116,17 +1202,151 @@ export function inferPortLinksFromPeers(params: {
     return matches.length === 1 ? matches[0].id : null;
   };
 
+  const resolveMyListenerId = (protocol: string, port: number, address: string | null) => {
+    const listeners = nodePorts.filter((p) =>
+      p.nodeId === nodeId
+      && p.missingSince === null
+      && isListenerState(p.state)
+      && p.protocol === protocol
+      && p.port === port);
+    if (address) {
+      const normalized = normalizeAddr(address);
+      const exact = listeners.filter((p) => normalizeAddr(p.listenAddr) === normalized);
+      if (exact.length === 1) return exact[0].id;
+      const wildcard = listeners.filter((p) => ['0.0.0.0', '*', '::', '[::]'].includes(p.listenAddr));
+      if (wildcard.length === 1) return wildcard[0].id;
+      return null;
+    }
+    return listeners.length === 1 ? listeners[0].id : null;
+  };
+
   const listeningPorts = (nodePorts ?? []).filter(
     (p) => p.missingSince === null && isListenerState(p.state),
   );
 
   const existing = existingPortLinks ?? [];
-  const byKey = new Map<string, NetworkPortLink>();
-  for (const link of existing) byKey.set(portLinkNaturalKey(link), link);
   const links: NetworkPortLink[] = [...existing];
 
   let added = 0;
   let confirmed = 0;
+
+  /**
+   * Merge one inferred candidate into the store.
+   *
+   * Beyond the exact natural-key match this performs the v2.18.1 bidirectional
+   * reconciliation: the same service dependency `A:p1 → B:p2` is reported as a
+   * degraded inbound row by B's probe (source port unknown) and as an
+   * attributed outbound row by A's probe. The two rows share
+   * (sourceNode, protocol, targetNode, targetPort) but differ in
+   * `sourcePortId`, so they must UPGRADE each other in place instead of
+   * duplicating. Manual links are only ever confirmed, never rewritten.
+   */
+  const mergeCandidate = (candidate: NetworkPortLink): void => {
+    const key = portLinkNaturalKey(candidate);
+    const existingIndex = links.findIndex((l) => portLinkNaturalKey(l) === key);
+    if (existingIndex >= 0) {
+      const prev = links[existingIndex];
+      links[existingIndex] = prev.source === 'manual'
+        ? { ...prev, lastConfirmedAt: now, updatedAt: now }
+        : { ...prev, ...candidate, id: prev.id, source: 'auto', description: prev.description, manualLabel: prev.manualLabel, hidden: prev.hidden, firstSeenAt: prev.firstSeenAt, createdAt: prev.createdAt };
+      confirmed += 1;
+      return;
+    }
+    // Upgrade match: a degraded row (no source port row) and an attributed row
+    // describe the same dependency when everything else aligns.
+    if (candidate.sourcePortId !== null) {
+      const degradedIndex = links.findIndex((l) =>
+        l.sourcePortId === null
+        && l.sourceNodeId === candidate.sourceNodeId
+        && l.sourceProtocol === candidate.sourceProtocol
+        && l.targetNodeId === candidate.targetNodeId
+        && l.targetProtocol === candidate.targetProtocol
+        && l.targetPort === candidate.targetPort);
+      if (degradedIndex >= 0) {
+        const prev = links[degradedIndex];
+        links[degradedIndex] = prev.source === 'manual'
+          ? { ...prev, lastConfirmedAt: now, updatedAt: now }
+          : { ...candidate, id: prev.id, description: prev.description, manualLabel: prev.manualLabel, hidden: prev.hidden, firstSeenAt: prev.firstSeenAt, createdAt: prev.createdAt };
+        confirmed += 1;
+        return;
+      }
+    }
+    links.push({ ...candidate, id: generateId('plink') });
+    added += 1;
+  };
+
+  if ((serviceLinks ?? []).length > 0) {
+    for (const link of serviceLinks ?? []) {
+      const ip = normalizeAddr(link?.remoteAddr ?? '');
+      if (!ip || isExcludedPeerIp(ip)) continue;
+      if (addressOwner(ip) === nodeId) continue; // own interface
+      const protocol = link.protocol === 'udp' ? 'udp' : 'tcp';
+      const status: LinkStatus = isActiveSocketState(link.state) ? 'active' : 'observed';
+      const countSuffix = link.connections > 1 ? ` (×${link.connections})` : '';
+      const remoteNodeId = addressOwner(ip);
+      if (link.direction === 'inbound') {
+        // Peer → my listener. Unknown peers MUST stay visible (observed node).
+        const sourceNodeId = remoteNodeId ?? observedNodeId(ip);
+        const localPort = link.localPort;
+        if (localPort == null) continue;
+        mergeCandidate({
+          id: '',
+          sourceNodeId,
+          sourcePortId: null,
+          sourceIp: null,
+          sourceProtocol: protocol,
+          sourcePort: 0, // peer's ephemeral port deliberately unknown
+          targetNodeId: nodeId,
+          targetPortId: resolveMyListenerId(protocol, localPort, link.localAddr ?? null),
+          targetProtocol: protocol,
+          targetPort: localPort,
+          targetIp: null,
+          status,
+          source: 'auto',
+          evidence: `/proc ${link.state}: ${ip} → 本机:${localPort}${countSuffix}`,
+          description: '',
+          manualLabel: '',
+          hidden: false,
+          firstSeenAt: now,
+          lastConfirmedAt: now,
+          createdAt: now,
+          updatedAt: now,
+        });
+      } else {
+        // Outbound: only when the peer is already a known node.
+        if (!remoteNodeId) continue;
+        const targetPort = link.remotePort;
+        if (targetPort == null) continue;
+        const p1 = link.localPort ?? null;
+        mergeCandidate({
+          id: '',
+          sourceNodeId: nodeId,
+          sourcePortId: p1 != null ? resolveMyListenerId(protocol, p1, link.localAddr ?? null) : null,
+          sourceIp: null,
+          sourceProtocol: protocol,
+          sourcePort: p1 ?? 0, // 0 = attribution unavailable, never fabricated
+          targetNodeId: remoteNodeId,
+          targetPortId: portIdForNode(remoteNodeId, protocol, targetPort),
+          targetProtocol: protocol,
+          targetPort,
+          targetIp: null,
+          status,
+          source: 'auto',
+          evidence: `/proc ${link.state}: 本机${p1 != null ? `:${p1}` : ''} → ${ip}:${targetPort}${countSuffix}`,
+          description: '',
+          manualLabel: '',
+          hidden: false,
+          firstSeenAt: now,
+          lastConfirmedAt: now,
+          createdAt: now,
+          updatedAt: now,
+        });
+      }
+    }
+    return { links, added, confirmed };
+  }
+
+  // ── legacy fallback: derive from raw peers (macOS/BSD / old payloads) ──
   for (const peer of peers ?? []) {
     const localPort = peer?.localPort ?? null;
     if (localPort == null) continue;
@@ -1135,11 +1355,11 @@ export function inferPortLinksFromPeers(params: {
     if (!ip) continue;
     const targetPort = peer.remotePort ?? null;
     if (targetPort == null) continue;
-    if (addressOwner(ip) === nodeId || !isServerPeerAddress(ip) || isUnspecified(ip)) {
+    if (addressOwner(ip) === nodeId || isExcludedPeerIp(ip)) {
       continue; // loopback / own interface
     }
 
-    const peerNodeId = addressOwner(ip) ?? observedNodeId(ip, group);
+    const peerNodeId = addressOwner(ip) ?? observedNodeId(ip);
     const localListener = listeningPorts.find((port) =>
       listenerMatches(port, protocol, localPort, normalizeAddr(peer.localAddr ?? '')));
     const normalizedProcess = (peer.processName ?? '').trim().toLowerCase();
@@ -1151,7 +1371,7 @@ export function inferPortLinksFromPeers(params: {
     // A listening local socket is the server side of the connection. Keep the
     // TCP direction truthful: remote:remotePort → currentNode:localPort.
     if (localListener) {
-      const candidate: NetworkPortLink = {
+      mergeCandidate({
         id: '',
         sourceNodeId: peerNodeId,
         // The remote endpoint is a client socket. Its ephemeral port is not a
@@ -1175,25 +1395,14 @@ export function inferPortLinksFromPeers(params: {
         lastConfirmedAt: now,
         createdAt: now,
         updatedAt: now,
-      };
-      const index = links.findIndex((l) => portLinkNaturalKey(l) === portLinkNaturalKey(candidate));
-      if (index >= 0) {
-        const prev = links[index];
-        links[index] = prev.source === 'manual'
-          ? { ...prev, lastConfirmedAt: now, updatedAt: now }
-          : { ...prev, ...candidate, id: prev.id, source: 'auto', description: prev.description, manualLabel: prev.manualLabel, hidden: prev.hidden, firstSeenAt: prev.firstSeenAt, createdAt: prev.createdAt };
-        confirmed += 1;
-        continue;
-      }
-      links.push({ ...candidate, id: generateId('plink') });
-      added += 1;
+      });
       continue;
     }
 
     // An outbound client socket is anchored to a real same-process listener
     // when process evidence exists. Without that evidence the edge still runs
     // from the server itself; the ephemeral client port is never materialized.
-    const candidate: NetworkPortLink = {
+    mergeCandidate({
       id: '',
       sourceNodeId: nodeId,
       sourcePortId: processListener?.id ?? null,
@@ -1215,19 +1424,7 @@ export function inferPortLinksFromPeers(params: {
       lastConfirmedAt: now,
       createdAt: now,
       updatedAt: now,
-    };
-    const key = portLinkNaturalKey(candidate);
-    const prev = byKey.get(key);
-    if (prev) {
-      links[links.findIndex((l) => l.id === prev.id)] = prev.source === 'manual'
-        ? { ...prev, lastConfirmedAt: now, updatedAt: now }
-        : { ...prev, ...candidate, id: prev.id, source: 'auto', description: prev.description, manualLabel: prev.manualLabel, hidden: prev.hidden, firstSeenAt: prev.firstSeenAt, createdAt: prev.createdAt };
-      confirmed += 1;
-      continue;
-    }
-    links.push({ ...candidate, id: generateId('plink') });
-    byKey.set(key, links[links.length - 1]);
-    added += 1;
+    });
   }
 
   return { links, added, confirmed };
@@ -1247,9 +1444,7 @@ export function resolvePortLinkTargets(params: {
   now: number;
 }): { links: NetworkPortLink[]; resolved: number } {
   const { nodeId, nodePorts, interfacesIndex, existingPortLinks, now } = params;
-  const group = groupOf(params.knownNodes ?? [], nodeId);
-  const addressOwner = (ip: string): string | undefined =>
-    interfacesIndex.get(scopedAddressKey(group, ip));
+  const addressOwner = (ip: string): string | undefined => interfacesIndex.get(ip);
 
   const resolveListenerId = (
     protocol: string,

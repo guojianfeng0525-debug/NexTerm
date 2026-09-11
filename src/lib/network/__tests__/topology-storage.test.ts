@@ -86,7 +86,7 @@ import {
   saveNodeInterfaces,
   saveNodePorts,
   saveNodeRoutes,
-  syncNodeGroupPaths,
+  migrateObservedNodeIds,
   subscribeTopology,
   upsertLink,
   upsertPortLink,
@@ -290,44 +290,76 @@ describe('node cache', () => {
   });
 });
 
-describe('node group sync', () => {
-  it('repairs saved nodes and legacy observed peers from current folders', async () => {
+describe('observed node id migration (v2.18.1: one IP, one node)', () => {
+  it('renames group-scoped observed ids to canonical IP ids and retargets edges', async () => {
     upsertNode(makeNode({
       id: 'saved',
       connectionId: 'conn-1',
-      groupPath: 'All Connections',
+      groupPath: 'All Connections/Production',
     }));
+    // Legacy shape: group-scoped id (encoded folder segment + IP).
     upsertNode(makeNode({
-      id: 'observed:10.10.1.30',
-      connectionId: 'observed:10.10.1.30',
-      groupPath: 'All Connections',
+      id: 'observed:All%20Connections%2FProduction:10.10.1.30',
+      connectionId: 'observed:All%20Connections%2FProduction:10.10.1.30',
+      groupPath: 'All Connections/Production',
     }));
     upsertLink(makeLink({
       id: 'link-observed',
       sourceNodeId: 'saved',
-      targetNodeId: 'observed:10.10.1.30',
+      targetNodeId: 'observed:All%20Connections%2FProduction:10.10.1.30',
+    }));
+    upsertPortLink(makePortLink({
+      id: 'plink-observed',
+      sourceNodeId: 'observed:All%20Connections%2FProduction:10.10.1.30',
+      sourcePort: 0,
+      targetNodeId: 'saved',
+      targetPort: 22,
     }));
     await flush();
 
-    expect(syncNodeGroupPaths(new Map([
-      ['conn-1', 'All Connections/Production'],
-    ]))).toBe(2);
+    expect(migrateObservedNodeIds()).toBe(1);
     await flush();
 
-    expect(getNode('saved')?.groupPath).toBe('All Connections/Production');
-    expect(getNode('observed:10.10.1.30')?.groupPath).toBe('All Connections/Production');
-    expect(store.tables.get('net_nodes')?.get('saved')?.group_path).toBe('All Connections/Production');
+    // One canonical node for the IP; the legacy row is gone.
+    const observed = listNodes().filter((n) => n.connectionId.startsWith('observed:'));
+    expect(observed.map((n) => n.id)).toEqual(['observed:10.10.1.30']);
+    // Edges point at the canonical id.
+    expect(listLinks()[0]?.targetNodeId).toBe('observed:10.10.1.30');
+    expect(listPortLinks()[0]?.sourceNodeId).toBe('observed:10.10.1.30');
+    expect(store.tables.get('net_nodes')?.has('observed:All%20Connections%2FProduction:10.10.1.30')).toBe(false);
   });
 
-  it('keeps observed nodes unchanged when they are not linked to a saved node', () => {
+  it('merges duplicate observed nodes for the same IP, keeping layout and labels', async () => {
+    upsertNode(makeNode({
+      id: 'observed:Prod:10.10.1.40',
+      connectionId: 'observed:Prod:10.10.1.40',
+      posX: 120,
+      posY: 80,
+      displayName: '数据库主库',
+    }));
     upsertNode(makeNode({
       id: 'observed:10.10.1.40',
       connectionId: 'observed:10.10.1.40',
-      groupPath: 'All Connections',
     }));
+    await flush();
 
-    expect(syncNodeGroupPaths(new Map())).toBe(0);
-    expect(getNode('observed:10.10.1.40')?.groupPath).toBe('All Connections');
+    expect(migrateObservedNodeIds()).toBe(1);
+    await flush();
+
+    const nodes = listNodes().filter((n) => n.connectionId.startsWith('observed:'));
+    expect(nodes).toHaveLength(1);
+    expect(nodes[0]?.id).toBe('observed:10.10.1.40');
+    expect(nodes[0]?.posX).toBe(120);
+    expect(nodes[0]?.displayName).toBe('数据库主库');
+  });
+
+  it('is a no-op for stores without legacy rows', () => {
+    upsertNode(makeNode({
+      id: 'observed:10.10.1.50',
+      connectionId: 'observed:10.10.1.50',
+    }));
+    expect(migrateObservedNodeIds()).toBe(0);
+    expect(listNodes().map((n) => n.id)).toEqual(['observed:10.10.1.50']);
   });
 });
 

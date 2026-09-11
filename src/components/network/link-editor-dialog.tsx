@@ -29,6 +29,7 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { Textarea } from '@/components/ui/textarea';
+import { Switch } from '@/components/ui/switch';
 import { Trash2 } from 'lucide-react';
 import type {
   LinkStatus,
@@ -76,6 +77,7 @@ interface FormState {
   status: LinkStatus;
   description: string;
   manualLabel: string;
+  hidden: boolean;
 }
 
 const EMPTY_FORM: FormState = {
@@ -87,6 +89,7 @@ const EMPTY_FORM: FormState = {
   status: 'active',
   description: '',
   manualLabel: '',
+  hidden: false,
 };
 
 function parsePort(raw: string): number | null {
@@ -126,6 +129,7 @@ export function LinkEditorDialog({
         status: link.status,
         description: link.description,
         manualLabel: link.manualLabel,
+        hidden: link.hidden,
       });
       return;
     }
@@ -166,6 +170,7 @@ export function LinkEditorDialog({
         status: form.status,
         description: form.description.trim(),
         manualLabel: form.manualLabel.trim(),
+        hidden: form.hidden,
         // A human touched it: from now on it is a manual relationship.
         source: 'manual',
         updatedAt: now,
@@ -185,7 +190,7 @@ export function LinkEditorDialog({
       evidence: '',
       description: form.description.trim(),
       manualLabel: form.manualLabel.trim(),
-      hidden: false,
+      hidden: form.hidden,
       firstSeenAt: now,
       lastConfirmedAt: now,
       createdAt: now,
@@ -373,6 +378,24 @@ export function LinkEditorDialog({
                 }
                 placeholder={t('topology.linkDialog.descriptionPlaceholder')}
                 className="min-h-[68px] resize-none"
+              />
+            </div>
+
+            <div className="flex items-center justify-between rounded-lg border border-border px-3 py-2.5">
+              <div className="space-y-0.5">
+                <Label htmlFor="topology-link-hidden" className="text-xs">
+                  {t('topology.linkDialog.hidden')}
+                </Label>
+                <p className="text-[11px] text-muted-foreground">
+                  {t('topology.linkDialog.hiddenHint')}
+                </p>
+              </div>
+              <Switch
+                id="topology-link-hidden"
+                checked={form.hidden}
+                onCheckedChange={(checked) =>
+                  setForm((current) => ({ ...current, hidden: checked }))
+                }
               />
             </div>
           </div>

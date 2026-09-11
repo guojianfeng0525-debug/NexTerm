@@ -2621,7 +2621,7 @@
       "rules": "防火墙规则",
       "ports": "监听端口",
       "peers": "活动连接",
-    "procSockets": "内核 Socket 表"
+      "procSockets": "内核 Socket 表"
     },
     "roleHint": {
       "web": "Web 服务",
@@ -2846,7 +2846,10 @@
       "peerIp": "对端 IP",
       "serverOnly": "仅服务器",
       "realPortOnlyHint": "端口只能选择已采集到的真实监听端口；未采集时连接到服务器节点。"
-    }
+    },
+    "editLink": "编辑关系",
+    "hideLink": "隐藏关系",
+    "unhideLink": "取消隐藏关系"
   },
   "topology": {
     "title": "网络拓扑",
@@ -2923,7 +2926,9 @@
       "sameNode": "起点与终点不能相同",
       "delete": "删除",
       "deleteTitle": "删除该关系？",
-      "deleteDesc": "删除后可通过再次探测或手工新建重新建立。"
+      "deleteDesc": "删除后可通过再次探测或手工新建重新建立。",
+      "hidden": "隐藏",
+      "hiddenHint": "隐藏的关系会淡显，并从默认视图中移出。"
     },
     "source": {
       "title": "来源",
@@ -3012,7 +3017,9 @@
       "linkCreated": "拓扑关系已创建",
       "linkDeleted": "拓扑关系已删除",
       "layoutApplied": "已应用自动布局",
-      "layoutReset": "已重置为自动布局"
+      "layoutReset": "已重置为自动布局",
+      "linkHidden": "关系已隐藏",
+      "linkShown": "关系已恢复显示"
     },
     "details.title": "详情",
     "details.noSelection": "未选中任何对象",
@@ -3119,6 +3126,9 @@
     "linkStatus.active": "活跃",
     "linkStatus.observed": "已观测",
     "linkStatus.stale": "待确认",
-    "linkStatus.unknown": "未知"
+    "linkStatus.unknown": "未知",
+    "editLink": "编辑关系",
+    "hideLink": "隐藏关系",
+    "unhideLink": "取消隐藏关系"
   }
 }

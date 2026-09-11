@@ -17,7 +17,8 @@ const tauri = vi.hoisted(() => {
   });
   const closeHandlers: Array<(event: { preventDefault(): void }) => Promise<void> | void> = [];
   const destroy = vi.fn();
-  return { db, invoke, closeHandlers, destroy };
+  const processExit = vi.fn();
+  return { db, invoke, closeHandlers, destroy, processExit };
 });
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: tauri.invoke }));
@@ -30,6 +31,7 @@ vi.mock('@tauri-apps/api/window', () => ({
     destroy: tauri.destroy,
   }),
 }));
+vi.mock('@tauri-apps/plugin-process', () => ({ exit: tauri.processExit }));
 
 import { TerminalGroupProvider, useTerminalGroups } from '../lib/terminal-group-context';
 import {
@@ -60,6 +62,8 @@ describe('TerminalGroupProvider — save workspace at close', () => {
     tauri.invoke.mockClear();
     tauri.closeHandlers.length = 0;
     tauri.destroy.mockClear();
+    tauri.processExit.mockClear();
+    tauri.destroy.mockResolvedValue(undefined);
     (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {};
     resetWorkspaceCache();
     await hydrateWorkspace();
@@ -112,5 +116,71 @@ describe('TerminalGroupProvider — save workspace at close', () => {
     ]);
 
     document.body.removeChild(container);
+  });
+
+  it('falls back to process exit when the window destroy capability is missing', async () => {
+    // Regression guard for the 2.18.0 unclosable-app bug: `destroy` was never
+    // in `core:window:*` capabilities, so its rejection left the window open
+    // forever. The handler must now route through plugin-process instead.
+    tauri.destroy.mockRejectedValue(new Error('window.destroy not allowed'));
+
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    await act(async () => {
+      createRoot(container).render(
+        <TerminalGroupProvider>
+          <Harness />
+        </TerminalGroupProvider>,
+      );
+      await Promise.resolve();
+    });
+
+    const event = { preventDefault: vi.fn() };
+    await act(async () => {
+      await tauri.closeHandlers[0]?.(event);
+    });
+
+    expect(event.preventDefault).toHaveBeenCalled();
+    expect(tauri.destroy).toHaveBeenCalled();
+    expect(tauri.processExit).toHaveBeenCalledWith(0);
+
+    document.body.removeChild(container);
+  });
+
+  it('still closes when persistence hangs (3s bound)', async () => {
+    vi.useFakeTimers();
+    try {
+      tauri.invoke.mockImplementationOnce(
+        () => new Promise((resolve) => setTimeout(resolve, 60_000)),
+      );
+
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      await act(async () => {
+        createRoot(container).render(
+          <TerminalGroupProvider>
+            <Harness />
+          </TerminalGroupProvider>,
+        );
+        await Promise.resolve();
+      });
+
+      const event = { preventDefault: vi.fn() };
+      const closeRun = act(async () => {
+        await tauri.closeHandlers[0]?.(event);
+      });
+      // The persistence promise never resolves within the bound; the race
+      // timer must fire and let the close proceed.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3_100);
+      });
+      await closeRun;
+
+      expect(tauri.destroy).toHaveBeenCalled();
+
+      document.body.removeChild(container);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

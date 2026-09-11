@@ -101,6 +101,37 @@ const PROBE_INTERVAL_MS = 1000;
 /** Backoff after a failed probe, so dead hosts are not hammered every tick. */
 const PROBE_FAIL_BACKOFF_MS = 30_000;
 
+/**
+ * Persisted last sample per server. Toggling the resources column (or opening
+ * the toolbox) renders these values INSTANTLY instead of a wall of '—'; the
+ * next poll tick overwrites them in place. Best-effort: private mode / quota
+ * errors simply skip the cache.
+ */
+const RESOURCE_CACHE_KEY = 'nexterm:toolbox:resource-cache';
+
+function readResourceCache(): Record<string, ServerStats> {
+  try {
+    const raw = window.localStorage.getItem(RESOURCE_CACHE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as Record<string, { stats?: ServerStats }>;
+    const out: Record<string, ServerStats> = {};
+    for (const [id, entry] of Object.entries(parsed)) {
+      if (entry?.stats) out[id] = entry.stats;
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+function writeResourceCache(map: Record<string, ServerStats>): void {
+  try {
+    window.localStorage.setItem(RESOURCE_CACHE_KEY, JSON.stringify(map));
+  } catch {
+    /* cache is best-effort */
+  }
+}
+
 interface ServerStats {
   cpu_percent: number;
   cores: number;
@@ -205,12 +236,14 @@ export function ServersView({
   const [showResources, setShowResources] = useState<boolean>(() =>
     Boolean(prefGet<unknown>('nexterm:toolbox:show-resources', false)),
   );
-  const [resources, setResources] = useState<Record<string, ServerStats>>({});
+  const [resources, setResources] = useState<Record<string, ServerStats>>(() => readResourceCache());
 
   // Earliest allowed offline-probe retry per server id. Successful probes
   // schedule the next attempt after PROBE_INTERVAL_MS; failed probes back off
   // for PROBE_FAIL_BACKOFF_MS so dead hosts don't stall the poll loop.
   const nextProbeRef = useRef<Record<string, number>>({});
+  /** True while the resources column is in its cache-hydrating activation. */
+  const resourcesActivatedRef = useRef(false);
 
   const reload = useCallback(() => {
     // Spread into new arrays: the storage returns the same array reference
@@ -257,6 +290,14 @@ export function ServersView({
     }
     let cancelled = false;
     let inFlight = false;
+    // Instant display on (re)activation: hydrate the grid from the last
+    // persisted sample before the first network round-trip lands. Guarded by
+    // a ref so dependency-driven effect re-runs never clobber fresh values
+    // with the cache.
+    if (!resourcesActivatedRef.current) {
+      resourcesActivatedRef.current = true;
+      setResources(readResourceCache());
+    }
     const fetchAll = async () => {
       if (inFlight) return; // skip a tick rather than queueing stale runs
       inFlight = true;
@@ -328,7 +369,10 @@ export function ServersView({
         }
 
         // Atomic replace: no stale merge — every server is fresh or '—'.
-        if (!cancelled) setResources(map);
+        if (!cancelled) {
+          setResources(map);
+          writeResourceCache(map);
+        }
       } finally {
         inFlight = false;
       }

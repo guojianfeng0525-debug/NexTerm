@@ -716,75 +716,132 @@ export function removeNode(id: string): void {
 }
 
 /**
- * Align saved-connection nodes with the connection's current folder.
+ * v2.18.1 startup migration: observed nodes become IP-unique.
  *
- * `group_path` was added after the topology shipped. Rows created before that
- * migration legitimately contain the default root value, so the UI cannot tell
- * "user chose root" from "row was written before folders existed". The storage
- * initializer knows the hydrated connection cache and performs this one-time
- * repair on every launch.
+ * Before 2.18.1 observed node ids were group-scoped
+ * (`observed:<encoded-group>:<ip>`), so the same address could exist as two
+ * nodes in two folders and every cross-group edge vanished from both views.
+ * The id is now the plain normalized IP; this migration renames legacy rows,
+ * merges duplicates (keeping the first non-null position/label), and
+ * re-targets every link / port-link endpoint that referenced the old ids.
+ *
+ * `syncNodeGroupPaths` (the folder-drift repair it replaced) is gone by
+ * design: node identity no longer depends on the folder, and the group
+ * dropdown is a pure view filter.
  */
-export function syncNodeGroupPaths(folderByConnectionId: ReadonlyMap<string, string>): number {
-  const root = 'All Connections';
-  const changed: NetworkNode[] = [];
-  const assignedObserved = new Set<string>();
-  const groupsById = new Map<string, string>();
-  const nextNodes = listNodes().map((node): NetworkNode => {
-    const isObserved = node.connectionId.startsWith('observed:');
-    const folder = folderByConnectionId.get(node.connectionId);
-    const group = isObserved || folder === undefined
-      ? (node.groupPath || root)
-      : (folder || root);
-    if (!isObserved) {
-      groupsById.set(node.id, group);
+export function migrateObservedNodeIds(): number {
+  const LEGACY_PREFIX = 'observed:';
+  const nodes = listNodes();
+  // canonical id (observed:<ip>) → merged node
+  const canonical = new Map<string, NetworkNode>();
+  // old id → canonical id
+  const rename = new Map<string, string>();
+  let changed = 0;
+
+  for (const node of nodes) {
+    if (!node.connectionId.startsWith(LEGACY_PREFIX)) continue;
+    // Strip one legacy group segment if present: observed:<encoded>:<ip>.
+    const rest = node.connectionId.slice(LEGACY_PREFIX.length);
+    const parts = rest.split(':');
+    const ip = (parts.length >= 2 ? parts[parts.length - 1] : rest).trim();
+    if (!ip) continue;
+    const canonicalId = `observed:${ip}`;
+
+    if (node.id === canonicalId) {
+      const prev = canonical.get(canonicalId);
+      canonical.set(canonicalId, prev && (prev.posX != null || prev.displayName) ? prev : node);
+      continue;
     }
-    if (group === node.groupPath) return node;
-    const next = { ...node, groupPath: group, updatedAt: Date.now() };
-    changed.push(next);
-    return next;
-  });
-
-  // Legacy observed peers were also written with the default root group. Move
-  // each one to the group of the saved server that observed it. A peer linked
-  // from multiple isolated groups has ambiguous ownership; keep its first
-  // assignment, and cross-group links simply fall out of both group views.
-  for (const link of listLinks()) {
-    const sourceGroup = groupsById.get(link.sourceNodeId);
-    const targetGroup = groupsById.get(link.targetNodeId);
-    const savedGroup = sourceGroup ?? targetGroup;
-    if (!savedGroup || (sourceGroup !== undefined && targetGroup !== undefined && sourceGroup === targetGroup)) continue;
-    const observedId = nodeIsObservedId(link.sourceNodeId)
-      ? link.sourceNodeId
-      : nodeIsObservedId(link.targetNodeId)
-        ? link.targetNodeId
-        : null;
-    if (observedId && !assignedObserved.has(observedId)) {
-      groupsById.set(observedId, savedGroup);
-      assignedObserved.add(observedId);
+    rename.set(node.id, canonicalId);
+    const prev = canonical.get(canonicalId);
+    if (!prev) {
+      canonical.set(canonicalId, node);
+    } else {
+      // Merge: keep the first non-null manual layout / display name.
+      const merged: NetworkNode = {
+        ...prev,
+        posX: prev.posX ?? node.posX,
+        posY: prev.posY ?? node.posY,
+        displayName: prev.displayName || node.displayName,
+        notes: prev.notes || node.notes,
+      };
+      canonical.set(canonicalId, merged);
     }
+    changed += 1;
   }
+  if (rename.size === 0) return 0;
 
-  const observedChanged: NetworkNode[] = [];
-  for (let index = 0; index < nextNodes.length; index += 1) {
-    const node = nextNodes[index];
-    if (!nodeIsObservedId(node.id)) continue;
-    const group = assignedObserved.has(node.id) ? groupsById.get(node.id) : undefined;
-    if (!group || group === node.groupPath) continue;
-    const next = { ...node, groupPath: group, updatedAt: Date.now() };
-    nextNodes[index] = next;
-    observedChanged.push(next);
+  const now = Date.now();
+  // Rewrite observed nodes to their canonical ids.
+  const nextNodes: NetworkNode[] = [];
+  for (const node of nodes) {
+    if (!node.connectionId.startsWith(LEGACY_PREFIX)) {
+      nextNodes.push(node);
+      continue;
+    }
+    const rest = node.connectionId.slice(LEGACY_PREFIX.length);
+    const parts = rest.split(':');
+    const ip = (parts.length >= 2 ? parts[parts.length - 1] : rest).trim();
+    const canonicalId = `observed:${ip}`;
+    const canonicalNode = canonical.get(canonicalId);
+    if (!canonicalNode) {
+      nextNodes.push(node);
+      continue;
+    }
+    const renamed: NetworkNode = {
+      ...canonicalNode,
+      id: canonicalId,
+      connectionId: canonicalId,
+      updatedAt: now,
+    };
+    if (!nextNodes.some((n) => n.id === canonicalId)) nextNodes.push(renamed);
+    if (node.id !== canonicalId) commitDelete('nodes', node.id);
   }
-
-  if (changed.length === 0 && observedChanged.length === 0) return 0;
   cache.nodes = nextNodes;
-  for (const node of [...changed, ...observedChanged]) commitUpsert('nodes', toRow('nodes', node));
+  for (const node of nextNodes) {
+    if (rename.has(node.id) || rename.size > 0) commitUpsert('nodes', toRow('nodes', node));
+  }
+
+  // Re-target links.
+  const links = listLinks();
+  let linksChanged = false;
+  const nextLinks = links.map((link): NetworkLink => {
+    const sourceNodeId = rename.get(link.sourceNodeId) ?? link.sourceNodeId;
+    const targetNodeId = rename.get(link.targetNodeId) ?? link.targetNodeId;
+    if (sourceNodeId === link.sourceNodeId && targetNodeId === link.targetNodeId) return link;
+    linksChanged = true;
+    return { ...link, sourceNodeId, targetNodeId, updatedAt: now };
+  });
+  if (linksChanged) {
+    cache.links = nextLinks;
+    for (let index = 0; index < links.length; index += 1) {
+      if (nextLinks[index] !== links[index]) commitUpsert('links', toRow('links', nextLinks[index]));
+    }
+  }
+
+  // Re-target port links.
+  const portLinks = listPortLinks();
+  let portLinksChanged = false;
+  const nextPortLinks = portLinks.map((link): NetworkPortLink => {
+    const sourceNodeId = link.sourceNodeId !== null ? (rename.get(link.sourceNodeId) ?? link.sourceNodeId) : null;
+    const targetNodeId = link.targetNodeId !== null ? (rename.get(link.targetNodeId) ?? link.targetNodeId) : null;
+    if (sourceNodeId === link.sourceNodeId && targetNodeId === link.targetNodeId) return link;
+    portLinksChanged = true;
+    return { ...link, sourceNodeId, targetNodeId, updatedAt: now };
+  });
+  if (portLinksChanged) {
+    cache.port_links = nextPortLinks;
+    for (let index = 0; index < portLinks.length; index += 1) {
+      if (nextPortLinks[index] !== portLinks[index]) {
+        commitUpsert('port_links', toRow('port_links', nextPortLinks[index]));
+      }
+    }
+  }
+
   notifyTopologyChanged();
-  return changed.length + observedChanged.length;
+  return changed;
 }
 
-function nodeIsObservedId(id: string): boolean {
-  return id.startsWith('observed:');
-}
 
 
 /* ── detail reads ────────────────────────────────────────────────────────── */

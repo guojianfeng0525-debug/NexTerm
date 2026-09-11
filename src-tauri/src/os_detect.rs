@@ -608,55 +608,43 @@ done
     /// `/proc/net/{tcp,tcp6,udp,udp6}` is the kernel socket table. Unlike the
     /// `ss`/`netstat` fallbacks it is available without installing iproute2 or
     /// net-tools, performs no name resolution, and emits *every* state. The
-    /// process association is best-effort: it only reads symlinks below
-    /// `/proc/<pid>/fd` and never launches a helper on the remote host.
+    /// rows are passed through verbatim — the parser reads the socket inode
+    /// (column 10) directly, so the days of deriving per-socket ownership in
+    /// shell (one `readlink` fork per fd, the remote-CPU spike of 2.18.0) are
+    /// gone; ownership now comes from the single-process [`Self::fdmap_probe_cmd`].
     pub fn proc_sockets_probe_cmd(&self) -> &'static str {
         r#"
 echo "NT_PROC_BEGIN"
-socket_inodes="|"
 for spec in "tcp /proc/net/tcp" "tcp6 /proc/net/tcp6" "udp /proc/net/udp" "udp6 /proc/net/udp6"; do
     set -- $spec
     proto=$1
     path=$2
     if [ -r "$path" ]; then
         printf 'NT_PROC_FILE\t%s\t%s\n' "$proto" "$path"
-        while read -r _f1 _f2 _f3 _f4 _f5 _f6 _f7 _f8 inode _rest; do
-            printf '%s\n' "$_f1 $_f2 $_f3 $_f4 $_f5 $_f6 $_f7 $_f8 $inode $_rest"
-            case "$inode" in
-                ''|*[!0-9]*) continue ;;
-            esac
-            socket_inodes="$socket_inodes$inode|"
-        done < "$path"
+        cat "$path" 2>/dev/null
     fi
-done
-for proc in /proc/[0-9]*; do
-    [ -d "$proc" ] || continue
-    pid=${proc##*/}
-    comm=''
-    if [ -r "$proc/comm" ]; then
-        comm=$(cat "$proc/comm" 2>/dev/null)
-    fi
-    for fd in "$proc"/fd/*; do
-        [ -e "$fd" ] || continue
-        target=$(readlink "$fd" 2>/dev/null) || continue
-        case "$target" in
-            socket:\[*\])
-                inode=${target#socket:[}
-                inode=${inode%]}
-                # Skip every fd whose socket is not in one of the four kernel
-                # tables read above. This keeps the scan from materializing the
-                # full fd map of busy application/container hosts.
-                case "$socket_inodes" in
-                    *"|$inode|"*)
-                        printf 'NT_PROC_PROCESS\t%s\t%s\t%s\n' "$inode" "$pid" "$comm"
-                        ;;
-                esac
-                ;;
-        esac
-    done
 done
 echo "NT_PROC_END"
 "#
+    }
+
+    /// Process → socket-inode ownership in ONE remote process.
+    ///
+    /// GNU findutils matches every socket fd with a single kernel-side
+    /// traversal (`-lname`, `-printf`) — no per-fd `readlink` forks, which is
+    /// what made busy hosts spike to thousands of execs per probe. BusyBox
+    /// `find` (Alpine) lacks `-printf`/`-lname` on older builds and exits
+    /// non-zero, so the globbed `ls -l` fallback still covers it with a single
+    /// process. Both output shapes are parsed by `parse_fdmap`. Non-root users
+    /// simply get a partial map (other users' /proc/<pid>/fd is unreadable),
+    /// which degrades `p1` attribution instead of fabricating it.
+    pub fn fdmap_probe_cmd(&self) -> &'static str {
+        match self.family {
+            OsFamily::MacOS | OsFamily::Bsd => "echo \"NT_FDMAP_UNAVAILABLE\"",
+            _ => {
+                "{ find /proc/[0-9]*/fd -lname 'socket:\\[*' -printf '%p %l\\n' 2>/dev/null || ls -l /proc/[0-9]*/fd 2>/dev/null; } | head -n 40000"
+            }
+        }
     }
 
     /// Firewall type / state probe.
@@ -734,39 +722,48 @@ echo "NT_PROC_END"
     /// Single read-only shell script that emits EVERY topology section in one
     /// SSH round-trip, each wrapped in a `###NT:<name>###` marker.
     ///
-    /// Section order is fixed: `hostname` → `os` → `interfaces` → `routes` →
-    /// `firewall` → `rules` → `ports` → `peers`. One exec instead of eight
-    /// keeps the connection read-lock hold time (and the 30s per-command
-    /// timeout exposure) at a single round-trip.
-    pub fn topology_probe_cmd(&self) -> String {
+    /// Section set (v2.18.1, requirement-driven — anything the user did not
+    /// ask for is not collected): `hostname` → `os` → `interfaces` →
+    /// (`firewall` + `rules`, only when `include_firewall`) → Linux:
+    /// `proc_sockets` + `fdmap` / macOS-BSD: `ports` + `peers`. The routing
+    /// table section was dropped: it was the heaviest remaining read with no
+    /// consumer-facing purpose in the topology graph.
+    ///
+    /// One exec instead of many keeps the connection read-lock hold time (and
+    /// the 30s per-command timeout exposure) at a single round-trip; the whole
+    /// script forks at most ~4 short-lived processes on the remote host.
+    pub fn topology_probe_cmd(&self, include_firewall: bool) -> String {
         let mut s = String::new();
         s.push_str("# NexTerm network topology probe — READ-ONLY / ZERO-INSTALL.\n");
         s.push_str("# Every command below is a pure query: no redirection to a file, no\n");
         s.push_str("# package manager, no iptables -A/-F, no systemctl start/stop, no\n");
-        s.push_str("# credential handling. `set -e` is deliberately absent so that one\n");
-        s.push_str("# failing section can never abort the remaining ones.\n");
+        s.push_str("# credential handling, no per-fd readlink forks. `set -e` is\n");
+        s.push_str("# deliberately absent so that one failing section can never abort\n");
+        s.push_str("# the remaining ones. Firewall dumps are opt-in per call and cached\n");
+        s.push_str("# client-side, so a re-probe within the TTL skips them entirely.\n");
         s.push_str("echo \"###NT:hostname###\"; ");
         s.push_str(self.hostname_probe_cmd());
         s.push_str("\necho \"###NT:os###\"; ");
         s.push_str(self.os_release_probe_cmd());
         s.push_str("\necho \"###NT:interfaces###\"; ");
         s.push_str(self.interfaces_probe_cmd());
-        s.push_str("\necho \"###NT:routes###\"; ");
-        s.push_str(self.routes_probe_cmd());
-        s.push_str("\necho \"###NT:firewall###\";\n");
-        s.push_str(&self.firewall_probe_cmd());
-        s.push_str("echo \"###NT:rules###\";\n");
-        s.push_str(&self.firewall_rules_probe_cmd());
+        if include_firewall {
+            s.push_str("\necho \"###NT:firewall###\";\n");
+            s.push_str(&self.firewall_probe_cmd());
+            s.push_str("echo \"###NT:rules###\";\n");
+            s.push_str(&self.firewall_rules_probe_cmd());
+        }
         if matches!(self.family, OsFamily::MacOS | OsFamily::Bsd) {
             s.push_str("echo \"###NT:ports###\"; ");
             s.push_str(self.ports_probe_cmd());
             s.push_str("\necho \"###NT:peers###\"; ");
             s.push_str(self.peers_probe_cmd());
+            s.push_str("\necho \"###NT:fdmap###\"; echo \"NT_FDMAP_UNAVAILABLE\"");
         } else {
-            s.push_str("echo \"###NT:ports###\";\necho \"NT_PROC_SOCKETS\"\n");
-            s.push_str("echo \"###NT:peers###\";\necho \"NT_PROC_SOCKETS\"\n");
             s.push_str("echo \"###NT:proc_sockets###\";\n");
             s.push_str(self.proc_sockets_probe_cmd());
+            s.push_str("echo \"###NT:fdmap###\";\n");
+            s.push_str(self.fdmap_probe_cmd());
         }
         s.push_str("\necho \"###NT:end###\"");
         s
@@ -910,31 +907,38 @@ mod tests {
 
     #[test]
     fn test_topology_probe_cmd_section_order() {
-        let script = OsInfo::default().topology_probe_cmd();
+        let full = OsInfo::default().topology_probe_cmd(true);
         let order = [
             "###NT:hostname###",
             "###NT:os###",
             "###NT:interfaces###",
-            "###NT:routes###",
             "###NT:firewall###",
             "###NT:rules###",
-            "###NT:ports###",
-            "###NT:peers###",
             "###NT:proc_sockets###",
+            "###NT:fdmap###",
             "###NT:end###",
         ];
         let mut cursor = 0usize;
         for marker in order {
-            let at = script[cursor..]
+            let at = full[cursor..]
                 .find(marker)
                 .unwrap_or_else(|| panic!("missing {marker} after offset {cursor}"));
             cursor += at + marker.len();
         }
+        // The routing table is no longer collected at all.
+        assert!(!full.contains("###NT:routes###"));
+        // TTL mode: firewall sections are omitted entirely on re-probe.
+        let cached = OsInfo::default().topology_probe_cmd(false);
+        assert!(!cached.contains("###NT:firewall###"));
+        assert!(!cached.contains("###NT:rules###"));
+        assert!(cached.contains("###NT:fdmap###"));
     }
 
     #[test]
     fn test_topology_probe_cmd_is_read_only() {
-        let script = OsInfo::default().topology_probe_cmd();
+        // Cover the FULL script (firewall dumps included) — the read-only
+        // guarantee must hold for every optional section.
+        let script = OsInfo::default().topology_probe_cmd(true);
         // Only inspect executable lines — the header comment deliberately
         // *mentions* the constructs it promises never to use.
         let code: String = script
@@ -947,25 +951,53 @@ mod tests {
             "set -e",
             " > ",
             ">>",
+            " | tee",
+            "sed -i",
+            "chmod ",
+            "chown ",
+            "kill ",
+            "pkill ",
+            "reboot",
+            "shutdown",
+            "mkfs",
+            "mount ",
+            "umount ",
+            "dd ",
             "nc ",
             "/dev/tcp",
             "ping ",
             "traceroute",
             "dig ",
             "nslookup ",
+            "curl ",
+            "wget ",
             "apt ",
             "yum ",
             "apk ",
             "dnf ",
+            "pkg ",
             "iptables -A",
             "iptables -F",
             "iptables -I",
+            "iptables -X",
+            "iptables -Z",
+            "iptables -N",
+            "nft add",
+            "nft delete",
+            "nft insert",
+            "nft flush",
             "systemctl start",
             "systemctl stop",
+            "systemctl restart",
+            "service ",
             "ufw enable",
             "ufw disable",
+            "ufw allow",
+            "ufw deny",
+            "ufw delete",
             "firewall-cmd --add",
             "firewall-cmd --remove",
+            "readlink ",
         ] {
             assert!(
                 !code.contains(forbidden),
@@ -975,17 +1007,28 @@ mod tests {
     }
 
     #[test]
-    fn test_topology_probe_cmd_prefers_iproute2_on_linux() {
+    fn test_topology_probe_cmd_uses_whitelist_commands_only() {
+        // The v2.18.1 contract: exactly these remote commands, nothing else
+        // beyond shell builtins. Anything new must be justified + whitelisted
+        // here (and stay read-only, see the test above).
         let script = OsInfo {
             family: OsFamily::Debian,
-            has_ss: true,
             ..Default::default()
         }
-        .topology_probe_cmd();
-        assert!(script.contains("ip -o addr"));
-        assert!(script.contains("ip route"));
-        assert!(script.contains("/proc/net/tcp"));
-        assert!(script.contains("NT_PROC_PROCESS"));
+        .topology_probe_cmd(true);
+        for required in [
+            "hostname -f",
+            "ip -o addr",
+            "/proc/net/tcp",
+            "find /proc/[0-9]*/fd -lname",
+            "iptables-save",
+        ] {
+            assert!(script.contains(required), "probe must use {required:?}");
+        }
+        // The per-fd readlink storm and the routing dump are gone.
+        assert!(!script.contains("NT_PROC_PROCESS"));
+        assert!(!script.contains("ip route"));
+        assert!(!script.contains("for fd in"));
     }
 
     #[test]
@@ -996,17 +1039,20 @@ mod tests {
             has_gnu_coreutils: false,
             ..Default::default()
         }
-        .topology_probe_cmd();
+        .topology_probe_cmd(true);
         assert!(script.contains("/proc/net/tcp"));
+        // BusyBox find has no -printf: the single-process ls fallback must be
+        // wired in on the same line so `||` covers the unsupported builtin.
+        assert!(script.contains("|| ls -l /proc/[0-9]*/fd"));
 
         let macos = OsInfo {
             family: OsFamily::MacOS,
             ..Default::default()
         }
-        .topology_probe_cmd();
+        .topology_probe_cmd(true);
         assert!(macos.contains("ifconfig -a"));
-        assert!(macos.contains("netstat -rn -f inet"));
         assert!(macos.contains("pfctl"));
+        assert!(macos.contains("NT_FDMAP_UNAVAILABLE"));
     }
 
     #[test]

@@ -43,7 +43,7 @@ import {
 import type { NetworkLink, NetworkNode, NetworkPort } from '@/lib/network/topology-types';
 import { cn } from '@/lib/utils';
 import { ConnectionStorageManager } from '@/lib/connection-storage';
-import { isServerPeerAddress, SERVER_GROUP_ROOT } from '@/lib/network/address-scope';
+import { SERVER_GROUP_ROOT } from '@/lib/network/address-scope';
 import {
   TopologyGraph,
   computeAutoLayout,
@@ -97,12 +97,15 @@ export function ToolTopology() {
     setLinks(listLinks());
   }, []);
 
+  // Group assignment is informational only (dropdown filter label). Saved
+  // nodes follow their connection's folder; observed nodes keep the group of
+  // the server that first observed them. NOTHING here can hide a node or an
+  // edge — the graph renders exactly what is stored (WYSIWYG contract).
   const scopeOf = useCallback((node: NetworkNode): string => {
     if (node.connectionId.startsWith('observed:')) {
       return node.groupPath?.trim() || SERVER_GROUP_ROOT;
     }
     return ConnectionStorageManager.getConnection(node.connectionId)?.folder
-      || node.groupPath?.trim()
       || SERVER_GROUP_ROOT;
   }, []);
 
@@ -126,8 +129,9 @@ export function ToolTopology() {
     const query = search.trim().toLowerCase();
     return nodes.filter((node) => {
       if (node.hidden && !showHidden) return false;
-      if (scopeOf(node) !== isolationGroup) return false;
-      if (node.connectionId.startsWith('observed:') && !isServerPeerAddress(node.primaryIp)) return false;
+      // 「全部连接」= everything (cross-group edges included). A picked group
+      // is a plain view filter. No address blacklist, no group scoping.
+      if (isolationGroup !== SERVER_GROUP_ROOT && scopeOf(node) !== isolationGroup) return false;
       if (!query) return true;
       return (
         nodeLabel(node).toLowerCase().includes(query) ||
@@ -312,6 +316,14 @@ export function ToolTopology() {
     setSelectedNodeId(null);
     setLinkDialogOpen(true);
   }, [links]);
+
+  const handleToggleLinkHidden = useCallback((id: string) => {
+    const link = links.find((item) => item.id === id);
+    if (!link) return;
+    upsertLink({ ...link, hidden: !link.hidden, updatedAt: Date.now() });
+    reload();
+    toast.success(link.hidden ? t('topology.toast.linkShown') : t('topology.toast.linkHidden'));
+  }, [links, reload, t]);
 
   const handleSaveLink = useCallback(
     (link: NetworkLink) => {
@@ -518,6 +530,7 @@ export function ToolTopology() {
               onEditNode={handleEditNode}
               onEditLink={handleEditLink}
               onHideNode={handleHideNode}
+              onToggleLinkHidden={handleToggleLinkHidden}
               onRequestDeleteNode={(id) =>
                 setDeleteNodeTarget(nodes.find((item) => item.id === id) ?? null)
               }

@@ -95,6 +95,7 @@ const SECTION_LABEL_KEYS = {
   ports: 'network.section.ports',
   peers: 'network.section.peers',
   procSockets: 'network.section.procSockets',
+  fdmap: 'network.section.procSockets',
 } as const satisfies Record<keyof ProbeSections, string>;
 
 function readNodeData(assetId: string, host = ''): NodePanelData | null {

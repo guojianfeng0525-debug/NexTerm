@@ -4917,6 +4917,7 @@ mod encoding_tests {
 #[tauri::command]
 pub async fn probe_network_topology(
     connection_id: String,
+    include_firewall: Option<bool>,
     state: State<'_, Arc<ConnectionManager>>,
 ) -> Result<crate::network_probe::ProbeResult, String> {
     let _probe_permit = TOPOLOGY_PROBE_LIMIT
@@ -4933,5 +4934,9 @@ pub async fn probe_network_topology(
 
     let os_info = get_os_info(&connection_id, &client, state.inner()).await;
 
-    Ok(crate::network_probe::run_probe(&client, &os_info).await)
+    // Firewall dumps (iptables-save / nft list ruleset) are the heaviest
+    // section; the frontend passes `false` while its 10-minute TTL cache is
+    // still fresh so a re-probe never re-runs them.
+    let include_firewall = include_firewall.unwrap_or(true);
+    Ok(crate::network_probe::run_probe(&client, &os_info, include_firewall).await)
 }

@@ -13,7 +13,12 @@
  */
 import { invoke } from '@tauri-apps/api/core';
 import { ConnectionStorageManager } from '../connection-storage';
-import type { ApplyProbeSummary, ProbeResult } from './topology-types';
+import type {
+  ApplyProbeSummary,
+  MergeOutcome,
+  NetworkFirewallRule,
+  ProbeResult,
+} from './topology-types';
 import {
   buildInterfaceIpIndex,
   deriveProbeStatus,
@@ -26,7 +31,6 @@ import {
   mergeInterfaces,
   mergeNode,
   mergePorts,
-  mergeRoutes,
   normalizeTopologyAddress,
   resolvePortLinkTargets,
   sanitizeProbeData,
@@ -35,7 +39,6 @@ import {
   getNodeByConnectionId,
   getNodeInterfaces,
   getNodePorts,
-  getNodeRoutes,
   getNodeFirewallRules,
   getNodeFirewalls,
   listInterfaces,
@@ -48,7 +51,6 @@ import {
   saveNodeFirewalls,
   saveNodeInterfaces,
   saveNodePorts,
-  saveNodeRoutes,
   savePortLinks,
   upsertNode,
 } from './topology-storage';
@@ -71,9 +73,15 @@ function toError(err: unknown, fallback: string): Error {
 }
 
 /** Run the full read-only probe against the server bound to `connectionId`. */
-export async function probeServerTopology(connectionId: string): Promise<ProbeResult> {
+export async function probeServerTopology(
+  connectionId: string,
+  options?: { includeFirewall?: boolean },
+): Promise<ProbeResult> {
   try {
-    return await invoke<ProbeResult>('probe_network_topology', { connectionId });
+    return await invoke<ProbeResult>('probe_network_topology', {
+      connectionId,
+      includeFirewall: options?.includeFirewall ?? true,
+    });
   } catch (err) {
     throw toError(err, '探测网络拓扑失败');
   }
@@ -106,7 +114,7 @@ export function applyProbeResult(input: ApplyProbeInput): ApplyProbeSummary {
   const probeAt = input.probeAt ?? Date.now();
   const data = sanitizeProbeData(input.result?.data ?? {
     hostname: '', osName: '', primaryIp: '', interfaces: [], routes: [],
-    firewall: null, firewallRules: [], ports: [], peers: [],
+    firewall: null, firewallRules: [], ports: [], peers: [], serviceLinks: [],
   });
   const status = deriveProbeStatus(input.result);
   const groupPath = ConnectionStorageManager.getConnection(input.connectionId)?.folder || 'All Connections';
@@ -122,18 +130,16 @@ export function applyProbeResult(input: ApplyProbeInput): ApplyProbeSummary {
   const observedCandidate = data
     ? listNodes().find((node) => (
         isObservedNode(node)
-        && (node.groupPath?.trim() || 'All Connections') === groupPath
         && detectedAddresses.has(normalizeTopologyAddress(node.primaryIp))
       ))
     : undefined;
   const existingByConnection = getNodeByConnectionId(input.connectionId);
-  // Within one isolation group, an address is the asset identity. This merges
-  // duplicate saved connections to the same server and promotes an observed
-  // endpoint instead of creating a second server.
+  // An address is the asset identity (one IP, one node — global, not
+  // group-scoped). This merges duplicate saved connections to the same server
+  // and promotes an observed endpoint instead of creating a second node.
   const existingByIp = data
     ? listNodes().find((node) => (
         node.id !== observedCandidate?.id
-        && (node.groupPath?.trim() || 'All Connections') === groupPath
         && (
           detectedAddresses.has(normalizeTopologyAddress(node.primaryIp))
           || getNodeInterfaces(node.id).some(iface => [
@@ -163,24 +169,33 @@ export function applyProbeResult(input: ApplyProbeInput): ApplyProbeSummary {
   const interfaces = mergeInterfaces(getNodeInterfaces(nodeId), data?.interfaces ?? [], nodeId, probeAt);
   saveNodeInterfaces(nodeId, interfaces.items);
 
-  const routes = mergeRoutes(getNodeRoutes(nodeId), data?.routes ?? [], nodeId, probeAt);
-  saveNodeRoutes(nodeId, routes.items);
+  // Routes are no longer collected (dropped in 2.18.1): skip the merge so the
+  // rows already in the store are neither refreshed nor marked missing.
 
-  // Merge against EVERY stored row, not just the current one: a firewall
-  // implementation switch produces a second row while the old one is retained
-  // (marked missing) so the user's note on it survives.
-  const firewalls = mergeFirewalls(getNodeFirewalls(nodeId), data?.firewall ?? null, nodeId, probeAt);
-  const firewall = firewalls.items.find((f) => f.missingSince === null) ?? firewalls.items[0] ?? null;
-  saveNodeFirewalls(nodeId, firewalls.items);
+  // Firewall dumps run behind a 10-minute TTL; when the probe skipped them
+  // (`firewallCollected === false`) the stored rows must stay untouched —
+  // merging an empty payload would wrongly mark them missing.
+  const firewallCollected = data?.firewallCollected !== false;
+  // Zeroed when the firewall sections were skipped (TTL cache); the summary
+  // fields stay for contract stability.
+  let rulesOutcome: MergeOutcome<NetworkFirewallRule> = { items: [], added: 0, updated: 0, missing: 0 };
+  if (firewallCollected) {
+    // Merge against EVERY stored row, not just the current one: a firewall
+    // implementation switch produces a second row while the old one is retained
+    // (marked missing) so the user's note on it survives.
+    const firewalls = mergeFirewalls(getNodeFirewalls(nodeId), data?.firewall ?? null, nodeId, probeAt);
+    const firewall = firewalls.items.find((f) => f.missingSince === null) ?? firewalls.items[0] ?? null;
+    saveNodeFirewalls(nodeId, firewalls.items);
 
-  const rules = mergeFirewallRules(
-    getNodeFirewallRules(nodeId),
-    data?.firewallRules ?? [],
-    nodeId,
-    firewall?.id ?? '',
-    probeAt,
-  );
-  saveNodeFirewallRules(nodeId, rules.items);
+    rulesOutcome = mergeFirewallRules(
+      getNodeFirewallRules(nodeId),
+      data?.firewallRules ?? [],
+      nodeId,
+      firewall?.id ?? '',
+      probeAt,
+    );
+    saveNodeFirewallRules(nodeId, rulesOutcome.items);
+  }
 
   const ports = mergePorts(getNodePorts(nodeId), data?.ports ?? [], nodeId, probeAt);
   saveNodePorts(nodeId, ports.items);
@@ -189,6 +204,7 @@ export function applyProbeResult(input: ApplyProbeInput): ApplyProbeSummary {
   const knownNodes = inferObservedNodes({
     nodeId,
     peers: data?.peers ?? [],
+    serviceLinks: data?.serviceLinks ?? [],
     knownNodes: nodesBefore,
     now: probeAt,
   });
@@ -201,6 +217,7 @@ export function applyProbeResult(input: ApplyProbeInput): ApplyProbeSummary {
   const linkResult = inferLinksFromPeers({
     nodeId,
     peers: data?.peers ?? [],
+    serviceLinks: data?.serviceLinks ?? [],
     knownNodes,
     interfacesIndex,
     nodePorts,
@@ -210,12 +227,13 @@ export function applyProbeResult(input: ApplyProbeInput): ApplyProbeSummary {
   saveLinks(linkResult.links);
 
   // ── port-level links (level-2 drill-down) ──
-  // Infer port links from the same observed peers, anchored at the probed
-  // node's listening ports. Unknown peers become observed server nodes with no
-  // port rows; they are never auto-probed.
+  // Service links carry both LISTENING endpoints (A:p1 → B:p2); raw peers are
+  // the macOS/BSD fallback. Unknown inbound peers become observed server nodes
+  // with no port rows; they are never auto-probed.
   const portLinkResult = inferPortLinksFromPeers({
     nodeId,
     peers: data?.peers ?? [],
+    serviceLinks: data?.serviceLinks ?? [],
     nodePorts,
     allPorts: listPorts(),
     interfacesIndex,
@@ -241,20 +259,22 @@ export function applyProbeResult(input: ApplyProbeInput): ApplyProbeSummary {
     nodeId,
     added: {
       interfaces: interfaces.added,
-      routes: routes.added,
-      rules: rules.added,
+      // Routes are no longer collected (dropped v2.18.1); the summary field
+      // stays for contract stability and always reports zero.
+      routes: 0,
+      rules: rulesOutcome.added,
       ports: ports.added,
     },
     updated: {
       interfaces: interfaces.updated,
-      routes: routes.updated,
-      rules: rules.updated,
+      routes: 0,
+      rules: rulesOutcome.updated,
       ports: ports.updated,
     },
     missing: {
       interfaces: interfaces.missing,
-      routes: routes.missing,
-      rules: rules.missing,
+      routes: 0,
+      rules: rulesOutcome.missing,
       ports: ports.missing,
     },
     linksAdded: linkResult.added,

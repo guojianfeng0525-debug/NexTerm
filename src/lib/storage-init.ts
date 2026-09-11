@@ -8,7 +8,6 @@
  * components see consistent data on first paint.
  */
 import { getAppLockKey } from './toolbox/app-lock';
-import { ConnectionStorageManager } from './connection-storage';
 import { initializeToolboxStore } from './toolbox/toolbox-storage';
 import { hydrateConnectionsStorage } from './connection-storage';
 import { hydrateConnectionProfiles } from './connection-profiles';
@@ -23,7 +22,7 @@ import { hydrateJarStorage } from './toolbox/jar-storage';
 import { hydratePostgresConnections } from './toolbox/postgres-storage';
 import { hydrateSqliteConnections } from './toolbox/sqlite-storage';
 import { hydrateMySQLConnections } from './toolbox/mysql-storage';
-import { initializeTopologyStore, syncNodeGroupPaths } from './network/topology-storage';
+import { initializeTopologyStore, migrateObservedNodeIds } from './network/topology-storage';
 
 /**
  * Hydrate every SQLite-backed store. Never throws — each store degrades to
@@ -55,15 +54,11 @@ export async function initializeAllStorage(): Promise<void> {
     hydrateMySQLConnections(),
     initializeTopologyStore(),
   ]);
-  // Nodes written before topology groups existed carry the default root path.
-  // Repair them from the current saved-connection folder before any view reads
-  // the cache, then propagate the correction to legacy observed peers.
-  syncNodeGroupPaths(new Map(
-    ConnectionStorageManager.getConnections().map(connection => [
-      connection.id,
-      connection.folder || 'All Connections',
-    ]),
-  ));
+  // Observed nodes became IP-unique in 2.18.1 (one IP, one node — group
+  // scoping created duplicates and made cross-group edges vanish). Fold any
+  // legacy group-scoped ids into their canonical IP ids before views read
+  // the cache.
+  migrateObservedNodeIds();
   // Run after all initial reads finish because VACUUM requires an exclusive lock.
   await compactDocumentHistory();
   // Suggestion store migrates the (now hydrated) legacy usage/history as its

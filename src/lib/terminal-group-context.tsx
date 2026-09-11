@@ -105,15 +105,35 @@ export function TerminalGroupProvider({ children }: { children: React.ReactNode 
     let disposed = false;
     let unlisten: (() => void) | null = null;
 
+    const exitThroughWindow = async (): Promise<void> => {
+      // `destroy` needs `core:window:allow-destroy`; if the capability is ever
+      // dropped again (the 2.18.0 regression that made the app unclosable) or
+      // the call fails for any other reason, fall back to process exit — the
+      // process plugin and `process:allow-exit` are always available.
+      try {
+        await getCurrentWindow().destroy();
+      } catch (error) {
+        console.error('[workspace] window destroy failed, falling back to process exit:', error);
+        const { exit } = await import('@tauri-apps/plugin-process');
+        await exit(0);
+      }
+    };
+
     void getCurrentWindow().onCloseRequested(async (event) => {
       event.preventDefault();
       saveState(stateRef.current);
+      // Bound the persistence so a wedged storage backend can never keep the
+      // window open; the in-memory snapshot (saveState) is already durable
+      // enough for the fallback path.
       try {
-        await flushWorkspace();
+        await Promise.race([
+          flushWorkspace(),
+          new Promise((resolve) => setTimeout(resolve, 3_000)),
+        ]);
       } catch (error) {
         console.error('[workspace] close-time persistence failed:', error);
       }
-      if (!disposed) await getCurrentWindow().destroy();
+      if (!disposed) await exitThroughWindow();
     }).then((dispose) => {
       if (disposed) dispose();
       else unlisten = dispose;

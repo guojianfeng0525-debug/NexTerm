@@ -622,7 +622,7 @@ describe('mergePorts', () => {
 /* ══ topology links ════════════════════════════════════════════════════════ */
 
 describe('buildInterfaceIpIndex', () => {
-  it('strips CIDR suffixes and scopes the index to known nodes', () => {
+  it('strips CIDR suffixes into global IP keys scoped to known nodes', () => {
     const nodes = [makeNode({ id: 'node-a' }), makeNode({ id: 'node-b', connectionId: 'conn-b' })];
     const ifaces = [
       makeInterface({ nodeId: 'node-a', ipv4Addrs: ['10.0.0.5/24'], ipv6Addrs: ['fe80::1/64'] }),
@@ -631,11 +631,22 @@ describe('buildInterfaceIpIndex', () => {
     ];
 
     const index = buildInterfaceIpIndex(nodes, ifaces);
-    expect(index.get('All Connections\u000010.0.0.5')).toBe('node-a');
-    expect(index.get('All Connections\u000010.0.0.6')).toBe('node-b');
+    // v2.18.1: keys are the plain IP — one IP is one asset, folders do not
+    // partition the address space.
+    expect(index.get('10.0.0.5')).toBe('node-a');
+    expect(index.get('10.0.0.6')).toBe('node-b');
     // Link-local addresses never identify a server.
     expect(index.has('fe80::1')).toBe(false);
     expect(index.has('10.0.0.9')).toBe(false);
+  });
+
+  it('keeps Tailscale/CGNAT and RFC1918 ranges (no container blacklist on peers)', () => {
+    const nodes = [makeNode({ id: 'node-a', primaryIp: '100.64.1.5' })];
+    const index = buildInterfaceIpIndex(nodes, [
+      makeInterface({ nodeId: 'node-a', ipv4Addrs: ['172.18.0.5/16'] }),
+    ]);
+    expect(index.get('100.64.1.5')).toBe('node-a');
+    expect(index.get('172.18.0.5')).toBe('node-a');
   });
 });
 
@@ -667,7 +678,9 @@ describe('server-only probe sanitization and group isolation', () => {
     expect(clean.peers[0].remoteAddr).toBe('192.168.50.10');
   });
 
-  it('scopes observed endpoint identity and interface ownership by isolation group', () => {
+  it('resolves the same IP in two groups to ONE asset and one observed id', () => {
+    // v2.18.1: group scoping is gone. Two nodes claiming the same IP make the
+    // index ambiguous (no owner), and observed ids are the plain IP.
     const groupA = [makeNode({ id: 'node-a', groupPath: 'Prod', primaryIp: '10.0.0.5' })];
     const groupB = [makeNode({ id: 'node-b', connectionId: 'conn-b', groupPath: 'Dev', primaryIp: '10.0.0.5' })];
     const index = buildInterfaceIpIndex(
@@ -678,8 +691,8 @@ describe('server-only probe sanitization and group isolation', () => {
       ],
     );
 
-    expect(index.get('Prod\u000010.0.0.5')).toBe('node-a');
-    expect(index.get('Dev\u000010.0.0.5')).toBe('node-b');
+    // Duplicate IP across two nodes is ambiguous — no owner.
+    expect(index.has('10.0.0.5')).toBe(false);
 
     const observedA = inferObservedNodes({
       nodeId: 'node-a',
@@ -694,8 +707,9 @@ describe('server-only probe sanitization and group isolation', () => {
       now: 1_000,
     });
 
-    expect(observedA.at(-1)?.id).toBe('observed:Prod:10.0.0.9');
-    expect(observedB.at(-1)?.id).toBe('observed:Dev:10.0.0.9');
+    // Both groups observe the SAME global node id — never a per-group copy.
+    expect(observedA.at(-1)?.id).toBe('observed:10.0.0.9');
+    expect(observedB.at(-1)?.id).toBe('observed:10.0.0.9');
   });
 });
 
@@ -750,6 +764,105 @@ describe('inferLinksFromPeers', () => {
       'observed:10.0.0.99',
     ]);
     expect(out.confirmed).toBe(0);
+  });
+
+
+  it('service link inbound: unknown peer becomes an observed source aimed at my listener', () => {
+    const out = inferLinksFromPeers({
+      nodeId: 'node-a',
+      peers: [],
+      serviceLinks: [{
+        direction: 'inbound',
+        remoteAddr: '203.0.113.9',
+        remotePort: null,
+        localAddr: '0.0.0.0',
+        localPort: 5432,
+        protocol: 'tcp',
+        state: 'ESTABLISHED',
+        connections: 3,
+      }],
+      knownNodes: nodes,
+      interfacesIndex: index,
+      existingLinks: [],
+      now: 2_000,
+    });
+
+    expect(out.added).toBe(1);
+    const link = out.links[0];
+    expect(link.sourceNodeId).toBe('observed:203.0.113.9');
+    expect(link.targetNodeId).toBe('node-a');
+    expect(link.port).toBe(5432);
+    expect(link.evidence).toContain('(×3)');
+  });
+
+  it('service link outbound: unknown peer creates NEITHER node nor link', () => {
+    const out = inferLinksFromPeers({
+      nodeId: 'node-a',
+      peers: [],
+      serviceLinks: [{
+        direction: 'outbound',
+        remoteAddr: '93.184.216.34',
+        remotePort: 443,
+        localAddr: '10.0.0.5',
+        localPort: null,
+        protocol: 'tcp',
+        state: 'ESTABLISHED',
+        connections: 1,
+      }],
+      knownNodes: nodes,
+      interfacesIndex: index,
+      existingLinks: [],
+      now: 2_000,
+    });
+
+    expect(out.added).toBe(0);
+    expect(out.links).toHaveLength(0);
+  });
+
+  it('service link outbound: known peer yields A:p1 -> B:p2 with attributed evidence', () => {
+    const out = inferLinksFromPeers({
+      nodeId: 'node-a',
+      peers: [],
+      serviceLinks: [{
+        direction: 'outbound',
+        remoteAddr: '10.0.0.6',
+        remotePort: 5432,
+        localAddr: '10.0.0.5',
+        localPort: 8443,
+        protocol: 'tcp',
+        state: 'ESTABLISHED',
+        connections: 1,
+      }],
+      knownNodes: nodes,
+      interfacesIndex: index,
+      existingLinks: [],
+      now: 2_000,
+    });
+
+    expect(out.added).toBe(1);
+    const link = out.links[0];
+    expect(link.sourceNodeId).toBe('node-a');
+    expect(link.targetNodeId).toBe('node-b');
+    expect(link.port).toBe(5432);
+    expect(link.evidence).toContain('本机:8443');
+    expect(link.evidence).toContain('10.0.0.6:5432');
+  });
+
+  it('excludes loopback and link-local peers from service links', () => {
+    const out = inferLinksFromPeers({
+      nodeId: 'node-a',
+      peers: [],
+      serviceLinks: [
+        { direction: 'inbound', remoteAddr: '127.0.0.1', remotePort: null, localAddr: '0.0.0.0', localPort: 80, protocol: 'tcp', state: 'ESTABLISHED', connections: 1 },
+        { direction: 'inbound', remoteAddr: 'fe80::1', remotePort: null, localAddr: '0.0.0.0', localPort: 80, protocol: 'tcp', state: 'ESTABLISHED', connections: 1 },
+      ],
+      knownNodes: nodes,
+      interfacesIndex: index,
+      existingLinks: [],
+      now: 2_000,
+    });
+    expect(out.added).toBe(0);
+    expect(out.links).toHaveLength(0);
   });
 
   it('ignores a peer that resolves back to the probed node itself', () => {
@@ -998,6 +1111,58 @@ describe('port-level topology links', () => {
     ...currentPorts,
     makePort({ id: 'port-b3306', nodeId: 'node-b', port: 3306, processName: 'postgres', pid: 20 }),
   ];
+
+
+  it('upgrades a degraded inbound row when the peer-side probe attributes p1', () => {
+    // B 的探测（入向，源端口未知）已落库一条降级行；A 的探测随后给出
+    // 带归属的出向行 A:8443 → B:5432。两条必须合并为一行而不是重复。
+    const degraded = makePortLink({
+      id: 'plink-b-view',
+      sourceNodeId: 'node-a',
+      sourcePortId: null,
+      sourcePort: 0,
+      targetNodeId: 'node-b',
+      targetPortId: null,
+      targetPort: 5432,
+    });
+    const nodePortsA = [makePort({ id: 'port-a-8443', nodeId: 'node-a', port: 8443 })];
+    const nodePortsB = [makePort({ id: 'port-b-5432', nodeId: 'node-b', port: 5432 })];
+    const ipIndex = buildInterfaceIpIndex(
+      [makeNode({ id: 'node-a' }), makeNode({ id: 'node-b', connectionId: 'conn-b' })],
+      [
+        makeInterface({ nodeId: 'node-a', ipv4Addrs: ['10.0.0.5/24'] }),
+        makeInterface({ id: 'i2', nodeId: 'node-b', ipv4Addrs: ['10.0.0.6/24'] }),
+      ],
+    );
+
+    const out = inferPortLinksFromPeers({
+      nodeId: 'node-a',
+      peers: [],
+      serviceLinks: [{
+        direction: 'outbound',
+        remoteAddr: '10.0.0.6',
+        remotePort: 5432,
+        localAddr: '10.0.0.5',
+        localPort: 8443,
+        protocol: 'tcp',
+        state: 'ESTABLISHED',
+        connections: 1,
+      }],
+      nodePorts: nodePortsA,
+      allPorts: [...nodePortsA, ...nodePortsB],
+      interfacesIndex: ipIndex,
+      existingPortLinks: [degraded],
+      now: 2_000,
+    });
+
+    expect(out.added).toBe(0);
+    expect(out.confirmed).toBe(1);
+    expect(out.links).toHaveLength(1);
+    // Upgraded in place, not duplicated.
+    expect(out.links[0].id).toBe('plink-b-view');
+    expect(out.links[0].sourcePortId).toBe('port-a-8443');
+    expect(out.links[0].targetPortId).toBe('port-b-5432');
+  });
 
   it('maps an outbound ephemeral socket to the service port of the same process', () => {
     const result = inferPortLinksFromPeers({

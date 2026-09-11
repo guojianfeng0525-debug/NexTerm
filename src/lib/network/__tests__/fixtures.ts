@@ -42,6 +42,7 @@ export function sections(over: Partial<ProbeSections> = {}): ProbeSections {
     ports: section(),
     peers: section(),
     procSockets: section(),
+    fdmap: section(),
     ...over,
   };
 }
@@ -143,8 +144,10 @@ export function probeData(over: Partial<ProbeData> = {}): ProbeData {
     routes: [detectedRoute()],
     firewall: detectedFirewall(),
     firewallRules: [detectedRule()],
+    firewallCollected: true,
     ports: [detectedPort()],
     peers: [],
+    serviceLinks: [],
     ...over,
   };
 }

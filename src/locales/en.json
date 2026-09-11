@@ -2621,7 +2621,7 @@
       "rules": "防火墙规则",
       "ports": "监听端口",
       "peers": "Active connections",
-    "procSockets": "Kernel socket table"
+      "procSockets": "Kernel socket table"
     },
     "roleHint": {
       "web": "Web",
@@ -2846,7 +2846,10 @@
       "peerIp": "Peer IP",
       "serverOnly": "Server only",
       "realPortOnlyHint": "Ports must be real collected listeners; uncollected peers connect to the server node."
-    }
+    },
+    "editLink": "Edit relationship",
+    "hideLink": "Hide relationship",
+    "unhideLink": "Unhide relationship"
   },
   "topology": {
     "title": "Network Topology",
@@ -2923,7 +2926,9 @@
       "sameNode": "Source and target must differ",
       "delete": "Delete",
       "deleteTitle": "Delete this relationship?",
-      "deleteDesc": "You can rebuild it later by probing again or adding it manually."
+      "deleteDesc": "You can rebuild it later by probing again or adding it manually.",
+      "hidden": "Hidden",
+      "hiddenHint": "Hidden relationships fade out and stay out of the default view."
     },
     "source": {
       "title": "Source",
@@ -3012,7 +3017,9 @@
       "linkCreated": "Relationship created",
       "linkDeleted": "Relationship deleted",
       "layoutApplied": "Auto layout applied",
-      "layoutReset": "Reset to auto layout"
+      "layoutReset": "Reset to auto layout",
+      "linkHidden": "Relationship hidden",
+      "linkShown": "Relationship shown"
     },
     "details.title": "Details",
     "details.noSelection": "Nothing selected",
@@ -3119,6 +3126,9 @@
     "linkStatus.active": "Active",
     "linkStatus.observed": "Observed",
     "linkStatus.stale": "Stale",
-    "linkStatus.unknown": "Unknown"
+    "linkStatus.unknown": "Unknown",
+    "editLink": "Edit relationship",
+    "hideLink": "Hide relationship",
+    "unhideLink": "Unhide relationship"
   }
 }

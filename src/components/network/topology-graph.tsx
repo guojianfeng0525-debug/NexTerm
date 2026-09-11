@@ -520,6 +520,8 @@ export interface TopologyGraphProps {
   readonly onEditNode: (id: string) => void;
   readonly onEditLink: (id: string) => void;
   readonly onHideNode: (id: string) => void;
+  /** Toggle a link's `hidden` flag (right-click menu; fades the edge). */
+  readonly onToggleLinkHidden?: (id: string) => void;
   readonly onRequestDeleteNode: (id: string) => void;
   /** Invoked by Delete/Backspace for the current multi-node selection. */
   readonly onRequestDeleteNodes: (ids: string[]) => void;
@@ -541,6 +543,7 @@ export function TopologyGraph({
   onEditNode,
   onEditLink,
   onHideNode,
+  onToggleLinkHidden,
   onRequestDeleteNode,
   onRequestDeleteNodes,
   onMoveNode,
@@ -980,8 +983,9 @@ export function TopologyGraph({
               const color = LINK_COLORS[link.linkType] ?? LINK_COLORS.unknown;
               const dashed = link.source === 'auto';
               return (
+                <ContextMenu key={link.id}>
+                  <ContextMenuTrigger asChild>
                 <g
-                  key={link.id}
                   data-link-id={link.id}
                   opacity={link.hidden ? 0.32 : 1}
                   className="cursor-pointer"
@@ -1041,6 +1045,18 @@ export function TopologyGraph({
                     </g>
                   )}
                 </g>
+                  </ContextMenuTrigger>
+                  <ContextMenuContent className="w-48">
+                    <ContextMenuItem onSelect={() => onEditLink(link.id)}>
+                      {t('topology.editLink')}
+                    </ContextMenuItem>
+                    {onToggleLinkHidden && (
+                      <ContextMenuItem onSelect={() => onToggleLinkHidden(link.id)}>
+                        {link.hidden ? t('topology.unhideLink') : t('topology.hideLink')}
+                      </ContextMenuItem>
+                    )}
+                  </ContextMenuContent>
+                </ContextMenu>
               );
             })}
           </g>

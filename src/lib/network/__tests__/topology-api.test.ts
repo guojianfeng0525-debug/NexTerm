@@ -37,7 +37,6 @@ import {
   getNodeFirewalls,
   getNodeInterfaces,
   getNodePorts,
-  getNodeRoutes,
   getNodeSnapshot,
   listLinks,
   listNodes,
@@ -47,7 +46,6 @@ import {
   patchNodeManual,
   patchPortManual,
   patchPortReachability,
-  patchRouteManual,
   resetTopologyStore,
 } from '../topology-storage';
 import {
@@ -81,7 +79,21 @@ describe('probeServerTopology', () => {
     backend.handler = () => payload;
 
     await expect(probeServerTopology('conn-a')).resolves.toEqual(payload);
-    expect(backend.calls[0]).toEqual({ cmd: 'probe_network_topology', args: { connectionId: 'conn-a' } });
+    expect(backend.calls[0]).toEqual({
+      cmd: 'probe_network_topology',
+      args: { connectionId: 'conn-a', includeFirewall: true },
+    });
+  });
+
+  it('passes includeFirewall=false through for TTL-cached re-probes', async () => {
+    const payload = probeResult({ probedAtMs: 5_000 });
+    backend.handler = () => payload;
+
+    await probeServerTopology('conn-a', { includeFirewall: false });
+    expect(backend.calls[0]).toEqual({
+      cmd: 'probe_network_topology',
+      args: { connectionId: 'conn-a', includeFirewall: false },
+    });
   });
 
   it('normalizes a string rejection into an Error', async () => {
@@ -117,8 +129,10 @@ describe('applyProbeResult', () => {
           routes: [detectedRoute()],
           firewall: detectedFirewall(),
           firewallRules: [detectedRule()],
+          firewallCollected: true,
           ports: [detectedPort()],
           peers: [],
+          serviceLinks: [],
         },
       }),
       probeAt: 1_000,
@@ -130,9 +144,10 @@ describe('applyProbeResult', () => {
     expect(node?.hostname).toBe('web-01');
     expect(node?.lastProbeStatus).toBe('ok');
 
-    expect(summary.added).toEqual({ interfaces: 1, routes: 1, rules: 1, ports: 1 });
+    // Routes are no longer collected (dropped v2.18.1); firewall/rules still
+    // merge when the probe ran with includeFirewall (default true).
+    expect(summary.added).toEqual({ interfaces: 1, routes: 0, rules: 1, ports: 1 });
     expect(getNodeInterfaces(summary.nodeId)).toHaveLength(1);
-    expect(getNodeRoutes(summary.nodeId)).toHaveLength(1);
     expect(getNodeFirewall(summary.nodeId)?.fwType).toBe('firewalld');
     expect(getNodeFirewallRules(summary.nodeId)).toHaveLength(1);
     expect(getNodePorts(summary.nodeId)).toHaveLength(1);
@@ -159,14 +174,12 @@ describe('applyProbeResult', () => {
     });
     const portId = getNodePorts(nodeId)[0].id;
     const ifaceId = getNodeInterfaces(nodeId)[0].id;
-    const routeId = getNodeRoutes(nodeId)[0].id;
     const ruleId = getNodeFirewallRules(nodeId)[0].id;
     const fwId = getNodeFirewall(nodeId)?.id ?? '';
 
     patchPortManual(nodeId, portId, { serviceName: '官网', purpose: '对外 HTTP', hidden: true });
     patchPortReachability(nodeId, portId, 'blocked', 1_500);
     patchInterfaceManual(nodeId, ifaceId, { manualLabel: '内网网卡' });
-    patchRouteManual(nodeId, routeId, { manualNote: '默认出口' });
     patchFirewallRuleManual(nodeId, ruleId, { manualPurpose: '放行运维 SSH' });
 
     // ── second probe: the server changed, and one port disappeared ──
@@ -184,6 +197,7 @@ describe('applyProbeResult', () => {
           firewallRules: [detectedRule()],
           ports: [detectedPort({ port: 8080, processName: 'node' })],
           peers: [],
+          serviceLinks: [],
         },
         sections: {
           ...probeResult().sections,
@@ -225,7 +239,7 @@ describe('applyProbeResult', () => {
 
     expect(getNodeInterfaces(nodeId)[0].manualLabel).toBe('内网网卡');
     expect(getNodeInterfaces(nodeId)[0].mac).toBe('new-mac');
-    expect(getNodeRoutes(nodeId)[0].manualNote).toBe('默认出口');
+    // Routes are no longer collected; previously stored rows are left alone.
     expect(getNodeFirewallRules(nodeId)[0].manualPurpose).toBe('放行运维 SSH');
     expect(getNodeFirewall(nodeId)?.active).toBe(false);
     expect(getNodeFirewall(nodeId)?.id).toBe(fwId);
@@ -243,6 +257,7 @@ describe('applyProbeResult', () => {
           hostname: 'a',
           interfaces: [detectedInterface({ ifaceName: 'eth0', ipv4Addrs: ['10.0.0.5/24'] })],
           peers: [detectedPeer({ remoteAddr: '10.0.0.6', remotePort: 5432, processName: 'app' })],
+          serviceLinks: [],
         },
       }),
       probeAt: 1_000,
@@ -277,6 +292,7 @@ describe('applyProbeResult', () => {
           interfaces: [detectedInterface({ ifaceName: 'eth0', ipv4Addrs: ['10.0.0.6/24'] })],
           ports: [detectedPort({ port: 5432, processName: 'postgres', pid: 201 })],
           peers: [detectedPeer({ remoteAddr: '203.0.113.9', remotePort: 443 })],
+          serviceLinks: [],
         },
       }),
       probeAt: 2_000,
@@ -299,6 +315,7 @@ describe('applyProbeResult', () => {
           hostname: 'a',
           interfaces: [detectedInterface({ ifaceName: 'eth0', ipv4Addrs: ['10.0.0.5/24'] })],
           peers: [detectedPeer({ remoteAddr: '10.0.0.6', remotePort: 5432, processName: 'app' })],
+          serviceLinks: [],
         },
       }),
       probeAt: 3_000,
@@ -350,6 +367,7 @@ describe('applyProbeResult', () => {
       hostname: 'b',
       interfaces: [detectedInterface({ ifaceName: 'eth0', ipv4Addrs: ['10.0.0.6/24'] })],
       peers: [],
+      serviceLinks: [],
     };
 
     applyProbeResult({ connectionId: 'conn-b', connectionName: 'B', result: probeResult({ data: bData }), probeAt: 1_000 });
