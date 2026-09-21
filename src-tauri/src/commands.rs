@@ -4932,7 +4932,9 @@ pub async fn probe_network_topology(
 
     let client = connection.read().await;
 
-    let os_info = get_os_info(&connection_id, &client, state.inner()).await;
+    // Detect only the kernel family inside the one local-read script. No
+    // separate OS/tool probe and no name resolution is needed.
+    let os_info = OsInfo::default();
 
     // Firewall dumps (iptables-save / nft list ruleset) are the heaviest
     // section; the frontend passes `false` while its 10-minute TTL cache is

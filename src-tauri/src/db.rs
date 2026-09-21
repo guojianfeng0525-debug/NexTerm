@@ -875,6 +875,39 @@ fn upsert_row(
     Ok(())
 }
 
+/// Persist one topology observation atomically, using the same validated row
+/// mappings as ordinary edits. No credentials or non-topology tables allowed.
+#[derive(Debug, Deserialize)]
+pub struct TopologyWrite {
+    table: String,
+    row: Option<JsonMap<String, JsonValue>>,
+    key: Option<String>,
+}
+
+fn write_topology_batch(conn: &mut Connection, writes: &[TopologyWrite]) -> Result<(), String> {
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    for write in writes {
+        validate_table(&write.table)?;
+        if !write.table.starts_with("net_") { return Err("Only topology tables are allowed".into()); }
+        match (&write.row, &write.key) {
+            (Some(row), None) => upsert_row(&tx, &write.table, row)?,
+            (None, Some(key)) => {
+                let pk = pk_column(&write.table)?;
+                tx.execute(&format!("DELETE FROM \"{}\" WHERE \"{}\" = ?1", write.table, pk), [key])
+                    .map_err(|e| e.to_string())?;
+            }
+            _ => return Err("Expected a row or deletion key".into()),
+        }
+    }
+    tx.commit().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn topology_write_batch(writes: Vec<TopologyWrite>, state: State<'_, Arc<DbState>>) -> Result<(), String> {
+    let mut conn = state.conn.lock().map_err(|_| "db lock poisoned".to_string())?;
+    write_topology_batch(&mut conn, &writes)
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceReplaceRequest {
@@ -1839,6 +1872,23 @@ mod upsert_tests {
         let _ = std::fs::remove_file(&path);
 
         DbState::open(&path).expect("open test db")
+    }
+
+    #[test]
+    fn topology_batch_is_atomic_and_restricted() {
+        let state = open_test_db();
+        let mut conn = state.conn.lock().unwrap();
+        let node = || TopologyWrite { table: "net_nodes".into(), key: None,
+            row: Some(json!({"id":"n", "connection_id":"c", "created_at":1, "updated_at":1}).as_object().unwrap().clone()) };
+        let invalid = TopologyWrite { table: "net_ports".into(), key: None, row: Some(JsonMap::new()) };
+        assert!(write_topology_batch(&mut conn, &[node(), invalid]).is_err());
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM net_nodes", [], |row| row.get(0)).unwrap();
+        assert_eq!(count, 0, "a failed row must roll back the entire observation");
+        let forbidden = TopologyWrite { table: "connections".into(), key: Some("c".into()), row: None };
+        assert!(write_topology_batch(&mut conn, &[node(), forbidden]).is_err());
+        write_topology_batch(&mut conn, &[node()]).unwrap();
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM net_nodes", [], |row| row.get(0)).unwrap();
+        assert_eq!(count, 1);
     }
 
     fn upsert_raw(
