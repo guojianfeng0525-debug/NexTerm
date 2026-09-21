@@ -525,9 +525,9 @@ done
     // `NT_UNAVAILABLE:<段名>`，由解析层标记 `unavailable` 而不是判定为失败，
     // 且任一分段失败都不会中断后续分段（脚本内不使用 `set -e`）。
 
-    /// Hostname probe — `hostname -f` first, then plain `hostname`, then `uname -n`.
+    /// Read the kernel hostname only; never resolve an FQDN through DNS/NSS.
     pub fn hostname_probe_cmd(&self) -> &'static str {
-        "{ hostname -f 2>/dev/null || hostname 2>/dev/null || uname -n 2>/dev/null || echo \"NT_UNAVAILABLE:hostname\"; } | head -n 1"
+        "{ uname -n 2>/dev/null || echo \"NT_UNAVAILABLE:hostname\"; } | head -n 1"
     }
 
     /// OS release probe — `/etc/os-release` on Linux, `sw_vers` on macOS.
@@ -576,13 +576,13 @@ done
     pub fn ports_probe_cmd(&self) -> &'static str {
         match self.family {
             OsFamily::MacOS | OsFamily::Bsd => {
-                "{ netstat -an -p tcp 2>/dev/null | grep -i listen; netstat -an -p udp 2>/dev/null; } | head -n 200"
+                "{ netstat -an -p tcp 2>/dev/null | grep -i listen; netstat -an -p udp 2>/dev/null; }"
             }
             _ if self.has_ss => {
-                "{ ss -tulpnH 2>/dev/null || ss -tulpn 2>/dev/null || netstat -tulpn 2>/dev/null || echo \"NT_UNAVAILABLE:ports\"; } | head -n 200"
+                "{ ss -tulpnH 2>/dev/null || ss -tulpn 2>/dev/null || netstat -tulpn 2>/dev/null || echo \"NT_UNAVAILABLE:ports\"; }"
             }
             _ => {
-                "{ netstat -tulpn 2>/dev/null || echo \"NT_UNAVAILABLE:ports\"; } | head -n 200"
+                "{ netstat -tulpn 2>/dev/null || echo \"NT_UNAVAILABLE:ports\"; }"
             }
         }
     }
@@ -592,13 +592,13 @@ done
     pub fn peers_probe_cmd(&self) -> &'static str {
         match self.family {
             OsFamily::MacOS | OsFamily::Bsd => {
-                "{ netstat -an -p tcp 2>/dev/null | grep -i established || echo \"NT_UNAVAILABLE:peers\"; } | head -n 200"
+                "{ netstat -an -p tcp 2>/dev/null | grep -i established || echo \"NT_UNAVAILABLE:peers\"; }"
             }
             _ if self.has_ss => {
-                "{ ss -tunpH state established 2>/dev/null || ss -tunp 2>/dev/null | grep -i established || netstat -tnp 2>/dev/null | grep -i established || echo \"NT_UNAVAILABLE:peers\"; } | head -n 200"
+                "{ ss -tunpH state established 2>/dev/null || ss -tunp 2>/dev/null | grep -i established || netstat -tnp 2>/dev/null | grep -i established || echo \"NT_UNAVAILABLE:peers\"; }"
             }
             _ => {
-                "{ netstat -tnp 2>/dev/null | grep -i established || echo \"NT_UNAVAILABLE:peers\"; } | head -n 200"
+                "{ netstat -tnp 2>/dev/null | grep -i established || echo \"NT_UNAVAILABLE:peers\"; }"
             }
         }
     }
@@ -621,7 +621,9 @@ for spec in "tcp /proc/net/tcp" "tcp6 /proc/net/tcp6" "udp /proc/net/udp" "udp6 
     path=$2
     if [ -r "$path" ]; then
         printf 'NT_PROC_FILE\t%s\t%s\n' "$proto" "$path"
-        cat "$path" 2>/dev/null
+        cat "$path" 2>/dev/null || echo "NT_PROC_PARTIAL"
+    elif [ "$proto" = tcp ] || [ "$proto" = udp ]; then
+        echo "NT_PROC_PARTIAL"
     fi
 done
 echo "NT_PROC_END"
@@ -638,11 +640,18 @@ echo "NT_PROC_END"
     /// process. Both output shapes are parsed by `parse_fdmap`. Non-root users
     /// simply get a partial map (other users' /proc/<pid>/fd is unreadable),
     /// which degrades `p1` attribution instead of fabricating it.
+    ///
+    /// The trailing `cat /proc/[0-9]*/stat` block feeds the PARENT lookup:
+    /// forking servers (`socat TCP-LISTEN:…,fork`, nginx, php-fpm) close the
+    /// inherited listener fd in the child, so the dialling process owns no
+    /// listener and p1 must be attributed through its `PPid`. One `cat` with
+    /// a shell glob — zero extra forks — and every `stat` line starts with its
+    /// own pid, so the rows self-identify.
     pub fn fdmap_probe_cmd(&self) -> &'static str {
         match self.family {
             OsFamily::MacOS | OsFamily::Bsd => "echo \"NT_FDMAP_UNAVAILABLE\"",
             _ => {
-                "{ find /proc/[0-9]*/fd -lname 'socket:\\[*' -printf '%p %l\\n' 2>/dev/null || ls -l /proc/[0-9]*/fd 2>/dev/null; } | head -n 40000"
+                "echo \"NT_FDMAP_BEGIN\"; { find /proc/[0-9]*/fd -lname 'socket:\\[*' -printf '%p %l\\n' 2>/dev/null || ls -l /proc/[0-9]*/fd 2>/dev/null; } | head -n 40000; echo \"NT_FDMAP_PPID\"; cat /proc/[0-9]*/stat 2>/dev/null | head -n 40000; echo \"NT_FDMAP_END\""
             }
         }
     }
@@ -724,16 +733,17 @@ echo "NT_PROC_END"
     ///
     /// Section set (v2.18.1, requirement-driven — anything the user did not
     /// ask for is not collected): `hostname` → `os` → `interfaces` →
-    /// (`firewall` + `rules`, only when `include_firewall`) → Linux:
-    /// `proc_sockets` + `fdmap` / macOS-BSD: `ports` + `peers`. The routing
+    /// Linux: `proc_sockets` + `fdmap` / macOS-BSD: `ports` + `peers` →
+    /// optional `firewall` + `rules`. The routing
     /// table section was dropped: it was the heaviest remaining read with no
     /// consumer-facing purpose in the topology graph.
     ///
     /// One exec instead of many keeps the connection read-lock hold time (and
     /// the 30s per-command timeout exposure) at a single round-trip; the whole
-    /// script forks at most ~4 short-lived processes on the remote host.
+    /// executor bounds the runtime and output, including optional firewall queries.
     pub fn topology_probe_cmd(&self, include_firewall: bool) -> String {
         let mut s = String::new();
+        s.push_str("nt_limit() { awk -v n=\"$1\" 'NR<=n {print} NR==n+1 {print \"NT_PARTIAL:output limit\"; exit}'; }\n");
         s.push_str("# NexTerm network topology probe — READ-ONLY / ZERO-INSTALL.\n");
         s.push_str("# Every command below is a pure query: no redirection to a file, no\n");
         s.push_str("# package manager, no iptables -A/-F, no systemctl start/stop, no\n");
@@ -747,12 +757,7 @@ echo "NT_PROC_END"
         s.push_str(self.os_release_probe_cmd());
         s.push_str("\necho \"###NT:interfaces###\"; ");
         s.push_str(self.interfaces_probe_cmd());
-        if include_firewall {
-            s.push_str("\necho \"###NT:firewall###\";\n");
-            s.push_str(&self.firewall_probe_cmd());
-            s.push_str("echo \"###NT:rules###\";\n");
-            s.push_str(&self.firewall_rules_probe_cmd());
-        }
+        s.push_str("\n");
         if matches!(self.family, OsFamily::MacOS | OsFamily::Bsd) {
             s.push_str("echo \"###NT:ports###\"; ");
             s.push_str(self.ports_probe_cmd());
@@ -763,7 +768,13 @@ echo "NT_PROC_END"
             s.push_str("echo \"###NT:proc_sockets###\";\n");
             s.push_str(self.proc_sockets_probe_cmd());
             s.push_str("echo \"###NT:fdmap###\";\n");
-            s.push_str(self.fdmap_probe_cmd());
+            s.push_str(&self.fdmap_probe_cmd().replace("head -n ", "nt_limit "));
+        }
+        if include_firewall {
+            s.push_str("\necho \"###NT:firewall###\";\n");
+            s.push_str(&self.firewall_probe_cmd());
+            s.push_str("echo \"###NT:rules###\";\n");
+            s.push_str(&self.firewall_rules_probe_cmd().replace("head -n ", "nt_limit "));
         }
         s.push_str("\necho \"###NT:end###\"");
         s
@@ -909,14 +920,9 @@ mod tests {
     fn test_topology_probe_cmd_section_order() {
         let full = OsInfo::default().topology_probe_cmd(true);
         let order = [
-            "###NT:hostname###",
-            "###NT:os###",
-            "###NT:interfaces###",
-            "###NT:firewall###",
-            "###NT:rules###",
-            "###NT:proc_sockets###",
-            "###NT:fdmap###",
-            "###NT:end###",
+            "###NT:hostname###", "###NT:os###", "###NT:interfaces###",
+            "###NT:proc_sockets###", "###NT:fdmap###", "###NT:firewall###",
+            "###NT:rules###", "###NT:end###",
         ];
         let mut cursor = 0usize;
         for marker in order {
@@ -967,6 +973,7 @@ mod tests {
             "/dev/tcp",
             "ping ",
             "traceroute",
+            "hostname -f",
             "dig ",
             "nslookup ",
             "curl ",
@@ -1017,10 +1024,13 @@ mod tests {
         }
         .topology_probe_cmd(true);
         for required in [
-            "hostname -f",
+            "uname -n",
             "ip -o addr",
             "/proc/net/tcp",
             "find /proc/[0-9]*/fd -lname",
+            // Single-cat parent-pid block for the p1 fork-parent attribution
+            // (socat/nginx shape); zero extra forks.
+            "cat /proc/[0-9]*/stat",
             "iptables-save",
         ] {
             assert!(script.contains(required), "probe must use {required:?}");

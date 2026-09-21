@@ -12,8 +12,8 @@ mod ftp_client;
 mod jump;
 mod ls_parser;
 mod mysql;
-mod network_probe;
-mod os_detect;
+pub mod network_probe;
+pub mod os_detect;
 mod postgres;
 mod postgres_catalog;
 mod postgres_design;
@@ -582,6 +582,7 @@ pub fn run() {
             commands::get_system_locale,
             // SQLite key-value store
             db::row_upsert,
+            db::topology_write_batch,
             db::row_get,
             db::row_list,
             db::row_delete,

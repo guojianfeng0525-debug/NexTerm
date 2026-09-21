@@ -44,6 +44,10 @@ pub struct ProbeSection {
 }
 
 impl ProbeSection {
+    pub fn skipped() -> Self {
+        Self { status: "skipped".to_string(), note: String::new() }
+    }
+
     pub fn ok() -> Self {
         Self {
             status: "ok".to_string(),
@@ -327,6 +331,9 @@ fn missing_section() -> ProbeSection {
 fn evaluate_section(raw: &str) -> ProbeSection {
     for line in raw.lines() {
         let t = line.trim();
+        if let Some(reason) = t.strip_prefix("NT_PARTIAL:") {
+            return ProbeSection { status: "partial".to_string(), note: reason.trim().to_string() };
+        }
         if let Some(reason) = t.strip_prefix("NT_ERROR:") {
             return ProbeSection {
                 status: "failed".to_string(),
@@ -1901,7 +1908,15 @@ fn parse_proc_address(value: &str) -> String {
         }
         let mut address = [0u8; 16];
         address.copy_from_slice(&bytes);
-        return std::net::Ipv6Addr::from(address).to_string();
+        let v6 = std::net::Ipv6Addr::from(address);
+        // IPv4-mapped IPv6 (`::ffff:a.b.c.d`) is how dual-stack sockets see
+        // IPv4 peers (verified live on Alpine socat: the web peer surfaced as
+        // ::ffff:172.21.0.3). Normalizing here keeps "one IP, one node"
+        // intact — the frontend matches peers against plain IPv4 primaries.
+        if let Some(v4) = v6.to_ipv4_mapped() {
+            return v4.to_string();
+        }
+        return v6.to_string();
     }
     String::new()
 }
@@ -1928,18 +1943,78 @@ fn is_unspecified_addr(addr: &str) -> bool {
 /// · GNU find `-printf '%p %l\n'`: `/proc/1234/fd/5 socket:[98765]`
 /// · BusyBox `ls -l /proc/[0-9]*/fd`: a `/proc/1234/fd:` header line followed
 ///   by `lrwxrwxrwx ... 5 -> socket:[98765]` entries.
-pub fn parse_fdmap(raw: &str) -> HashMap<String, u32> {
-    let mut map = HashMap::new();
+/// One socket inode may be shared by SEVERAL pids: a `fork`ing server
+/// (`socat TCP-LISTEN:…,fork`, classic prefork pools) hands every child the
+/// inherited listener fd, and the dialling child creates the connection fd —
+/// both live in the same inode space. A single-pid map silently loses the
+/// child's attribution (found by the live container suite: the p1 of the
+/// `web:8080 → db:6379` edge came back `None`), so ownership is a set.
+///
+/// `parent` maps pid → PPid from the `NT_FDMAP_PPID` block: forking servers
+/// usually CLOSE the inherited listener fd in the child, so the dialling
+/// process owns no listener and p1 is attributed through its parent instead.
+#[derive(Default)]
+pub struct FdOwnership {
+    /// socket inode → every pid holding an fd to it.
+    pub inode_pids: HashMap<String, Vec<u32>>,
+    /// pid → parent pid (empty when the stat block was unavailable).
+    pub parent: HashMap<u32, u32>,
+}
+
+/// Parse a `pid (comm with (spaces)) state ppid …` line from
+/// `/proc/<pid>/stat`. The comm field may contain spaces and parentheses, so
+/// everything before the LAST `)` is the comm.
+fn parse_stat_ppid(line: &str) -> Option<(u32, u32)> {
+    let close = line.rfind(')')?;
+    let pid = line[..close]
+        .split_whitespace()
+        .next()?
+        .parse::<u32>()
+        .ok()?;
+    let rest = line[close + 1..].trim();
+    let mut fields = rest.split_whitespace();
+    let _state = fields.next()?;
+    let ppid = fields.next()?.parse::<u32>().ok()?;
+    Some((pid, ppid))
+}
+
+pub fn parse_fdmap(raw: &str) -> FdOwnership {
+    let mut out = FdOwnership::default();
     let mut current_pid: Option<u32> = None;
+    let mut in_ppid_block = false;
+    let mut push = |map: &mut HashMap<String, Vec<u32>>, inode: String, pid: u32| {
+        let set = map.entry(inode).or_default();
+        if !set.contains(&pid) {
+            set.push(pid);
+        }
+    };
     for line in raw.lines() {
         let line = line.trim_end_matches('\r').trim();
         if line == "NT_FDMAP_UNAVAILABLE" || line.starts_with("NT_PROC_") {
             continue;
         }
+        if line == "NT_FDMAP_BEGIN" {
+            in_ppid_block = false;
+            continue;
+        }
+        if line == "NT_FDMAP_PPID" {
+            in_ppid_block = true;
+            continue;
+        }
+        if line == "NT_FDMAP_END" {
+            in_ppid_block = false;
+            continue;
+        }
+        if in_ppid_block {
+            if let Some((pid, ppid)) = parse_stat_ppid(line) {
+                out.parent.insert(pid, ppid);
+            }
+            continue;
+        }
         // find -printf shape: path + link target on one line.
         if let Some((path, target)) = line.split_once(' ') {
             if let (Some(pid), Some(inode)) = (pid_from_proc_path(path), socket_inode(target)) {
-                map.insert(inode, pid);
+                push(&mut out.inode_pids, inode, pid);
                 continue;
             }
         }
@@ -1954,11 +2029,11 @@ pub fn parse_fdmap(raw: &str) -> HashMap<String, u32> {
         // ls -l entry line: `... 5 -> socket:[98765]`
         if let Some((_, target)) = line.split_once(" -> ") {
             if let (Some(pid), Some(inode)) = (current_pid, socket_inode(target)) {
-                map.insert(inode, pid);
+                push(&mut out.inode_pids, inode, pid);
             }
         }
     }
-    map
+    out
 }
 
 fn pid_from_proc_path(path: &str) -> Option<u32> {
@@ -1991,7 +2066,7 @@ fn socket_inode(target: &str) -> Option<String> {
 ///    `p1` resolved through fd attribution and explicit degradation otherwise.
 pub fn parse_proc_sockets(
     raw: &str,
-    fdmap: &HashMap<String, u32>,
+    fdmap: &FdOwnership,
 ) -> (Vec<DetectedPort>, Vec<DetectedPeer>, Vec<DetectedServiceLink>, ProbeSection) {
     let mut current_proto = String::new();
     let mut sockets = ProcSockets::default();
@@ -1999,7 +2074,7 @@ pub fn parse_proc_sockets(
 
     // Pass 1 — collect listener rows so direction/attribution can be resolved
     // in one further sweep regardless of row ordering.
-    let mut listen_inodes: HashMap<String, (String, u16)> = HashMap::new();
+    let mut listen_inodes: HashMap<String, (String, String, u16)> = HashMap::new();
     for line in raw.lines() {
         let line = line.trim_end_matches('\r');
         if let Some(rest) = line.strip_prefix("NT_PROC_FILE\t") {
@@ -2030,22 +2105,29 @@ pub fn parse_proc_sockets(
         let is_listener = if proto == "tcp" {
             state == "LISTEN"
         } else {
-            // A connected UDP socket still owns a real local endpoint.
-            true
+            state == "UNCONN"
         };
-        if is_listener {
-            listen_inodes.insert(tokens[9].to_string(), (proto.clone(), local_port));
+        // Loopback-bound listeners (docker's embedded DNS on 127.0.0.11 with
+        // a random port, `redis bind 127.0.0.1`, …) are host-internal
+        // services — the requirement explicitly drops loopback noise. Found
+        // live: the docker-DNS UDP socket surfaced as an "open port".
+        let externally_bound = !is_loopback_addr(&parse_proc_address(tokens[1]));
+        if is_listener && externally_bound {
+            listen_inodes.insert(tokens[9].to_string(), (proto.clone(), parse_proc_address(tokens[1]), local_port));
         }
     }
 
-    // pid → set of listening ports it owns (via the fd map). A pid owning
-    // several listeners cannot be uniquely attributed, so it stays in the map
-    // as a multi-candidate and only single-listener pids get a `p1`.
+    // pid → set of listening ports it owns (via the fd map). A forked child
+    // shares its parent's listener fds, so one inode feeds MANY pids; a pid
+    // owning several distinct listeners cannot be uniquely attributed and
+    // only single-listener pids get a `p1`.
     let mut pid_listeners: HashMap<u32, Vec<u16>> = HashMap::new();
-    for (inode, pid) in fdmap {
-        if let Some((proto, port)) = listen_inodes.get(inode) {
+    for (inode, pids) in &fdmap.inode_pids {
+        if let Some((proto, _, port)) = listen_inodes.get(inode) {
             if proto == "tcp" {
-                pid_listeners.entry(*pid).or_default().push(*port);
+                for pid in pids {
+                    pid_listeners.entry(*pid).or_default().push(*port);
+                }
             }
         }
     }
@@ -2053,6 +2135,7 @@ pub fn parse_proc_sockets(
         .iter()
         .filter_map(|(pid, ports)| {
             let mut deduped = ports.clone();
+            deduped.sort_unstable();
             deduped.dedup();
             if deduped.len() == 1 {
                 Some((*pid, deduped[0]))
@@ -2062,18 +2145,18 @@ pub fn parse_proc_sockets(
         })
         .collect();
 
-    let listen_keys: std::collections::HashSet<(String, u16)> = listen_inodes
+    let listen_keys: std::collections::HashSet<(String, String, u16)> = listen_inodes
         .values()
         .cloned()
         .collect();
 
     let mut link_agg: HashMap<
-        (String, String, Option<u16>, Option<u16>, String),
+        (String, String, Option<u16>, Option<u16>, String, String),
         (String, u32, String),
     > = HashMap::new();
     let push_link = |link: DetectedServiceLink,
                      agg: &mut HashMap<
-        (String, String, Option<u16>, Option<u16>, String),
+        (String, String, Option<u16>, Option<u16>, String, String),
         (String, u32, String),
     >| {
         let key = (
@@ -2082,6 +2165,7 @@ pub fn parse_proc_sockets(
             link.remote_port,
             link.local_port,
             link.protocol.clone(),
+            link.local_addr.clone(),
         );
         // First local bind address wins when several connections collapse
         // into one aggregate (e.g. wildcard and explicit binds).
@@ -2131,14 +2215,19 @@ pub fn parse_proc_sockets(
         if !seen.insert(dedup) {
             continue;
         }
-        let pid = fdmap.get(&inode).copied();
+        // Owners of this socket (usually one; forked children share).
+        let pids: Vec<u32> = fdmap.inode_pids.get(&inode).cloned().unwrap_or_default();
+        let pid = pids.first().copied();
 
         let is_listener = if proto == "tcp" {
             state == "LISTEN"
         } else {
-            true
+            state == "UNCONN"
         };
-        if is_listener {
+        // Same loopback rule as pass 1 — a host-internal bind is not an
+        // externally open port and never enters the reported set.
+        let externally_bound = !is_loopback_addr(&local_addr);
+        if is_listener && externally_bound {
             sockets.ports.push(DetectedPort {
                 protocol: proto.clone(),
                 port: local_port,
@@ -2180,7 +2269,8 @@ pub fn parse_proc_sockets(
             continue;
         }
         if proto == "tcp" {
-            let inbound = listen_keys.contains(&(proto.clone(), local_port));
+            let inbound = [local_addr.as_str(), "0.0.0.0", "::"].iter()
+                .any(|addr| listen_keys.contains(&(proto.clone(), addr.to_string(), local_port)));
             let link = if inbound {
                 // Peer connected to MY listener: p2 = local_port, peer's
                 // ephemeral source port deliberately dropped.
@@ -2197,8 +2287,20 @@ pub fn parse_proc_sockets(
             } else {
                 // I connected to the peer's listener: p2 = remote_port,
                 // p1 = the initiating process's own listener (if unique).
-                let p1 = pid
-                    .and_then(|pid| unique_listener_port.get(&pid).copied());
+                // The dialling pid may be a fork child that inherited the
+                // listener fd, so probe every owner for a unique listener;
+                // forking servers usually CLOSE the inherited fd in the
+                // child (verified live on socat), so fall back to the parent
+                // process's unique listener (nginx/php-fpm shape).
+                let mut p1 = pids.iter().find_map(|pid| unique_listener_port.get(pid).copied());
+                if p1.is_none() {
+                    p1 = pids.iter().find_map(|pid| {
+                        fdmap
+                            .parent
+                            .get(pid)
+                            .and_then(|ppid| unique_listener_port.get(ppid).copied())
+                    });
+                }
                 DetectedServiceLink {
                     direction: "outbound".to_string(),
                     remote_addr: remote_addr.clone(),
@@ -2230,7 +2332,7 @@ pub fn parse_proc_sockets(
     let mut service_links: Vec<DetectedServiceLink> = link_agg
         .into_iter()
         .map(
-            |((direction, remote_addr, remote_port, local_port, protocol), (state, connections, local_addr))| {
+            |((direction, remote_addr, remote_port, local_port, protocol, _), (state, connections, local_addr))| {
                 DetectedServiceLink {
                     direction,
                     remote_addr,
@@ -2257,7 +2359,9 @@ pub fn parse_proc_sockets(
             status: "unavailable".to_string(),
             note: "/proc socket 表不可读".to_string(),
         }
-    } else if fdmap.is_empty() && !sockets.ports.is_empty() {
+    } else if raw.contains("NT_PROC_PARTIAL") {
+        ProbeSection { status: "partial".to_string(), note: "Some local socket tables could not be read".to_string() }
+    } else if fdmap.inode_pids.is_empty() && !sockets.ports.is_empty() {
         ProbeSection {
             status: "partial".to_string(),
             note: "无法获取进程归属（可能需要更高权限），服务端口归因将降级".to_string(),
@@ -2279,13 +2383,23 @@ pub fn parse_proc_sockets(
 /// distro-aware (see design doc §4.2). `include_firewall=false` skips the
 /// iptables/nft/ufw dumps entirely (client-side TTL cache still fresh).
 pub fn build_probe_script(os: &OsInfo, include_firewall: bool) -> String {
-    os.topology_probe_cmd(include_firewall)
+    if os.family == crate::os_detect::OsFamily::Unknown {
+        let mut mac = os.clone();
+        mac.family = crate::os_detect::OsFamily::MacOS;
+        let mut bsd = os.clone();
+        bsd.family = crate::os_detect::OsFamily::Bsd;
+        let mut linux = os.clone();
+        linux.family = crate::os_detect::OsFamily::GenericLinux;
+        format!("case \"$(uname -s)\" in\nDarwin)\n{}\n;;\n*BSD)\n{}\n;;\n*)\n{}\n;;\nesac", mac.topology_probe_cmd(include_firewall), bsd.topology_probe_cmd(include_firewall), linux.topology_probe_cmd(include_firewall))
+    } else {
+        os.topology_probe_cmd(include_firewall)
+    }
 }
 
 /// Container/CNI interfaces and their pod/service addresses describe the
 /// workload namespace, not the physical/virtual server exposed to users.
 fn is_server_facing_interface(iface: &DetectedInterface) -> bool {
-    if iface.is_loopback || iface.ipv4_addrs.is_empty() {
+    if iface.is_loopback || (iface.ipv4_addrs.is_empty() && iface.ipv6_addrs.is_empty()) {
         return false;
     }
     let name = iface.iface_name.to_ascii_lowercase();
@@ -2305,16 +2419,11 @@ fn is_server_facing_interface(iface: &DetectedInterface) -> bool {
 }
 
 fn is_container_primary_ip(addr: &str) -> bool {
-    let Some(ip) = strip_cidr(addr).parse::<std::net::Ipv4Addr>().ok() else {
-        return true; // IPv6 link/unique-local candidates are not a primary server IP.
-    };
-    let o = ip.octets();
-    o[0] == 127
-        || (o[0] == 169 && o[1] == 254)
-        || (o[0] == 172 && (16..=31).contains(&o[1]))
-        || (o[0] == 10 && matches!(o[1], 42 | 43 | 244))
-        || (o[0] == 10 && (96..=111).contains(&o[1]))
-        || (o[0] == 100 && (64..=127).contains(&o[1]))
+    match strip_cidr(addr).parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(ip)) => ip.is_loopback() || ip.is_unspecified() || ip.is_link_local() || ip.is_multicast(),
+        Ok(std::net::IpAddr::V6(ip)) => ip.is_loopback() || ip.is_unspecified() || ip.is_unicast_link_local() || ip.is_multicast(),
+        Err(_) => true,
+    }
 }
 
 /// Pick the node's primary IPv4: the address on the interface that carries the
@@ -2331,7 +2440,7 @@ pub fn pick_primary_ip(routes: &[DetectedRoute], interfaces: &[DetectedInterface
             if iface.iface_name == name && is_server_facing_interface(iface) {
                 if let Some(ip) = iface
                     .ipv4_addrs
-                    .iter()
+                    .iter().chain(&iface.ipv6_addrs)
                     .find(|ip| !is_container_primary_ip(ip))
                 {
                     return strip_cidr(ip);
@@ -2343,7 +2452,7 @@ pub fn pick_primary_ip(routes: &[DetectedRoute], interfaces: &[DetectedInterface
         if is_server_facing_interface(iface) {
             if let Some(ip) = iface
                 .ipv4_addrs
-                .iter()
+                .iter().chain(&iface.ipv6_addrs)
                 .find(|ip| !is_container_primary_ip(ip))
             {
                 return strip_cidr(ip);
@@ -2390,11 +2499,10 @@ fn failed_sections() -> ProbeSections {
 
 /// Run the whole topology probe over an existing SSH session.
 ///
-/// Exactly one `execute_command` call — serialising eight commands would hold
+/// Exactly one `execute_probe_command` call — serialising eight commands would hold
 /// the connection read lock eight times as long and multiply the 30s
-/// per-command timeout exposure. An outer 25s `tokio::time::timeout` bounds
-/// the probe below the underlying 30s exec timeout so we can still return a
-/// structured (partial) result instead of being killed mid-flight.
+/// per-command timeout exposure. The executor owns its 25s deadline and closes
+/// the channel before returning completed sections from an interrupted run.
 ///
 /// Never panics: every failure is logged and turned into a section status.
 pub async fn run_probe(
@@ -2405,38 +2513,28 @@ pub async fn run_probe(
     let probed_at_ms = now_millis();
     let script = build_probe_script(os, include_firewall);
 
-    let raw = match tokio::time::timeout(
-        std::time::Duration::from_secs(25),
-        client.execute_command(&script),
-    )
-    .await
-    {
-        Ok(Ok(output)) => output,
-        Ok(Err(e)) => {
-            tracing::warn!("network topology probe failed: {}", e);
-            return ProbeResult {
-                success: false,
-                error: Some(truncate_chars(&e.to_string(), 500)),
-                sections: failed_sections(),
-                data: empty_probe_data(),
-                probed_at_ms,
-                raw_excerpt: None,
-            };
-        }
-        Err(_) => {
-            tracing::warn!("network topology probe timed out after 25s");
-            return ProbeResult {
-                success: false,
-                error: Some("探测超时（25s）".to_string()),
-                sections: failed_sections(),
-                data: empty_probe_data(),
-                probed_at_ms,
-                raw_excerpt: None,
-            };
-        }
-    };
+    match client.execute_probe_command(&script).await {
+        Ok((raw, incomplete)) => parse_probe_output(&raw, include_firewall, probed_at_ms, incomplete),
+        Err(e) => ProbeResult {
+            success: false,
+            error: Some(truncate_chars(&e.to_string(), 500)),
+            sections: failed_sections(),
+            data: empty_probe_data(),
+            probed_at_ms,
+            raw_excerpt: None,
+        },
+    }
+}
 
-    let sections = split_sections(&raw);
+/// Parse only completed sections. Timeout/size limits must not turn an
+/// unfinished socket table into authoritative evidence of absent listeners.
+fn parse_probe_output(raw: &str, include_firewall: bool, probed_at_ms: u64, incomplete: bool) -> ProbeResult {
+    let mut sections = split_sections(raw);
+    if incomplete {
+        if let Some(key) = raw.lines().rev().find_map(section_key) {
+            if key != "__end__" { sections.remove(key); }
+        }
+    }
     let excerpt = Some(truncate_chars(&raw, RAW_EXCERPT_MAX_CHARS));
 
     let (hostname, hostname_section) = match sections.get("hostname") {
@@ -2458,18 +2556,19 @@ pub async fn run_probe(
         } else {
             // Skipped on purpose (client-side TTL cache); not an error.
             ProbeSection {
-                status: "unavailable".to_string(),
-                note: "防火墙缓存未过期，本次探测跳过".to_string(),
+                status: "skipped".to_string(),
+                note: String::new(),
             }
         }),
     };
     let (firewall_rules, rules_section) = match sections.get("rules") {
+        Some(body) if body.trim().is_empty() && firewall.fw_type == "none" => (Vec::new(), ProbeSection::skipped()),
         Some(body) => parse_firewall_rules(body),
-        None => (Vec::new(), firewall_section.clone()),
+        None => (Vec::new(), if include_firewall { missing_section() } else { ProbeSection::skipped() }),
     };
     let fdmap = match sections.get("fdmap") {
         Some(body) => parse_fdmap(body),
-        None => HashMap::new(),
+        None => FdOwnership::default(),
     };
     let (proc_ports, proc_peers, service_links, proc_sockets_section) = match sections.get("proc_sockets") {
         Some(body) => parse_proc_sockets(body, &fdmap),
@@ -2477,10 +2576,11 @@ pub async fn run_probe(
             Vec::new(),
             Vec::new(),
             Vec::new(),
-            missing_section(),
+            ProbeSection::skipped(),
         ),
     };
-    let (ports, ports_section) = if proc_sockets_section.status != "unavailable" {
+    let use_proc = sections.contains_key("proc_sockets");
+    let (ports, ports_section) = if use_proc {
         (proc_ports.clone(), proc_sockets_section.clone())
     } else {
         match sections.get("ports") {
@@ -2488,7 +2588,7 @@ pub async fn run_probe(
             None => (Vec::new(), missing_section()),
         }
     };
-    let (peers, peers_section) = if proc_sockets_section.status != "unavailable" {
+    let (peers, peers_section) = if use_proc {
         (proc_peers, proc_sockets_section.clone())
     } else {
         match sections.get("peers") {
@@ -2540,7 +2640,9 @@ pub async fn run_probe(
 
     ProbeResult {
         success,
-        error: if success {
+        error: if incomplete {
+            Some("Probe interrupted (timeout, output limit or remote exit); only completed sections were retained".to_string())
+        } else if success {
             None
         } else {
             Some("所有分段均未采集到数据".to_string())
@@ -2549,13 +2651,15 @@ pub async fn run_probe(
             hostname: hostname_section,
             os: os_section,
             interfaces: interfaces_section,
-            routes: missing_section(),
+            routes: ProbeSection::skipped(),
             firewall: firewall_section,
             rules: rules_section,
             ports: ports_section,
             peers: peers_section,
             proc_sockets: proc_sockets_section,
-            fdmap: ProbeSection::ok(),
+            fdmap: if !use_proc { ProbeSection::skipped() } else if fdmap.inode_pids.is_empty() || sections.get("fdmap").is_some_and(|raw| raw.contains("NT_PARTIAL:")) {
+                ProbeSection { status: "partial".to_string(), note: "Process ownership unavailable; server relationships are still retained".to_string() }
+            } else { ProbeSection::ok() },
         },
         data: ProbeData {
             hostname,
@@ -2594,6 +2698,55 @@ fn empty_firewall() -> DetectedFirewall {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bsd_snapshot_uses_netstat_without_proc() {
+        let raw = "###NT:hostname###\nmac\n###NT:os###\nDarwin 25\n###NT:interfaces###\nen0: flags=8863<UP,BROADCAST> mtu 1500\n inet 192.168.1.2 netmask 0xffffff00\n###NT:ports###\ntcp4 0 0 *.22 *.* LISTEN\n###NT:peers###\ntcp4 0 0 192.168.1.2.22 192.168.1.3.45000 ESTABLISHED\n###NT:fdmap###\nNT_FDMAP_UNAVAILABLE\n###NT:end###";
+        let result = parse_probe_output(raw, false, 1, false);
+        assert_eq!(result.data.ports.len(), 1);
+        assert_eq!(result.data.peers.len(), 1);
+        assert_eq!(result.sections.proc_sockets.status, "skipped");
+        assert_eq!(result.sections.routes.status, "skipped");
+        assert_eq!(result.sections.firewall.status, "skipped");
+    }
+
+    #[test]
+    fn interrupted_snapshot_does_not_publish_unfinished_socket_rows() {
+        let raw = "###NT:hostname###\nweb\n###NT:proc_sockets###\nNT_PROC_FILE\ttcp\t/proc/net/tcp\n0: 00000000:0050 00000000:0000 0A 0 0 0 0 0 123\n";
+        let result = parse_probe_output(raw, false, 1, true);
+        assert_eq!(result.data.hostname, "web");
+        assert!(result.data.ports.is_empty());
+        assert_eq!(result.sections.ports.status, "failed");
+        assert!(result.error.is_some());
+        let complete_sockets = format!("{raw}###NT:fdmap###\n");
+        let result = parse_probe_output(&complete_sockets, false, 1, true);
+        assert_eq!(result.data.ports.len(), 1);
+    }
+
+    #[test]
+    fn socket_read_errors_do_not_claim_complete_coverage() {
+        let (_, _, _, status) = parse_proc_sockets("NT_PROC_FILE\ttcp\t/proc/net/tcp\nNT_PROC_PARTIAL\n", &FdOwnership::default());
+        assert_eq!(status.status, "partial");
+    }
+
+    #[test]
+    fn private_and_ipv6_server_addresses_are_valid_primary_ips() {
+        for addr in ["172.20.1.10", "100.100.1.10", "fd00::10", "2001:db8::10"] {
+            assert!(!is_container_primary_ip(addr));
+        }
+        let (interfaces, _) = parse_interfaces("2: eth0 inet6 fd00::10/64 scope global");
+        assert_eq!(pick_primary_ip(&[], &interfaces), "fd00::10");
+    }
+
+    #[test]
+    fn connected_udp_clients_never_become_listener_nodes() {
+        let raw = "NT_PROC_FILE\tudp\t/proc/net/udp\n0: 0100000A:C350 0200000A:0035 01 0 0 0 0 0 123\n";
+        let (ports, peers, links, _) = parse_proc_sockets(raw, &FdOwnership::default());
+        assert!(ports.is_empty());
+        assert_eq!(peers.len(), 1);
+        assert_eq!(links[0].remote_port, Some(53));
+        assert_eq!(links[0].local_port, None);
+    }
 
     // ── split_sections ─────────────────────────────────────────────────────
 
@@ -3105,7 +3258,7 @@ NT_PROC_FILE\tudp\t/proc/net/udp
    3: 00000000:0035 00000000:0000 07 00000000:000000 00:00000000 00000000     0        0 44444 1 0000000000000000 100 0 0 10 0
 NT_PROC_END
 ";
-        let (ports, peers, links, section) = parse_proc_sockets(raw, &HashMap::new());
+        let (ports, peers, links, section) = parse_proc_sockets(raw, &FdOwnership::default());
         assert_eq!(section.status, "partial");
         assert_eq!(ports.len(), 2);
         assert_eq!(ports[0].listen_addr, "0.0.0.0");
@@ -3133,11 +3286,11 @@ NT_PROC_END
 not-a-match
 /proc/x/fd/1 socket:[99999]
 ";
-        let map = parse_fdmap(raw);
-        assert_eq!(map.get("11111"), Some(&412));
-        assert_eq!(map.get("22222"), Some(&99));
-        assert_eq!(map.get("88888"), Some(&99));
-        assert!(!map.contains_key("99999"));
+        let out = parse_fdmap(raw);
+        assert_eq!(out.inode_pids.get("11111"), Some(&vec![412]));
+        assert_eq!(out.inode_pids.get("22222"), Some(&vec![99]));
+        assert_eq!(out.inode_pids.get("88888"), Some(&vec![99]));
+        assert!(!out.inode_pids.contains_key("99999"));
     }
 
     #[test]
@@ -3148,12 +3301,142 @@ total 0
 lrwxrwxrwx 1 root root 64 Sep  9 10:00 6 -> socket:[11111]
 lrwxrwxrwx 1 root root 64 Sep  9 10:00 7 -> pipe:[123]
 /proc/99/fd:
-lrwxrwxrwx 1 app app 64 Sep  9 10:00 9 -> socket:[22222]
+lrwxrwxrwx 1 root root 64 Sep  9 10:00 9 -> socket:[22222]
 ";
-        let map = parse_fdmap(raw);
-        assert_eq!(map.get("11111"), Some(&412));
-        assert_eq!(map.get("22222"), Some(&99));
-        assert_eq!(map.len(), 2, "pipe fds must be ignored");
+        let out = parse_fdmap(raw);
+        assert_eq!(out.inode_pids.get("11111"), Some(&vec![412]));
+        assert_eq!(out.inode_pids.get("22222"), Some(&vec![99]));
+        assert_eq!(out.inode_pids.len(), 2, "pipe fds must be ignored");
+    }
+
+    #[test]
+    fn ports_exclude_loopback_bound_listeners() {
+        // Found live on Alpine: docker's embedded DNS binds 127.0.0.11 with a
+        // RANDOM port in UNCONN state — indistinguishable from a service
+        // listener by state alone, and exactly the kind of loopback noise the
+        // requirement drops. Same rule for tcp (e.g. `bind 127.0.0.1` redis).
+        let raw = "\
+NT_PROC_FILE\tudp\t/proc/net/udp
+   0: 0B00007F:DCD4 00000000:0000 07 00000000:000000 00:00000000 00000000 0 0 38217 1 0000000000000000 100 0 0 10 -1
+   1: 00000000:14E9 00000000:0000 07 00000000:000000 00:00000000 00000000 0 0 38218 1 0000000000000000 100 0 0 10 -1
+NT_PROC_FILE\ttcp\t/proc/net/tcp
+   2: 0100007F:18EB 00000000:0000 0A 00000000:000000 00:00000000 00000000 0 0 38219 1 0000000000000000 100 0 0 10 0
+   3: 00000000:18EB 00000000:0000 0A 00000000:000000 00:00000000 00000000 0 0 38220 1 0000000000000000 100 0 0 10 0
+";
+        let (ports, _, _, _) = parse_proc_sockets(raw, &FdOwnership::default());
+        // Only the externally bound rows survive: udp 5353 and tcp 6379.
+        assert_eq!(
+            ports.iter().map(|p| (p.protocol.as_str(), p.port)).collect::<Vec<_>>(),
+            vec![("udp", 5353), ("tcp", 6379)],
+            "loopback binds (127.0.0.11 docker DNS, 127.0.0.1 redis) must not surface"
+        );
+    }
+
+    #[test]
+    fn parse_fdmap_ppid_block_with_spaces_in_comm() {
+        // /proc/<pid>/stat rows: `pid (comm) state ppid …`. comm may contain
+        // spaces AND parentheses (e.g. threads, weird binaries) — everything
+        // before the LAST ')' is the comm.
+        let raw = "\
+NT_FDMAP_BEGIN
+/proc/8/fd/5 socket:[13241]
+NT_FDMAP_PPID
+8 (socat) S 1 1 1 0 -1 4194560
+9 (socat) S 8 8 8 0 -1 4194560
+120 (weird (name) x) S 9 9 9 0 -1 0
+NT_FDMAP_END
+";
+        let out = parse_fdmap(raw);
+        assert_eq!(out.inode_pids.get("13241"), Some(&vec![8]));
+        assert_eq!(out.parent.get(&8), Some(&1));
+        assert_eq!(out.parent.get(&9), Some(&8), "socat fork child's parent");
+        assert_eq!(out.parent.get(&120), Some(&9), "comm with parens+spaces still parses");
+    }
+
+    #[test]
+    fn service_links_attribute_p1_through_parent_when_child_closed_listener() {
+        // The OTHER real-world shape from the live container suite: socat's
+        // fork child CLOSES the inherited listener fd before dialling out —
+        // the child owns no listener at all, and p1 must come from the
+        // parent process's unique listener (nginx/php-fpm master shape).
+        let raw = "\
+NT_PROC_FILE\ttcp\t/proc/net/tcp
+   0: 00000000:1F90 00000000:0000 0A 00000000:000000 00:00000000 00000000 0 0 13241 1 0000000000000000 100 0 0 10 0
+   1: 030015AC:9C34 020015AC:18EB 01 00000000:000000 00:00000000 00000000 0 0 18987 1 0000000000000000 20 0 0 10 -1
+";
+        let fdmap = FdOwnership {
+            inode_pids: HashMap::from([
+                ("13241".to_string(), vec![8u32]),   // parent's listener only
+                ("18987".to_string(), vec![9u32]),   // child's dial (no listener fd)
+            ]),
+            parent: HashMap::from([(9u32, 8u32)]),
+        };
+        let (_, _, links, _) = parse_proc_sockets(raw, &fdmap);
+        let outbound = links.iter().find(|l| l.direction == "outbound").expect("outbound");
+        assert_eq!(outbound.remote_port, Some(6379));
+        assert_eq!(
+            outbound.local_port,
+            Some(8080),
+            "p1 must resolve through the fork parent's listener"
+        );
+    }
+
+    #[test]
+    fn service_links_do_not_inherit_listener_from_unrelated_parent() {
+        // A plain client (e.g. `mysql -h db`) has no listener; its parent is
+        // a shell. Even when the GRANDparent chain would reach sshd (which
+        // listens on 22), only ONE parent hop is allowed — never fabricate a
+        // service dependency onto sshd.
+        let raw = "\
+NT_PROC_FILE\ttcp\t/proc/net/tcp
+   0: 00000000:0016 00000000:0000 0A 00000000:000000 00:00000000 00000000 0 0 500 1 0000000000000000 100 0 0 10 0
+   1: 030015AC:9C34 020015AC:18EB 01 00000000:000000 00:00000000 00000000 0 0 18987 1 0000000000000000 20 0 0 10 -1
+";
+        let fdmap = FdOwnership {
+            inode_pids: HashMap::from([
+                ("500".to_string(), vec![7u32]),    // sshd listener, pid 7
+                ("18987".to_string(), vec![42u32]), // mysql client
+            ]),
+            parent: HashMap::from([(42u32, 100u32), (100u32, 7u32)]), // shell → sshd
+        };
+        let (_, _, links, _) = parse_proc_sockets(raw, &fdmap);
+        let outbound = links.iter().find(|l| l.direction == "outbound").expect("outbound");
+        assert_eq!(
+            outbound.local_port, None,
+            "one parent hop only — a client behind a shell must degrade, not claim sshd:22"
+        );
+    }
+
+    #[test]
+    fn service_links_attribute_p1_through_fork_shared_listener_inode() {
+        // Real-world shape found by the live container suite: `socat
+        // TCP-LISTEN:8080,fork` — pid 99 holds the listener (inode 22222),
+        // the fork child pid 120 INHERITED that same fd AND dialled out
+        // (inode 44444). A single-pid fdmap silently lost the child side and
+        // degraded p1 to None; ownership must be a set.
+        let raw = "\
+NT_PROC_FILE\ttcp\t/proc/net/tcp
+   0: 00000000:1F90 00000000:0000 0A 00000000:000000 00:00000000 00000000 0 0 22222 1 0000000000000000 100 0 0 10 0
+   1: 0200000A:AD9C 0300000A:18EB 01 00000000:000000 00:00000000 00000000 0 0 44444 1 0000000000000000 20 0 0 10 -1
+";
+        let fdmap = FdOwnership {
+            inode_pids: HashMap::from([
+                ("22222".to_string(), vec![99u32, 120u32]), // parent + fork child
+                ("44444".to_string(), vec![120u32]),        // child's connection
+            ]),
+            parent: HashMap::new(),
+        };
+        let (_, _, links, _) = parse_proc_sockets(raw, &fdmap);
+        let outbound = links
+            .iter()
+            .find(|l| l.direction == "outbound")
+            .expect("outbound link");
+        assert_eq!(outbound.remote_port, Some(6379));
+        assert_eq!(
+            outbound.local_port,
+            Some(8080),
+            "fork child must still attribute p1 through the shared listener inode"
+        );
     }
 
     #[test]
@@ -3169,12 +3452,15 @@ NT_PROC_FILE\ttcp\t/proc/net/tcp
    2: 0100000A:1F90 0900000A:C350 01 00000000:000000 00:00000000 00000000 0 0 33333 1 0000000000000000 20 0 0 10 -1
    3: 0200000A:AD9C 0300000A:18EB 01 00000000:000000 00:00000000 00000000 0 0 44444 1 0000000000000000 20 0 0 10 -1
 ";
-        let fdmap = HashMap::from([
-            ("11111".to_string(), 7u32),
-            ("22222".to_string(), 99u32),
-            ("33333".to_string(), 7u32),
-            ("44444".to_string(), 99u32),
-        ]);
+        let fdmap = FdOwnership {
+            inode_pids: HashMap::from([
+                ("11111".to_string(), vec![7u32]),
+                ("22222".to_string(), vec![99u32]),
+                ("33333".to_string(), vec![7u32]),
+                ("44444".to_string(), vec![99u32]),
+            ]),
+            parent: HashMap::new(),
+        };
         let (ports, peers, links, section) = parse_proc_sockets(raw, &fdmap);
         assert_eq!(section.status, "ok");
         assert_eq!(ports.len(), 2, "listeners on 8080 and 5432");
@@ -3211,7 +3497,10 @@ NT_PROC_FILE\ttcp\t/proc/net/tcp
 NT_PROC_FILE\ttcp\t/proc/net/tcp
    1: 0100000A:C5A2 0200000A:1538 01 00000000:000000 00:00000000 00000000 0 0 22222 1 0000000000000000 20 0 0 10 -1
 ";
-        let fdmap = HashMap::from([("22222".to_string(), 99u32)]);
+        let fdmap = FdOwnership {
+            inode_pids: HashMap::from([("22222".to_string(), vec![99u32])]),
+            parent: HashMap::new(),
+        };
         let (_, _, links, _) = parse_proc_sockets(raw, &fdmap);
         assert_eq!(links.len(), 1);
         let link = &links[0];
@@ -3230,16 +3519,12 @@ NT_PROC_FILE\ttcp\t/proc/net/tcp
    2: 0100000A:1F90 0300000A:1538 01 00000000:000000 00:00000000 00000000 0 0 33333 1 0000000000000000 20 0 0 10 -1
    3: 0200000A:1539 0300000A:1538 01 00000000:000000 00:00000000 00000000 0 0 44444 1 0000000000000000 20 0 0 10 -1
 ";
-        let (_, _, links, _) = parse_proc_sockets(raw, &HashMap::new());
-        // Row 0 loopback, row 1 self — dropped. Rows 2+3 aggregate: both are
-        // ephemeral-local outbound connections to 10.0.0.3:5432 (no listener
-        // table → p1 unavailable), same tuple → connections = 2.
-        assert_eq!(links.len(), 1);
-        assert_eq!(links[0].direction, "outbound");
-        assert_eq!(links[0].remote_addr, "10.0.0.3");
-        assert_eq!(links[0].remote_port, Some(5432));
-        assert_eq!(links[0].local_port, None);
-        assert_eq!(links[0].connections, 2);
+        let (_, _, links, _) = parse_proc_sockets(raw, &FdOwnership::default());
+        // Distinct local bind addresses must not collapse to an arbitrary
+        // first address. Each row retains its actual local endpoint.
+        assert_eq!(links.len(), 2);
+        assert!(links.iter().all(|l| l.direction == "outbound" && l.remote_addr == "10.0.0.3"
+            && l.remote_port == Some(5432) && l.local_port.is_none() && l.connections == 1));
     }
 
     #[test]
@@ -3248,7 +3533,7 @@ NT_PROC_FILE\ttcp\t/proc/net/tcp
 NT_PROC_FILE\tudp\t/proc/net/udp
    0: 030015AC:0035 020015AC:1538 07 00000000:000000 00:00000000 00000000 0 0 55555 1 0000000000000000 100 0 0 10 -1
 ";
-        let (ports, peers, links, section) = parse_proc_sockets(raw, &HashMap::new());
+        let (ports, peers, links, section) = parse_proc_sockets(raw, &FdOwnership::default());
         assert_eq!(section.status, "partial");
         assert_eq!(ports.len(), 1);
         assert_eq!(ports[0].protocol, "udp");
@@ -3271,9 +3556,10 @@ NT_PROC_FILE\ttcp\t/proc/net/tcp
    0: 0B00007F:82B1 00000000:0000 0A 00000000:000000 00:00000000 00000000 0 0 10975 1 0000000000a1992188 100 0 0 10 0
    1: 020015AC:A499 030015AC:1F90 01 00000000:000000 00:00000000 00000000 0 0 6937 1 0000000000d448874c 20 0 0 10 -1
 ";
-        let (ports, peers, links, _) = parse_proc_sockets(a, &HashMap::new());
-        assert_eq!(ports.len(), 1);
-        assert_eq!(ports[0].listen_addr, "127.0.0.11");
+        let (ports, peers, links, _) = parse_proc_sockets(a, &FdOwnership::default());
+        // 127.0.0.11 is docker's embedded DNS bound to loopback — the row is
+        // a genuine LISTEN but loopback binds are excluded by contract.
+        assert!(ports.is_empty(), "loopback listener must not surface: {ports:?}");
         assert_eq!(peers.len(), 1);
         assert_eq!(peers[0].local_addr, "172.21.0.2");
         assert_eq!(peers[0].remote_addr, "172.21.0.3");
@@ -3291,13 +3577,14 @@ NT_PROC_FILE\ttcp6\t/proc/net/tcp6
    0: 00000000000000000000000000000000:1F90 00000000000000000000000000000000:0000 0A 00000000:000000 00:00000000 00000000 0 0 4859 1 0000000000fb436901 100 0 0 10 0
    1: 0000000000000000FFFF0000030015AC:1F90 0000000000000000FFFF0000020015AC:A499 01 00000000:000000 00:00000000 00000000 0 0 4860 1 00000000006bc236dc 20 0 0 10 -1
 ";
-        let (ports, peers, links, _) = parse_proc_sockets(b, &HashMap::new());
+        let (ports, peers, links, _) = parse_proc_sockets(b, &FdOwnership::default());
         assert_eq!(ports.len(), 1);
         assert_eq!(ports[0].listen_addr, "::");
         assert_eq!(ports[0].port, 8080);
         assert_eq!(peers.len(), 1);
-        assert_eq!(peers[0].local_addr, "::ffff:172.21.0.3");
-        assert_eq!(peers[0].remote_addr, "::ffff:172.21.0.2");
+        // IPv4-mapped IPv6 normalizes to plain IPv4 (one IP, one node).
+        assert_eq!(peers[0].local_addr, "172.21.0.3");
+        assert_eq!(peers[0].remote_addr, "172.21.0.2");
         assert_eq!(peers[0].local_port, Some(8080));
         assert_eq!(peers[0].remote_port, Some(42137));
         // Local port 8080 IS a listener → inbound from ::ffff:172.21.0.2.
@@ -3456,6 +3743,10 @@ NT_PROC_FILE\ttcp6\t/proc/net/tcp6
             "/dev/tcp",
             "ping ",
             "traceroute",
+            "hostname -f",
+            "curl ",
+            "wget ",
+            "nmap ",
             "dig ",
             "nslookup ",
             "apt ",
