@@ -320,6 +320,39 @@ pub struct SshSession {
     pub connected: bool,
 }
 
+/// How a [`SshClient::exec_stream`] run ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamEnd {
+    /// Remote process exited (exit status received).
+    Exited(u32),
+    /// Caller cancelled through the token; the channel was closed.
+    Cancelled,
+}
+
+/// Wrap a streaming command so a stop reliably reaps the REMOTE process tree.
+///
+/// Without a PTY, neither a channel close nor a forwarded signal reaches
+/// grandchildren reliably (verified live: the fixture sshd does not act on
+/// `signal` channel requests for exec channels, and a plain close leaves a
+/// quiet `tail -f` re-parented and alive — the classic "ssh disconnect
+/// leaks tail" problem). The wrapper parks the shell on `read _` instead:
+///
+///  * user stop → the client sends channel EOF → sshd closes the child's
+///    stdin → `read` returns → the shell exits → the EXIT trap TERMs the
+///    whole process GROUP (`kill -TERM 0`; sshd gives each session its own
+///    group, so the blast radius is exactly this command's children).
+///  * command exit → `kill -TERM $$` kills the parked shell → same trap.
+///
+/// The command's own exit status is not preserved (the wrapper shell's is
+/// reported instead) — acceptable for a log stream, where the frontend only
+/// surfaces non-zero exits as a hint.
+pub fn wrap_stream_command(command: &str) -> String {
+    let escaped = command.replace('\'', "'\\''");
+    format!(
+        "sh -c 'trap \"kill -TERM 0 2>/dev/null\" EXIT HUP TERM; {{ {escaped}; kill -TERM $$ 2>/dev/null; }} & read _ || true'"
+    )
+}
+
 pub struct SshClient {
     session: Option<Arc<client::Handle<Client>>>,
     /// Keeps the jump-host session alive for the lifetime of the connection.
@@ -613,6 +646,41 @@ impl SshClient {
     }
 
     // Changed to &self instead of &mut self to allow concurrent access
+    /// Bounded, read-only topology snapshot. Keep completed output on timeout,
+    /// and close the channel here rather than cancelling its owner externally.
+    pub async fn execute_probe_command(&self, command: &str) -> Result<(String, bool)> {
+        let session = self.session.as_ref().ok_or_else(|| anyhow::anyhow!("Not connected"))?;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(25);
+        let mut channel = tokio::time::timeout_at(deadline, session.channel_open_session())
+            .await.map_err(|_| anyhow::anyhow!("Probe channel open timed out"))??;
+        let mut output = Vec::new();
+        let mut complete = false;
+        let result = tokio::time::timeout_at(deadline, async {
+            channel.exec(true, command).await?;
+            let mut code = None;
+            let mut eof = false;
+            while let Some(msg) = channel.wait().await {
+                match msg {
+                    ChannelMsg::Data { data } | ChannelMsg::ExtendedData { data, .. } => {
+                        if output.len() + data.len() > 16 * 1024 * 1024 { break; }
+                        output.extend_from_slice(&data);
+                    }
+                    ChannelMsg::ExitStatus { exit_status } => code = Some(exit_status),
+                    ChannelMsg::Eof => eof = true,
+                    ChannelMsg::Close => { complete = code == Some(0); break; }
+                    _ => {}
+                }
+                if eof && code.is_some() { complete = code == Some(0); break; }
+            }
+            Ok::<(), anyhow::Error>(())
+        }).await;
+        // Also bound cleanup so a stalled session cannot hold the global probe
+        // permit indefinitely. No signal or command is sent to another host.
+        let _ = tokio::time::timeout(Duration::from_secs(1), channel.close()).await;
+        if let Ok(Err(err)) = result { return Err(err); }
+        Ok((String::from_utf8_lossy(&output).into_owned(), !complete))
+    }
+
     pub async fn execute_command(&self, command: &str) -> Result<String> {
         if let Some(session) = &self.session {
             let mut channel = session.channel_open_session().await?;
@@ -684,6 +752,82 @@ impl SshClient {
             }
         } else {
             Err(anyhow::anyhow!("Not connected"))
+        }
+    }
+
+    /// Clone the underlying session handle for use inside a spawned task.
+    ///
+    /// Streaming readers (`exec_stream`) outlive the caller's borrow of the
+    /// `SshClient` (it sits behind a connection-manager `RwLock`); the Arc'd
+    /// russh handle lets the stream own its own channel instead.
+    pub fn session_handle(&self) -> Option<Arc<client::Handle<Client>>> {
+        self.session.clone()
+    }
+
+    /// Streaming `exec` for long-running commands (`tail -f`, `journalctl -f`).
+    ///
+    /// Unlike [`Self::execute_command`] there is NO timeout: the future runs
+    /// until the remote process exits or the caller cancels the token. Every
+    /// stdout/stderr chunk is handed to `on_data` as it arrives; cancelling
+    /// closes the channel explicitly (a leaked open channel would keep the
+    /// remote `tail -f` process alive and grow russh's channel map).
+    pub async fn exec_stream(
+        session: &Arc<client::Handle<Client>>,
+        command: &str,
+        cancel: tokio_util::sync::CancellationToken,
+        mut on_data: impl FnMut(String),
+    ) -> Result<StreamEnd> {
+        let mut channel = session.channel_open_session().await?;
+        let wrapped = wrap_stream_command(command);
+        channel.exec(true, wrapped.as_str()).await?;
+
+        loop {
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => {
+                    // EOF (not close, not signal) is the reliable reaper:
+                    // sshd closes the wrapper shell's stdin on channel EOF,
+                    // its parked `read` returns, and the EXIT trap TERMs the
+                    // whole remote process group (see wrap_stream_command).
+                    // HUP is kept as a fast path for sshds that do forward
+                    // signal requests. Wait for the remote close, bounded.
+                    let _ = channel.signal(Sig::HUP).await;
+                    let _ = channel.eof().await;
+                    let _ = tokio::time::timeout(Duration::from_millis(1500), async {
+                        loop {
+                            match channel.wait().await {
+                                Some(ChannelMsg::Close) | None => break,
+                                _ => {}
+                            }
+                        }
+                    })
+                    .await;
+                    let _ = channel.close().await;
+                    return Ok(StreamEnd::Cancelled);
+                }
+                message = channel.wait() => {
+                    match message {
+                        Some(ChannelMsg::Data { ref data })
+                        | Some(ChannelMsg::ExtendedData { ref data, .. }) => {
+                            on_data(String::from_utf8_lossy(data).into_owned());
+                        }
+                        Some(ChannelMsg::ExitStatus { exit_status }) => {
+                            // Drain until Eof/Close so the channel unwinds
+                            // cleanly, then report.
+                            let _ = channel.eof().await;
+                            let _ = channel.close().await;
+                            return Ok(StreamEnd::Exited(exit_status));
+                        }
+                        Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None => {
+                            let _ = channel.close().await;
+                            // Stream ended without an exit status (killed /
+                            // dropped); treat as a normal end with unknown code.
+                            return Ok(StreamEnd::Exited(u32::MAX));
+                        }
+                        _ => {}
+                    }
+                }
+            }
         }
     }
 

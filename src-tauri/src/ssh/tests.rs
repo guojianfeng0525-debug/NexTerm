@@ -1,3 +1,5 @@
+use crate::ssh::wrap_stream_command;
+
 #[cfg(test)]
 mod ssh_contract_tests {
     use crate::ssh::{AuthMethod, SshClient, SshConfig};
@@ -644,4 +646,19 @@ async fn disconnected_received_is_ok() {
         .disconnected(russh::client::DisconnectReason::ReceivedDisconnect(info))
         .await;
     assert!(res.is_ok(), "received disconnect must not fail");
+}
+
+#[test]
+fn wrap_stream_command_escapes_and_keeps_shape() {
+    // Plain command: trap + background + parked read, single-quoted body.
+    let wrapped = wrap_stream_command("tail -f /var/log/app.log");
+    assert!(wrapped.starts_with("sh -c 'trap \"kill -TERM 0 2>/dev/null\" EXIT HUP TERM; { tail -f /var/log/app.log; kill -TERM $$ 2>/dev/null; } & read _ || true'"),
+        "unexpected wrapper: {wrapped}");
+
+    // Embedded single quotes must be escaped, never terminate the outer quote.
+    let tricky = wrap_stream_command("journalctl -u 'my service' -f");
+    assert!(tricky.contains(r"journalctl -u '\''my service'\'' -f"), "quote escaping broken: {tricky}");
+    // The outer shell string still ends where it should (last ' closes the
+    // sh -c argument): count via the parked-read tail anchor.
+    assert!(tricky.ends_with("read _ || true'"), "wrapper tail anchor lost: {tricky}");
 }

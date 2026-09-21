@@ -1582,7 +1582,7 @@ pub async fn discover_log_sources(
         "-name 'cron' -o -name 'cron.log' -o ",
         "-name 'boot.log' -o -name 'dpkg.log' -o ",
         "-name 'yum.log' -o -name 'alternatives.log' ",
-        "\\) -readable 2>/dev/null | head -80"
+        "\\) -readable 2>/dev/null | head -120"
     );
 
     if let Ok(output) = client.execute_command(file_cmd).await {
@@ -1630,7 +1630,7 @@ pub async fn discover_log_sources(
     }
 
     // 2. Discover journalctl services
-    let journal_cmd = "systemctl list-units --type=service --state=running --no-pager --no-legend 2>/dev/null | awk '{print $1}' | head -30";
+    let journal_cmd = "systemctl list-units --type=service --state=running --no-pager --no-legend 2>/dev/null | awk '{print $1}' | head -80";
     if let Ok(output) = client.execute_command(journal_cmd).await {
         for line in output.lines() {
             let unit = line.trim().to_string();
@@ -1650,7 +1650,7 @@ pub async fn discover_log_sources(
     }
 
     // 3. Discover docker containers
-    let docker_cmd = r#"docker ps --format '{{.Names}}\t{{.Status}}' 2>/dev/null | head -20"#;
+    let docker_cmd = r#"docker ps --format '{{.Names}}\t{{.Status}}' 2>/dev/null | head -40"#;
     if let Ok(output) = client.execute_command(docker_cmd).await {
         if !output.contains("command not found") && !output.contains("Cannot connect") {
             for line in output.lines() {
@@ -1710,6 +1710,10 @@ pub async fn read_log(
     let line_count = lines.unwrap_or(200);
 
     let cmd = match source_type.as_str() {
+        // User-authored command (saved custom log source): executed verbatim
+        // as the connection's login user. The line-count selector does not
+        // apply — the command carries its own -n / -f.
+        "command" => path,
         "journal" => format!(
             "journalctl -u '{}' -n {} --no-pager 2>/dev/null",
             shell_escape_single_quoted(&path),
@@ -1739,6 +1743,169 @@ pub async fn read_log(
             error: Some(e.to_string()),
         }),
     }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Streaming log sources (custom commands: tail -f / journalctl -f)
+//
+// A stream is one SSH exec channel kept open for the command's lifetime.
+// Chunks are forwarded to the frontend as `log-stream` events (payload
+// `LogStreamEvent`), throttled to at most one event per flush window or per
+// 4 KiB so a chatty log cannot flood the IPC bridge. The frontend stops a
+// stream with `log_stream_stop`; the spawned task also self-cleans when the
+// remote process exits or the connection drops.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Upper bound on concurrently open log streams. A stuck stream holds an SSH
+/// channel and a tokio task; without a cap a UI leak (unstopped tail -f on
+/// every source switch) would slowly exhaust the session.
+const LOG_STREAM_MAX: usize = 8;
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase", tag = "type")]
+pub enum LogStreamEvent {
+    Data { stream_id: String, data: String },
+    End { stream_id: String, exit_code: u32 },
+    Error { stream_id: String, message: String },
+}
+
+static LOG_STREAMS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, tokio_util::sync::CancellationToken>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+static LOG_STREAM_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Start a streaming log command on an existing SSH connection.
+///
+/// Returns the stream id; output arrives via `log-stream` events. The stream
+/// ends with an `End` event when the remote command exits (incl. non-zero)
+/// and an `Error` event when the channel/transport fails. Cancellation
+/// (`log_stream_stop`) emits nothing — the frontend knows it asked.
+#[tauri::command]
+pub async fn log_stream_start(
+    app: tauri::AppHandle,
+    connection_id: String,
+    command: String,
+    state: State<'_, Arc<ConnectionManager>>,
+) -> Result<String, String> {
+    use tauri::Emitter;
+
+    let connection = state
+        .get_connection(&connection_id)
+        .await
+        .ok_or("Connection not found")?;
+    // Only clone the Arc'd session handle — the stream must NOT hold the
+    // connection's write lock for its lifetime.
+    let session = {
+        let client = connection.read().await;
+        client
+            .session_handle()
+            .ok_or("Connection not established")?
+    };
+
+    let stream_id = format!(
+        "logstream-{}",
+        LOG_STREAM_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    );
+    let cancel = tokio_util::sync::CancellationToken::new();
+    {
+        let mut streams = LOG_STREAMS.lock().map_err(|_| "log stream registry poisoned")?;
+        if streams.len() >= LOG_STREAM_MAX {
+            return Err("日志流数量已达上限（8），请先停止其他日志流".to_string());
+        }
+        streams.insert(stream_id.clone(), cancel.clone());
+    }
+
+    let emit_id = stream_id.clone();
+    tokio::spawn(async move {
+        use crate::ssh::StreamEnd;
+
+        // Throttle: flush when 4 KiB buffered or 100 ms passed since the
+        // first buffered byte.
+        let mut buffer = String::new();
+        let mut since_first: Option<tokio::time::Instant> = None;
+        let mut flush = |buffer: &mut String, since: &mut Option<tokio::time::Instant>| {
+            if buffer.is_empty() {
+                return;
+            }
+            let _ = app.emit(
+                "log-stream",
+                LogStreamEvent::Data {
+                    stream_id: emit_id.clone(),
+                    data: std::mem::take(buffer),
+                },
+            );
+            *since = None;
+        };
+
+        let result = crate::ssh::SshClient::exec_stream(
+            &session,
+            &command,
+            cancel.clone(),
+            |chunk| {
+                // Flush the previous window first when it has aged out, so
+                // low-rate streams (tail -f emitting one line per second)
+                // are not held back until 4 KiB accumulates.
+                if let Some(first) = since_first {
+                    if first.elapsed() >= std::time::Duration::from_millis(100) {
+                        flush(&mut buffer, &mut since_first);
+                    }
+                }
+                buffer.push_str(&chunk);
+                if since_first.is_none() {
+                    since_first = Some(tokio::time::Instant::now());
+                }
+                if buffer.len() >= 4096 {
+                    flush(&mut buffer, &mut since_first);
+                }
+            },
+        )
+        .await;
+
+        // Drain whatever the throttle left behind.
+        flush(&mut buffer, &mut since_first);
+
+        LOG_STREAMS
+            .lock()
+            .map(|mut streams| streams.remove(&emit_id))
+            .ok();
+
+        match result {
+            Ok(StreamEnd::Cancelled) => { /* stop() already told the frontend */ }
+            Ok(StreamEnd::Exited(code)) => {
+                let _ = app.emit(
+                    "log-stream",
+                    LogStreamEvent::End {
+                        stream_id: emit_id.clone(),
+                        exit_code: code,
+                    },
+                );
+            }
+            Err(e) => {
+                let _ = app.emit(
+                    "log-stream",
+                    LogStreamEvent::Error {
+                        stream_id: emit_id.clone(),
+                        message: e.to_string(),
+                    },
+                );
+            }
+        }
+    });
+
+    Ok(stream_id)
+}
+
+/// Stop a running log stream. Unknown ids are a no-op (already ended).
+#[tauri::command]
+pub async fn log_stream_stop(stream_id: String) -> Result<(), String> {
+    let token = LOG_STREAMS
+        .lock()
+        .map(|streams| streams.get(&stream_id).cloned())
+        .map_err(|_| "log stream registry poisoned")?;
+    if let Some(token) = token {
+        token.cancel();
+    }
+    Ok(())
 }
 
 #[tauri::command]

@@ -526,6 +526,9 @@ pub fn run() {
             commands::discover_log_sources,
             commands::read_log,
             commands::search_log,
+            // Streaming log sources (custom commands, tail -f style)
+            commands::log_stream_start,
+            commands::log_stream_stop,
             commands::get_network_stats,
             commands::get_active_connections,
             commands::get_network_bandwidth,

@@ -55,7 +55,9 @@ export type DbTable =
   | 'net_ports'
   | 'net_port_probes'
   | 'net_links'
-  | 'net_port_links';
+  | 'net_port_links'
+  /* ── log monitor: user-authored log source commands, scoped per connection ── */
+  | 'log_custom_sources';
 
 export type Row = Record<string, unknown>;
 

@@ -20,8 +20,11 @@ import React, {
   useCallback,
   useContext,
 } from "react";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { useTranslation } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";
+import { listCustomLogSourcesForConnection, type CustomLogSource } from "@/lib/log-sources-storage";
+import { LogCommandManager } from "./log-command-manager";
 import { toast } from "sonner";
 import {
   Search,
@@ -39,16 +42,24 @@ import {
   Pause,
   ChevronDown,
   AlertCircle,
+  Terminal,
+  Settings2,
 } from "lucide-react";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 
 import {
+  Command as CommandMenu,
+  CommandEmpty,
+  CommandGroup,
+  CommandInput,
+  CommandItem,
+  CommandList,
+} from "./ui/command";
+import {
   Select,
   SelectContent,
-  SelectGroup,
   SelectItem,
-  SelectLabel,
   SelectTrigger,
   SelectValue,
 } from "./ui/select";
@@ -82,7 +93,8 @@ interface LogMonitorProps {
 export interface LogSource {
   id: string;
   name: string;
-  source_type: "file" | "journal" | "docker";
+  source_type: "file" | "journal" | "docker" | "command";
+  /** For `command` sources this is the FULL command to execute. */
   path: string;
   category: string;
   size_human?: string;
@@ -90,6 +102,8 @@ export interface LogSource {
 
 interface LogMonitorState {
   sources: LogSource[];
+  /** Persisted user-authored command sources for the active connection. */
+  customCommands: CustomLogSource[];
   selectedSourceId: string;
   customPath: string;
   showCustomInput: boolean;
@@ -105,6 +119,7 @@ interface LogMonitorState {
 
 type LogMonitorStateContext = LogMonitorState & {
   setSources: React.Dispatch<React.SetStateAction<LogSource[]>>;
+  setCustomCommands: React.Dispatch<React.SetStateAction<CustomLogSource[]>>;
   setSelectedSourceId: React.Dispatch<React.SetStateAction<string>>;
   setCustomPath: React.Dispatch<React.SetStateAction<string>>;
   setShowCustomInput: React.Dispatch<React.SetStateAction<boolean>>;
@@ -122,6 +137,7 @@ const LogMonitorContext = createContext<LogMonitorStateContext | null>(null);
 
 export function LogMonitorStateProvider({ children }: { children: React.ReactNode }) {
   const [sources, setSources] = useState<LogSource[]>([]);
+  const [customCommands, setCustomCommands] = useState<CustomLogSource[]>([]);
   const [selectedSourceId, setSelectedSourceId] = useState("");
   const [customPath, setCustomPath] = useState("");
   const [showCustomInput, setShowCustomInput] = useState(false);
@@ -136,7 +152,7 @@ export function LogMonitorStateProvider({ children }: { children: React.ReactNod
 
   return (
     <LogMonitorContext.Provider value={{
-      sources, setSources, selectedSourceId, setSelectedSourceId,
+      sources, setSources, customCommands, setCustomCommands, selectedSourceId, setSelectedSourceId,
       customPath, setCustomPath, showCustomInput, setShowCustomInput,
       rawLines, setRawLines, searchTerm, setSearchTerm, isRegex, setIsRegex,
       activeFilters, setActiveFilters, lineCount, setLineCount,
@@ -277,6 +293,35 @@ function extractTimestamp(line: string): { timestamp?: string; rest: string } {
 }
 
 /** Parse raw lines into structured log entries */
+/** Streaming line buffer cap — older lines are dropped from the top. */
+export const STREAM_LINE_CAP = 5000;
+
+/**
+ * Append a streaming chunk to the line buffer.
+ *
+ * Chunks arrive at arbitrary byte boundaries: a chunk may end mid-line, so
+ * the trailing partial line is carried in `pending` and prepended to the
+ * next chunk. When the buffer exceeds `cap` lines the OLDEST lines are
+ * dropped (a live tail only ever needs the recent window).
+ * Pure function — unit-tested directly.
+ */
+export function appendChunk(
+  lines: readonly string[],
+  pending: string,
+  chunk: string,
+  cap: number,
+): { lines: string[]; pending: string } {
+  const merged = pending + chunk;
+  const parts = merged.split("\n");
+  const nextPending = parts.pop() ?? "";
+  const out = lines.length >= cap ? lines.slice(lines.length - cap) : [...lines];
+  for (const part of parts) {
+    if (out.length >= cap) out.shift();
+    out.push(part);
+  }
+  return { lines: out, pending: nextPending };
+}
+
 function parseLogLines(rawLines: string[]): ParsedLogLine[] {
   return rawLines
     .filter((line) => line.trim().length > 0)
@@ -304,10 +349,17 @@ function groupSources(sources: LogSource[]) {
   return groups;
 }
 
-const SOURCE_TYPE_LABELS: Record<string, { icon: React.ReactNode; label: string }> = {
-  file: { icon: <FileText className="h-3 w-3 inline mr-1" />, label: "Log Files" },
-  journal: { icon: <ScrollText className="h-3 w-3 inline mr-1" />, label: "Services (journalctl)" },
-  docker: { icon: <Container className="h-3 w-3 inline mr-1" />, label: "Containers (docker)" },
+type SourceTypeLabelKey =
+  | "logMonitor.sourceTypeFile"
+  | "logMonitor.sourceTypeJournal"
+  | "logMonitor.sourceTypeDocker"
+  | "logMonitor.sourceTypeCommand";
+
+const SOURCE_TYPE_LABELS: Record<string, { icon: React.ReactNode; labelKey: SourceTypeLabelKey }> = {
+  file: { icon: <FileText className="h-3 w-3 inline mr-1" />, labelKey: "logMonitor.sourceTypeFile" },
+  journal: { icon: <ScrollText className="h-3 w-3 inline mr-1" />, labelKey: "logMonitor.sourceTypeJournal" },
+  docker: { icon: <Container className="h-3 w-3 inline mr-1" />, labelKey: "logMonitor.sourceTypeDocker" },
+  command: { icon: <Terminal className="h-3 w-3 inline mr-1" />, labelKey: "logMonitor.sourceTypeCommand" },
 };
 
 // ── Component ──
@@ -315,7 +367,7 @@ const SOURCE_TYPE_LABELS: Record<string, { icon: React.ReactNode; label: string 
 export function LogMonitor({ connectionId, externalLogPath, externalLogPathKey, isActive = true }: LogMonitorProps) {
   const { t } = useTranslation();
   const {
-    sources, setSources, selectedSourceId, setSelectedSourceId,
+    sources, setSources, customCommands, setCustomCommands, selectedSourceId, setSelectedSourceId,
     customPath, setCustomPath, showCustomInput, setShowCustomInput,
     rawLines, setRawLines, searchTerm, setSearchTerm, isRegex, setIsRegex,
     activeFilters, setActiveFilters, lineCount, setLineCount,
@@ -323,6 +375,21 @@ export function LogMonitor({ connectionId, externalLogPath, externalLogPathKey, 
     scrollLocked, setScrollLocked,
   } = useLogMonitorState();
   const [isDiscovering, setIsDiscovering] = useState(false);
+  const [manageOpen, setManageOpen] = useState(false);
+  const [sourceSearchOpen, setSourceSearchOpen] = useState(false);
+
+  // ── Streaming (command sources: tail -f style) ──
+  const [streamId, setStreamId] = useState<string | null>(null);
+  const streamIdRef = useRef<string | null>(null);
+  const pendingLineRef = useRef<string>("");
+  const stopStream = useCallback(async (id: string | null) => {
+    const target = id ?? streamIdRef.current;
+    streamIdRef.current = null;
+    setStreamId(null);
+    if (target) {
+      try { await invoke("log_stream_stop", { streamId: target }); } catch { /* already ended */ }
+    }
+  }, []);
 
   const [isLoading, setIsLoading] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -375,11 +442,107 @@ export function LogMonitor({ connectionId, externalLogPath, externalLogPathKey, 
     }
   }, [connectionId, discoverSources, isActive]);
 
+  // ── Persisted custom command sources (per connection) ──
+  const reloadCustomCommands = useCallback(async () => {
+    if (!connectionId) {
+      setCustomCommands([]);
+      return;
+    }
+    try {
+      setCustomCommands(await listCustomLogSourcesForConnection(connectionId));
+    } catch (err) {
+      console.error("[LogMonitor] failed to load custom log sources:", err);
+    }
+  }, [connectionId, setCustomCommands]);
+
+  useEffect(() => {
+    void reloadCustomCommands();
+  }, [reloadCustomCommands]);
+
+  // ── Unified source list: discovered + persisted custom commands ──
+  const allSources = useMemo(() => {
+    const cmdSources: LogSource[] = customCommands.map((c) => ({
+      id: `cmd:${c.id}`,
+      name: c.name,
+      source_type: "command" as const,
+      path: c.command,
+      category: "command",
+    }));
+    return [...sources, ...cmdSources];
+  }, [sources, customCommands]);
+
   // ── Find selected source ──
   const selectedSource = useMemo(
-    () => sources.find((s) => s.id === selectedSourceId) ?? null,
-    [sources, selectedSourceId]
+    () => allSources.find((s) => s.id === selectedSourceId) ?? null,
+    [allSources, selectedSourceId]
   );
+
+  // ── log-stream event listener (single subscription, filters by id) ──
+  useEffect(() => {
+    let unlisten: UnlistenFn | null = null;
+    let disposed = false;
+    void listen<{
+      type: "data" | "end" | "error";
+      streamId: string;
+      data?: string;
+      exitCode?: number;
+      message?: string;
+    }>("log-stream", (event) => {
+      const payload = event.payload;
+      if (payload.streamId !== streamIdRef.current) return;
+      if (payload.type === "data" && payload.data) {
+        // Function-state update keeps the listener independent of the render
+        // cycle (no re-subscribe on every line, no lost chunk between
+        // unlisten/listen).
+        setRawLines((prev) => {
+          const { lines, pending } = appendChunk(prev, pendingLineRef.current, payload.data ?? "", STREAM_LINE_CAP);
+          pendingLineRef.current = pending;
+          return lines;
+        });
+        if (scrollLocked) {
+          requestAnimationFrame(() => {
+            if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+          });
+        }
+      } else if (payload.type === "end") {
+        streamIdRef.current = null;
+        setStreamId(null);
+        if ((payload.exitCode ?? 0) !== 0 && payload.exitCode !== undefined && payload.exitCode !== 4294967295) {
+          toast.warning(t('logMonitor.streamExited'), { description: `exit ${payload.exitCode}` });
+        }
+      } else if (payload.type === "error") {
+        streamIdRef.current = null;
+        setStreamId(null);
+        toast.error(t('logMonitor.streamFailed'), { description: payload.message ?? "" });
+      }
+    }).then((fn) => {
+      if (disposed) fn();
+      else unlisten = fn;
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [scrollLocked, setRawLines, t]);
+
+  // Start a streaming command source (tail -f style).
+  const startStream = useCallback(async (command: string) => {
+    await stopStream(null);
+    pendingLineRef.current = "";
+    setRawLines([]);
+    setIsLoading(true);
+    try {
+      const id = await invoke<string>("log_stream_start", { connectionId, command });
+      streamIdRef.current = id;
+      setStreamId(id);
+    } catch (err) {
+      toast.error(t('logMonitor.streamFailed'), {
+        description: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      setIsLoading(false);
+    }
+  }, [connectionId, setRawLines, stopStream, t]);
 
   // ── Load log content ──
 
@@ -450,16 +613,29 @@ export function LogMonitor({ connectionId, externalLogPath, externalLogPathKey, 
     [connectionId, selectedSourceId, selectedSource, lineCount, scrollLocked, setRawLines, t]
   );
 
-  // Load when source changes
+  // Load when source changes. Command sources STREAM (tail -f) instead of
+  // one-shot read; any previous stream is stopped first.
   useEffect(() => {
-    if (isActive && selectedSourceId) {
-      void loadLog();
+    if (!isActive || !selectedSourceId) {
+      void stopStream(null);
+      return;
     }
-  }, [isActive, selectedSourceId]); // eslint-disable-line react-hooks/exhaustive-deps
+    if (selectedSource?.source_type === "command" && selectedSource.path) {
+      void startStream(selectedSource.path);
+      return;
+    }
+    void stopStream(null);
+    void loadLog();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isActive, selectedSourceId]);
 
-  // Auto-refresh timer
+  // Stop the stream when the component unmounts.
+  useEffect(() => () => { void stopStream(null); }, [stopStream]);
+
+  // Auto-refresh timer (poll sources only; command sources stream instead)
   useEffect(() => {
     if (!isActive || !autoRefresh || !selectedSourceId) return;
+    if (selectedSource?.source_type === "command") return;
     const interval = setInterval(
       () => { void loadLog(true); },
       refreshInterval * 1000
@@ -665,7 +841,7 @@ export function LogMonitor({ connectionId, externalLogPath, externalLogPathKey, 
 
   // ── Grouped sources for dropdown ──
 
-  const groupedSources = useMemo(() => groupSources(sources), [sources]);
+  const groupedSources = useMemo(() => groupSources(allSources), [allSources]);
 
   // ── No connection state ──
 
@@ -684,67 +860,98 @@ export function LogMonitor({ connectionId, externalLogPath, externalLogPathKey, 
       <div className="h-full flex flex-col text-foreground">
         {/* ── Row 1: Source selector ── */}
         <div className="flex items-center gap-1 px-2 py-1 border-b bg-muted/30 shrink-0">
-          <Select value={selectedSourceId} onValueChange={handleSourceChange}>
-            <SelectTrigger className="h-7 text-xs flex-1 min-w-0">
-              <SelectValue placeholder={t('logMonitor.selectLogSource')} />
-            </SelectTrigger>
-            <SelectContent className="max-h-[300px]">
-              {Object.entries(groupedSources).map(([type, items]) => {
-                const meta = SOURCE_TYPE_LABELS[type] ?? {
-                  icon: <FileText className="h-3 w-3 inline mr-1" />,
-                  label: type,
-                };
-                return (
-                  <SelectGroup key={type}>
-                    <SelectLabel className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground flex items-center gap-1">
-                      {meta.icon}
-                      {meta.label}
-                    </SelectLabel>
-                    {items.map((src) => (
-                      <SelectItem
-                        key={src.id}
-                        value={src.id}
-                        className="text-xs"
+          <Popover open={sourceSearchOpen} onOpenChange={setSourceSearchOpen}>
+            <PopoverTrigger asChild>
+              <Button
+                variant="outline"
+                role="combobox"
+                className="h-7 text-xs flex-1 min-w-0 justify-between font-normal"
+              >
+                <span className="truncate">
+                  {selectedSource ? selectedSource.name : t('logMonitor.selectLogSource')}
+                </span>
+                <ChevronDown className="h-3 w-3 shrink-0 opacity-50" />
+              </Button>
+            </PopoverTrigger>
+            <PopoverContent className="p-0" align="start">
+              <CommandMenu>
+                <CommandInput placeholder={t('logMonitor.searchSources')} className="h-8 text-xs" />
+                <CommandList>
+                  <CommandEmpty className="text-xs py-3 text-center">
+                    {t('logMonitor.noSourceMatch')}
+                  </CommandEmpty>
+                  {Object.entries(groupedSources).map(([type, items]) => {
+                    const meta = SOURCE_TYPE_LABELS[type] ?? {
+                      icon: <FileText className="h-3 w-3 inline mr-1" />,
+                      labelKey: "logMonitor.sourceTypeFile",
+                    };
+                    return (
+                      <CommandGroup
+                        key={type}
+                        heading={
+                          <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground flex items-center gap-1">
+                            {meta.icon}
+                            {t(meta.labelKey)}
+                          </span>
+                        }
                       >
-                        <div className="flex items-center justify-between gap-2 w-full">
-                          <span className="truncate">{src.name}</span>
-                          {src.size_human && (
-                            <span className="text-[10px] text-muted-foreground shrink-0">
-                              {src.size_human}
-                            </span>
-                          )}
-                        </div>
-                      </SelectItem>
-                    ))}
-                  </SelectGroup>
-                );
-              })}
+                        {items.map((src) => (
+                          <CommandItem
+                            key={src.id}
+                            value={`${src.name} ${src.path}`}
+                            onSelect={() => {
+                              handleSourceChange(src.id);
+                              setSourceSearchOpen(false);
+                            }}
+                            className="text-xs"
+                          >
+                            <div className="flex items-center justify-between gap-2 w-full min-w-0" title={src.path}>
+                              <span className="truncate min-w-0 flex-1">
+                                {src.source_type === "command" ? `${src.name}` : src.name}
+                              </span>
+                              {src.size_human ? (
+                                <span className="text-[10px] text-muted-foreground shrink-0">{src.size_human}</span>
+                              ) : src.source_type === "command" ? (
+                                <Terminal className="h-3 w-3 shrink-0 text-muted-foreground" />
+                              ) : null}
+                            </div>
+                          </CommandItem>
+                        ))}
+                      </CommandGroup>
+                    );
+                  })}
 
-              {/* Custom sources */}
-              {sources.some((s) => s.category === "custom") && (
-                <SelectGroup>
-                  <SelectLabel className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground flex items-center gap-1">
-                    <FolderOpen className="h-3 w-3 inline mr-1" />
-                    {t('logMonitor.customPaths')}
-                  </SelectLabel>
-                  {sources
-                    .filter((s) => s.category === "custom")
-                    .map((src) => (
-                      <SelectItem
-                        key={src.id}
-                        value={src.id}
-                        className="text-xs"
-                        title={src.path}
-                      >
-                        <div className="flex items-center gap-2 w-full min-w-0">
-                          <span className="truncate min-w-0 flex-1">{src.path}</span>
-                        </div>
-                      </SelectItem>
-                    ))}
-                </SelectGroup>
-              )}
-            </SelectContent>
-          </Select>
+                  {/* Ad-hoc custom paths (file-browser handoff / quick add) */}
+                  {sources.some((s) => s.category === "custom") && (
+                    <CommandGroup
+                      heading={
+                        <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground flex items-center gap-1">
+                          <FolderOpen className="h-3 w-3 inline mr-1" />
+                          {t('logMonitor.customPaths')}
+                        </span>
+                      }
+                    >
+                      {sources
+                        .filter((s) => s.category === "custom")
+                        .map((src) => (
+                          <CommandItem
+                            key={src.id}
+                            value={src.path}
+                            onSelect={() => {
+                              handleSourceChange(src.id);
+                              setSourceSearchOpen(false);
+                            }}
+                            className="text-xs"
+                          >
+                            <span className="truncate">{src.path}</span>
+                          </CommandItem>
+                        ))}
+                    </CommandGroup>
+                  )}
+                </CommandList>
+              </CommandMenu>
+            </PopoverContent>
+          </Popover>
 
           <Tooltip>
             <TooltipTrigger asChild>
@@ -780,6 +987,20 @@ export function LogMonitor({ connectionId, externalLogPath, externalLogPathKey, 
             <TooltipContent side="bottom">{t('logMonitor.addCustomPath')}</TooltipContent>
           </Tooltip>
 
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                size="icon"
+                variant="ghost"
+                className="h-7 w-7 shrink-0"
+                onClick={() => setManageOpen(true)}
+              >
+                <Settings2 className="h-3.5 w-3.5" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="bottom">{t('logMonitor.manageCommands')}</TooltipContent>
+          </Tooltip>
+
           <Separator orientation="vertical" className="h-4 mx-0.5" />
 
           {/* Auto-refresh toggle */}
@@ -787,15 +1008,23 @@ export function LogMonitor({ connectionId, externalLogPath, externalLogPathKey, 
             <TooltipTrigger asChild>
               <Button
                 size="icon"
-                variant={autoRefresh ? "default" : "ghost"}
+                variant={selectedSource?.source_type === "command" ? (streamId ? "default" : "ghost") : (autoRefresh ? "default" : "ghost")}
                 className={cn(
                   "h-7 w-7 shrink-0",
-                  autoRefresh && "bg-green-600 hover:bg-green-700 text-white"
+                  ((selectedSource?.source_type === "command" && streamId) || (selectedSource?.source_type !== "command" && autoRefresh)) &&
+                    "bg-green-600 hover:bg-green-700 text-white"
                 )}
-                onClick={() => setAutoRefresh(!autoRefresh)}
+                onClick={() => {
+                  if (selectedSource?.source_type === "command") {
+                    if (streamId) void stopStream(null);
+                    else if (selectedSource.path) void startStream(selectedSource.path);
+                    return;
+                  }
+                  setAutoRefresh(!autoRefresh);
+                }}
                 disabled={!selectedSourceId}
               >
-                {autoRefresh ? (
+                {(selectedSource?.source_type === "command" ? Boolean(streamId) : autoRefresh) ? (
                   <Pause className="h-3.5 w-3.5" />
                 ) : (
                   <Play className="h-3.5 w-3.5" />
@@ -803,7 +1032,13 @@ export function LogMonitor({ connectionId, externalLogPath, externalLogPathKey, 
               </Button>
             </TooltipTrigger>
             <TooltipContent side="bottom">
-              {autoRefresh ? t('logMonitor.stopLiveTail') : t('logMonitor.startLiveTail')}
+              {selectedSource?.source_type === "command"
+                ? streamId
+                  ? t('logMonitor.streamStop')
+                  : t('logMonitor.streamStart')
+                : autoRefresh
+                  ? t('logMonitor.stopLiveTail')
+                  : t('logMonitor.startLiveTail')}
             </TooltipContent>
           </Tooltip>
 
@@ -958,6 +1193,7 @@ export function LogMonitor({ connectionId, externalLogPath, externalLogPathKey, 
           <Select
             value={String(lineCount)}
             onValueChange={(v) => setLineCount(Number(v))}
+            disabled={selectedSource?.source_type === "command"}
           >
             <SelectTrigger className="h-7 w-[70px] text-[10px] shrink-0">
               <SelectValue />
@@ -977,7 +1213,13 @@ export function LogMonitor({ connectionId, externalLogPath, externalLogPathKey, 
               <Button
                 size="sm"
                 className="h-7 text-xs px-2 shrink-0"
-                onClick={() => loadLog()}
+                onClick={() => {
+                  if (selectedSource?.source_type === "command" && selectedSource.path) {
+                    void startStream(selectedSource.path);
+                  } else {
+                    void loadLog();
+                  }
+                }}
                 disabled={!selectedSourceId || isLoading}
               >
                 {isLoading ? (
@@ -1135,6 +1377,13 @@ export function LogMonitor({ connectionId, externalLogPath, externalLogPathKey, 
           </div>
         </div>
       </div>
+
+        <LogCommandManager
+          open={manageOpen}
+          onOpenChange={setManageOpen}
+          connectionId={connectionId}
+          onChanged={() => { void reloadCustomCommands(); }}
+        />
     </TooltipProvider>
   );
 }

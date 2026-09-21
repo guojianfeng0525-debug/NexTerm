@@ -32,7 +32,7 @@ type DocumentListRow = (String, String, String, i64, i64, i64, i64);
 
 /// Allow-listed normalized tables. Table names are validated against this
 /// list before being interpolated into SQL, so no injection is possible.
-pub const TABLES: [&str; 49] = [
+pub const TABLES: [&str; 50] = [
     "connections",
     "folders",
     "active_connections",
@@ -90,6 +90,9 @@ pub const TABLES: [&str; 49] = [
     "net_port_probes",
     "net_links",
     "net_port_links",
+    // Log monitor — user-authored log source commands, scoped per saved
+    // connection (each server keeps its own command list).
+    "log_custom_sources",
 ];
 
 /// Tables whose legacy key-value layout collides with a new normalized table
@@ -729,6 +732,7 @@ fn pk_column(table: &str) -> Result<&'static str, String> {
         "net_port_probes" => "id",
         "net_links" => "id",
         "net_port_links" => "id",
+        "log_custom_sources" => "id",
         _ => return Err(format!("unknown table: {}", table)),
     })
 }
@@ -1837,6 +1841,16 @@ CREATE TABLE IF NOT EXISTS "net_port_links" (
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS "log_custom_sources" (
+    id TEXT PRIMARY KEY,
+    connection_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    command TEXT NOT NULL,
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
 DROP INDEX IF EXISTS idx_net_port_links_natural;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_net_port_links_natural_v2 ON net_port_links(
   COALESCE(source_node_id, ''),
@@ -1883,6 +1897,8 @@ mod command_registration_tests {
             "db::row_delete",
             "commands::ssh_connect",
             "commands::probe_network_topology",
+            "commands::log_stream_start",
+            "commands::log_stream_stop",
         ] {
             assert!(
                 handler_block.contains(command),
