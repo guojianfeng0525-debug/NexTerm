@@ -128,7 +128,7 @@ export function filterNetworkPorts(
     const stats = getPortLinkStats(port.nodeId, port.id, links);
     const state = port.state.trim().toUpperCase();
     const isListening = port.missingSince === null && (state.includes('LISTEN') || state.includes('UNCONN'));
-    const hasActualConnection = stats.statuses.some((status) => status === 'active' || status === 'observed');
+    const hasActualConnection = stats.statuses.some((status) => status === 'active');
     if (criteria.connection === 'listening' && !isListening) return false;
     if (criteria.connection === 'missing' && port.missingSince === null) return false;
     if (criteria.connection === 'connected' && !hasActualConnection) return false;

@@ -10,6 +10,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { toast } from 'sonner';
 import { NetworkPanel } from '@/components/network/network-panel';
 import {
   makeFirewall,
@@ -25,7 +26,7 @@ import {
 
 const api = vi.hoisted(() => ({
   probeServerTopology: vi.fn(),
-  applyProbeResult: vi.fn(),
+  persistProbeResult: vi.fn(),
 }));
 
 const store = vi.hoisted(() => ({
@@ -47,17 +48,18 @@ const store = vi.hoisted(() => ({
   patchRouteManual: vi.fn(),
   patchFirewallRuleManual: vi.fn(),
   upsertNode: vi.fn(),
+  patchNodeManual: vi.fn(),
 }));
 
 vi.mock('@/lib/network/topology-api', () => ({
   probeServerTopology: api.probeServerTopology,
-  applyProbeResult: api.applyProbeResult,
+  persistProbeResult: api.persistProbeResult,
 }));
 
 vi.mock('@/lib/network/topology-storage', () => store);
 
 vi.mock('sonner', () => ({
-  toast: { success: vi.fn(), error: vi.fn() },
+  toast: { success: vi.fn(), error: vi.fn(), warning: vi.fn() },
 }));
 
 /** Rendered button label comes from the real locale file (tests run in `en`). */
@@ -108,7 +110,7 @@ describe('NetworkPanel — probe is strictly user-triggered', () => {
     store.listNodes.mockReturnValue([]);
     store.listPortLinks.mockReturnValue([]);
     api.probeServerTopology.mockResolvedValue(probeResult());
-    api.applyProbeResult.mockReturnValue({
+    api.persistProbeResult.mockReturnValue({
       nodeId: 'node-1',
       added: { interfaces: 0, routes: 0, rules: 0, ports: 0 },
       updated: { interfaces: 0, routes: 0, rules: 0, ports: 0 },
@@ -169,7 +171,7 @@ describe('NetworkPanel — probe is strictly user-triggered', () => {
     fireEvent.click(screen.getByRole('button', { name: new RegExp(PROBE_BUTTON, 'i') }));
 
     await waitFor(() => expect(api.probeServerTopology).toHaveBeenCalledTimes(1));
-    expect(api.probeServerTopology).toHaveBeenCalledWith('session-1');
+    expect(api.probeServerTopology).toHaveBeenCalledWith('session-1', { includeFirewall: false });
   });
 
   it('persists against the asset connection id, not the session id', async () => {
@@ -177,8 +179,8 @@ describe('NetworkPanel — probe is strictly user-triggered', () => {
 
     fireEvent.click(screen.getByRole('button', { name: new RegExp(PROBE_BUTTON, 'i') }));
 
-    await waitFor(() => expect(api.applyProbeResult).toHaveBeenCalledTimes(1));
-    expect(api.applyProbeResult).toHaveBeenCalledWith(
+    await waitFor(() => expect(api.persistProbeResult).toHaveBeenCalledTimes(1));
+    expect(api.persistProbeResult).toHaveBeenCalledWith(
       expect.objectContaining({ connectionId: 'conn-1', connectionName: 'web-01' }),
     );
   });
@@ -188,8 +190,8 @@ describe('NetworkPanel — probe is strictly user-triggered', () => {
 
     fireEvent.click(screen.getByRole('button', { name: new RegExp(PROBE_BUTTON, 'i') }));
 
-    await waitFor(() => expect(api.applyProbeResult).toHaveBeenCalledTimes(1));
-    expect(api.applyProbeResult).toHaveBeenCalledWith(
+    await waitFor(() => expect(api.persistProbeResult).toHaveBeenCalledTimes(1));
+    expect(api.persistProbeResult).toHaveBeenCalledWith(
       expect.objectContaining({ connectionId: 'session-1' }),
     );
   });
@@ -229,5 +231,58 @@ describe('NetworkPanel — probe is strictly user-triggered', () => {
       expect(tab.className).toContain('flex-1');
       expect(tab.className).toContain('min-w-0');
     }
+  });
+});
+
+describe('probe outcome reporting', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    store.subscribeTopology.mockReturnValue(() => {});
+    store.getNodeByConnectionId.mockReturnValue(undefined);
+    store.listPortLinks.mockReturnValue([]);
+    api.persistProbeResult.mockResolvedValue({ added: { interfaces: 0, routes: 0, rules: 0, ports: 0 }, updated: { interfaces: 0, routes: 0, rules: 0, ports: 0 }, missing: { interfaces: 0, routes: 0, rules: 0, ports: 0 } });
+  });
+  afterEach(cleanup);
+
+  it('reports a structured backend failure as failure, never success', async () => {
+    api.probeServerTopology.mockResolvedValue(probeResult({ success: false, error: 'timeout' }));
+    renderPanel();
+    fireEvent.click(screen.getByRole('button', { name: /Probe this server/i }));
+    await waitFor(() => expect(toast.error).toHaveBeenCalled());
+    expect(toast.success).not.toHaveBeenCalled();
+  });
+
+  it('retains degradation details through local storage refreshes', async () => {
+    const result = probeResult();
+    result.sections.ports = { status: 'partial', note: 'Process ownership unavailable' };
+    api.probeServerTopology.mockResolvedValue(result);
+    renderPanel();
+    fireEvent.click(screen.getByRole('button', { name: /Probe this server/i }));
+    await waitFor(() => expect(screen.getByText(/Process ownership unavailable/)).toBeTruthy());
+    act(() => store.subscribeTopology.mock.calls[0][0]());
+    expect(screen.getByText(/Process ownership unavailable/)).toBeTruthy();
+    expect(toast.warning).toHaveBeenCalled();
+  });
+
+  it('does not report success before SQLite commits', async () => {
+    api.probeServerTopology.mockResolvedValue(probeResult());
+    api.persistProbeResult.mockRejectedValue(new Error('disk full'));
+    renderPanel();
+    fireEvent.click(screen.getByRole('button', { name: /Probe this server/i }));
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith('Probe failed', { description: 'disk full' }));
+    expect(toast.success).not.toHaveBeenCalled();
+  });
+
+  it('edits the selected node through a manual patch without replacing its auto fields', () => {
+    const node = seedProbedNode();
+    store.listNodes.mockReturnValue([makeNode({ id: 'unrelated' }), node]);
+    store.patchNodeManual.mockImplementation((id, patch) => ({ ...node, id, ...patch }));
+    renderPanel();
+    const notes = screen.getByRole('textbox');
+    fireEvent.change(notes, { target: { value: 'selected server note' } });
+    fireEvent.blur(notes);
+    expect(store.patchNodeManual).toHaveBeenCalledWith('node-1', { notes: 'selected server note' });
+    expect(store.upsertNode).not.toHaveBeenCalled();
+    expect(api.probeServerTopology).not.toHaveBeenCalled();
   });
 });

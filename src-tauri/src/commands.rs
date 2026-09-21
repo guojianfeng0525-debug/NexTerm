@@ -13,9 +13,18 @@ use tokio::sync::Semaphore;
 ///
 /// A user can switch tabs and click another server before the first manual
 /// probe finishes. One permit prevents those independent UI actions from
-/// stacking simultaneous remote scans; the 25-second probe timeout guarantees
+/// stacking simultaneous remote reads; the 5-second probe timeout guarantees
 /// that the permit is eventually released.
 static TOPOLOGY_PROBE_LIMIT: Semaphore = Semaphore::const_new(1);
+static TOPOLOGY_LAST_PROBE: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+
+fn reserve_topology_probe(last: &mut Option<std::time::Instant>, now: std::time::Instant) -> Result<(), String> {
+    if last.is_some_and(|at| now.duration_since(at) < std::time::Duration::from_secs(60)) {
+        return Err("Low-impact probing allows at most one collection per minute in this application; try again later".into());
+    }
+    *last = Some(now);
+    Ok(())
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ConnectRequest {
@@ -5120,9 +5129,8 @@ pub async fn probe_network_topology(
     state: State<'_, Arc<ConnectionManager>>,
 ) -> Result<crate::network_probe::ProbeResult, String> {
     let _probe_permit = TOPOLOGY_PROBE_LIMIT
-        .acquire()
-        .await
-        .map_err(|_| "network topology probe scheduler closed")?;
+        .try_acquire()
+        .map_err(|_| "A topology probe is already running; no additional probe was queued")?;
 
     let connection = state
         .get_connection(&connection_id)
@@ -5130,14 +5138,35 @@ pub async fn probe_network_topology(
         .ok_or("Connection not found")?;
 
     let client = connection.read().await;
+    {
+        let mut last = TOPOLOGY_LAST_PROBE.lock().map_err(|_| "probe limiter unavailable")?;
+        reserve_topology_probe(&mut last, std::time::Instant::now())?;
+    }
 
     // Detect only the kernel family inside the one local-read script. No
     // separate OS/tool probe and no name resolution is needed.
     let os_info = OsInfo::default();
 
-    // Firewall dumps (iptables-save / nft list ruleset) are the heaviest
-    // section; the frontend passes `false` while its 10-minute TTL cache is
-    // still fresh so a re-probe never re-runs them.
-    let include_firewall = include_firewall.unwrap_or(true);
-    Ok(crate::network_probe::run_probe(&client, &os_info, include_firewall).await)
+    // Keep the old IPC argument compatible, but never allow it to bypass the
+    // low-impact policy. Older clients cannot re-enable expensive collection.
+    let _ = include_firewall;
+    Ok(crate::network_probe::run_probe(&client, &os_info, false).await)
+}
+
+#[cfg(test)]
+mod topology_budget_tests {
+    use super::reserve_topology_probe;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn topology_budget_rejects_bursts_without_extending_the_cooldown() {
+        let now = Instant::now();
+        let mut last = None;
+        assert!(reserve_topology_probe(&mut last, now).is_ok());
+        for second in [0, 1, 59] {
+            assert!(reserve_topology_probe(&mut last, now + Duration::from_secs(second)).is_err());
+            assert_eq!(last, Some(now));
+        }
+        assert!(reserve_topology_probe(&mut last, now + Duration::from_secs(60)).is_ok());
+    }
 }

@@ -621,7 +621,7 @@ for spec in "tcp /proc/net/tcp" "tcp6 /proc/net/tcp6" "udp /proc/net/udp" "udp6 
     path=$2
     if [ -r "$path" ]; then
         printf 'NT_PROC_FILE\t%s\t%s\n' "$proto" "$path"
-        cat "$path" 2>/dev/null || echo "NT_PROC_PARTIAL"
+        awk 'NR <= 513 {print} NR == 514 {print "NT_PROC_PARTIAL"; exit}' "$path" 2>/dev/null || echo "NT_PROC_PARTIAL"
     elif [ "$proto" = tcp ] || [ "$proto" = udp ]; then
         echo "NT_PROC_PARTIAL"
     fi
@@ -728,55 +728,31 @@ echo "NT_PROC_END"
         s
     }
 
-    /// Single read-only shell script that emits EVERY topology section in one
-    /// SSH round-trip, each wrapped in a `###NT:<name>###` marker.
-    ///
-    /// Section set (v2.18.1, requirement-driven — anything the user did not
-    /// ask for is not collected): `hostname` → `os` → `interfaces` →
-    /// Linux: `proc_sockets` + `fdmap` / macOS-BSD: `ports` + `peers` →
-    /// optional `firewall` + `rules`. The routing
-    /// table section was dropped: it was the heaviest remaining read with no
-    /// consumer-facing purpose in the topology graph.
-    ///
-    /// One exec instead of many keeps the connection read-lock hold time (and
-    /// the 30s per-command timeout exposure) at a single round-trip; the whole
-    /// executor bounds the runtime and output, including optional firewall queries.
-    pub fn topology_probe_cmd(&self, include_firewall: bool) -> String {
-        let mut s = String::new();
-        s.push_str("nt_limit() { awk -v n=\"$1\" 'NR<=n {print} NR==n+1 {print \"NT_PARTIAL:output limit\"; exit}'; }\n");
-        s.push_str("# NexTerm network topology probe — READ-ONLY / ZERO-INSTALL.\n");
-        s.push_str("# Every command below is a pure query: no redirection to a file, no\n");
-        s.push_str("# package manager, no iptables -A/-F, no systemctl start/stop, no\n");
-        s.push_str("# credential handling, no per-fd readlink forks. `set -e` is\n");
-        s.push_str("# deliberately absent so that one failing section can never abort\n");
-        s.push_str("# the remaining ones. Firewall dumps are opt-in per call and cached\n");
-        s.push_str("# client-side, so a re-probe within the TTL skips them entirely.\n");
+    /// Mandatory low-impact snapshot. Read only metadata, limited interfaces
+    /// and limited Linux socket rows. The caller supplies remote runtime limits.
+    /// Legacy firewall arguments cannot enable process walks or rule dumps.
+    pub fn topology_probe_cmd(&self, _include_firewall: bool) -> String {
+        // Low-impact collection is mandatory even for older callers requesting
+        // firewall data. No process/fd traversal and no firewall dump is allowed.
+        let mut s = String::from("nt_limit() { awk -v n=\"$1\" 'NR<=n {print} NR==n+1 {print \"NT_PARTIAL:sample limit\"; exit}'; }\n");
         s.push_str("echo \"###NT:hostname###\"; ");
         s.push_str(self.hostname_probe_cmd());
         s.push_str("\necho \"###NT:os###\"; ");
         s.push_str(self.os_release_probe_cmd());
-        s.push_str("\necho \"###NT:interfaces###\"; ");
+        s.push_str("\necho \"###NT:interfaces###\"; { ");
         s.push_str(self.interfaces_probe_cmd());
-        s.push_str("\n");
+        s.push_str("; } | nt_limit 128\n");
         if matches!(self.family, OsFamily::MacOS | OsFamily::Bsd) {
-            s.push_str("echo \"###NT:ports###\"; ");
-            s.push_str(self.ports_probe_cmd());
-            s.push_str("\necho \"###NT:peers###\"; ");
-            s.push_str(self.peers_probe_cmd());
-            s.push_str("\necho \"###NT:fdmap###\"; echo \"NT_FDMAP_UNAVAILABLE\"");
+            // netstat's kernel snapshot can itself scale with every socket.
+            // Fail closed until a bounded native source is available.
+            s.push_str("echo \"###NT:ports###\"; echo \"NT_UNAVAILABLE:bounded socket source unavailable\"\n");
+            s.push_str("echo \"###NT:peers###\"; echo \"NT_UNAVAILABLE:bounded socket source unavailable\"\n");
         } else {
             s.push_str("echo \"###NT:proc_sockets###\";\n");
             s.push_str(self.proc_sockets_probe_cmd());
-            s.push_str("echo \"###NT:fdmap###\";\n");
-            s.push_str(&self.fdmap_probe_cmd().replace("head -n ", "nt_limit "));
         }
-        if include_firewall {
-            s.push_str("\necho \"###NT:firewall###\";\n");
-            s.push_str(&self.firewall_probe_cmd());
-            s.push_str("echo \"###NT:rules###\";\n");
-            s.push_str(&self.firewall_rules_probe_cmd().replace("head -n ", "nt_limit "));
-        }
-        s.push_str("\necho \"###NT:end###\"");
+        s.push_str("echo \"###NT:fdmap###\"; echo \"NT_SKIPPED:low-impact policy\"\n");
+        s.push_str("echo \"###NT:end###\"");
         s
     }
 }
@@ -921,8 +897,7 @@ mod tests {
         let full = OsInfo::default().topology_probe_cmd(true);
         let order = [
             "###NT:hostname###", "###NT:os###", "###NT:interfaces###",
-            "###NT:proc_sockets###", "###NT:fdmap###", "###NT:firewall###",
-            "###NT:rules###", "###NT:end###",
+            "###NT:proc_sockets###", "###NT:fdmap###", "###NT:end###",
         ];
         let mut cursor = 0usize;
         for marker in order {
@@ -933,7 +908,7 @@ mod tests {
         }
         // The routing table is no longer collected at all.
         assert!(!full.contains("###NT:routes###"));
-        // TTL mode: firewall sections are omitted entirely on re-probe.
+        // Firewall sections are omitted even when a legacy caller requests them.
         let cached = OsInfo::default().topology_probe_cmd(false);
         assert!(!cached.contains("###NT:firewall###"));
         assert!(!cached.contains("###NT:rules###"));
@@ -942,8 +917,7 @@ mod tests {
 
     #[test]
     fn test_topology_probe_cmd_is_read_only() {
-        // Cover the FULL script (firewall dumps included) — the read-only
-        // guarantee must hold for every optional section.
+        // Legacy firewall requests must still produce the low-impact script.
         let script = OsInfo::default().topology_probe_cmd(true);
         // Only inspect executable lines — the header comment deliberately
         // *mentions* the constructs it promises never to use.
@@ -1027,11 +1001,7 @@ mod tests {
             "uname -n",
             "ip -o addr",
             "/proc/net/tcp",
-            "find /proc/[0-9]*/fd -lname",
-            // Single-cat parent-pid block for the p1 fork-parent attribution
-            // (socat/nginx shape); zero extra forks.
-            "cat /proc/[0-9]*/stat",
-            "iptables-save",
+            "NR <= 513",
         ] {
             assert!(script.contains(required), "probe must use {required:?}");
         }
@@ -1051,9 +1021,8 @@ mod tests {
         }
         .topology_probe_cmd(true);
         assert!(script.contains("/proc/net/tcp"));
-        // BusyBox find has no -printf: the single-process ls fallback must be
-        // wired in on the same line so `||` covers the unsupported builtin.
-        assert!(script.contains("|| ls -l /proc/[0-9]*/fd"));
+        // Even on BusyBox hosts, never fall back to traversing every process.
+        assert!(!script.contains("/proc/[0-9]*/fd"));
 
         let macos = OsInfo {
             family: OsFamily::MacOS,
@@ -1061,8 +1030,9 @@ mod tests {
         }
         .topology_probe_cmd(true);
         assert!(macos.contains("ifconfig -a"));
-        assert!(macos.contains("pfctl"));
-        assert!(macos.contains("NT_FDMAP_UNAVAILABLE"));
+        assert!(!macos.contains("pfctl"));
+        assert!(!macos.contains("netstat"));
+        assert!(macos.contains("NT_SKIPPED:low-impact policy"));
     }
 
     #[test]

@@ -4,15 +4,26 @@ import {
   isLoopbackAddress,
   isServerInterfaceAddress,
   isServerPeerAddress,
+  normalizeScopeAddress,
 } from '../address-scope';
 
 describe('address scope', () => {
-  it('excludes loopback and container/pod addresses from server identity', () => {
+  it('canonicalizes IPv6 variants and rejects invalid or expanded local addresses', () => {
+    expect(normalizeScopeAddress('2001:0DB8:0:0:0:0:0:1/64')).toBe('2001:db8::1');
+    expect(normalizeScopeAddress('[2001:db8::1]/64')).toBe('2001:db8::1');
+    expect(normalizeScopeAddress('::ffff:a00:1')).toBe('10.0.0.1');
+    expect(isServerPeerAddress('0:0:0:0:0:0:0:1')).toBe(false);
+    expect(isServerPeerAddress('0:0:0:0:0:0:0:0')).toBe(false);
+    expect(isServerPeerAddress('::ffff:7f00:1')).toBe(false);
+    expect(isServerPeerAddress('broken:address')).toBe(false);
+  });
+
+  it('excludes loopback but preserves private and VPN peer addresses', () => {
     expect(isServerPeerAddress('127.0.0.1')).toBe(false);
     expect(isServerPeerAddress('::1')).toBe(false);
-    expect(isServerPeerAddress('172.21.0.3')).toBe(false);
-    expect(isServerPeerAddress('10.244.1.5')).toBe(false);
-    expect(isServerPeerAddress('10.96.0.10')).toBe(false);
+    expect(isServerPeerAddress('172.21.0.3')).toBe(true);
+    expect(isServerPeerAddress('10.244.1.5')).toBe(true);
+    expect(isServerPeerAddress('10.96.0.10')).toBe(true);
     expect(isServerPeerAddress('203.0.113.9')).toBe(true);
   });
 
@@ -35,4 +46,12 @@ describe('address scope', () => {
     expect(isLoopbackAddress('')).toBe(true);
     expect(isLoopbackAddress('127.0.0.11')).toBe(true);
   });
+});
+
+it('accepts real server private, VPN and IPv6 addresses without a range blacklist', () => {
+  expect(isServerInterfaceAddress('172.20.1.10', 'eth0')).toBe(true);
+  expect(isServerInterfaceAddress('100.100.1.10', 'tailscale0')).toBe(true);
+  expect(isServerInterfaceAddress('fd00::10', 'eth0')).toBe(true);
+  expect(isServerPeerAddress('0.0.0.0')).toBe(false);
+  expect(isServerPeerAddress('224.0.0.1')).toBe(false);
 });

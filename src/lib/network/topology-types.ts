@@ -31,7 +31,7 @@
 export type ProbeStatus = 'ok' | 'partial' | 'failed' | 'never';
 
 /** Per-section outcome inside a single probe run. */
-export type SectionStatus = 'ok' | 'partial' | 'failed' | 'unavailable';
+export type SectionStatus = 'ok' | 'partial' | 'failed' | 'unavailable' | 'skipped';
 
 /** Server-side firewall implementation family. */
 export type FirewallType =
@@ -79,8 +79,8 @@ export interface NetworkNode {
   /** Saved-connection id this node describes (`originalConnectionId ?? tabId`). */
   readonly connectionId: string;
   /**
-   * Saved-server folder path. Topology correlation is scoped by this value so
-   * the same address in two isolation groups never becomes one asset or edge.
+   * Saved-server folder path, used only for display grouping. Different saved
+   * connections remain distinct assets even if their addresses overlap.
    */
   groupPath: string;
 

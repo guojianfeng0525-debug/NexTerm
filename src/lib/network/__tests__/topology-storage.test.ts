@@ -9,7 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const store = vi.hoisted(() => {
   const tables = new Map<string, Map<string, Record<string, unknown>>>();
   const calls: { cmd: string; args: Record<string, unknown> }[] = [];
-  return { tables, calls };
+  return { tables, calls, failBatch: false, failBatchAt: 0, batchCount: 0, batchGate: null as Promise<void> | null };
 });
 
 vi.mock('@tauri-apps/api/core', () => ({
@@ -26,6 +26,20 @@ vi.mock('@tauri-apps/api/core', () => ({
     };
 
     switch (cmd) {
+      case 'topology_write_batch': {
+        const batchNumber = ++store.batchCount;
+        const gate = store.batchGate;
+        store.batchGate = null;
+        if (gate) await gate;
+        if (store.failBatch || batchNumber === store.failBatchAt) throw new Error('disk full');
+        for (const write of args.writes as { table: string; row?: Record<string, unknown>; key?: string }[]) {
+          let rows = store.tables.get(write.table);
+          if (!rows) { rows = new Map(); store.tables.set(write.table, rows); }
+          if (write.row) rows.set(String(write.row.id), { ...write.row });
+          else if (write.key) rows.delete(write.key);
+        }
+        return;
+      }
       case 'row_upsert': {
         const row = args.row as Record<string, unknown>;
         const rawKey: unknown = row.id ?? row.key ?? '';
@@ -80,8 +94,10 @@ import {
   removeNode,
   removeNodes,
   resetTopologyStore,
+  commitTopologyProbe,
   saveNodeFirewallRules,
   savePortLinks,
+  saveLinks,
   saveNodeFirewalls,
   saveNodeInterfaces,
   saveNodePorts,
@@ -110,6 +126,10 @@ async function flush(): Promise<void> {
 }
 
 beforeEach(() => {
+  store.failBatch = false;
+  store.failBatchAt = 0;
+  store.batchCount = 0;
+  store.batchGate = null;
   store.tables.clear();
   store.calls.length = 0;
   resetTopologyStore();
@@ -404,6 +424,19 @@ describe('manual patches', () => {
 });
 
 describe('links', () => {
+  it('merges retargeted aliases before persistence and preserves both annotations', async () => {
+    upsertLink(makeLink({ id: 'first', targetNodeId: 'observed:10.0.0.1', description: 'first note' }));
+    upsertLink(makeLink({ id: 'second', targetNodeId: 'observed:10.0.0.2', manualLabel: 'second label', lastConfirmedAt: 2000 }));
+    await flush();
+    await commitTopologyProbe(() => saveLinks(listLinks().map(link => ({ ...link, targetNodeId: 'real-server' }))));
+    expect(listLinks()).toHaveLength(1);
+    expect(listLinks()[0]).toMatchObject({ description: 'first note', manualLabel: 'second label', lastConfirmedAt: 2000 });
+    resetTopologyStore();
+    await initializeTopologyStore();
+    expect(listLinks()).toHaveLength(1);
+    expect(listLinks()[0].targetNodeId).toBe('real-server');
+  });
+
   it('upserts, lists and removes links', () => {
     upsertLink(makeLink({ id: 'l1' }));
     upsertLink({ ...makeLink({ id: 'l1' }), description: '编辑过' });
@@ -502,5 +535,92 @@ describe('port links', () => {
 
     savePortLinks([outbound]);
     expect(listPortLinks()).toEqual([outbound]);
+  });
+});
+
+describe('atomic probe persistence', () => {
+  it('reloads durable state if reconciliation of a concurrent edit fails', async () => {
+    upsertNode(makeNode());
+    await flush();
+    let release!: () => void;
+    store.batchGate = new Promise<void>(resolve => { release = resolve; });
+    store.failBatchAt = store.batchCount + 3; // probe, edit, then repair
+    const pending = commitTopologyProbe(() => upsertNode(makeNode({ hostname: 'fresh-host' })));
+    await Promise.resolve();
+    patchNodeManual('node-a', { notes: 'concurrent note' });
+    release();
+    await expect(pending).rejects.toThrow('disk full');
+    const durable = store.tables.get('net_nodes')?.get('node-a');
+    expect(getNode('node-a')?.hostname).toBe(durable?.hostname);
+    expect(getNode('node-a')?.notes).toBe('concurrent note');
+  });
+
+  it('does not leave new orphan rows when a node is deleted during a probe commit', async () => {
+    upsertNode(makeNode());
+    await flush();
+    let release!: () => void;
+    store.batchGate = new Promise<void>(resolve => { release = resolve; });
+    const pending = commitTopologyProbe(() => {
+      upsertNode(makeNode({ hostname: 'fresh-host' }));
+      saveNodePorts('node-a', [makePort()]);
+      upsertLink(makeLink());
+    });
+    await Promise.resolve();
+    removeNode('node-a');
+    release();
+    await pending;
+    expect(getNode('node-a')).toBeUndefined();
+    expect(getNodePorts('node-a')).toEqual([]);
+    expect(listLinks()).toEqual([]);
+    resetTopologyStore();
+    await initializeTopologyStore();
+    expect(getNode('node-a')).toBeUndefined();
+    expect(getNodePorts('node-a')).toEqual([]);
+    expect(listLinks()).toEqual([]);
+  });
+
+  it('keeps concurrent manual edits and fresh probe fields in both cache and SQLite', async () => {
+    upsertNode(makeNode());
+    await flush();
+    let release!: () => void;
+    store.batchGate = new Promise<void>(resolve => { release = resolve; });
+    const pending = commitTopologyProbe(() => {
+      upsertNode(makeNode({ hostname: 'fresh-host', primaryIp: '10.0.0.99' }));
+    });
+    await Promise.resolve();
+    patchNodeManual('node-a', { notes: 'keep my edit' });
+    release();
+    await pending;
+    expect(getNode('node-a')).toMatchObject({ hostname: 'fresh-host', primaryIp: '10.0.0.99', notes: 'keep my edit' });
+    resetTopologyStore();
+    await initializeTopologyStore();
+    expect(getNode('node-a')).toMatchObject({ hostname: 'fresh-host', primaryIp: '10.0.0.99', notes: 'keep my edit' });
+  });
+
+  it('does not publish a failed database transaction or overwrite the previous snapshot', async () => {
+    upsertNode(makeNode());
+    await flush();
+    store.failBatch = true;
+    await expect(commitTopologyProbe(() => {
+      upsertNode(makeNode({ hostname: 'new-host' }));
+      saveNodePorts('node-a', [makePort()]);
+    })).rejects.toThrow('disk full');
+    expect(getNode('node-a')?.hostname).toBe('web-01');
+    expect(getNodePorts('node-a')).toEqual([]);
+    store.failBatch = false;
+    await commitTopologyProbe(() => {
+      upsertNode(makeNode({ hostname: 'new-host' }));
+      saveNodePorts('node-a', [makePort()]);
+    });
+    resetTopologyStore();
+    await initializeTopologyStore();
+    expect(getNode('node-a')?.hostname).toBe('new-host');
+    expect(getNodePorts('node-a')).toHaveLength(1);
+  });
+
+  it('does not truncate an IPv6 observed identity during migration', () => {
+    upsertNode(makeNode({ id: 'observed:2001:db8::50', connectionId: 'observed:2001:db8::50', primaryIp: '2001:db8::50' }));
+    expect(migrateObservedNodeIds()).toBe(0);
+    expect(listNodes()[0].id).toBe('observed:2001:db8::50');
   });
 });

@@ -795,7 +795,7 @@ describe('inferLinksFromPeers', () => {
     expect(link.evidence).toContain('(×3)');
   });
 
-  it('service link outbound: unknown peer creates NEITHER node nor link', () => {
+  it('service link outbound: unknown peer retains a display-only endpoint', () => {
     const out = inferLinksFromPeers({
       nodeId: 'node-a',
       peers: [],
@@ -815,8 +815,8 @@ describe('inferLinksFromPeers', () => {
       now: 2_000,
     });
 
-    expect(out.added).toBe(0);
-    expect(out.links).toHaveLength(0);
+    expect(out.added).toBe(1);
+    expect(out.links[0].targetNodeId).toBe('observed:93.184.216.34');
   });
 
   it('service link outbound: known peer yields A:p1 -> B:p2 with attributed evidence', () => {
@@ -1335,4 +1335,63 @@ describe('port-level topology links', () => {
       sourceIp: null,
     });
   });
+});
+
+describe('mixed and reciprocal evidence', () => {
+  it('matches equivalent IPv6 interface and socket address forms', () => {
+    const node = makeNode({ id: 'v6', primaryIp: '2001:0DB8:0:0:0:0:0:1' });
+    const index = buildInterfaceIpIndex([node], [makeInterface({ nodeId: 'v6', ipv4Addrs: [], ipv6Addrs: ['2001:db8::1/64'] })]);
+    expect(index.get('2001:db8::1')).toBe('v6');
+    expect(index.size).toBe(1);
+  });
+
+  it('keeps TIME_WAIT relationships alongside attributed active connections', () => {
+    const params = { nodeId: 'a', interfacesIndex: new Map([['10.0.0.2', 'b'], ['10.0.0.3', 'c']]), existingLinks: [], now: 1000,
+      peers: [detectedPeer({ localAddr: '10.0.0.1', remoteAddr: '10.0.0.3', localPort: 45000, remotePort: 443, state: 'TIME_WAIT' })],
+      serviceLinks: [{ direction: 'outbound' as const, localAddr: '10.0.0.1', remoteAddr: '10.0.0.2', localPort: null, remotePort: 80, protocol: 'tcp' as const, state: 'ESTABLISHED', connections: 1 }],
+    };
+    const result = inferLinksFromPeers(params);
+    expect(result.links.map(l => [l.targetNodeId, l.status])).toEqual([['b', 'active'], ['c', 'observed']]);
+    const ports = inferPortLinksFromPeers({ ...params, nodePorts: [], existingPortLinks: [] });
+    expect(ports.links.map(l => [l.targetNodeId, l.status])).toEqual([['b', 'active'], ['c', 'observed']]);
+  });
+
+  it.each(['outbound-first', 'inbound-first'])('converges to one concrete edge in %s order', order => {
+    const a = makeNode({ id: 'a', primaryIp: '10.0.0.1' });
+    const b = makeNode({ id: 'b', primaryIp: '10.0.0.2' });
+    const pa = makePort({ id: 'pa', nodeId: 'a', port: 8080 });
+    const pb = makePort({ id: 'pb', nodeId: 'b', port: 5432 });
+    const common = { peers: [], knownNodes: [a, b], allPorts: [pa, pb], interfacesIndex: new Map([['10.0.0.1', 'a'], ['10.0.0.2', 'b']]), now: 1000 };
+    const out = { ...common, nodeId: 'a', nodePorts: [pa], serviceLinks: [{ direction: 'outbound' as const, localAddr: '10.0.0.1', remoteAddr: '10.0.0.2', localPort: 8080, remotePort: 5432, protocol: 'tcp' as const, state: 'ESTABLISHED', connections: 1 }] };
+    const incoming = { ...common, nodeId: 'b', nodePorts: [pb], serviceLinks: [{ direction: 'inbound' as const, localAddr: '10.0.0.2', remoteAddr: '10.0.0.1', localPort: 5432, remotePort: null, protocol: 'tcp' as const, state: 'ESTABLISHED', connections: 1 }] };
+    let links: ReturnType<typeof inferPortLinksFromPeers>['links'] = [];
+    for (const sample of order === 'outbound-first' ? [out, incoming, out, incoming] : [incoming, out, incoming, out]) {
+      links = inferPortLinksFromPeers({ ...sample, existingPortLinks: links }).links;
+    }
+    expect(links).toHaveLength(1);
+    expect(links[0]).toMatchObject({ sourcePortId: 'pa', targetPortId: 'pb', sourcePort: 8080, targetPort: 5432 });
+  });
+
+  it('does not arbitrarily assign duplicate primary-only IPs to one saved server', () => {
+    const nodes = [makeNode({ id: 'a', connectionId: 'a' }), makeNode({ id: 'b', connectionId: 'b' })];
+    expect(buildInterfaceIpIndex(nodes, []).has('10.0.0.5')).toBe(false);
+  });
+
+  it('skipped optional sections do not turn a complete observation into partial', () => {
+    const result = probeResult();
+    result.sections.routes = section('skipped');
+    result.sections.firewall = section('skipped');
+    result.sections.rules = section('skipped');
+    expect(deriveProbeStatus(result)).toBe('ok');
+  });
+});
+
+it('keeps an ambiguous peer unresolved even when an earlier placeholder was promoted', () => {
+  const nodes = [makeNode({ id: 'observed:10.0.0.5', connectionId: 'saved-a' }), makeNode({ id: 'b', connectionId: 'saved-b' })];
+  const index = buildInterfaceIpIndex(nodes, []);
+  const peers = [detectedPeer({ remoteAddr: '10.0.0.5' })];
+  const known = inferObservedNodes({ nodeId: 'c', peers, knownNodes: nodes, interfacesIndex: index, now: 1 });
+  expect(known.at(-1)?.id).toBe('observed:10.0.0.5:unresolved');
+  const result = inferLinksFromPeers({ nodeId: 'c', peers, knownNodes: known, interfacesIndex: buildInterfaceIpIndex(known, []), existingLinks: [], now: 1 });
+  expect(result.links[0].targetNodeId).toBe('observed:10.0.0.5:unresolved');
 });

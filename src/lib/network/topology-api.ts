@@ -17,6 +17,7 @@ import type {
   ApplyProbeSummary,
   MergeOutcome,
   NetworkFirewallRule,
+  ProbeSection,
   ProbeResult,
 } from './topology-types';
 import {
@@ -53,6 +54,8 @@ import {
   saveNodePorts,
   savePortLinks,
   upsertNode,
+  removeNode,
+  commitTopologyProbe,
 } from './topology-storage';
 
 /**
@@ -99,6 +102,22 @@ export interface ApplyProbeInput {
   probeAt?: number;
 }
 
+/** Partial samples can add evidence but cannot prove that old rows vanished. */
+function mergeSection<T extends { id: string; missingSince: number | null; lastSeenAt: number }>(
+  section: ProbeSection | undefined, existing: T[], merge: () => MergeOutcome<T>,
+): MergeOutcome<T> {
+  if (!section || !['ok', 'partial'].includes(section.status)) {
+    return { items: existing, added: 0, updated: 0, missing: 0 };
+  }
+  const outcome = merge();
+  if (section.status === 'ok') return outcome;
+  const previous = new Map(existing.map(item => [item.id, item]));
+  return { ...outcome, missing: 0, items: outcome.items.map(item => {
+    const old = previous.get(item.id);
+    return old && item.lastSeenAt === old.lastSeenAt ? old : item;
+  }) };
+}
+
 /**
  * Probe → merge → persist, in one call.
  *
@@ -117,6 +136,10 @@ export function applyProbeResult(input: ApplyProbeInput): ApplyProbeSummary {
     firewall: null, firewallRules: [], ports: [], peers: [], serviceLinks: [],
   });
   const status = deriveProbeStatus(input.result);
+  const sections = input.result.sections;
+  const readable = (key: keyof typeof sections) => input.result.success
+    && ['ok', 'partial'].includes(sections[key]?.status);
+  const section = (key: keyof typeof sections) => input.result.success ? sections[key] : undefined;
   const groupPath = ConnectionStorageManager.getConnection(input.connectionId)?.folder || 'All Connections';
   const detectedAddresses = new Set<string>();
   const interfaceAddresses = (data?.interfaces ?? []).flatMap((item) => [
@@ -127,31 +150,24 @@ export function applyProbeResult(input: ApplyProbeInput): ApplyProbeSummary {
     const normalized = normalizeTopologyAddress(addr);
     if (normalized) detectedAddresses.add(normalized);
   }
-  const observedCandidate = data
-    ? listNodes().find((node) => (
-        isObservedNode(node)
-        && detectedAddresses.has(normalizeTopologyAddress(node.primaryIp))
-      ))
-    : undefined;
   const existingByConnection = getNodeByConnectionId(input.connectionId);
-  // An address is the asset identity (one IP, one node — global, not
-  // group-scoped). This merges duplicate saved connections to the same server
-  // and promotes an observed endpoint instead of creating a second node.
-  const existingByIp = data
-    ? listNodes().find((node) => (
-        node.id !== observedCandidate?.id
-        && (
-          detectedAddresses.has(normalizeTopologyAddress(node.primaryIp))
-          || getNodeInterfaces(node.id).some(iface => [
-            ...(iface.ipv4Addrs ?? []),
-            ...(iface.ipv6Addrs ?? []),
-          ].some(addr => detectedAddresses.has(normalizeTopologyAddress(addr))))
-        )
-      ))
+  const hasKnownClaim = listNodes().some(node => !isObservedNode(node)
+    && (detectedAddresses.has(normalizeTopologyAddress(node.primaryIp))
+      || getNodeInterfaces(node.id).some(iface => [...iface.ipv4Addrs, ...iface.ipv6Addrs]
+        .some(addr => detectedAddresses.has(normalizeTopologyAddress(addr))))));
+  const observedCandidate = readable('interfaces') && !hasKnownClaim
+    ? listNodes().find(node => isObservedNode(node) && detectedAddresses.has(normalizeTopologyAddress(node.primaryIp)))
     : undefined;
+  const existing = existingByConnection ?? observedCandidate;
+  // Failed/unavailable sections only update attempt bookkeeping. Last known
+  // identity and topology evidence survive until a successful sample replaces them.
+  if (!readable('hostname')) data.hostname = existing?.hostname ?? '';
+  if (!readable('os')) data.osName = existing?.osName ?? '';
+  if (!readable('interfaces')) data.primaryIp = existing?.primaryIp ?? '';
+  if (!readable('peers')) { data.peers = []; data.serviceLinks = []; }
 
   const node = mergeNode(
-    existingByConnection ?? observedCandidate ?? existingByIp,
+    existing,
     data,
     input.connectionId,
     probeAt,
@@ -163,10 +179,12 @@ export function applyProbeResult(input: ApplyProbeInput): ApplyProbeSummary {
       groupPath,
     },
   );
+  if (!readable('ports') && existing) node.roleHint = existing.roleHint;
   upsertNode(node);
   const nodeId = node.id;
 
-  const interfaces = mergeInterfaces(getNodeInterfaces(nodeId), data?.interfaces ?? [], nodeId, probeAt);
+  const interfaces = mergeSection(section('interfaces'), getNodeInterfaces(nodeId),
+    () => mergeInterfaces(getNodeInterfaces(nodeId), data.interfaces, nodeId, probeAt));
   saveNodeInterfaces(nodeId, interfaces.items);
 
   // Routes are no longer collected (dropped in 2.18.1): skip the merge so the
@@ -183,21 +201,23 @@ export function applyProbeResult(input: ApplyProbeInput): ApplyProbeSummary {
     // Merge against EVERY stored row, not just the current one: a firewall
     // implementation switch produces a second row while the old one is retained
     // (marked missing) so the user's note on it survives.
-    const firewalls = mergeFirewalls(getNodeFirewalls(nodeId), data?.firewall ?? null, nodeId, probeAt);
+    const firewalls = mergeSection(section('firewall'), getNodeFirewalls(nodeId),
+      () => mergeFirewalls(getNodeFirewalls(nodeId), data.firewall, nodeId, probeAt));
     const firewall = firewalls.items.find((f) => f.missingSince === null) ?? firewalls.items[0] ?? null;
     saveNodeFirewalls(nodeId, firewalls.items);
 
-    rulesOutcome = mergeFirewallRules(
+    rulesOutcome = mergeSection(section('rules'), getNodeFirewallRules(nodeId), () => mergeFirewallRules(
       getNodeFirewallRules(nodeId),
       data?.firewallRules ?? [],
       nodeId,
       firewall?.id ?? '',
       probeAt,
-    );
+    ));
     saveNodeFirewallRules(nodeId, rulesOutcome.items);
   }
 
-  const ports = mergePorts(getNodePorts(nodeId), data?.ports ?? [], nodeId, probeAt);
+  const ports = mergeSection(section('ports'), getNodePorts(nodeId),
+    () => mergePorts(getNodePorts(nodeId), data.ports, nodeId, probeAt));
   saveNodePorts(nodeId, ports.items);
 
   const nodesBefore = listNodes();
@@ -206,6 +226,7 @@ export function applyProbeResult(input: ApplyProbeInput): ApplyProbeSummary {
     peers: data?.peers ?? [],
     serviceLinks: data?.serviceLinks ?? [],
     knownNodes: nodesBefore,
+    interfacesIndex: buildInterfaceIpIndex(nodesBefore, listInterfaces()),
     now: probeAt,
   });
   const knownIds = new Set(nodesBefore.map((item) => item.id));
@@ -213,36 +234,38 @@ export function applyProbeResult(input: ApplyProbeInput): ApplyProbeSummary {
     if (!knownIds.has(observed.id)) upsertNode(observed);
   }
   const interfacesIndex = buildInterfaceIpIndex(knownNodes, listInterfaces());
+  const aliases = new Map<string, string>();
+  for (const observed of knownNodes.filter(isObservedNode)) {
+    const owner = interfacesIndex.get(normalizeTopologyAddress(observed.primaryIp));
+    if (owner && owner !== observed.id) aliases.set(observed.id, owner);
+  }
+  if (aliases.size > 0) {
+    saveLinks(listLinks().map(link => ({ ...link,
+      sourceNodeId: aliases.get(link.sourceNodeId) ?? link.sourceNodeId,
+      targetNodeId: aliases.get(link.targetNodeId) ?? link.targetNodeId,
+    })));
+    savePortLinks(listPortLinks().map(link => ({ ...link,
+      sourceNodeId: aliases.get(link.sourceNodeId ?? '') ?? link.sourceNodeId,
+      targetNodeId: aliases.get(link.targetNodeId ?? '') ?? link.targetNodeId,
+    })));
+    // Do not delete a placeholder on which the user has left annotations.
+    for (const observed of knownNodes.filter(item => aliases.has(item.id))) {
+      if (!observed.notes && !observed.displayName && !observed.environment
+        && observed.nodeType === 'observed-server' && observed.posX === null && observed.posY === null && !observed.hidden) removeNode(observed.id);
+    }
+  }
   const nodePorts = getNodePorts(nodeId);
-  const linkResult = inferLinksFromPeers({
-    nodeId,
-    peers: data?.peers ?? [],
-    serviceLinks: data?.serviceLinks ?? [],
-    knownNodes,
-    interfacesIndex,
-    nodePorts,
-    existingLinks: listLinks(),
-    now: probeAt,
-  });
-  saveLinks(linkResult.links);
-
-  // ── port-level links (level-2 drill-down) ──
-  // Service links carry both LISTENING endpoints (A:p1 → B:p2); raw peers are
-  // the macOS/BSD fallback. Unknown inbound peers become observed server nodes
-  // with no port rows; they are never auto-probed.
-  const portLinkResult = inferPortLinksFromPeers({
-    nodeId,
-    peers: data?.peers ?? [],
-    serviceLinks: data?.serviceLinks ?? [],
-    nodePorts,
-    allPorts: listPorts(),
-    interfacesIndex,
-    knownNodes,
-    existingPortLinks: listPortLinks(),
-    now: probeAt,
-  });
-  savePortLinks(portLinkResult.links);
-
+  const portsComplete = section('ports')?.status === 'ok';
+  // A missing listener in a truncated/failed snapshot does not prove that a
+  // socket is outbound. Keep unknown peers as nodes, but defer its direction.
+  const relationPeers = portsComplete ? data.peers : data.peers.filter(peer =>
+    readable('ports') && data.ports.some(port => port.protocol === peer.protocol
+      && port.port === peer.localPort
+      && ['0.0.0.0', '::', '*', normalizeTopologyAddress(peer.localAddr ?? '')]
+        .includes(normalizeTopologyAddress(port.listenAddr))));
+  const relationServices = portsComplete ? data.serviceLinks
+    : data.serviceLinks.filter(link => link.direction === 'inbound' && readable('ports')
+      && data.ports.some(port => port.protocol === link.protocol && port.port === link.localPort));
   // Resolve any dangling port links whose target IP now matches this node's
   // freshly-probed interfaces ("探测后关联", without re-probing the peer).
   const portLinkResolution = resolvePortLinkTargets({
@@ -254,6 +277,42 @@ export function applyProbeResult(input: ApplyProbeInput): ApplyProbeSummary {
     now: probeAt,
   });
   if (portLinkResolution.resolved > 0) savePortLinks(portLinkResolution.links);
+
+  const linkResult = inferLinksFromPeers({
+    nodeId,
+    peers: relationPeers,
+    serviceLinks: relationServices,
+    knownNodes,
+    interfacesIndex,
+    nodePorts,
+    existingLinks: listLinks(),
+    now: probeAt,
+  });
+  const completePeers = portsComplete && readable('peers') && sections.peers.status === 'ok';
+  saveLinks(linkResult.links.map(link => completePeers && link.source === 'auto'
+    && (link.sourceNodeId === nodeId || link.targetNodeId === nodeId)
+    && (link.lastConfirmedAt ?? 0) < probeAt && link.status === 'active'
+    ? { ...link, status: 'observed', updatedAt: probeAt } : link));
+
+  // ── port-level links (level-2 drill-down) ──
+  // Service links carry both LISTENING endpoints (A:p1 → B:p2); raw peers are
+  // the macOS/BSD fallback. Unknown inbound peers become observed server nodes
+  // with no port rows; they are never auto-probed.
+  const portLinkResult = inferPortLinksFromPeers({
+    nodeId,
+    peers: relationPeers,
+    serviceLinks: relationServices,
+    nodePorts,
+    allPorts: listPorts(),
+    interfacesIndex,
+    knownNodes,
+    existingPortLinks: listPortLinks(),
+    now: probeAt,
+  });
+  savePortLinks(portLinkResult.links.map(link => completePeers && link.source === 'auto'
+    && (link.sourceNodeId === nodeId || link.targetNodeId === nodeId)
+    && (link.lastConfirmedAt ?? 0) < probeAt && link.status === 'active'
+    ? { ...link, status: 'observed', updatedAt: probeAt } : link));
 
   return {
     nodeId,
@@ -283,4 +342,12 @@ export function applyProbeResult(input: ApplyProbeInput): ApplyProbeSummary {
     portLinksConfirmed: portLinkResult.confirmed,
     portLinksResolved: portLinkResolution.resolved,
   };
+}
+
+/** Production entry point: success means the whole observation is durable. */
+let probeCommitQueue: Promise<unknown> = Promise.resolve();
+export function persistProbeResult(input: ApplyProbeInput): Promise<ApplyProbeSummary> {
+  const result = probeCommitQueue.then(() => commitTopologyProbe(() => applyProbeResult(input)));
+  probeCommitQueue = result.catch(() => undefined);
+  return result;
 }

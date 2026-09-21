@@ -2504,7 +2504,7 @@
     "deleteNode": "Delete node",
     "probe": {
       "partial": "Probe partially complete",
-      "scope": "Reads only this server; never connects to observed peers. Manual probes accumulate observed relationships, not unseen links.",
+      "scope": "Low-impact collection: manual local reads, at most once per minute. Bounded samples; no process traversal, firewall queries, or peer connections. Missing resource-limit tools skips collection and preserves existing topology.",
       "success": "Probe complete",
       "successDetail": "Added {{added}}, updated {{updated}}, {{missing}} not seen this run",
       "failed": "Probe failed"

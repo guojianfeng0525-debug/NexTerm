@@ -650,7 +650,7 @@ impl SshClient {
     /// and close the channel here rather than cancelling its owner externally.
     pub async fn execute_probe_command(&self, command: &str) -> Result<(String, bool)> {
         let session = self.session.as_ref().ok_or_else(|| anyhow::anyhow!("Not connected"))?;
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(25);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         let mut channel = tokio::time::timeout_at(deadline, session.channel_open_session())
             .await.map_err(|_| anyhow::anyhow!("Probe channel open timed out"))??;
         let mut output = Vec::new();
@@ -662,7 +662,7 @@ impl SshClient {
             while let Some(msg) = channel.wait().await {
                 match msg {
                     ChannelMsg::Data { data } | ChannelMsg::ExtendedData { data, .. } => {
-                        if output.len() + data.len() > 16 * 1024 * 1024 { break; }
+                        if output.len() + data.len() > 512 * 1024 { break; }
                         output.extend_from_slice(&data);
                     }
                     ChannelMsg::ExitStatus { exit_status } => code = Some(exit_status),

@@ -21,7 +21,7 @@ export interface NodeSummaryProps {
   portCount: number;
   /**
    * Applies a manual-field patch. Re-probes must never overwrite these, so the
-   * parent routes this straight to `upsertNode`.
+   * parent routes this through `patchNodeManual`.
    */
   onPatch: (
     patch: Partial<Pick<NetworkNode, 'displayName' | 'nodeType' | 'environment' | 'notes'>>,

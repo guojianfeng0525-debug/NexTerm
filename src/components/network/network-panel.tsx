@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
 import { Loader2, Radar } from 'lucide-react';
@@ -14,8 +14,9 @@ import { FirewallView } from './firewall-view';
 import { PortTable } from './port-table';
 import { PortTopologyView } from './port-topology';
 import { ProbeEmptyState } from './probe-empty-state';
+import { deriveProbeStatus } from '@/lib/network/topology-merge';
 import { cn } from '@/lib/utils';
-import { applyProbeResult, probeServerTopology } from '@/lib/network/topology-api';
+import { persistProbeResult, probeServerTopology } from '@/lib/network/topology-api';
 import {
   isExternallyBoundListenAddress,
   isServerInterfaceAddress,
@@ -28,14 +29,13 @@ import {
   getNodeInterfaces,
   getNodePorts,
   getNodeRoutes,
-  listNodes,
   listPortLinks,
   patchFirewallRuleManual,
   patchInterfaceManual,
   patchPortManual,
   patchRouteManual,
   subscribeTopology,
-  upsertNode,
+  patchNodeManual,
 } from '@/lib/network/topology-storage';
 import type {
   NetworkFirewall,
@@ -98,19 +98,12 @@ const SECTION_LABEL_KEYS = {
   fdmap: 'network.section.procSockets',
 } as const satisfies Record<keyof ProbeSections, string>;
 
-function readNodeData(assetId: string, host = ''): NodePanelData | null {
-  const hostIp = host.trim();
-  const node = getNodeByConnectionId(assetId)
-    // A same-server probe can reuse another saved connection's node; host is
-    // only a secondary hint because the saved connection id remains primary.
-    ?? (hostIp ? listNodes().find(candidate => candidate.primaryIp.trim() === hostIp) : undefined);
+function readNodeData(assetId: string): NodePanelData | null {
+  const node = getNodeByConnectionId(assetId);
   if (!node) return null;
   const interfaces = getNodeInterfaces(node.id).filter(iface =>
     !iface.isLoopback
-    && isServerInterfaceAddress(
-      iface.ipv4Addrs[0] ?? iface.ipv6Addrs[0] ?? '',
-      iface.ifaceName,
-    ));
+    && [...iface.ipv4Addrs, ...iface.ipv6Addrs].some(addr => isServerInterfaceAddress(addr, iface.ifaceName)));
   const serverAddresses = interfaces.flatMap(iface => [
     ...(iface.ipv4Addrs ?? []),
     ...(iface.ipv6Addrs ?? []),
@@ -158,8 +151,11 @@ export function NetworkPanel({
 
   const [data, setData] = useState<NodePanelData | null>(null);
   const [storeVersion, setStoreVersion] = useState(0);
-  const [probing, setProbing] = useState(false);
-  const [lastSections, setLastSections] = useState<ProbeSections | null>(null);
+  const running = useRef(new Set<string>());
+  const [probingSessions, setProbingSessions] = useState<Set<string>>(new Set());
+  const probing = probingSessions.has(connectionId);
+  const [sectionHistory, setSectionHistory] = useState<Record<string, ProbeSections>>({});
+  const lastSections = sectionHistory[assetId] ?? null;
   const [activeTab, setActiveTab] = useState('summary');
   /** Level-2 drill-down: when set, the panel shows that port's topology. */
   const [selectedPort, setSelectedPort] = useState<{ nodeId: string; portId: string; host: string } | null>(null);
@@ -176,8 +172,7 @@ export function NetworkPanel({
   // global topology view edits the store.
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- hydrating from an external store is an effect
-    setData(readNodeData(assetId, host));
-    setLastSections(null);
+    setData(readNodeData(assetId));
   }, [assetId, host, storeVersion]);
 
   // Drilling into a port is scoped to one server; leaving it resets the view.
@@ -191,18 +186,20 @@ export function NetworkPanel({
 
   // ── Manual probe ───────────────────────────────────────────────────────
   const handleProbe = async () => {
-    if (probing) return;
-    setProbing(true);
+    if (running.current.has(connectionId)) return;
+    running.current.add(connectionId);
+    setProbingSessions(new Set(running.current));
     try {
-      const result = await probeServerTopology(connectionId);
-      const summary = applyProbeResult({ connectionId: assetId, connectionName, result });
+      const result = await probeServerTopology(connectionId, { includeFirewall: false });
+      const summary = await persistProbeResult({ connectionId: assetId, connectionName, result });
 
-    setData(readNodeData(assetId, host));
-      setLastSections(result.sections);
+      setSectionHistory(history => ({ ...history, [assetId]: result.sections }));
       setStoreVersion(v => v + 1);
 
-      toast.success(t('network.probe.success'), {
-        description: t('network.probe.successDetail', {
+      const status = deriveProbeStatus(result);
+      const notify = status === 'failed' ? toast.error : status === 'partial' ? toast.warning : toast.success;
+      notify(t(status === 'failed' ? 'network.probe.failed' : status === 'partial' ? 'network.probe.partial' : 'network.probe.success'), {
+        description: result.error || t('network.probe.successDetail', {
           added: sumCounts(summary.added),
           updated: sumCounts(summary.updated),
           missing: sumCounts(summary.missing),
@@ -214,7 +211,8 @@ export function NetworkPanel({
       });
       setStoreVersion(v => v + 1);
     } finally {
-      setProbing(false);
+      running.current.delete(connectionId);
+      setProbingSessions(new Set(running.current));
     }
   };
 
@@ -224,7 +222,7 @@ export function NetworkPanel({
     patch: Partial<Pick<NetworkNode, 'displayName' | 'nodeType' | 'environment' | 'notes'>>,
   ) => {
     if (!node) return;
-    const [updated] = upsertNode({ ...node, ...patch });
+    const updated = patchNodeManual(node.id, patch);
     if (updated) setData(current => (current ? { ...current, node: updated } : current));
     setStoreVersion(v => v + 1);
   };
@@ -234,7 +232,7 @@ export function NetworkPanel({
   const degradedSections = lastSections
     ? (Object.keys(lastSections) as Array<keyof ProbeSections>)
         .map(key => ({ key, section: lastSections[key] }))
-        .filter(entry => entry.section.status !== 'ok' && entry.section.note.trim() !== '')
+        .filter(entry => entry.section.status !== 'ok' && entry.section.status !== 'skipped' && entry.section.note.trim() !== '')
     : [];
 
   const status: ProbeStatus = node?.lastProbeStatus ?? 'never';
@@ -259,6 +257,8 @@ export function NetworkPanel({
             {probing ? t('network.probeButtonProbing') : t('network.probeButton')}
           </span>
         </Button>
+
+        <p className="text-[10px] leading-relaxed text-muted-foreground">{t('network.probe.scope')}</p>
 
         {probing && (
           <div className="h-0.5 w-full overflow-hidden rounded bg-muted">

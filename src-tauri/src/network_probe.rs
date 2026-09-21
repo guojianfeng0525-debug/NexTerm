@@ -2068,6 +2068,7 @@ pub fn parse_proc_sockets(
     raw: &str,
     fdmap: &FdOwnership,
 ) -> (Vec<DetectedPort>, Vec<DetectedPeer>, Vec<DetectedServiceLink>, ProbeSection) {
+    let partial = raw.contains("NT_PROC_PARTIAL");
     let mut current_proto = String::new();
     let mut sockets = ProcSockets::default();
     let mut seen = std::collections::HashSet::new();
@@ -2271,6 +2272,11 @@ pub fn parse_proc_sockets(
         if proto == "tcp" {
             let inbound = [local_addr.as_str(), "0.0.0.0", "::"].iter()
                 .any(|addr| listen_keys.contains(&(proto.clone(), addr.to_string(), local_port)));
+            if !inbound && partial {
+                // A listener may be beyond the sampling limit. Its absence
+                // cannot prove an outbound direction or a remote service port.
+                continue;
+            }
             let link = if inbound {
                 // Peer connected to MY listener: p2 = local_port, peer's
                 // ephemeral source port deliberately dropped.
@@ -2314,6 +2320,7 @@ pub fn parse_proc_sockets(
             };
             push_link(link, &mut link_agg);
         } else {
+            if partial { continue; }
             // Connected UDP: the remote endpoint is a bound service socket.
             let link = DetectedServiceLink {
                 direction: "outbound".to_string(),
@@ -2359,7 +2366,7 @@ pub fn parse_proc_sockets(
             status: "unavailable".to_string(),
             note: "/proc socket 表不可读".to_string(),
         }
-    } else if raw.contains("NT_PROC_PARTIAL") {
+    } else if partial {
         ProbeSection { status: "partial".to_string(), note: "Some local socket tables could not be read".to_string() }
     } else if fdmap.inode_pids.is_empty() && !sockets.ports.is_empty() {
         ProbeSection {
@@ -2380,10 +2387,10 @@ pub fn parse_proc_sockets(
 /// Build the single read-only probe script for the given host.
 ///
 /// Delegates to [`OsInfo::topology_probe_cmd`] so every command stays
-/// distro-aware (see design doc §4.2). `include_firewall=false` skips the
-/// iptables/nft/ufw dumps entirely (client-side TTL cache still fresh).
+/// distro-aware (see design doc §4.2). Firewall requests are ignored under
+/// the mandatory low-impact policy; runtime limits must be available remotely.
 pub fn build_probe_script(os: &OsInfo, include_firewall: bool) -> String {
-    if os.family == crate::os_detect::OsFamily::Unknown {
+    let body = if os.family == crate::os_detect::OsFamily::Unknown {
         let mut mac = os.clone();
         mac.family = crate::os_detect::OsFamily::MacOS;
         let mut bsd = os.clone();
@@ -2393,7 +2400,26 @@ pub fn build_probe_script(os: &OsInfo, include_firewall: bool) -> String {
         format!("case \"$(uname -s)\" in\nDarwin)\n{}\n;;\n*BSD)\n{}\n;;\n*)\n{}\n;;\nesac", mac.topology_probe_cmd(include_firewall), bsd.topology_probe_cmd(include_firewall), linux.topology_probe_cmd(include_firewall))
     } else {
         os.topology_probe_cmd(include_firewall)
-    }
+    };
+    // Remote termination is required: closing the SSH channel alone does not
+    // prove its descendants stopped. Missing budget tools means no collection.
+    let bounded = format!("ulimit -t 1 || exit 1\n{}", body);
+    let quoted = bounded.replace('\'', "'\\''");
+    format!(r#"nt_timeout=
+for nt_candidate in timeout gtimeout; do
+  if command -v "$nt_candidate" >/dev/null 2>&1; then
+    case "$(LC_ALL=C "$nt_candidate" --version 2>/dev/null)" in
+      *"GNU coreutils"*) nt_timeout=$nt_candidate; break ;;
+    esac
+  fi
+done
+if [ -z "$nt_timeout" ] || ! command -v nice >/dev/null 2>&1; then
+  echo '###NT:hostname###'
+  echo 'NT_UNAVAILABLE:GNU timeout and nice required for low-impact collection'
+  echo '###NT:end###'
+  exit 0
+fi
+exec "$nt_timeout" -k 1 3 nice -n 19 sh -c '{quoted}'"#)
 }
 
 /// Container/CNI interfaces and their pod/service addresses describe the
@@ -2501,7 +2527,7 @@ fn failed_sections() -> ProbeSections {
 ///
 /// Exactly one `execute_probe_command` call — serialising eight commands would hold
 /// the connection read lock eight times as long and multiply the 30s
-/// per-command timeout exposure. The executor owns its 25s deadline and closes
+/// per-command timeout exposure. The executor owns its 5s deadline and closes
 /// the channel before returning completed sections from an interrupted run.
 ///
 /// Never panics: every failure is logged and turned into a section status.
@@ -2511,10 +2537,12 @@ pub async fn run_probe(
     include_firewall: bool,
 ) -> ProbeResult {
     let probed_at_ms = now_millis();
-    let script = build_probe_script(os, include_firewall);
+    // Ignore legacy opt-in: firewall dumps are outside the mandatory budget.
+    let _ = include_firewall;
+    let script = build_probe_script(os, false);
 
     match client.execute_probe_command(&script).await {
-        Ok((raw, incomplete)) => parse_probe_output(&raw, include_firewall, probed_at_ms, incomplete),
+        Ok((raw, incomplete)) => parse_probe_output(&raw, false, probed_at_ms, incomplete),
         Err(e) => ProbeResult {
             success: false,
             error: Some(truncate_chars(&e.to_string(), 500)),
@@ -2570,7 +2598,7 @@ fn parse_probe_output(raw: &str, include_firewall: bool, probed_at_ms: u64, inco
         Some(body) => parse_fdmap(body),
         None => FdOwnership::default(),
     };
-    let (proc_ports, proc_peers, service_links, proc_sockets_section) = match sections.get("proc_sockets") {
+    let (proc_ports, proc_peers, service_links, mut proc_sockets_section) = match sections.get("proc_sockets") {
         Some(body) => parse_proc_sockets(body, &fdmap),
         None => (
             Vec::new(),
@@ -2579,6 +2607,14 @@ fn parse_probe_output(raw: &str, include_firewall: bool, probed_at_ms: u64, inco
             ProbeSection::skipped(),
         ),
     };
+    if sections.get("fdmap").is_some_and(|raw| raw.contains("NT_SKIPPED:"))
+        && proc_sockets_section.status == "partial"
+        && sections.get("proc_sockets").is_some_and(|raw| !raw.contains("NT_PROC_PARTIAL"))
+    {
+        // Missing ownership is intentional, not evidence that the socket
+        // sample is incomplete. Truncated/unreadable tables stay partial.
+        proc_sockets_section = ProbeSection::ok();
+    }
     let use_proc = sections.contains_key("proc_sockets");
     let (ports, ports_section) = if use_proc {
         (proc_ports.clone(), proc_sockets_section.clone())
@@ -2657,7 +2693,7 @@ fn parse_probe_output(raw: &str, include_firewall: bool, probed_at_ms: u64, inco
             ports: ports_section,
             peers: peers_section,
             proc_sockets: proc_sockets_section,
-            fdmap: if !use_proc { ProbeSection::skipped() } else if fdmap.inode_pids.is_empty() || sections.get("fdmap").is_some_and(|raw| raw.contains("NT_PARTIAL:")) {
+            fdmap: if !use_proc || sections.get("fdmap").is_some_and(|raw| raw.contains("NT_SKIPPED:")) { ProbeSection::skipped() } else if fdmap.inode_pids.is_empty() || sections.get("fdmap").is_some_and(|raw| raw.contains("NT_PARTIAL:")) {
                 ProbeSection { status: "partial".to_string(), note: "Process ownership unavailable; server relationships are still retained".to_string() }
             } else { ProbeSection::ok() },
         },
@@ -3778,6 +3814,83 @@ NT_PROC_FILE\ttcp6\t/proc/net/tcp6
                 .status();
             assert!(status.unwrap().success());
         }
+    }
+
+    #[test]
+    fn low_impact_probe_never_traverses_processes_or_dumps_firewalls() {
+        for include_firewall in [true, false] {
+            let script = build_probe_script(&OsInfo::default(), include_firewall);
+            for forbidden in ["find /proc", "/proc/[0-9]", "iptables", "nft ", "firewall-cmd", "ufw ", "pfctl", "netstat", "ss -"] {
+                assert!(!script.contains(forbidden), "unexpected expensive command: {forbidden}");
+            }
+            assert!(script.contains("-k 1 3 nice -n 19"));
+            assert!(script.contains("ulimit -t 1"));
+            assert!(script.contains("NR <= 513"));
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn low_impact_probe_skips_collection_when_budget_tools_are_missing() {
+        let output = std::process::Command::new("/bin/sh")
+            .env("PATH", "/nonexistent-nexterm-tools")
+            .arg("-c").arg(build_probe_script(&OsInfo::default(), true))
+            .output().unwrap();
+        assert!(output.status.success());
+        let result = parse_probe_output(&String::from_utf8_lossy(&output.stdout), false, 1, false);
+        assert!(!result.success);
+        assert!(result.data.ports.is_empty());
+        assert_eq!(result.sections.hostname.status, "unavailable");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn low_impact_probe_uses_gnu_fallback_after_incompatible_timeout() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        for (name, body) in [
+            ("timeout", "echo 'BusyBox timeout'"),
+            ("gtimeout", "if [ \"$1\" = --version ]; then echo 'timeout (GNU coreutils)'; else printf '%s\\n' \"$1 $2 $3 $4 $5 $6 $7\"; fi"),
+            ("nice", "exit 99"),
+        ] {
+            let path = dir.path().join(name);
+            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let output = std::process::Command::new("/bin/sh")
+            .env("PATH", dir.path()).arg("-c")
+            .arg(build_probe_script(&OsInfo::default(), true)).output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8(output.stdout).unwrap().trim(), "-k 1 3 nice -n 19 sh");
+    }
+
+    #[test]
+    fn low_impact_partial_sample_does_not_invent_outbound_direction() {
+        let raw = "NT_PROC_FILE\ttcp\t/proc/net/tcp\n0: 0100000A:1F90 0200000A:AFC8 01 00000000:000000 00:00000000 00000000 0 0 22222\nNT_PROC_PARTIAL\n";
+        let (ports, peers, links, status) = parse_proc_sockets(raw, &FdOwnership::default());
+        assert!(ports.is_empty());
+        assert_eq!(peers.len(), 1);
+        assert!(links.is_empty());
+        assert_eq!(status.status, "partial");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn low_impact_socket_limit_stops_at_budget_and_reports_partial() {
+        // Synthetic input only: this test never reads host socket/process data.
+        let dir = tempfile::tempdir().unwrap();
+        let table = dir.path().join("socket-table");
+        std::fs::write(&table, "row\n".repeat(2000)).unwrap();
+        let mut script = OsInfo::default().proc_sockets_probe_cmd().to_string();
+        for path in ["/proc/net/tcp6", "/proc/net/tcp", "/proc/net/udp6", "/proc/net/udp"] {
+            script = script.replace(path, &table.to_string_lossy());
+        }
+        let output = std::process::Command::new("/bin/sh").args(["-c", &script]).output().unwrap();
+        assert!(output.status.success());
+        let output = String::from_utf8(output.stdout).unwrap();
+        assert_eq!(output.lines().filter(|line| *line == "row").count(), 4 * 513);
+        assert_eq!(output.lines().filter(|line| *line == "NT_PROC_PARTIAL").count(), 4);
+        assert_eq!(parse_proc_sockets(&output, &FdOwnership::default()).3.status, "partial");
     }
 
     #[test]

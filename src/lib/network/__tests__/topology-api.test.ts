@@ -16,6 +16,7 @@ const backend = vi.hoisted(() => ({
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: async (cmd: string, args: Record<string, unknown> = {}) => {
     backend.calls.push({ cmd, args });
+    if (cmd === 'topology_write_batch') return;
     if (cmd.startsWith('row_')) {
       if (cmd === 'row_upsert') return true;
       if (cmd === 'row_list') return [];
@@ -57,6 +58,8 @@ import {
   detectedRule,
   probeResult,
   section,
+  sections,
+  probeData,
 } from './fixtures';
 
 beforeEach(() => {
@@ -291,7 +294,7 @@ describe('applyProbeResult', () => {
           hostname: 'b',
           interfaces: [detectedInterface({ ifaceName: 'eth0', ipv4Addrs: ['10.0.0.6/24'] })],
           ports: [detectedPort({ port: 5432, processName: 'postgres', pid: 201 })],
-          peers: [detectedPeer({ remoteAddr: '203.0.113.9', remotePort: 443 })],
+          peers: [detectedPeer({ localAddr: '10.0.0.6', remoteAddr: '203.0.113.9', remotePort: 443 })],
           serviceLinks: [],
         },
       }),
@@ -334,7 +337,7 @@ describe('applyProbeResult', () => {
     });
   });
 
-  it('uses the same server IP inside one group as the same server asset', () => {
+  it('keeps independent saved connections separate when their private IPs overlap', () => {
     const first = applyProbeResult({
       connectionId: 'conn-a',
       connectionName: 'A alias',
@@ -348,10 +351,10 @@ describe('applyProbeResult', () => {
       probeAt: 2_000,
     });
 
-    expect(second.nodeId).toBe(first.nodeId);
-    expect(listNodes()).toHaveLength(1);
-    expect(getNodeByConnectionId('conn-b')?.id).toBe(first.nodeId);
-    expect(getNodeByConnectionId('conn-a')).toBeUndefined();
+    expect(second.nodeId).not.toBe(first.nodeId);
+    expect(listNodes()).toHaveLength(2);
+    expect(getNodeByConnectionId('conn-b')?.id).toBe(second.nodeId);
+    expect(getNodeByConnectionId('conn-a')?.id).toBe(first.nodeId);
   });
 
   it('only re-confirms an existing link on a repeat probe', () => {
@@ -416,5 +419,86 @@ describe('applyProbeResult', () => {
     expect(getNodeByConnectionId('conn-a')?.lastProbeStatus).toBe('failed');
     expect(getNodeByConnectionId('conn-a')?.lastProbeError).toBe('连接已断开');
     expect(getNodeByConnectionId('conn-a')?.id).toBe(summary.nodeId);
+  });
+});
+
+describe('incremental evidence reliability', () => {
+  it('retains uncertain peers without inventing outbound ports from a truncated listener table', () => {
+    applyProbeResult({ connectionId: 'a', connectionName: 'A', result: probeResult({
+      sections: sections({ ports: section('partial', 'sample limit'), peers: section('partial', 'sample limit') }),
+      data: probeData({ ports: [], peers: [detectedPeer({ localPort: 8080, remotePort: 45000 })] }),
+    }) });
+    expect(listNodes()).toHaveLength(2);
+    expect(listLinks()).toEqual([]);
+    expect(listPortLinks()).toEqual([]);
+  });
+
+  it.each(['a', 'b'])('converges reciprocal observations starting from %s without duplicate port edges', first => {
+    const sample = (server: string) => {
+      const ip = server === 'a' ? '10.0.0.1' : '10.0.0.2';
+      return probeResult({ data: probeData({ primaryIp: ip,
+        interfaces: [detectedInterface({ ipv4Addrs: [ip + '/24'] })],
+        ports: [detectedPort({ port: server === 'a' ? 8080 : 5432 })],
+        peers: [], serviceLinks: [{ localAddr: ip,
+          remoteAddr: server === 'a' ? '10.0.0.2' : '10.0.0.1',
+          direction: server === 'a' ? 'outbound' : 'inbound',
+          localPort: server === 'a' ? 8080 : 5432,
+          remotePort: server === 'a' ? 5432 : null,
+          protocol: 'tcp', state: 'ESTABLISHED', connections: 1,
+        }],
+      }) });
+    };
+    [first, first === 'a' ? 'b' : 'a', 'a', 'b'].forEach((server, index) => {
+      applyProbeResult({ connectionId: server, connectionName: server, result: sample(server), probeAt: 1000 + index });
+    });
+    expect(listNodes()).toHaveLength(2);
+    expect(listLinks()).toHaveLength(1);
+    expect(listPortLinks()).toHaveLength(1);
+    expect(listPortLinks()[0]).toMatchObject({
+      sourceNodeId: getNodeByConnectionId('a')?.id,
+      targetNodeId: getNodeByConnectionId('b')?.id,
+      sourcePort: 8080, targetPort: 5432,
+    });
+    expect(listPortLinks()[0].targetPortId).toBeTruthy();
+  });
+
+  it('retains all last good rows and identity after a timeout', () => {
+    const first = applyProbeResult({ connectionId: 'a', connectionName: 'A', result: probeResult(), probeAt: 1000 });
+    const previous = getNodeSnapshot(first.nodeId)!;
+    applyProbeResult({ connectionId: 'a', connectionName: 'A', result: probeResult({ success: false, error: 'timeout', data: probeData({ hostname: '', osName: '', primaryIp: '', interfaces: [], ports: [], firewall: null, firewallRules: [], peers: [], serviceLinks: [] }) }), probeAt: 2000 });
+    const current = getNodeSnapshot(first.nodeId)!;
+    expect(current.node.hostname).toBe(previous.node.hostname);
+    expect(current.node.primaryIp).toBe(previous.node.primaryIp);
+    expect(current.node.lastProbeStatus).toBe('failed');
+    expect(current.interfaces).toEqual(previous.interfaces);
+    expect(current.ports).toEqual(previous.ports);
+    expect(current.firewallRules).toEqual(previous.firewallRules);
+  });
+
+  it('adds partial evidence without marking unseen rows missing', () => {
+    const first = applyProbeResult({ connectionId: 'a', connectionName: 'A', result: probeResult(), probeAt: 1000 });
+    applyProbeResult({ connectionId: 'a', connectionName: 'A', result: probeResult({ sections: sections({ ports: section('partial', 'interrupted') }), data: probeData({ ports: [detectedPort({ port: 443 })] }) }), probeAt: 2000 });
+    expect(getNodePorts(first.nodeId).map(p => [p.port, p.missingSince])).toEqual([[443, null], [80, null]]);
+  });
+
+  it('accumulates A → B → C, promotes B without re-probing A and retains history', () => {
+    const sample = (ip: string, remote: string | null) => probeResult({ data: probeData({ primaryIp: ip,
+      interfaces: [detectedInterface({ ipv4Addrs: [ip + '/24'] })], ports: [detectedPort()],
+      peers: remote ? [detectedPeer({ localAddr: ip, remoteAddr: remote, localPort: 45000, remotePort: 80 })] : [],
+    }) });
+    const a = applyProbeResult({ connectionId: 'a', connectionName: 'A', result: sample('172.20.0.1', '172.20.0.2'), probeAt: 1000 });
+    expect(listLinks()).toHaveLength(1);
+    const b = applyProbeResult({ connectionId: 'b', connectionName: 'B', result: sample('172.20.0.2', '172.20.0.3'), probeAt: 2000 });
+    expect(listLinks()).toHaveLength(2);
+    expect(listLinks().some(l => l.sourceNodeId === a.nodeId && l.targetNodeId === b.nodeId)).toBe(true);
+    expect(listPortLinks().find(l => l.targetNodeId === b.nodeId)?.targetPortId).toBeTruthy();
+    const c = applyProbeResult({ connectionId: 'c', connectionName: 'C', result: sample('172.20.0.3', null), probeAt: 3000 });
+    expect(listLinks()).toHaveLength(2);
+    expect(listNodes()).toHaveLength(3);
+    expect(listPortLinks().find(l => l.targetNodeId === c.nodeId)?.targetPortId).toBeTruthy();
+    applyProbeResult({ connectionId: 'a', connectionName: 'A', result: sample('172.20.0.1', null), probeAt: 4000 });
+    expect(listLinks()).toHaveLength(2);
+    expect(listLinks().find(l => l.sourceNodeId === a.nodeId)).toMatchObject({ status: 'observed', lastConfirmedAt: 1000 });
+    expect(backend.calls.every(call => call.cmd === 'topology_write_batch' || call.cmd.startsWith('row_'))).toBe(true);
   });
 });

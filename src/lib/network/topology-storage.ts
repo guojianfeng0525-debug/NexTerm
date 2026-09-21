@@ -22,7 +22,8 @@
  * numbers and free-text notes about the user's own servers. `encField` /
  * `decField` are intentionally NOT used.
  */
-import { type DbTable, type Row, rowDelete, rowList, rowUpsert } from '../toolbox/db';
+import { type DbTable, type Row, rowList } from '../toolbox/db';
+import { invoke } from '@tauri-apps/api/core';
 import type {
   NetworkFirewall,
   NetworkFirewallRule,
@@ -579,6 +580,7 @@ function list<T>(kind: Kind): T[] {
  * probe pipeline or another view mutates the store.
  */
 export function notifyTopologyChanged(): void {
+  if (stagedWrites) return;
   try {
     window.dispatchEvent(new CustomEvent(TOPOLOGY_CHANGED_EVENT));
   } catch {
@@ -586,12 +588,94 @@ export function notifyTopologyChanged(): void {
   }
 }
 
+type TopologyWrite = { table: DbTable; row?: Row; key?: string };
+let stagedWrites: TopologyWrite[] | null = null;
+let writeQueue: Promise<unknown> = Promise.resolve();
+
+function enqueueWrites(writes: TopologyWrite[]): Promise<void> {
+  const pending = writeQueue.then(() => invoke<void>('topology_write_batch', { writes }));
+  // A failed operation must not prevent later explicit retries or edits.
+  writeQueue = pending.catch(() => undefined);
+  return pending;
+}
+
+/** Merge synchronously into a draft, commit all rows, then publish the cache.
+ * Concurrent manual edits keep their changed fields and are rebased onto the
+ * committed observation, so a full-row edit cannot roll back fresh auto fields.
+ */
+export async function commitTopologyProbe<T>(merge: () => T): Promise<T> {
+  const before = { ...cache };
+  const writes: TopologyWrite[] = [];
+  stagedWrites = writes;
+  let result: T;
+  let after: typeof cache;
+  try {
+    result = merge();
+    after = { ...cache };
+  } finally {
+    Object.assign(cache, before);
+    stagedWrites = null;
+  }
+  await enqueueWrites(writes);
+  const currentNodeIds = new Set(listNodes().map(node => node.id));
+  const deletedNodeIds = (before.nodes as NetworkNode[])
+    .filter(node => !currentNodeIds.has(node.id)).map(node => node.id);
+  const rebasedWrites: TopologyWrite[] = [];
+  for (const kind of Object.keys(cache) as Kind[]) {
+    if (cache[kind] === before[kind]) { cache[kind] = after[kind]; continue; }
+    // Preserve changes made while SQLite was committing; apply the remaining
+    // draft delta by stable row id, never replace a whole table underneath UI.
+    const oldRows = new Map((before[kind] as { id: string }[]).map(row => [row.id, row]));
+    const newRows = new Map((after[kind] as { id: string }[]).map(row => [row.id, row]));
+    const current = cache[kind] as { id: string }[];
+    const currentIds = new Set(current.map(row => row.id));
+    cache[kind] = current.flatMap(row => {
+      const old = oldRows.get(row.id);
+      const fresh = newRows.get(row.id);
+      if (row === old) return fresh ? [fresh] : [];
+      if (!old || !fresh) return [row];
+      const changed = Object.fromEntries(Object.entries(row)
+        .filter(([key, value]) => value !== (old as Record<string, unknown>)[key]));
+      const rebased = { ...fresh, ...changed };
+      rebasedWrites.push({ table: TABLES[kind], row: toRow(kind, rebased) });
+      return [rebased];
+    });
+    for (const [id, row] of newRows) if (!oldRows.has(id) && !currentIds.has(id)) cache[kind].push(row);
+  }
+  // A manual deletion only knew the pre-probe children. Also remove any new
+  // children/edges in the committed draft, in the same reconciliation batch.
+  if (deletedNodeIds.length) {
+    stagedWrites = rebasedWrites;
+    try { removeNodes(deletedNodeIds); } finally { stagedWrites = null; }
+  }
+  // Already queued edits may contain old auto fields. Repair them in queue
+  // order; any subsequent edit now reads the rebased cache and stays newer.
+  const durable = rebasedWrites.length ? enqueueWrites(rebasedWrites) : Promise.resolve();
+  notifyTopologyChanged();
+  try {
+    await durable;
+  } catch (error) {
+    // The initial observation committed, but its concurrent-edit repair did
+    // not. Recover the actual durable state instead of displaying phantom data.
+    await writeQueue;
+    await initializeTopologyStore();
+    notifyTopologyChanged();
+    throw error;
+  }
+  return result;
+}
+
+function persist(writes: TopologyWrite[]): void {
+  if (stagedWrites) { stagedWrites.push(...writes); return; }
+  void enqueueWrites(writes).catch(err => console.error('[topology] save failed', err));
+}
+
 function commitUpsert(kind: Kind, row: Row): void {
-  void rowUpsert(TABLES[kind], row).then(() => undefined);
+  persist([{ table: TABLES[kind], row }]);
 }
 
 function commitDelete(kind: Kind, id: string): void {
-  void rowDelete(TABLES[kind], id).then(() => undefined);
+  persist([{ table: TABLES[kind], key: id }]);
 }
 
 /** Insert or replace one row in the cache, then persist + notify. */
@@ -739,11 +823,13 @@ export function migrateObservedNodeIds(): number {
   let changed = 0;
 
   for (const node of nodes) {
-    if (!node.connectionId.startsWith(LEGACY_PREFIX)) continue;
+    if (!node.connectionId.startsWith(LEGACY_PREFIX) || node.connectionId.endsWith(':unresolved')) continue;
     // Strip one legacy group segment if present: observed:<encoded>:<ip>.
     const rest = node.connectionId.slice(LEGACY_PREFIX.length);
     const parts = rest.split(':');
-    const ip = (parts.length >= 2 ? parts[parts.length - 1] : rest).trim();
+    const ip = (rest === node.primaryIp || !rest.includes(':')
+      ? rest : /^\d+\.\d+\.\d+\.\d+$/.test(parts.at(-1) ?? '')
+        ? parts.at(-1)! : node.primaryIp).trim();
     if (!ip) continue;
     const canonicalId = `observed:${ip}`;
 
@@ -775,13 +861,15 @@ export function migrateObservedNodeIds(): number {
   // Rewrite observed nodes to their canonical ids.
   const nextNodes: NetworkNode[] = [];
   for (const node of nodes) {
-    if (!node.connectionId.startsWith(LEGACY_PREFIX)) {
+    if (!node.connectionId.startsWith(LEGACY_PREFIX) || node.connectionId.endsWith(':unresolved')) {
       nextNodes.push(node);
       continue;
     }
     const rest = node.connectionId.slice(LEGACY_PREFIX.length);
     const parts = rest.split(':');
-    const ip = (parts.length >= 2 ? parts[parts.length - 1] : rest).trim();
+    const ip = (rest === node.primaryIp || !rest.includes(':')
+      ? rest : /^\d+\.\d+\.\d+\.\d+$/.test(parts.at(-1) ?? '')
+        ? parts.at(-1)! : node.primaryIp).trim();
     const canonicalId = `observed:${ip}`;
     const canonicalNode = canonical.get(canonicalId);
     if (!canonicalNode) {
@@ -1079,12 +1167,32 @@ export function saveNodePorts(nodeId: string, items: readonly NetworkPort[]): vo
 /** Replace the whole link set (only rows that vanished are deleted). */
 export function saveLinks(items: readonly NetworkLink[]): void {
   const rows = list<NetworkLink>('links');
-  const keptIds = new Set(items.map((i) => i.id));
-  cache.links = [...items];
+  // Multiple observed IPs may resolve to the same server. Collapse the SQLite
+  // natural key before retargeting, retaining annotations from either edge.
+  const unique = new Map<string, NetworkLink>();
+  const combine = (a: string, b: string) => [...new Set([a, b].filter(Boolean))].join('\n');
+  for (const item of items) {
+    const key = JSON.stringify([item.sourceNodeId, item.targetNodeId, item.protocol, item.port]);
+    const previous = unique.get(key);
+    if (!previous) { unique.set(key, item); continue; }
+    const latest = item.lastConfirmedAt > previous.lastConfirmedAt ? item : previous;
+    unique.set(key, { ...latest, id: previous.id,
+      source: previous.source === 'manual' || item.source === 'manual' ? 'manual' : latest.source,
+      description: combine(previous.description, item.description),
+      manualLabel: combine(previous.manualLabel, item.manualLabel),
+      hidden: previous.hidden || item.hidden,
+      firstSeenAt: Math.min(previous.firstSeenAt, item.firstSeenAt),
+      createdAt: Math.min(previous.createdAt, item.createdAt),
+      updatedAt: Math.max(previous.updatedAt, item.updatedAt),
+    });
+  }
+  const next = [...unique.values()];
+  const keptIds = new Set(next.map((i) => i.id));
+  cache.links = next;
   for (const gone of rows) {
     if (!keptIds.has(gone.id)) commitDelete('links', gone.id);
   }
-  for (const item of items) commitUpsert('links', toRow('links', item));
+  for (const item of next) commitUpsert('links', toRow('links', item));
   notifyTopologyChanged();
 }
 

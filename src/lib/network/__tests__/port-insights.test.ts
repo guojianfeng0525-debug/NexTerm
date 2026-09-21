@@ -69,3 +69,11 @@ describe('port filtering and link counts', () => {
       .toEqual(['b8080']);
   });
 });
+
+it('retains historical relations without presenting them as currently connected', () => {
+  const port = makePort();
+  const link = makePortLink({ sourceNodeId: port.nodeId, sourcePortId: port.id, status: 'observed' });
+  const base = { protocol: 'all' as const, reachability: 'all' as const, host: '', search: '' };
+  expect(filterNetworkPorts([port], [link], { ...base, connection: 'connected' })).toEqual([]);
+  expect(filterNetworkPorts([port], [link], { ...base, connection: 'all' })).toEqual([port]);
+});
