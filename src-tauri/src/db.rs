@@ -1855,6 +1855,45 @@ CREATE INDEX IF NOT EXISTS idx_net_port_links_target_port ON net_port_links(targ
 "#;
 
 #[cfg(test)]
+mod command_registration_tests {
+    /// Critical commands must appear inside `generate_handler!` in lib.rs.
+    ///
+    /// Regression guard for the 2.18.0–2.18.1 bug: `workspace_replace` was
+    /// implemented and unit-tested against a mocked invoke, but never added
+    /// to the handler list — every close-time workspace flush silently
+    /// failed with "command not found" and reopens restored arbitrarily old
+    /// state. Mocked-frontend tests cannot catch a missing registration;
+    /// this source-level assertion can. Tauri exposes no runtime API to
+    /// enumerate registered commands, hence the text scan.
+    #[test]
+    fn critical_commands_are_registered_in_invoke_handler() {
+        let manifest = env!("CARGO_MANIFEST_DIR");
+        let lib_source =
+            std::fs::read_to_string(std::path::Path::new(manifest).join("src/lib.rs"))
+                .expect("read lib.rs");
+        let handler_block = lib_source
+            .split("generate_handler![")
+            .nth(1)
+            .and_then(|rest| rest.split("])").next())
+            .expect("generate_handler block");
+        for command in [
+            "db::workspace_replace",
+            "db::row_list",
+            "db::row_upsert",
+            "db::row_delete",
+            "commands::ssh_connect",
+            "commands::probe_network_topology",
+        ] {
+            assert!(
+                handler_block.contains(command),
+                "{command} is missing from generate_handler! — the frontend will get \
+                 \"command not found\" at runtime (the workspace-save bug class)"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
 mod upsert_tests {
     use super::*;
     use serde_json::json;

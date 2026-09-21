@@ -587,6 +587,11 @@ pub fn run() {
             db::row_list,
             db::row_delete,
             db::row_clear,
+            // Whole-workspace snapshot (close-time persist). Was missing from
+            // this list since 2.18.0: every close-time flush silently failed
+            // with "command not found" and the workspace never landed in
+            // SQLite (reopens restored arbitrarily old state).
+            db::workspace_replace,
             db::database_vacuum,
             db::documents_prune_versions,
             db::export_encrypted_backup,
