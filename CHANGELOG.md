@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.19.0] - 2026-09-21
+
+### 新增
+
+- **自定义命令日志源（流式跟随）**：日志监视器支持保存完整 shell 命令作为日志源（如 `tail -f /srv/order/logs/stdout.log`、`journalctl -u order-service -f --no-pager`），按服务器隔离持久化（`log_custom_sources` 表），管理对话框支持新建 / 编辑 / 删除 / 排序，界面明示命令以当前登录用户身份执行。选中命令源即真·流式跟随：单 SSH exec channel 持续读取（无超时），输出经 4 KiB / 100ms 节流以事件推送到前端，5000 行滚动缓冲正确处理跨 chunk 半行；停止（暂停 / 切源 / 失活 / 卸载）通过 channel EOF + 包装 shell 的进程组 trap 干净回收远端进程（真机验证零残留）；8 路并发上限防泄漏。
+- **日志源下拉可搜索**：换成 Combobox（文件 / 服务 / 容器 / 自定义命令分组），分组标签 i18n 化；Rust 枚举上限放宽（systemd 30→80、/var/log 文件 80→120、docker 容器 20→40），缓解多 java 服务场景选不到目标日志源的问题。
+- **拓扑探测 live 双容器集成测试**（`TOPOLOGY_PROBE_LIVE=1`）：Debian/GNU 与 Alpine/BusyBox 双环境、与 `ss -tln` 交叉验证监听集、临时端口零泄漏断言；**日志流式 live 测试**（`LOG_STREAM_LIVE=1`）：真机验证 tail -f 全生命周期含远端进程回收。
+- **命令注册防回归测试**：源码级断言关键 Tauri 命令必须出现在 `generate_handler!` 中（mock 型前端测试无法捕获漏注册）。
+
+### 修复
+
+- **工作空间保存失效（关键）**：`workspace_replace` 命令自 2.18.0 实现以来从未注册进 `generate_handler!`，每次关闭时的快照落盘全部以 "Command not found" 静默失败——重开恢复的是任意旧状态。已注册并真机验证写入；附防回归断言。
+- **拓扑 p1 归属四连修**（live 双容器测试发现）：① fdmap 单 pid 映射在 fork 共享 socket inode 时丢失归属（socat/prefork 形态）→ inode → pid 集合；② fork 子进程关闭继承 listener（socat/nginx 形态）→ 新增父进程归属链（一条零 fork 的 `cat /proc/[0-9]*/stat` 采集 PPid，严格一级父防误归 sshd:22）；③ IPv4-mapped IPv6（`::ffff:a.b.c.d`）未归一化破坏一 IP 一节点 → 解析层归一化；④ Docker 内嵌 DNS（127.0.0.11 + 随机口）回环监听泄漏为"开放端口" → 采集层排除回环绑定。
+- **流式初始输出竞态与节流死锁**（真机 UI e2e 发现）：首批数据在 `log_stream_start` 返回前推送被 id 过滤永久丢弃（表现为流已建立界面空白）→ 泵首窗口延迟 + data 事件不按 id 过滤双保险；缓冲仅在下一个 chunk 到达时检查时间窗导致静默 tail 初始输出永不显示 → 独立定时消费任务解耦。
+- **连接切换残留**：切换服务器后残留的旧命令源选择会把 id 整串当文件路径 tail 报错 → 切换时清空选择并停流。
+
 ## [2.18.1] - 2026-09-11
 
 ### 变更
