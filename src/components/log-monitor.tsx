@@ -394,6 +394,13 @@ export function LogMonitor({ connectionId, externalLogPath, externalLogPathKey, 
   const [isLoading, setIsLoading] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const lastScrollTop = useRef(0);
+  // Mirror for the stream listener: subscribing depends on no render state,
+  // so toggling scroll-lock never re-subscribes (a re-subscribe window can
+  // drop a chunk).
+  const scrollLockedRef = useRef(scrollLocked);
+  useEffect(() => {
+    scrollLockedRef.current = scrollLocked;
+  }, [scrollLocked]);
 
   // ── Source discovery ──
 
@@ -459,6 +466,15 @@ export function LogMonitor({ connectionId, externalLogPath, externalLogPathKey, 
     void reloadCustomCommands();
   }, [reloadCustomCommands]);
 
+  // A source selection belongs to ONE server: switching connections must not
+  // keep a stale `cmd:<id>` / `custom:<path>` around — loadLog would treat
+  // the id itself as a file path and error out.
+  useEffect(() => {
+    setSelectedSourceId("");
+    setAutoRefresh(false);
+    void stopStream(null);
+  }, [connectionId, setAutoRefresh, setSelectedSourceId, stopStream]);
+
   // ── Unified source list: discovered + persisted custom commands ──
   const allSources = useMemo(() => {
     const cmdSources: LogSource[] = customCommands.map((c) => ({
@@ -489,7 +505,11 @@ export function LogMonitor({ connectionId, externalLogPath, externalLogPathKey, 
       message?: string;
     }>("log-stream", (event) => {
       const payload = event.payload;
-      if (payload.streamId !== streamIdRef.current) return;
+      // Data events are accepted regardless of the id: only ONE stream runs
+      // at a time, and the first chunk can arrive before log_stream_start's
+      // invoke resolves (streamIdRef not yet set) — filtering by id there
+      // would silently drop the initial tail burst forever.
+      if (payload.type !== "data" && payload.streamId !== streamIdRef.current) return;
       if (payload.type === "data" && payload.data) {
         // Function-state update keeps the listener independent of the render
         // cycle (no re-subscribe on every line, no lost chunk between
@@ -499,7 +519,7 @@ export function LogMonitor({ connectionId, externalLogPath, externalLogPathKey, 
           pendingLineRef.current = pending;
           return lines;
         });
-        if (scrollLocked) {
+        if (scrollLockedRef.current) {
           requestAnimationFrame(() => {
             if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
           });
@@ -523,7 +543,7 @@ export function LogMonitor({ connectionId, externalLogPath, externalLogPathKey, 
       disposed = true;
       unlisten?.();
     };
-  }, [scrollLocked, setRawLines, t]);
+  }, [setRawLines, t]);
 
   // Start a streaming command source (tail -f style).
   const startStream = useCallback(async (command: string) => {
@@ -906,9 +926,7 @@ export function LogMonitor({ connectionId, externalLogPath, externalLogPathKey, 
                             className="text-xs"
                           >
                             <div className="flex items-center justify-between gap-2 w-full min-w-0" title={src.path}>
-                              <span className="truncate min-w-0 flex-1">
-                                {src.source_type === "command" ? `${src.name}` : src.name}
-                              </span>
+                              <span className="truncate min-w-0 flex-1">{src.name}</span>
                               {src.size_human ? (
                                 <span className="text-[10px] text-muted-foreground shrink-0">{src.size_human}</span>
                               ) : src.source_type === "command" ? (

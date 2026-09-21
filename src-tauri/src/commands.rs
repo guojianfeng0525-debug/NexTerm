@@ -1816,14 +1816,29 @@ pub async fn log_stream_start(
     }
 
     let emit_id = stream_id.clone();
-    tokio::spawn(async move {
-        use crate::ssh::StreamEnd;
+    let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let pump_cancel = cancel.clone();
+    let pump_app = app.clone();
 
-        // Throttle: flush when 4 KiB buffered or 100 ms passed since the
-        // first buffered byte.
+    // Throttle pump: flush at most one event per ~100 ms window or per 4 KiB.
+    // A dedicated ticker task is REQUIRED — flushing only on the next chunk's
+    // arrival leaves the FIRST burst stranded in the buffer forever for a
+    // `tail -f` that goes quiet after its initial lines (found by the live
+    // e2e: stream established, remote tail running, frontend showing nothing).
+    tokio::spawn(async move {
+        let app = pump_app;
         let mut buffer = String::new();
-        let mut since_first: Option<tokio::time::Instant> = None;
-        let mut flush = |buffer: &mut String, since: &mut Option<tokio::time::Instant>| {
+        let mut first_at: Option<tokio::time::Instant> = None;
+        // interval's FIRST tick fires immediately, which would emit before
+        // log_stream_start's invoke has even returned to the frontend (the
+        // listener then drops the chunk because its stream id is not set
+        // yet). Start the window at now+100ms instead.
+        let mut ticker = tokio::time::interval_at(
+            tokio::time::Instant::now() + std::time::Duration::from_millis(100),
+            std::time::Duration::from_millis(100),
+        );
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let flush = |buffer: &mut String, first: &mut Option<tokio::time::Instant>| {
             if buffer.is_empty() {
                 return;
             }
@@ -1834,35 +1849,52 @@ pub async fn log_stream_start(
                     data: std::mem::take(buffer),
                 },
             );
-            *since = None;
+            *first = None;
         };
+        loop {
+            tokio::select! {
+                biased;
+                _ = pump_cancel.cancelled() => break,
+                maybe = chunk_rx.recv() => match maybe {
+                    Some(chunk) => {
+                        buffer.push_str(&chunk);
+                        if first_at.is_none() {
+                            first_at = Some(tokio::time::Instant::now());
+                        }
+                        if buffer.len() >= 4096 {
+                            flush(&mut buffer, &mut first_at);
+                        }
+                    }
+                    None => {
+                        // Producer finished (exec_stream returned): drain.
+                        flush(&mut buffer, &mut first_at);
+                        break;
+                    }
+                },
+                _ = ticker.tick() => {
+                    if !buffer.is_empty() {
+                        flush(&mut buffer, &mut first_at);
+                    }
+                },
+            }
+        }
+    });
+
+    let emit_id = stream_id.clone();
+    tokio::spawn(async move {
+        use crate::ssh::StreamEnd;
 
         let result = crate::ssh::SshClient::exec_stream(
             &session,
             &command,
             cancel.clone(),
             |chunk| {
-                // Flush the previous window first when it has aged out, so
-                // low-rate streams (tail -f emitting one line per second)
-                // are not held back until 4 KiB accumulates.
-                if let Some(first) = since_first {
-                    if first.elapsed() >= std::time::Duration::from_millis(100) {
-                        flush(&mut buffer, &mut since_first);
-                    }
-                }
-                buffer.push_str(&chunk);
-                if since_first.is_none() {
-                    since_first = Some(tokio::time::Instant::now());
-                }
-                if buffer.len() >= 4096 {
-                    flush(&mut buffer, &mut since_first);
-                }
+                let _ = chunk_tx.send(chunk);
             },
         )
         .await;
-
-        // Drain whatever the throttle left behind.
-        flush(&mut buffer, &mut since_first);
+        // Drop the producer so the pump drains and exits.
+        drop(chunk_tx);
 
         LOG_STREAMS
             .lock()

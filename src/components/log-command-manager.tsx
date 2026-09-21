@@ -10,7 +10,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
-import { ChevronDown, ChevronUp, Plus, Terminal, Trash2 } from "lucide-react";
+import { ChevronDown, ChevronUp, Pencil, Plus, Terminal, Trash2 } from "lucide-react";
 import { Button } from "./ui/button";
 import {
   Dialog,
@@ -47,7 +47,7 @@ export function LogCommandManager({
   const [items, setItems] = useState<CustomLogSource[]>([]);
   const [name, setName] = useState("");
   const [command, setCommand] = useState("");
-  const [editingId, setEditingingId] = useState<string | null>(null);
+  const [editingId, setEditingId] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -65,15 +65,20 @@ export function LogCommandManager({
     }
   }, [connectionId, t]);
 
-  useEffect(() => {
-    if (open) void reload();
-  }, [open, reload]);
-
   const resetForm = useCallback(() => {
-    setEditingingId(null);
+    setEditingId(null);
     setName("");
     setCommand("");
   }, []);
+
+  useEffect(() => {
+    if (open) {
+      void reload();
+      // Reopening starts from a blank form — leftover editing state from the
+      // previous session must not leak into the fields.
+      resetForm();
+    }
+  }, [open, reload, resetForm]);
 
   const handleSave = useCallback(async () => {
     const trimmedName = name.trim();
@@ -181,12 +186,12 @@ export function LogCommandManager({
                       <Button
                         size="icon" variant="ghost" className="h-6 w-6"
                         onClick={() => {
-                          setEditingingId(item.id);
+                          setEditingId(item.id);
                           setName(item.name);
                           setCommand(item.command);
                         }}
                       >
-                        <Terminal className="h-3 w-3" />
+                        <Pencil className="h-3 w-3" />
                       </Button>
                       <Button
                         size="icon" variant="ghost" className="h-6 w-6 text-destructive hover:text-destructive"
