@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.19.1] - 2026-09-21
+
+### 变更
+
+- **拓扑探测改为强制低负载快照（low-impact policy）**：移除探测脚本中的 fdmap 进程遍历（`/proc/<pid>/fd` 与 `stat` 采集）与防火墙转储段——`includeFirewall` 参数保留但不再启用任何重采集；Linux socket 行硬上限 512（每表 `awk` 截断并标记 `NT_PROC_PARTIAL`）、interfaces 上限 128；macOS/BSD 端口 / 对端段在有无界 `netstat` 快照替代源之前直接标记不可用（fail closed）。探测专用 SSH 通道超时 25s→5s、输出上限 16MiB→512KiB，并加入进程级探测预算冷却拒绝突发重探测。
+- **行为变化（知悉）**：服务级边的 p1 进程归因与防火墙策略采集在此策略下不再执行；端口与对端数据以限长快照为准，超出上限时面板标记部分采样。
+
+### 修复
+
+- 探测结果改为异步合并落库（`persistProbeResult`），避免阻塞关闭路径；端口洞察与拓扑存储层同步适配。
+- 新增 6 个 low-impact 单测：预算拒绝突发且不延长冷却、无工具时跳过采集、GNU 回退、部分采样不虚构出向方向、上限即停并如实标记 partial。
+
 ## [2.19.0] - 2026-09-21
 
 ### 新增
