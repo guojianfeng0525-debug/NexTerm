@@ -5,6 +5,7 @@
  * panel was always empty.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { waitFor } from '@testing-library/react';
 import { createTestIpc } from './helpers/test-ipc';
 import { setupAppLock } from '../toolbox/app-lock';
 import { hydrateCommandHistory, recordExecutedCommand, getCommandHistory, getCommandUsage } from '../command-history';
@@ -36,9 +37,10 @@ describe('recordExecutedCommand', () => {
     expect(getCommandUsage()['ls -la']).toBe(2);
 
     // Async persist settles into the stand-in tables.
-    await new Promise(r => setTimeout(r, 20));
-    expect(ipc.DB.command_usage?.length ?? 0).toBe(2);
-    expect(ipc.DB.command_history?.length ?? 0).toBe(2);
+    await waitFor(() => {
+      expect(ipc.DB.command_usage?.length ?? 0).toBe(2);
+      expect(ipc.DB.command_history?.length ?? 0).toBe(2);
+    });
     expect(listener).toHaveBeenCalled();
 
     window.removeEventListener('nexterm:command-history-changed', listener);
@@ -47,7 +49,7 @@ describe('recordExecutedCommand', () => {
   it('restores history after a simulated restart (re-hydrate)', async () => {
     recordExecutedCommand('docker ps');
     recordExecutedCommand('npm run dev');
-    await new Promise(r => setTimeout(r, 20));
+    await waitFor(() => expect(ipc.DB.command_history?.length ?? 0).toBe(2));
 
     // Simulate app restart: reload from SQLite.
     await hydrateCommandHistory();
