@@ -557,63 +557,11 @@ done
         }
     }
 
-    /// Routing table probe — `ip route` on Linux, `netstat -rn` on BSD/macOS.
-    pub fn routes_probe_cmd(&self) -> &'static str {
-        match self.family {
-            OsFamily::MacOS | OsFamily::Bsd => {
-                "netstat -rn -f inet 2>/dev/null || netstat -rn 2>/dev/null || echo \"NT_UNAVAILABLE:routes\""
-            }
-            _ => "ip route 2>/dev/null || netstat -rn 2>/dev/null || echo \"NT_UNAVAILABLE:routes\"",
-        }
-    }
-
-    /// Listening-port probe — `ss -tulpnH` (with `-H` fallback for old
-    /// iproute2), then `netstat -tulpn`; BSD/macOS use `netstat -an -p`.
-    ///
-    /// NOTE: `-p` needs root; without it the process columns stay empty but
-    /// the listening state is still exact (the parser marks the section
-    /// `partial` rather than dropping it).
-    pub fn ports_probe_cmd(&self) -> &'static str {
-        match self.family {
-            OsFamily::MacOS | OsFamily::Bsd => {
-                "{ netstat -an -p tcp 2>/dev/null | grep -i listen; netstat -an -p udp 2>/dev/null; }"
-            }
-            _ if self.has_ss => {
-                "{ ss -tulpnH 2>/dev/null || ss -tulpn 2>/dev/null || netstat -tulpn 2>/dev/null || echo \"NT_UNAVAILABLE:ports\"; }"
-            }
-            _ => {
-                "{ netstat -tulpn 2>/dev/null || echo \"NT_UNAVAILABLE:ports\"; }"
-            }
-        }
-    }
-
-    /// Established-connection probe — only ESTABLISHED rows are kept, because
-    /// they are the sole input for topology-relationship inference.
-    pub fn peers_probe_cmd(&self) -> &'static str {
-        match self.family {
-            OsFamily::MacOS | OsFamily::Bsd => {
-                "{ netstat -an -p tcp 2>/dev/null | grep -i established || echo \"NT_UNAVAILABLE:peers\"; }"
-            }
-            _ if self.has_ss => {
-                "{ ss -tunpH state established 2>/dev/null || ss -tunp 2>/dev/null | grep -i established || netstat -tnp 2>/dev/null | grep -i established || echo \"NT_UNAVAILABLE:peers\"; }"
-            }
-            _ => {
-                "{ netstat -tnp 2>/dev/null | grep -i established || echo \"NT_UNAVAILABLE:peers\"; }"
-            }
-        }
-    }
-
-    /// Zero-install Linux socket source.
-    ///
-    /// `/proc/net/{tcp,tcp6,udp,udp6}` is the kernel socket table. Unlike the
-    /// `ss`/`netstat` fallbacks it is available without installing iproute2 or
-    /// net-tools, performs no name resolution, and emits *every* state. The
-    /// rows are passed through verbatim — the parser reads the socket inode
-    /// (column 10) directly, so the days of deriving per-socket ownership in
-    /// shell (one `readlink` fork per fd, the remote-CPU spike of 2.18.0) are
-    /// gone; ownership now comes from the single-process [`Self::fdmap_probe_cmd`].
-    pub fn proc_sockets_probe_cmd(&self) -> &'static str {
-        r#"
+    /// Scan each local kernel socket table once, emitting listeners first and
+    /// then bounded established/other peers. Busy servers cannot push their
+    /// listening ports out of a fixed prefix. Every omitted row is marked.
+    pub fn proc_sockets_probe_cmd(&self) -> String {
+        format!(r#"
 echo "NT_PROC_BEGIN"
 for spec in "tcp /proc/net/tcp" "tcp6 /proc/net/tcp6" "udp /proc/net/udp" "udp6 /proc/net/udp6"; do
     set -- $spec
@@ -621,111 +569,43 @@ for spec in "tcp /proc/net/tcp" "tcp6 /proc/net/tcp6" "udp /proc/net/udp" "udp6 
     path=$2
     if [ -r "$path" ]; then
         printf 'NT_PROC_FILE\t%s\t%s\n' "$proto" "$path"
-        awk 'NR <= 513 {print} NR == 514 {print "NT_PROC_PARTIAL"; exit}' "$path" 2>/dev/null || echo "NT_PROC_PARTIAL"
+        awk -v proto="$proto" -v max_listeners={listeners} -v max_peers={peers} '
+          NR == 1 {{ print; next }}
+          {{
+            is_listener = (proto == "tcp" ? $4 == "0A" : $4 == "07")
+            if (is_listener) {{
+              if (++listener_count <= max_listeners) print
+              else listener_partial = 1
+              next
+            }}
+            split($3, remote, ":")
+            if (remote[2] == "0000" || remote[2] == "") next
+            if ($4 == "01") {{
+              active_count++
+              if (!(remote[1] in seen_remote) && unique_count < max_peers) {{
+                seen_remote[remote[1]] = 1
+                active_unique[++unique_count] = $0
+              }} else if (++extra_count <= max_peers) {{
+                active_extra[extra_count] = $0
+              }}
+            }} else {{
+              if (++other_count <= max_peers) other[other_count] = $0
+            }}
+          }}
+          END {{
+            emitted = 0
+            for (i = 1; i <= unique_count && emitted < max_peers; i++) {{ print active_unique[i]; emitted++ }}
+            for (i = 1; i <= extra_count && emitted < max_peers; i++) {{ print active_extra[i]; emitted++ }}
+            for (i = 1; i <= other_count && emitted < max_peers; i++) {{ print other[i]; emitted++ }}
+            if (listener_partial) print "NT_LISTEN_PARTIAL"
+            if (active_count + other_count >= max_peers + 1) print "NT_PEER_PARTIAL"
+          }}' "$path" 2>/dev/null || echo "NT_PROC_PARTIAL"
     elif [ "$proto" = tcp ] || [ "$proto" = udp ]; then
         echo "NT_PROC_PARTIAL"
     fi
 done
 echo "NT_PROC_END"
-"#
-    }
-
-    /// Process → socket-inode ownership in ONE remote process.
-    ///
-    /// GNU findutils matches every socket fd with a single kernel-side
-    /// traversal (`-lname`, `-printf`) — no per-fd `readlink` forks, which is
-    /// what made busy hosts spike to thousands of execs per probe. BusyBox
-    /// `find` (Alpine) lacks `-printf`/`-lname` on older builds and exits
-    /// non-zero, so the globbed `ls -l` fallback still covers it with a single
-    /// process. Both output shapes are parsed by `parse_fdmap`. Non-root users
-    /// simply get a partial map (other users' /proc/<pid>/fd is unreadable),
-    /// which degrades `p1` attribution instead of fabricating it.
-    ///
-    /// The trailing `cat /proc/[0-9]*/stat` block feeds the PARENT lookup:
-    /// forking servers (`socat TCP-LISTEN:…,fork`, nginx, php-fpm) close the
-    /// inherited listener fd in the child, so the dialling process owns no
-    /// listener and p1 must be attributed through its `PPid`. One `cat` with
-    /// a shell glob — zero extra forks — and every `stat` line starts with its
-    /// own pid, so the rows self-identify.
-    pub fn fdmap_probe_cmd(&self) -> &'static str {
-        match self.family {
-            OsFamily::MacOS | OsFamily::Bsd => "echo \"NT_FDMAP_UNAVAILABLE\"",
-            _ => {
-                "echo \"NT_FDMAP_BEGIN\"; { find /proc/[0-9]*/fd -lname 'socket:\\[*' -printf '%p %l\\n' 2>/dev/null || ls -l /proc/[0-9]*/fd 2>/dev/null; } | head -n 40000; echo \"NT_FDMAP_PPID\"; cat /proc/[0-9]*/stat 2>/dev/null | head -n 40000; echo \"NT_FDMAP_END\""
-            }
-        }
-    }
-
-    /// Firewall type / state probe.
-    ///
-    /// Emits `FW=<type>`, `FW_STATE=…`, `FW_VERSION=…`, an `FW_ZONES_BEGIN` …
-    /// `FW_ZONES_END` block, and an `FW_POLICY_BEGIN` … `FW_POLICY_END` block
-    /// holding the iptables chain policies. `FW_RAW=` carries the first raw
-    /// line (including stderr) so the parser can turn `Permission denied`
-    /// into a `需要 root 权限` note instead of a hard failure.
-    pub fn firewall_probe_cmd(&self) -> String {
-        let mut s = String::from("FW=none\nFW_STATE=not running\nFW_VERSION=\nFW_RAW=\n");
-        s.push_str(
-            "if command -v firewall-cmd >/dev/null 2>&1 && [ \"$(firewall-cmd --state 2>/dev/null)\" = running ]; then\n\
-             FW=firewalld; FW_STATE=running\n\
-             elif command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -Eq 'Status: active|^active'; then\n\
-             FW=ufw; FW_STATE=active\n",
-        );
-        if matches!(self.family, OsFamily::MacOS | OsFamily::Bsd) {
-            s.push_str(
-                "elif command -v pfctl >/dev/null 2>&1 && pfctl -s info 2>/dev/null | grep -qi '^Status: Enabled'; then\n\
-                 FW=pf; FW_STATE=enabled\n",
-            );
-        }
-        s.push_str(
-            "elif command -v iptables-save >/dev/null 2>&1 && iptables-save 2>/dev/null | grep -Eq '^(\\*|:)'; then\n\
-             FW=iptables; FW_STATE=running\n\
-             elif command -v nft >/dev/null 2>&1 && nft list ruleset 2>/dev/null | grep -Eqi '(table|chain|hook)'; then\n\
-             FW=nftables; FW_STATE=running\n\
-             elif command -v iptables >/dev/null 2>&1 && iptables -S 2>/dev/null | grep -q '^-'; then\n\
-             FW=iptables; FW_STATE=running\n\
-             fi\n\
-             echo \"FW=$FW\"\n\
-             echo \"FW_STATE=$FW_STATE\"\n\
-             case \"$FW\" in\n\
-               firewalld) echo \"FW_VERSION=$(firewall-cmd --version 2>&1 | head -n 1)\"; echo \"FW_RAW=$(firewall-cmd --state 2>&1 | head -n 1)\";;\n\
-               ufw) echo \"FW_VERSION=$(ufw version 2>&1 | head -n 1)\"; echo \"FW_RAW=$(ufw status 2>&1 | head -n 1)\";;\n\
-               nftables) echo \"FW_VERSION=$(nft --version 2>&1 | head -n 1)\"; echo \"FW_RAW=$(nft list ruleset 2>&1 | head -n 1)\";;\n\
-               iptables) echo \"FW_VERSION=$(iptables --version 2>&1 | head -n 1)\"; echo \"FW_RAW=$(iptables-save 2>&1 | head -n 1)\";;\n",
-        );
-        if matches!(self.family, OsFamily::MacOS | OsFamily::Bsd) {
-            s.push_str(
-                "pf) echo \"FW_VERSION=\"; echo \"FW_RAW=$(pfctl -s info 2>&1 | head -n 1)\";;\n",
-            );
-        }
-        s.push_str(
-            "esac\n\
-             echo \"FW_ZONES_BEGIN\"\n\
-             if [ \"$FW\" = firewalld ]; then firewall-cmd --get-active-zones 2>&1 | head -n 20; fi\n\
-             echo \"FW_ZONES_END\"\n\
-             echo \"FW_POLICY_BEGIN\"\n\
-             if command -v iptables >/dev/null 2>&1; then iptables -S 2>&1 | grep -E '^-P ' | head -n 6; fi\n\
-             echo \"FW_POLICY_END\"\n",
-        );
-        s
-    }
-
-    /// Firewall rule dump — one block per available backend, each prefixed
-    /// with a `##RULE_FMT:<backend>##` marker so the parser can dispatch on
-    /// the exact output format it is looking at.
-    pub fn firewall_rules_probe_cmd(&self) -> String {
-        let mut s = String::from(
-            "if command -v firewall-cmd >/dev/null 2>&1; then echo \"##RULE_FMT:firewalld##\"; firewall-cmd --list-all-zones 2>&1 | head -n 120; fi\n\
-             if command -v ufw >/dev/null 2>&1; then echo \"##RULE_FMT:ufw##\"; ufw status verbose 2>&1 | head -n 80; fi\n\
-             if command -v nft >/dev/null 2>&1; then echo \"##RULE_FMT:nft##\"; nft list ruleset 2>&1 | head -n 120; fi\n\
-             if command -v iptables-save >/dev/null 2>&1; then echo \"##RULE_FMT:iptables##\"; iptables-save 2>&1 | head -n 160; elif command -v iptables >/dev/null 2>&1; then echo \"##RULE_FMT:iptables##\"; iptables -S 2>&1 | head -n 120; fi\n",
-        );
-        if matches!(self.family, OsFamily::MacOS | OsFamily::Bsd) {
-            s.push_str(
-                "if command -v pfctl >/dev/null 2>&1; then echo \"##RULE_FMT:pf##\"; pfctl -sr 2>&1 | head -n 80; fi\n",
-            );
-        }
-        s
+"#, listeners = crate::network_probe::policy::LISTENER_ROWS, peers = crate::network_probe::policy::PEER_ROWS)
     }
 
     /// Mandatory low-impact snapshot. Read only metadata, limited interfaces
@@ -741,7 +621,7 @@ echo "NT_PROC_END"
         s.push_str(self.os_release_probe_cmd());
         s.push_str("\necho \"###NT:interfaces###\"; { ");
         s.push_str(self.interfaces_probe_cmd());
-        s.push_str("; } | nt_limit 128\n");
+        s.push_str(&format!("; }} | nt_limit {}\n", crate::network_probe::policy::INTERFACE_ROWS));
         if matches!(self.family, OsFamily::MacOS | OsFamily::Bsd) {
             // netstat's kernel snapshot can itself scale with every socket.
             // Fail closed until a bounded native source is available.
@@ -749,7 +629,7 @@ echo "NT_PROC_END"
             s.push_str("echo \"###NT:peers###\"; echo \"NT_UNAVAILABLE:bounded socket source unavailable\"\n");
         } else {
             s.push_str("echo \"###NT:proc_sockets###\";\n");
-            s.push_str(self.proc_sockets_probe_cmd());
+            s.push_str(&self.proc_sockets_probe_cmd());
         }
         s.push_str("echo \"###NT:fdmap###\"; echo \"NT_SKIPPED:low-impact policy\"\n");
         s.push_str("echo \"###NT:end###\"");
@@ -1001,7 +881,8 @@ mod tests {
             "uname -n",
             "ip -o addr",
             "/proc/net/tcp",
-            "NR <= 513",
+            "-v max_listeners=1024",
+            "-v max_peers=384",
         ] {
             assert!(script.contains(required), "probe must use {required:?}");
         }
@@ -1035,52 +916,7 @@ mod tests {
         assert!(macos.contains("NT_SKIPPED:low-impact policy"));
     }
 
-    #[test]
-    fn test_firewall_cmd_emits_markers() {
-        let cmd = OsInfo::default().firewall_probe_cmd();
-        for marker in [
-            "FW=firewalld",
-            "FW_ZONES_BEGIN",
-            "FW_ZONES_END",
-            "FW_POLICY_BEGIN",
-            "FW_POLICY_END",
-            "FW=none",
-        ] {
-            assert!(cmd.contains(marker), "missing {marker}");
-        }
-    }
 
-    #[test]
-    fn test_firewall_rules_cmd_emits_format_markers() {
-        let cmd = OsInfo::default().firewall_rules_probe_cmd();
-        for marker in [
-            "##RULE_FMT:firewalld##",
-            "##RULE_FMT:ufw##",
-            "##RULE_FMT:nft##",
-            "##RULE_FMT:iptables##",
-        ] {
-            assert!(cmd.contains(marker), "missing {marker}");
-        }
-        assert!(!cmd.contains("##RULE_FMT:pf##"));
-    }
-
-    #[test]
-    fn test_peers_cmd_only_established() {
-        for info in [
-            OsInfo {
-                family: OsFamily::Debian,
-                has_ss: true,
-                ..Default::default()
-            },
-            OsInfo {
-                family: OsFamily::RedHat,
-                has_ss: false,
-                ..Default::default()
-            },
-        ] {
-            assert!(info.peers_probe_cmd().contains("established"));
-        }
-    }
 }
 
 #[cfg(test)]

@@ -1,9 +1,9 @@
 import React, { createContext, useContext, useReducer, useEffect, useRef, useMemo } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { getCurrentWindow } from '@tauri-apps/api/window';
 import type { TerminalGroupState, TerminalGroupAction, TerminalGroup, TerminalTab } from './terminal-group-types';
 import { terminalGroupReducer, createDefaultState } from './terminal-group-reducer';
-import { saveState, loadState, flushWorkspace } from './terminal-group-serializer';
+import { saveState, loadState } from './terminal-group-serializer';
+import { registerWorkspaceWindowSnapshot } from './workspace-window-snapshot';
 
 /**
  * Disconnect the backend session for a closed tab (best-effort). Terminal tabs
@@ -96,53 +96,10 @@ export function TerminalGroupProvider({ children }: { children: React.ReactNode 
     }
   }, [state]);
 
-  // Tauri delivers a cancellable close request, so we can persist the exact
-  // final state before destroying the window. If persistence fails, closing
-  // still wins: never trap the user in the app because of a storage error.
+  // The close controller also runs on the lock screen, before this provider
+  // mounts. Register the live reducer snapshot only while it exists.
   useEffect(() => {
-    const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
-    if (!isTauri) return;
-    let disposed = false;
-    let unlisten: (() => void) | null = null;
-
-    const exitThroughWindow = async (): Promise<void> => {
-      // `destroy` needs `core:window:allow-destroy`; if the capability is ever
-      // dropped again (the 2.18.0 regression that made the app unclosable) or
-      // the call fails for any other reason, fall back to process exit — the
-      // process plugin and `process:allow-exit` are always available.
-      try {
-        await getCurrentWindow().destroy();
-      } catch (error) {
-        console.error('[workspace] window destroy failed, falling back to process exit:', error);
-        const { exit } = await import('@tauri-apps/plugin-process');
-        await exit(0);
-      }
-    };
-
-    void getCurrentWindow().onCloseRequested(async (event) => {
-      event.preventDefault();
-      saveState(stateRef.current);
-      // Bound the persistence so a wedged storage backend can never keep the
-      // window open; the in-memory snapshot (saveState) is already durable
-      // enough for the fallback path.
-      try {
-        await Promise.race([
-          flushWorkspace(),
-          new Promise((resolve) => setTimeout(resolve, 3_000)),
-        ]);
-      } catch (error) {
-        console.error('[workspace] close-time persistence failed:', error);
-      }
-      if (!disposed) await exitThroughWindow();
-    }).then((dispose) => {
-      if (disposed) dispose();
-      else unlisten = dispose;
-    });
-
-    return () => {
-      disposed = true;
-      unlisten?.();
-    };
+    return registerWorkspaceWindowSnapshot(() => saveState(stateRef.current));
   }, []);
   useEffect(() => {
     if (isInitialMount.current) {

@@ -13,6 +13,7 @@
  */
 import { invoke } from '@tauri-apps/api/core';
 import { ConnectionStorageManager } from '../connection-storage';
+import { listenerMatches } from './topology-listeners';
 import type {
   ApplyProbeSummary,
   MergeOutcome,
@@ -190,11 +191,10 @@ export function applyProbeResult(input: ApplyProbeInput): ApplyProbeSummary {
   // Routes are no longer collected (dropped in 2.18.1): skip the merge so the
   // rows already in the store are neither refreshed nor marked missing.
 
-  // Firewall dumps run behind a 10-minute TTL; when the probe skipped them
-  // (`firewallCollected === false`) the stored rows must stay untouched —
-  // merging an empty payload would wrongly mark them missing.
+  // Current low-impact probes skip firewalls; legacy payloads can still
+  // merge their snapshots. A skipped section must never age stored rows.
   const firewallCollected = data?.firewallCollected !== false;
-  // Zeroed when the firewall sections were skipped (TTL cache); the summary
+  // Zeroed when firewall collection is skipped; the summary
   // fields stay for contract stability.
   let rulesOutcome: MergeOutcome<NetworkFirewallRule> = { items: [], added: 0, updated: 0, missing: 0 };
   if (firewallCollected) {
@@ -259,13 +259,11 @@ export function applyProbeResult(input: ApplyProbeInput): ApplyProbeSummary {
   // A missing listener in a truncated/failed snapshot does not prove that a
   // socket is outbound. Keep unknown peers as nodes, but defer its direction.
   const relationPeers = portsComplete ? data.peers : data.peers.filter(peer =>
-    readable('ports') && data.ports.some(port => port.protocol === peer.protocol
-      && port.port === peer.localPort
-      && ['0.0.0.0', '::', '*', normalizeTopologyAddress(peer.localAddr ?? '')]
-        .includes(normalizeTopologyAddress(port.listenAddr))));
+    readable('ports') && data.ports.some(port =>
+      listenerMatches(port, peer.protocol, peer.localPort, peer.localAddr ?? '')));
   const relationServices = portsComplete ? data.serviceLinks
     : data.serviceLinks.filter(link => link.direction === 'inbound' && readable('ports')
-      && data.ports.some(port => port.protocol === link.protocol && port.port === link.localPort));
+      && data.ports.some(port => listenerMatches(port, link.protocol, link.localPort, link.localAddr)));
   // Resolve any dangling port links whose target IP now matches this node's
   // freshly-probed interfaces ("探测后关联", without re-probing the peer).
   const portLinkResolution = resolvePortLinkTargets({

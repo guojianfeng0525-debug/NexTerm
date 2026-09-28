@@ -63,6 +63,7 @@ import {
   ROUTE_MANUAL_KEYS,
 } from './topology-types';
 import { generateId } from '../toolbox/toolbox-storage';
+import { isListenerState, listenerMatches, selectListener } from './topology-listeners';
 import {
   SERVER_GROUP_ROOT,
   isExternallyBoundListenAddress,
@@ -807,11 +808,6 @@ function isExcludedPeerIp(ip: string): boolean {
   return false;
 }
 
-function isListenerState(state: string): boolean {
-  const value = (state ?? '').trim().toUpperCase();
-  return value.includes('LISTEN') || value.includes('UNCONN');
-}
-
 function isActiveSocketState(state: string): boolean {
   const value = (state ?? '').trim().toUpperCase();
   return value === 'ESTABLISHED' || value === 'ESTAB' || value === 'SYN_SENT' || value === 'SYN_RECV';
@@ -823,23 +819,6 @@ function peerHasServiceEvidence(peer: DetectedPeer, links: readonly DetectedServ
     && normalizeAddr(link.localAddr) === normalizeAddr(peer.localAddr ?? '')
     && link.state === peer.state
     && (link.direction === 'inbound' ? link.localPort === peer.localPort : link.remotePort === peer.remotePort));
-}
-
-function listenerMatches(
-  port: NetworkPort,
-  protocol: string,
-  portNumber: number,
-  localAddr: string,
-): boolean {
-  return port.protocol === protocol
-    && port.port === portNumber
-    && (
-      port.listenAddr === localAddr
-      || port.listenAddr === '0.0.0.0'
-      || port.listenAddr === '*'
-      || port.listenAddr === '::'
-      || port.listenAddr === '[::]'
-    );
 }
 
 export function makeObservedNode(ip: string, now: number, groupPath = SERVER_GROUP_ROOT): NetworkNode {
@@ -994,7 +973,7 @@ export function inferLinksFromPeers(params: {
 
   let added = 0;
   let confirmed = 0;
-  const addressOwner = (ip: string): string | undefined => interfacesIndex.get(ip);
+  const addressOwner = (ip: string): string | undefined => interfacesIndex.get(normalizeAddr(ip));
   const listeningPorts = (nodePorts ?? []).filter(
     (port) => port.missingSince === null && isListenerState(port.state),
   );
@@ -1098,9 +1077,9 @@ export function inferLinksFromPeers(params: {
     if (targetNodeId === nodeId) continue;
 
     const protocol = peer.protocol === 'udp' ? 'udp' : 'tcp';
-    const localAddr = normalizeAddr(peer.localAddr ?? '');
+    const localAddr = peer.localAddr ?? '';
     const inbound = peer.localPort != null
-      && listeningPorts.some((port) => listenerMatches(port, protocol, peer.localPort as number, localAddr));
+      && listeningPorts.some((port) => listenerMatches(port, protocol, peer.localPort, localAddr));
     const sourceNodeId = inbound ? targetNodeId : nodeId;
     const destinationNodeId = inbound ? nodeId : targetNodeId;
     const port = inbound ? peer.localPort : peer.remotePort;
@@ -1141,10 +1120,9 @@ export function portLinkNaturalKey(item: {
   // endpoints therefore key by owner, while persisted listener endpoints key by
   // their real port-row id.
   const source = item.sourcePortId ?? item.sourceNodeId ?? item.sourceIp ?? '';
-  const target = item.targetPortId
-    ?? item.targetNodeId
-    ?? item.targetIp
-    ?? (item.targetPort === null ? '' : String(item.targetPort));
+  const target = item.targetPortId ?? (item.targetIp
+    ? `${item.targetNodeId ?? ''}@${normalizeAddr(item.targetIp)}`
+    : item.targetNodeId ?? (item.targetPort === null ? '' : String(item.targetPort)));
   return [
     source,
     item.sourceProtocol,
@@ -1186,40 +1164,12 @@ export function inferPortLinksFromPeers(params: {
   now: number;
 }): { links: NetworkPortLink[]; added: number; confirmed: number } {
   const { nodeId, peers, serviceLinks, nodePorts, allPorts = nodePorts, interfacesIndex, existingPortLinks, now } = params;
-  const addressOwner = (ip: string): string | undefined => interfacesIndex.get(ip);
+  const addressOwner = (ip: string): string | undefined => interfacesIndex.get(normalizeAddr(ip));
 
-  const portIdForNode = (owner: string | null, protocol: string, port: number) => {
-    if (!owner) return null;
-    const matches = allPorts.filter((p) =>
-      p.nodeId === owner &&
-      p.protocol === protocol &&
-      p.port === port &&
-      p.missingSince === null &&
-      isListenerState(p.state),
-    );
-    // Do not silently choose among several real listeners on different bind
-    // addresses/namespaces; the edge remains server-only until evidence or the
-    // user resolves the exact endpoint.
-    return matches.length === 1 ? matches[0].id : null;
-  };
-
-  const resolveMyListenerId = (protocol: string, port: number, address: string | null) => {
-    const listeners = nodePorts.filter((p) =>
-      p.nodeId === nodeId
-      && p.missingSince === null
-      && isListenerState(p.state)
-      && p.protocol === protocol
-      && p.port === port);
-    if (address) {
-      const normalized = normalizeAddr(address);
-      const exact = listeners.filter((p) => normalizeAddr(p.listenAddr) === normalized);
-      if (exact.length === 1) return exact[0].id;
-      const wildcard = listeners.filter((p) => ['0.0.0.0', '*', '::', '[::]'].includes(p.listenAddr));
-      if (wildcard.length === 1) return wildcard[0].id;
-      return null;
-    }
-    return listeners.length === 1 ? listeners[0].id : null;
-  };
+  const portIdForNode = (owner: string | null, protocol: string, port: number, address: string) =>
+    owner ? selectListener(allPorts, owner, protocol, port, address)?.id ?? null : null;
+  const resolveMyListenerId = (protocol: string, port: number, address: string | null) =>
+    selectListener(nodePorts, nodeId, protocol, port, address)?.id ?? null;
 
   const listeningPorts = (nodePorts ?? []).filter(
     (p) => p.missingSince === null && isListenerState(p.state),
@@ -1242,9 +1192,18 @@ export function inferPortLinksFromPeers(params: {
    * `sourcePortId`, so they must UPGRADE each other in place instead of
    * duplicating. Manual links are only ever confirmed, never rewritten.
    */
-  const mergeCandidate = (candidate: NetworkPortLink): void => {
+  const mergeCandidate = (candidate: NetworkPortLink, targetAddress?: string): void => {
     const key = portLinkNaturalKey(candidate);
-    const existingIndex = links.findIndex((l) => portLinkNaturalKey(l) === key);
+    let existingIndex = links.findIndex((l) => portLinkNaturalKey(l) === key);
+    if (existingIndex < 0 && candidate.targetPortId && targetAddress) {
+      const unresolved = links.filter(link => link.targetPortId === null
+        && link.sourceNodeId === candidate.sourceNodeId && link.sourcePortId === candidate.sourcePortId
+        && link.sourceProtocol === candidate.sourceProtocol
+        && link.targetNodeId === candidate.targetNodeId && link.targetPort === candidate.targetPort
+        && link.targetProtocol === candidate.targetProtocol
+        && normalizeAddr(link.targetIp ?? '') === normalizeAddr(targetAddress));
+      if (unresolved.length === 1) existingIndex = links.indexOf(unresolved[0]);
+    }
     if (existingIndex >= 0) {
       const prev = links[existingIndex];
       links[existingIndex] = prev.source === 'manual'
@@ -1283,6 +1242,7 @@ export function inferPortLinksFromPeers(params: {
         && l.targetNodeId === candidate.targetNodeId
         && l.targetProtocol === candidate.targetProtocol
         && l.targetPort === candidate.targetPort
+        && (!l.targetIp || !candidate.targetIp || normalizeAddr(l.targetIp) === normalizeAddr(candidate.targetIp))
         && (l.targetPortId === null || l.targetPortId === candidate.targetPortId));
       if (degradedIndex >= 0) {
         const prev = links[degradedIndex];
@@ -1333,13 +1293,14 @@ export function inferPortLinksFromPeers(params: {
           lastConfirmedAt: now,
           createdAt: now,
           updatedAt: now,
-        });
+        }, link.localAddr);
       } else {
         // Unknown outbound peers retain a port-less observed node.
 
         const targetPort = link.remotePort;
         if (targetPort == null) continue;
         const p1 = link.localPort ?? null;
+        const targetPortId = portIdForNode(remoteNodeId ?? null, protocol, targetPort, ip);
         mergeCandidate({
           id: '',
           sourceNodeId: nodeId,
@@ -1348,10 +1309,10 @@ export function inferPortLinksFromPeers(params: {
           sourceProtocol: protocol,
           sourcePort: p1 ?? 0, // 0 = attribution unavailable, never fabricated
           targetNodeId: remoteNodeId ?? unresolvedNodeId(ip, params.knownNodes),
-          targetPortId: portIdForNode(remoteNodeId ?? null, protocol, targetPort),
+          targetPortId,
           targetProtocol: protocol,
           targetPort,
-          targetIp: null,
+          targetIp: targetPortId ? null : ip,
           status,
           source: 'auto',
           evidence: `/proc ${link.state}: 本机${p1 != null ? `:${p1}` : ''} → ${ip}:${targetPort}${countSuffix}`,
@@ -1382,8 +1343,9 @@ export function inferPortLinksFromPeers(params: {
     }
 
     const peerNodeId = addressOwner(ip) ?? unresolvedNodeId(ip, params.knownNodes);
-    const localListener = listeningPorts.find((port) =>
-      listenerMatches(port, protocol, localPort, normalizeAddr(peer.localAddr ?? '')));
+    const localListener = selectListener(listeningPorts, nodeId, protocol, localPort, peer.localAddr);
+    const inbound = listeningPorts.some(port =>
+      listenerMatches(port, protocol, localPort, peer.localAddr ?? ''));
     const normalizedProcess = (peer.processName ?? '').trim().toLowerCase();
     const processListeners = peer.processPid != null
       ? listeningPorts.filter((p) => p.pid === peer.processPid)
@@ -1392,7 +1354,7 @@ export function inferPortLinksFromPeers(params: {
 
     // A listening local socket is the server side of the connection. Keep the
     // TCP direction truthful: remote:remotePort → currentNode:localPort.
-    if (localListener) {
+    if (inbound) {
       mergeCandidate({
         id: '',
         sourceNodeId: peerNodeId,
@@ -1403,7 +1365,7 @@ export function inferPortLinksFromPeers(params: {
         sourceProtocol: protocol,
         sourcePort: 0,
         targetNodeId: nodeId,
-        targetPortId: localListener.id,
+        targetPortId: localListener?.id ?? null,
         targetProtocol: protocol,
         targetPort: localPort,
         targetIp: null,
@@ -1417,13 +1379,14 @@ export function inferPortLinksFromPeers(params: {
         lastConfirmedAt: now,
         createdAt: now,
         updatedAt: now,
-      });
+      }, peer.localAddr);
       continue;
     }
 
     // An outbound client socket is anchored to a real same-process listener
     // when process evidence exists. Without that evidence the edge still runs
     // from the server itself; the ephemeral client port is never materialized.
+    const targetPortId = portIdForNode(peerNodeId, protocol, targetPort, ip);
     mergeCandidate({
       id: '',
       sourceNodeId: nodeId,
@@ -1432,10 +1395,10 @@ export function inferPortLinksFromPeers(params: {
       sourceProtocol: protocol,
       sourcePort: processListener?.port ?? 0,
       targetNodeId: peerNodeId,
-      targetPortId: portIdForNode(peerNodeId, protocol, targetPort),
+      targetPortId,
       targetProtocol: protocol,
       targetPort,
-      targetIp: null,
+      targetIp: targetPortId ? null : ip,
       status: isActiveSocketState(peer.state) ? 'active' : 'observed',
       source: 'auto',
       evidence: `/proc ${peer.state}: local -> ${ip}:${targetPort}`,
@@ -1466,43 +1429,23 @@ export function resolvePortLinkTargets(params: {
   now: number;
 }): { links: NetworkPortLink[]; resolved: number } {
   const { nodeId, nodePorts, interfacesIndex, existingPortLinks, now } = params;
-  const addressOwner = (ip: string): string | undefined => interfacesIndex.get(ip);
+  const addressOwner = (ip: string): string | undefined => interfacesIndex.get(normalizeAddr(ip));
 
-  const resolveListenerId = (
-    protocol: string,
-    portNumber: number,
-    address: string | null,
-  ): string | null => {
-    const listeners = (nodePorts ?? []).filter((port) =>
-      port.missingSince === null
-      && isListenerState(port.state)
-      && port.protocol === protocol
-      && port.port === portNumber);
-    if (address) {
-      const normalized = normalizeAddr(address);
-      const exact = listeners.filter((port) => normalizeAddr(port.listenAddr) === normalized);
-      if (exact.length === 1) return exact[0].id;
-      const wildcard = listeners.filter((port) => ['0.0.0.0', '*', '::', '[::]'].includes(port.listenAddr));
-      if (wildcard.length === 1) return wildcard[0].id;
-      return null;
-    }
-    return listeners.length === 1 ? listeners[0].id : null;
-  };
+  const resolveListenerId = (protocol: string, port: number, address: string | null) =>
+    selectListener(nodePorts, nodeId, protocol, port, address)?.id ?? null;
 
   let resolved = 0;
   const links = (existingPortLinks ?? []).map((l): NetworkPortLink => {
     let next = l;
 
     if (next.targetIp && isServerPeerAddress(next.targetIp) && addressOwner(next.targetIp) === nodeId) {
-      next = {
-        ...next,
-        targetNodeId: nodeId,
-        targetPortId: resolveListenerId(next.targetProtocol, next.targetPort, next.targetIp),
-        targetIp: null,
-        updatedAt: now,
-      };
-      resolved += 1;
-    } else if (next.targetNodeId === nodeId && next.targetPortId === null) {
+      const targetPortId = resolveListenerId(next.targetProtocol, next.targetPort, next.targetIp);
+      const targetIp = targetPortId ? null : next.targetIp;
+      if (next.targetNodeId !== nodeId || next.targetPortId !== targetPortId || next.targetIp !== targetIp) {
+        next = { ...next, targetNodeId: nodeId, targetPortId, targetIp, updatedAt: now };
+        resolved += 1;
+      }
+    } else if (!next.targetIp && next.targetNodeId === nodeId && next.targetPortId === null) {
       const portId = resolveListenerId(next.targetProtocol, next.targetPort, null);
       if (portId) {
         next = { ...next, targetPortId: portId, updatedAt: now };
@@ -1521,11 +1464,6 @@ export function resolvePortLinkTargets(params: {
         updatedAt: now,
       };
       resolved += 1;
-    } else if (next.sourceNodeId === nodeId && next.sourcePortId === null) {
-      if (next.sourcePort === 0) {
-        next = { ...next, updatedAt: now };
-        resolved += 1;
-      }
     }
 
     return next;

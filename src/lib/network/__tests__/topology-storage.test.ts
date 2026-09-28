@@ -9,7 +9,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const store = vi.hoisted(() => {
   const tables = new Map<string, Map<string, Record<string, unknown>>>();
   const calls: { cmd: string; args: Record<string, unknown> }[] = [];
-  return { tables, calls, failBatch: false, failBatchAt: 0, batchCount: 0, batchGate: null as Promise<void> | null };
+  return { tables, calls, failBatch: false, failRead: false, failBatchAt: 0, batchCount: 0,
+    batchGate: null as Promise<void> | null, readGate: null as Promise<void> | null };
 });
 
 vi.mock('@tauri-apps/api/core', () => ({
@@ -47,8 +48,12 @@ vi.mock('@tauri-apps/api/core', () => ({
         tableRows().set(rawKey, { ...row });
         return true;
       }
-      case 'row_list':
-        return [...(store.tables.get(table)?.values() ?? [])].map((r) => ({ ...r }));
+      case 'row_list': {
+        if (store.failRead) throw new Error('recovery read failed');
+        const rows = [...(store.tables.get(table)?.values() ?? [])].map((r) => ({ ...r }));
+        if (store.readGate) await store.readGate;
+        return rows;
+      }
       case 'row_get': {
         const row = store.tables.get(table)?.get(args.key as string);
         return row ? { ...row } : null;
@@ -127,9 +132,11 @@ async function flush(): Promise<void> {
 
 beforeEach(() => {
   store.failBatch = false;
+  store.failRead = false;
   store.failBatchAt = 0;
   store.batchCount = 0;
   store.batchGate = null;
+  store.readGate = null;
   store.tables.clear();
   store.calls.length = 0;
   resetTopologyStore();
@@ -539,6 +546,63 @@ describe('port links', () => {
 });
 
 describe('atomic probe persistence', () => {
+  it('does not replace the current topology with empty data on a database read failure', async () => {
+    upsertNode(makeNode());
+    saveNodePorts('node-a', [makePort()]);
+    await flush();
+    store.failRead = true;
+    await expect(initializeTopologyStore()).rejects.toThrow('recovery read failed');
+    expect(getNode('node-a')?.hostname).toBe('web-01');
+    expect(getNodePorts('node-a')).toHaveLength(1);
+  });
+
+  it('preserves the original commit error when recovery also fails', async () => {
+    upsertNode(makeNode());
+    await flush();
+    let release!: () => void;
+    store.batchGate = new Promise<void>(resolve => { release = resolve; });
+    store.failBatchAt = store.batchCount + 3;
+    const pending = commitTopologyProbe(() => upsertNode(makeNode({ hostname: 'fresh-host' })));
+    await Promise.resolve();
+    patchNodeManual('node-a', { notes: 'concurrent note' });
+    store.failRead = true;
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      release();
+      await expect(pending).rejects.toThrow('disk full');
+      expect(log).toHaveBeenCalledWith(expect.stringContaining('recovery failed'), expect.any(Error));
+    } finally { log.mockRestore(); }
+  });
+
+  it.each(['edit', 'delete', 'create'])('keeps a concurrent %s while loading a database snapshot', async action => {
+    upsertNode(makeNode());
+    saveNodePorts('node-a', [makePort()]);
+    await flush();
+    let release!: () => void;
+    store.readGate = new Promise<void>(resolve => { release = resolve; });
+    const loading = initializeTopologyStore();
+    // Read calls captured the old DB rows but have not delivered them yet.
+    if (action === 'edit') patchNodeManual('node-a', { notes: 'new note during recovery' });
+    if (action === 'delete') removeNode('node-a');
+    if (action === 'create') upsertNode(makeNode({ id: 'new-node', connectionId: 'new-connection' }));
+    release();
+    store.readGate = null;
+    await loading;
+    const check = () => {
+      if (action === 'edit') expect(getNode('node-a')?.notes).toBe('new note during recovery');
+      if (action === 'delete') {
+        expect(getNode('node-a')).toBeUndefined();
+        expect(getNodePorts('node-a')).toEqual([]);
+      }
+      if (action === 'create') expect(getNode('new-node')).toBeDefined();
+    };
+    check();
+    await flush();
+    resetTopologyStore();
+    await initializeTopologyStore();
+    check();
+  });
+
   it('reloads durable state if reconciliation of a concurrent edit fails', async () => {
     upsertNode(makeNode());
     await flush();

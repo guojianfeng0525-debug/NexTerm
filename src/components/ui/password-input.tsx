@@ -1,10 +1,12 @@
 import * as React from "react";
+import { useTranslation } from "react-i18next";
 import { Eye, EyeOff } from "lucide-react";
 import { Button } from "./button";
 import { Input } from "./input";
 import { cn } from "./utils";
 
 function PasswordInput({ className, type: _type, ...props }: React.ComponentProps<"input">) {
+  const { t } = useTranslation();
   const [show, setShow] = React.useState(false);
   // Passwords are ASCII — block IME composition (Chinese/Japanese/Korean) so
   // the input method can never inject composed text into the field. Both the
@@ -21,6 +23,9 @@ function PasswordInput({ className, type: _type, ...props }: React.ComponentProp
     <div className="relative">
       <Input
         type={show ? "text" : "password"}
+        data-password-input
+        inputMode="text"
+        autoCapitalize="off"
         className={cn("pr-10", className)}
         onCompositionStart={blockIme}
         onCompositionUpdate={blockIme}
@@ -33,8 +38,8 @@ function PasswordInput({ className, type: _type, ...props }: React.ComponentProp
         variant="ghost"
         size="icon"
         className="absolute right-1 top-1/2 h-7 w-7 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-        aria-label={show ? "Hide password" : "Show password"}
-        title={show ? "Hide password" : "Show password"}
+        aria-label={show ? t("passwordInput.hide") : t("passwordInput.show")}
+        title={show ? t("passwordInput.hide") : t("passwordInput.show")}
         onClick={() => setShow((v) => !v)}
       >
         {show ? <EyeOff /> : <Eye />}

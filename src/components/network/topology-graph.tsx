@@ -34,6 +34,7 @@ import {
   ContextMenuTrigger,
 } from '@/components/ui/context-menu';
 import { cn } from '@/lib/utils';
+import { computeAutoLayout, type Vec2 } from './topology-layout';
 import type {
   LinkType,
   NetworkLink,
@@ -46,27 +47,15 @@ import type {
 export const NODE_WIDTH = 190;
 export const NODE_HEIGHT = 76;
 
-const MIN_ZOOM = 0.3;
+const MIN_ZOOM = 0.12;
 const MAX_ZOOM = 2.5;
 const ZOOM_BUTTON_STEP = 1.25;
-
-/** Force-directed layout tuning (see `computeAutoLayout`). */
-const LAYOUT_IDEAL_DISTANCE = 300;
-const LAYOUT_ITERATIONS = 120;
-const LAYOUT_INITIAL_TEMPERATURE = 170;
-const LAYOUT_COOLING = 0.955;
-const LAYOUT_GRAVITY = 0.1;
 
 /** Below this zoom level edge labels are hidden to avoid visual clutter. */
 const LABEL_VISIBLE_ZOOM = 0.6;
 
 /** Pointer travel (px) below which a press counts as a click, not a drag. */
 const CLICK_SLOP = 4;
-
-export interface Vec2 {
-  x: number;
-  y: number;
-}
 
 const LINK_COLORS: Record<LinkType, string> = {
   ssh: 'var(--chart-1)',
@@ -115,174 +104,6 @@ function truncate(text: string, maxWidth: number, fontSize: number): string {
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
-}
-
-/* ══ automatic layout ═════════════════════════════════════════════════════ */
-
-export interface LayoutOptions {
-  /** Re-place every node, ignoring the manual coordinates already persisted. */
-  readonly force?: boolean;
-}
-
-/**
- * Fruchterman–Reingold style layout.
- *
- * Nodes carrying manual coordinates act as fixed anchors (unless `force` is
- * set); the remaining nodes are seeded on a golden-angle spiral around the
- * anchors' centroid and then relaxed with repulsion + spring attraction +
- * a weak pull towards the centroid. The result is deterministic — no random
- * jitter — so re-running with the same input yields the same picture.
- */
-export function computeAutoLayout(
-  nodes: readonly NetworkNode[],
-  links: readonly NetworkLink[],
-  options: LayoutOptions = {},
-): Map<string, Vec2> {
-  const positions = new Map<string, Vec2>();
-  const anchored = new Set<string>();
-
-  if (!options.force) {
-    for (const node of nodes) {
-      if (node.posX !== null && node.posY !== null) {
-        positions.set(node.id, { x: node.posX, y: node.posY });
-        anchored.add(node.id);
-      }
-    }
-  }
-
-  const ids = nodes.map((node) => node.id);
-  const free = nodes.filter((node) => !anchored.has(node.id));
-
-  let cx = 0;
-  let cy = 0;
-  if (anchored.size > 0) {
-    for (const id of anchored) {
-      const point = positions.get(id);
-      if (point) {
-        cx += point.x;
-        cy += point.y;
-      }
-    }
-    cx /= anchored.size;
-    cy /= anchored.size;
-  }
-
-  // Golden-angle spiral: deterministic and never places two nodes on top of
-  // each other, whatever the node count.
-  const GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5));
-  nodes.forEach((node, index) => {
-    if (anchored.has(node.id)) return;
-    const angle = index * GOLDEN_ANGLE;
-    const radius = 200 + 90 * Math.sqrt(index + 1);
-    positions.set(node.id, { x: cx + Math.cos(angle) * radius, y: cy + Math.sin(angle) * radius });
-  });
-
-  const edges: Array<readonly [string, string]> = [];
-  for (const link of links) {
-    if (link.sourceNodeId === link.targetNodeId) continue;
-    if (positions.has(link.sourceNodeId) && positions.has(link.targetNodeId)) {
-      edges.push([link.sourceNodeId, link.targetNodeId]);
-    }
-  }
-
-  const total = ids.length;
-  // Nothing to relax: a single node, every node anchored, or no edges at all.
-  // The spiral seeding already spaces such graphs out reasonably.
-  if (total < 2 || free.length === 0 || edges.length === 0) return positions;
-
-  const disp = new Map<string, Vec2>();
-  let temperature = LAYOUT_INITIAL_TEMPERATURE;
-
-  for (let iteration = 0; iteration < LAYOUT_ITERATIONS; iteration += 1) {
-    for (const id of ids) disp.set(id, { x: 0, y: 0 });
-
-    let gx = 0;
-    let gy = 0;
-    for (const id of ids) {
-      const point = positions.get(id);
-      if (point) {
-        gx += point.x;
-        gy += point.y;
-      }
-    }
-    gx /= total;
-    gy /= total;
-
-    // Repulsion between every pair.
-    for (let i = 0; i < total; i += 1) {
-      const a = positions.get(ids[i]);
-      if (!a) continue;
-      for (let j = i + 1; j < total; j += 1) {
-        const b = positions.get(ids[j]);
-        if (!b) continue;
-        const dx = a.x - b.x;
-        const dy = a.y - b.y;
-        const distance = Math.max(Math.hypot(dx, dy), 1);
-        const force = (LAYOUT_IDEAL_DISTANCE * LAYOUT_IDEAL_DISTANCE) / distance;
-        const ux = (dx / distance) * force;
-        const uy = (dy / distance) * force;
-        const da = disp.get(ids[i]);
-        const db = disp.get(ids[j]);
-        if (da) {
-          da.x += ux;
-          da.y += uy;
-        }
-        if (db) {
-          db.x -= ux;
-          db.y -= uy;
-        }
-      }
-    }
-
-    // Spring attraction along edges.
-    for (const [a, b] of edges) {
-      const pa = positions.get(a);
-      const pb = positions.get(b);
-      if (!pa || !pb) continue;
-      const dx = pa.x - pb.x;
-      const dy = pa.y - pb.y;
-      const distance = Math.max(Math.hypot(dx, dy), 1);
-      const force = (distance * distance) / LAYOUT_IDEAL_DISTANCE;
-      const ux = (dx / distance) * force;
-      const uy = (dy / distance) * force;
-      const da = disp.get(a);
-      const db = disp.get(b);
-      if (da) {
-        da.x -= ux;
-        da.y -= uy;
-      }
-      if (db) {
-        db.x += ux;
-        db.y += uy;
-      }
-    }
-
-    // Weak gravity keeps disconnected components from drifting away.
-    for (const node of free) {
-      const point = positions.get(node.id);
-      const d = disp.get(node.id);
-      if (!point || !d) continue;
-      d.x += (gx - point.x) * LAYOUT_GRAVITY;
-      d.y += (gy - point.y) * LAYOUT_GRAVITY;
-    }
-
-    // Apply, clamped by the current temperature; anchored nodes never move.
-    for (const node of free) {
-      const point = positions.get(node.id);
-      const d = disp.get(node.id);
-      if (!point || !d) continue;
-      const length = Math.hypot(d.x, d.y);
-      if (length > 0) {
-        const step = Math.min(length, temperature);
-        point.x += (d.x / length) * step;
-        point.y += (d.y / length) * step;
-      }
-    }
-
-    temperature = Math.max(temperature * LAYOUT_COOLING, 1);
-  }
-
-  return positions;
 }
 
 /** Human-facing node name: display name → hostname → primary IP. */
@@ -552,10 +373,11 @@ export function TopologyGraph({
   const containerRef = useRef<HTMLDivElement | null>(null);
   const svgRef = useRef<SVGSVGElement | null>(null);
   const dragRef = useRef<DragState | null>(null);
-  const didInitialFitRef = useRef(false);
+  const lastFitNodeSetRef = useRef('');
+  const lastFittedLayoutSeedRef = useRef(layoutSeed);
 
   const [view, setView] = useState<ViewState>({ x: 0, y: 0, k: 1 });
-  const [size, setSize] = useState({ width: 960, height: 640 });
+  const [size, setSize] = useState({ width: 0, height: 0 });
   const [dragNode, setDragNode] = useState<{ id: string; x: number; y: number } | null>(null);
   const [focusedId, setFocusedId] = useState<string | null>(null);
   const [hoverLink, setHoverLink] = useState<HoverLink | null>(null);
@@ -661,7 +483,7 @@ export function TopologyGraph({
   }, []);
 
   const fitToView = useCallback(() => {
-    if (nodes.length === 0 || size.width === 0) {
+    if (nodes.length === 0 || size.width === 0 || size.height === 0) {
       setView({ x: 0, y: 0, k: 1 });
       return;
     }
@@ -704,12 +526,20 @@ export function TopologyGraph({
     [applyZoom, fitToView],
   );
 
-  // Fit once, as soon as the first nodes have a measurable container.
+  // Newly discovered nodes must enter the viewport after a probe. Coordinate
+  // edits keep the same node set, so manual panning is not reset by dragging.
+  const nodeSetSignature = useMemo(() => nodes.map(node => node.id).sort().join('|'), [nodes]);
   useEffect(() => {
-    if (didInitialFitRef.current || nodes.length === 0 || size.width === 0) return;
-    didInitialFitRef.current = true;
+    if (nodeSetSignature === lastFitNodeSetRef.current || size.width === 0 || size.height === 0) return;
+    lastFitNodeSetRef.current = nodeSetSignature;
     fitToView();
-  }, [nodes.length, size.width, fitToView]);
+  }, [nodeSetSignature, size.width, size.height, fitToView]);
+
+  useEffect(() => {
+    if (layoutSeed === lastFittedLayoutSeedRef.current || size.width === 0 || size.height === 0) return;
+    lastFittedLayoutSeedRef.current = layoutSeed;
+    fitToView();
+  }, [layoutSeed, size.width, size.height, fitToView]);
 
   // Native listener: React attaches wheel handlers passively, so the page
   // would scroll behind the canvas without `preventDefault` here.
@@ -909,8 +739,14 @@ export function TopologyGraph({
   /* ── derived render data ──────────────────────────────────────────────── */
 
   const renderedLinks = useMemo(() => {
-    const hasReverse = new Set<string>();
-    for (const link of links) hasReverse.add(`${link.targetNodeId}>${link.sourceNodeId}`);
+    const groups = new Map<string, NetworkLink[]>();
+    for (const link of links) {
+      const key = `${link.sourceNodeId}>${link.targetNodeId}`;
+      const group = groups.get(key) ?? [];
+      group.push(link);
+      groups.set(key, group);
+    }
+    for (const group of groups.values()) group.sort((a, b) => a.id.localeCompare(b.id));
     return links.flatMap((link) => {
       const from = nodeById.get(link.sourceNodeId);
       const to = nodeById.get(link.targetNodeId);
@@ -918,11 +754,13 @@ export function TopologyGraph({
       const selfLoop = link.sourceNodeId === link.targetNodeId;
       if (!to && !selfLoop) return [];
       const a = positionOf(from);
-      const reverse = hasReverse.has(`${link.sourceNodeId}>${link.targetNodeId}`);
+      const group = groups.get(`${link.sourceNodeId}>${link.targetNodeId}`) ?? [link];
+      const index = group.indexOf(link);
+      const reverse = groups.has(`${link.targetNodeId}>${link.sourceNodeId}`);
       const geometry = selfLoop || !to
         ? selfLoopGeometry(a)
-        : edgeGeometry(a, positionOf(to), reverse ? 26 : 12);
-      return [{ link, geometry }];
+        : edgeGeometry(a, positionOf(to), (index - (group.length - 1) / 2) * 42 + (reverse ? 24 : 0));
+      return [{ link, geometry, parallelCount: group.length }];
     });
   }, [links, nodeById, positionOf]);
 
@@ -978,7 +816,7 @@ export function TopologyGraph({
         <g transform={`translate(${view.x} ${view.y}) scale(${view.k})`}>
           {/* Edges first so cards paint on top of them. */}
           <g>
-            {renderedLinks.map(({ link, geometry }) => {
+            {renderedLinks.map(({ link, geometry, parallelCount }) => {
               const selected = selectedLinkId === link.id;
               const color = LINK_COLORS[link.linkType] ?? LINK_COLORS.unknown;
               const dashed = link.source === 'auto';
@@ -1020,7 +858,7 @@ export function TopologyGraph({
                     strokeDasharray={dashed ? '7 5' : undefined}
                     markerEnd={`url(#topology-arrow-${link.linkType})`}
                   />
-                  {showLabels && (
+                  {showLabels && (selected || hoverLink?.link.id === link.id || (parallelCount === 1 && links.length <= nodes.length * 2)) && (
                     <g transform={`translate(${geometry.label.x} ${geometry.label.y})`}>
                       <rect
                         x={-30}

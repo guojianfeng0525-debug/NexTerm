@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.19.2] - 2026-09-28
+
+### 变更
+
+- 网络拓扑自动布局改为按连通分量分区、按关系层级排布，并为密集星形关系使用多圈布局；保留手动放置的节点，扩大缩放范围以便查看大图。
+- 拓扑探测冷却和并发限制改为按 SSH 服务器分别计算：同一服务器一分钟最多一次且不积压任务，不同服务器可分别探测。
+- Linux socket 采样优先保留监听端口，再限量保留连接记录；监听与连接分别标记截断，部分采样不会被误当作端口消失的证据。
+
+### 修复
+
+- 修复拓扑恢复期间的人工编辑、删除或新增被旧数据库快照覆盖，以及恢复失败遮盖原始提交错误的问题；修正不同网卡、IPv4/IPv6 和历史监听下的端口连线归属。
+- Windows 密码输入框获得焦点时暂时关闭中文输入法，离开后恢复先前状态；窗口启动时最大化。
+- Windows 关闭窗口时显示“退出 / 隐藏到托盘”选择，隐藏后可通过托盘图标恢复，并在操作前保存工作空间。
+
 ## [2.19.1] - 2026-09-21
 
 ### 变更

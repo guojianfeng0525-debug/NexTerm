@@ -94,7 +94,7 @@ export function AppLockScreen({ onUnlock }: AppLockScreenProps) {
   const isLoading = mode === 'loading';
 
   return (
-    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-background p-6">
+    <div className="fixed inset-0 z-40 flex items-center justify-center bg-background p-6">
       <div className="w-full max-w-sm space-y-6 animate-in fade-in duration-300">
         {/* Brand */}
         <div className="text-center space-y-3">

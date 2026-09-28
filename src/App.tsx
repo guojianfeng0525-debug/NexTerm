@@ -28,6 +28,7 @@ import { TerminalCallbacksProvider } from './lib/terminal-callbacks-context';
 import { GridRenderer } from './components/terminal/grid-renderer';
 import { ToolboxNav, type WorkspaceSection } from './components/toolbox/toolbox-nav';
 import { AppLockScreen } from './components/toolbox/app-lock-screen';
+import { WindowCloseController } from './components/window-close-controller';
 // Tool views are code-split (React.lazy) so their heavyweight dependencies
 // (codemirror, sql-formatter, xlsx, …) load on demand instead of inflating the
 // main entry. Views stay mounted once resolved (hidden via CSS), so internal
@@ -2153,18 +2154,22 @@ export default function App() {
     return () => window.clearTimeout(timer);
   }, []);
 
+  // The close controller must stay mounted on the lock screen as well.
+  const closeController = <WindowCloseController />;
+
   // Password gate — no application UI before the password is verified.
   if (appLocked) {
     return (
       <ErrorBoundary label="NexTerm Lock">
         <AppLockScreen onUnlock={() => setAppLocked(false)} />
+        {closeController}
       </ErrorBoundary>
     );
   }
 
   // Storage gate — hydrate SQLite-backed caches before the workspace mounts.
   if (!storageReady) {
-    return <AppStorageLoading />;
+    return <><AppStorageLoading />{closeController}</>;
   }
 
   return (
@@ -2174,6 +2179,7 @@ export default function App() {
           <AppContent />
         </TerminalGroupProvider>
       </LayoutProvider>
+      {closeController}
     </ErrorBoundary>
   );
 }

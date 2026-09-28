@@ -404,11 +404,11 @@ export interface NetworkPortLink {
    * are never auto-probed.
    */
   targetNodeId: string | null;
-  /** Resolved target port row id; NULL until the target node is probed. */
+  /** Real target listener row id; NULL until its binding can be identified. */
   targetPortId: string | null;
   targetProtocol: NetProtocol;
   targetPort: number;
-  /** Legacy bare IP for an unprobed peer target. */
+  /** Observed target address retained until the listener binding is resolved. */
   targetIp: string | null;
 
   /* A — inferred from locally observed peer connections */
@@ -591,8 +591,7 @@ export interface ProbeData {
   firewall: DetectedFirewall | null;
   firewallRules: DetectedFirewallRule[];
   /**
-   * False when the probe skipped the firewall sections because the client-side
-   * 10-minute TTL cache was still fresh; stored firewall rows must then be
+   * False when collection policy skipped firewall sections; stored rows must be
    * left untouched instead of marked missing.
    */
   firewallCollected?: boolean;
