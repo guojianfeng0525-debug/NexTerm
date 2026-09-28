@@ -6,6 +6,7 @@ import "./index.css";
 import "./styles/globals.css";
 import { initializeTheme } from "./lib/utils";
 import { hydratePreferences } from "./lib/preferences";
+import { installPasswordImeHandling } from "./lib/password-ime";
 
 // Suppress the WebKit/browser default context menu app-wide (macOS shows a
 // native selection menu on right-click).
@@ -20,6 +21,7 @@ import { hydratePreferences } from "./lib/preferences";
 // areas with no custom handler. Registered here so both entry roots (App and
 // FileViewerWindow) are covered.
 window.addEventListener('contextmenu', (event) => event.preventDefault());
+installPasswordImeHandling();
 
 // Hydrate SQLite preferences (language, theme, layout, terminal/editor config,
 // keyboard settings, workspace layout) before first paint, then initialize the

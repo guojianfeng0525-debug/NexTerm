@@ -3,8 +3,8 @@
  *
  * Mirrors the shape of `src/lib/toolbox/toolbox-storage.ts`: a synchronous
  * in-memory cache hydrated once after app unlock, synchronous reads for the
- * UI, and fire-and-forget `rowUpsert` / `rowDelete` writes that broadcast a
- * change event so subscribers can re-render.
+ * UI, queued SQLite batches, and change events for subscribers. Probe commits
+ * are awaited; manual edits update the cache optimistically.
  *
  * ── Persistence safety (docs/network-topology-design.md §9) ────────────────
  * · NO credential is ever written. None of the eight `net_*` tables has a
@@ -22,8 +22,9 @@
  * numbers and free-text notes about the user's own servers. `encField` /
  * `decField` are intentionally NOT used.
  */
-import { type DbTable, type Row, rowList } from '../toolbox/db';
+import type { DbTable, Row } from '../toolbox/db';
 import { invoke } from '@tauri-apps/api/core';
+import { reconcileRows } from './topology-reconcile';
 import type {
   NetworkFirewall,
   NetworkFirewallRule,
@@ -527,28 +528,36 @@ function toRow(kind: Kind, item: { readonly id: string }): Row {
 
 /* ── hydration / persistence ─────────────────────────────────────────────── */
 
-/** Load every `net_*` table into the in-memory cache (call once after unlock). */
+/** Load the topology after unlock or failure, retaining concurrent local edits. */
 export async function initializeTopologyStore(): Promise<void> {
+  const before = { ...cache };
+  // The shared rowList helper converts read errors into empty lists. Recovery
+  // must fail explicitly instead of publishing an empty topology as real data.
+  const readRows = (kind: Kind) => invoke<Row[]>('row_list', { table: TABLES[kind] });
   const [nodes, interfaces, routes, firewalls, rules, ports, probes, links, portLinks] = await Promise.all([
-    rowList(TABLES.nodes),
-    rowList(TABLES.interfaces),
-    rowList(TABLES.routes),
-    rowList(TABLES.firewalls),
-    rowList(TABLES.rules),
-    rowList(TABLES.ports),
-    rowList(TABLES.probes),
-    rowList(TABLES.links),
-    rowList(TABLES.port_links),
+    readRows('nodes'),
+    readRows('interfaces'),
+    readRows('routes'),
+    readRows('firewalls'),
+    readRows('rules'),
+    readRows('ports'),
+    readRows('probes'),
+    readRows('links'),
+    readRows('port_links'),
   ]);
-  cache.nodes = nodes.map(rowToNode);
-  cache.interfaces = interfaces.map(rowToInterface);
-  cache.routes = routes.map(rowToRoute);
-  cache.firewalls = firewalls.map(rowToFirewall);
-  cache.rules = rules.map(rowToRule);
-  cache.ports = ports.map(rowToPort);
-  cache.probes = probes.map(rowToProbe);
-  cache.links = links.map(rowToLink);
-  cache.port_links = portLinks.map(rowToPortLink);
+  const fresh = {
+    nodes: nodes.map(rowToNode),
+    interfaces: interfaces.map(rowToInterface),
+    routes: routes.map(rowToRoute),
+    firewalls: firewalls.map(rowToFirewall),
+    rules: rules.map(rowToRule),
+    ports: ports.map(rowToPort),
+    probes: probes.map(rowToProbe),
+    links: links.map(rowToLink),
+    port_links: portLinks.map(rowToPortLink),
+  };
+  const repairs = publishSnapshot(before, fresh);
+  if (repairs.length) await enqueueWrites(repairs);
   initialized = true;
 }
 
@@ -599,10 +608,32 @@ function enqueueWrites(writes: TopologyWrite[]): Promise<void> {
   return pending;
 }
 
-/** Merge synchronously into a draft, commit all rows, then publish the cache.
- * Concurrent manual edits keep their changed fields and are rebased onto the
- * committed observation, so a full-row edit cannot roll back fresh auto fields.
+/** Publish a durable snapshot while preserving edits made since `before`.
+ * Return the minimal repair batch for previously queued full-row writes.
  */
+function publishSnapshot(before: typeof cache, fresh: typeof cache): TopologyWrite[] {
+  const currentNodeIds = new Set(listNodes().map(node => node.id));
+  const deletedNodeIds = (before.nodes as NetworkNode[])
+    .filter(node => !currentNodeIds.has(node.id)).map(node => node.id);
+  const repairs: TopologyWrite[] = [];
+  for (const kind of Object.keys(cache) as Kind[]) {
+    const { items, rebased } = reconcileRows(
+      before[kind] as { id: string }[],
+      fresh[kind] as { id: string }[],
+      cache[kind] as { id: string }[],
+    );
+    cache[kind] = items;
+    repairs.push(...rebased.map(row => ({ table: TABLES[kind], row: toRow(kind, row) })));
+  }
+  // A manual deletion did not know about children newly discovered by a probe.
+  if (deletedNodeIds.length) {
+    stagedWrites = repairs;
+    try { removeNodes(deletedNodeIds); } finally { stagedWrites = null; }
+  }
+  return repairs;
+}
+
+/** Build a draft synchronously, commit it, then reconcile concurrent edits. */
 export async function commitTopologyProbe<T>(merge: () => T): Promise<T> {
   const before = { ...cache };
   const writes: TopologyWrite[] = [];
@@ -617,49 +648,21 @@ export async function commitTopologyProbe<T>(merge: () => T): Promise<T> {
     stagedWrites = null;
   }
   await enqueueWrites(writes);
-  const currentNodeIds = new Set(listNodes().map(node => node.id));
-  const deletedNodeIds = (before.nodes as NetworkNode[])
-    .filter(node => !currentNodeIds.has(node.id)).map(node => node.id);
-  const rebasedWrites: TopologyWrite[] = [];
-  for (const kind of Object.keys(cache) as Kind[]) {
-    if (cache[kind] === before[kind]) { cache[kind] = after[kind]; continue; }
-    // Preserve changes made while SQLite was committing; apply the remaining
-    // draft delta by stable row id, never replace a whole table underneath UI.
-    const oldRows = new Map((before[kind] as { id: string }[]).map(row => [row.id, row]));
-    const newRows = new Map((after[kind] as { id: string }[]).map(row => [row.id, row]));
-    const current = cache[kind] as { id: string }[];
-    const currentIds = new Set(current.map(row => row.id));
-    cache[kind] = current.flatMap(row => {
-      const old = oldRows.get(row.id);
-      const fresh = newRows.get(row.id);
-      if (row === old) return fresh ? [fresh] : [];
-      if (!old || !fresh) return [row];
-      const changed = Object.fromEntries(Object.entries(row)
-        .filter(([key, value]) => value !== (old as Record<string, unknown>)[key]));
-      const rebased = { ...fresh, ...changed };
-      rebasedWrites.push({ table: TABLES[kind], row: toRow(kind, rebased) });
-      return [rebased];
-    });
-    for (const [id, row] of newRows) if (!oldRows.has(id) && !currentIds.has(id)) cache[kind].push(row);
-  }
-  // A manual deletion only knew the pre-probe children. Also remove any new
-  // children/edges in the committed draft, in the same reconciliation batch.
-  if (deletedNodeIds.length) {
-    stagedWrites = rebasedWrites;
-    try { removeNodes(deletedNodeIds); } finally { stagedWrites = null; }
-  }
-  // Already queued edits may contain old auto fields. Repair them in queue
-  // order; any subsequent edit now reads the rebased cache and stays newer.
-  const durable = rebasedWrites.length ? enqueueWrites(rebasedWrites) : Promise.resolve();
+  const repairs = publishSnapshot(before, after);
+  const durable = repairs.length ? enqueueWrites(repairs) : Promise.resolve();
   notifyTopologyChanged();
   try {
     await durable;
   } catch (error) {
-    // The initial observation committed, but its concurrent-edit repair did
-    // not. Recover the actual durable state instead of displaying phantom data.
+    // Reload through the same reconciliation path; edits during recovery must
+    // not be overwritten by the database read that was already in flight.
     await writeQueue;
-    await initializeTopologyStore();
-    notifyTopologyChanged();
+    try {
+      await initializeTopologyStore();
+      notifyTopologyChanged();
+    } catch (recoveryError) {
+      console.error('[topology] recovery failed after commit error', recoveryError);
+    }
     throw error;
   }
   return result;

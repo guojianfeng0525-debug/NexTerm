@@ -41,8 +41,18 @@
     "more": "More",
     "clear": "Clear"
   },
+  "passwordInput": {
+    "show": "Show password",
+    "hide": "Hide password"
+  },
   "app": {
     "title": "NexTerm",
+    "close": {
+      "title": "Close NexTerm?",
+      "description": "Exit the application or keep connections running in the system tray.",
+      "hideToTray": "Hide to tray",
+      "exit": "Exit"
+    },
     "description": "Modern SSH / SFTP / FTP client built with Tauri",
     "connectionsRestored": "Connections Restored",
     "connectionsRestoredDesc": "{{restoredCount}} connection(s) restored, {{failedCount}} failed",
@@ -2504,7 +2514,7 @@
     "deleteNode": "Delete node",
     "probe": {
       "partial": "Probe partially complete",
-      "scope": "Low-impact collection: manual local reads, at most once per minute. Bounded samples; no process traversal, firewall queries, or peer connections. Missing resource-limit tools skips collection and preserves existing topology.",
+      "scope": "Low-impact collection: manual local reads, at most once per minute per server. Listening ports take priority in bounded samples; truncated evidence remains partial. No process traversal, firewall queries, or peer connections. Missing resource-limit tools skips collection and preserves existing topology.",
       "success": "Probe complete",
       "successDetail": "Added {{added}}, updated {{updated}}, {{missing}} not seen this run",
       "failed": "Probe failed"

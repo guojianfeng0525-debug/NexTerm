@@ -14,6 +14,7 @@ mod ls_parser;
 mod mysql;
 pub mod network_probe;
 pub mod os_detect;
+mod password_ime;
 mod postgres;
 mod postgres_catalog;
 mod postgres_design;
@@ -330,6 +331,7 @@ pub fn run() {
     } else {
         builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
                 let _ = window.set_focus();
                 let _ = window.unminimize();
             }
@@ -344,6 +346,39 @@ pub fn run() {
         .setup({
             let connection_manager_clone = connection_manager.clone();
             move |app| {
+                #[cfg(windows)]
+                {
+                    use tauri::tray::{MouseButton, TrayIconBuilder, TrayIconEvent};
+
+                    if let Some(window) = app.get_webview_window("main") {
+                        if let Err(error) = window.maximize() {
+                            tracing::warn!("Failed to maximize the Windows main window: {error}");
+                        }
+                    }
+                    if let Some(icon) = app.default_window_icon() {
+                        TrayIconBuilder::new()
+                            .icon(icon.clone())
+                            .tooltip("NexTerm")
+                            .show_menu_on_left_click(false)
+                            .on_tray_icon_event(|tray, event| {
+                                if matches!(
+                                    event,
+                                    TrayIconEvent::Click { button: MouseButton::Left, .. }
+                                        | TrayIconEvent::DoubleClick { button: MouseButton::Left, .. }
+                                ) {
+                                    if let Some(window) = tray.app_handle().get_webview_window("main") {
+                                        let _ = window.show();
+                                        let _ = window.unminimize();
+                                        let _ = window.set_focus();
+                                    }
+                                }
+                            })
+                            .build(app)?;
+                    } else {
+                        tracing::warn!("Windows tray icon unavailable: application icon missing");
+                    }
+                }
+
                 // Register native macOS menu and forward item events to the frontend
                 #[cfg(target_os = "macos")]
                 {
@@ -500,6 +535,7 @@ pub fn run() {
         .manage(sqlite::SqliteState::default())
         .manage(mysql::MysqlState::default())
         .invoke_handler(tauri::generate_handler![
+            password_ime::set_password_ime,
             commands::ssh_connect,
             commands::ssh_host_key_fingerprint,
             commands::ssh_cancel_connect,

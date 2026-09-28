@@ -46,10 +46,10 @@ import { ConnectionStorageManager } from '@/lib/connection-storage';
 import { SERVER_GROUP_ROOT } from '@/lib/network/address-scope';
 import {
   TopologyGraph,
-  computeAutoLayout,
   nodeLabel,
   type TopologyGraphHandle,
 } from '@/components/network/topology-graph';
+import { computeAutoLayout } from '@/components/network/topology-layout';
 import { TopologyNodeDialog } from '@/components/network/topology-node-dialog';
 import { LinkEditorDialog } from '@/components/network/link-editor-dialog';
 import { PortTopologyView } from '@/components/network/port-topology';
@@ -297,8 +297,6 @@ export function ToolTopology() {
     setLayoutSeed((seed) => seed + 1);
     reload();
     toast.success(t('topology.toast.layoutApplied'));
-    // Give the freshly persisted coordinates a frame before fitting.
-    requestAnimationFrame(() => graphRef.current?.fitToView());
   }, [reload, t, visibleLinks, visibleNodes]);
 
   /* ── link actions ─────────────────────────────────────────────────────── */

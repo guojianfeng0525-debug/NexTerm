@@ -5,25 +5,61 @@ use crate::proxy::{ProxyConfig, ProxyType};
 use crate::sftp_client::{FileEntry, FileEntryType, SftpAuthMethod, SftpConfig};
 use crate::ssh::{AuthMethod, JumpConfig, SshConfig};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::{Mutex, OnceLock};
+use std::time::Instant;
 use tauri::State;
-use tokio::sync::Semaphore;
 
-/// Global, process-wide serialization for topology probes.
-///
-/// A user can switch tabs and click another server before the first manual
-/// probe finishes. One permit prevents those independent UI actions from
-/// stacking simultaneous remote reads; the 5-second probe timeout guarantees
-/// that the permit is eventually released.
-static TOPOLOGY_PROBE_LIMIT: Semaphore = Semaphore::const_new(1);
-static TOPOLOGY_LAST_PROBE: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+#[derive(Default)]
+struct TopologyProbeSlot {
+    last: Option<Instant>,
+    active: bool,
+}
 
-fn reserve_topology_probe(last: &mut Option<std::time::Instant>, now: std::time::Instant) -> Result<(), String> {
-    if last.is_some_and(|at| now.duration_since(at) < std::time::Duration::from_secs(60)) {
-        return Err("Low-impact probing allows at most one collection per minute in this application; try again later".into());
+static TOPOLOGY_PROBE_SLOTS: OnceLock<Mutex<HashMap<String, TopologyProbeSlot>>> = OnceLock::new();
+
+fn probe_slots() -> &'static Mutex<HashMap<String, TopologyProbeSlot>> {
+    TOPOLOGY_PROBE_SLOTS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn reserve_topology_probe(
+    slots: &mut HashMap<String, TopologyProbeSlot>,
+    server: &str,
+    now: Instant,
+) -> Result<(), String> {
+    // Evict expired, inactive entries so many one-off servers do not grow the map forever.
+    slots.retain(|_, slot| {
+        slot.active
+            || slot
+                .last
+                .is_some_and(|at| now.duration_since(at) < crate::network_probe::policy::COOLDOWN)
+    });
+    let slot = slots.entry(server.to_owned()).or_default();
+    if slot.active {
+        return Err("A topology probe is already running for this server".into());
     }
-    *last = Some(now);
+    if slot
+        .last
+        .is_some_and(|at| now.duration_since(at) < crate::network_probe::policy::COOLDOWN)
+    {
+        return Err("Low-impact probing allows at most one collection per minute for this server; try again later".into());
+    }
+    slot.last = Some(now);
+    slot.active = true;
     Ok(())
+}
+
+struct TopologyProbeGuard(String);
+
+impl Drop for TopologyProbeGuard {
+    fn drop(&mut self) {
+        if let Ok(mut slots) = probe_slots().lock() {
+            if let Some(slot) = slots.get_mut(&self.0) {
+                slot.active = false;
+            }
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -5119,29 +5155,29 @@ mod encoding_tests {
 ///
 /// Runs exactly one read-only shell script over the existing SSH session and
 /// parses it into `ProbeResult`. Never auto-invoked — the frontend calls it
-/// from the manual "探测当前服务器" action only. The global permit also keeps
-/// at most one server probe active, even if several desktop panels queue a
-/// manual action.
+/// from the manual "探测当前服务器" action only. Each SSH endpoint has an
+/// independent cooldown and active slot; additional requests are not queued.
 #[tauri::command]
 pub async fn probe_network_topology(
     connection_id: String,
     include_firewall: Option<bool>,
     state: State<'_, Arc<ConnectionManager>>,
 ) -> Result<crate::network_probe::ProbeResult, String> {
-    let _probe_permit = TOPOLOGY_PROBE_LIMIT
-        .try_acquire()
-        .map_err(|_| "A topology probe is already running; no additional probe was queued")?;
-
     let connection = state
         .get_connection(&connection_id)
         .await
         .ok_or("Connection not found")?;
 
     let client = connection.read().await;
+    let server = client
+        .probe_server_key()
+        .ok_or("Server identity unavailable")?
+        .to_owned();
     {
-        let mut last = TOPOLOGY_LAST_PROBE.lock().map_err(|_| "probe limiter unavailable")?;
-        reserve_topology_probe(&mut last, std::time::Instant::now())?;
+        let mut slots = probe_slots().lock().map_err(|_| "probe limiter unavailable")?;
+        reserve_topology_probe(&mut slots, &server, Instant::now())?;
     }
+    let _probe_guard = TopologyProbeGuard(server);
 
     // Detect only the kernel family inside the one local-read script. No
     // separate OS/tool probe and no name resolution is needed.
@@ -5156,17 +5192,21 @@ pub async fn probe_network_topology(
 #[cfg(test)]
 mod topology_budget_tests {
     use super::reserve_topology_probe;
+    use std::collections::HashMap;
     use std::time::{Duration, Instant};
 
     #[test]
     fn topology_budget_rejects_bursts_without_extending_the_cooldown() {
         let now = Instant::now();
-        let mut last = None;
-        assert!(reserve_topology_probe(&mut last, now).is_ok());
+        let mut slots = HashMap::new();
+        assert!(reserve_topology_probe(&mut slots, "server-a", now).is_ok());
+        assert!(reserve_topology_probe(&mut slots, "server-b", now).is_ok());
+        assert!(reserve_topology_probe(&mut slots, "server-a", now).is_err());
+        slots.get_mut("server-a").unwrap().active = false;
         for second in [0, 1, 59] {
-            assert!(reserve_topology_probe(&mut last, now + Duration::from_secs(second)).is_err());
-            assert_eq!(last, Some(now));
+            assert!(reserve_topology_probe(&mut slots, "server-a", now + Duration::from_secs(second)).is_err());
+            assert_eq!(slots["server-a"].last, Some(now));
         }
-        assert!(reserve_topology_probe(&mut last, now + Duration::from_secs(60)).is_ok());
+        assert!(reserve_topology_probe(&mut slots, "server-a", now + Duration::from_secs(60)).is_ok());
     }
 }

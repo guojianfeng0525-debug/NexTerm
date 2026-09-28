@@ -41,8 +41,18 @@
     "more": "更多",
     "clear": "清除"
   },
+  "passwordInput": {
+    "show": "显示密码",
+    "hide": "隐藏密码"
+  },
   "app": {
     "title": "NexTerm",
+    "close": {
+      "title": "关闭 NexTerm？",
+      "description": "可以退出应用，或隐藏到系统托盘并保持连接运行。",
+      "hideToTray": "隐藏到托盘",
+      "exit": "退出"
+    },
     "description": "基于 Tauri 构建的现代 SSH/SFTP/FTP 客户端",
     "connectionsRestored": "连接已恢复",
     "connectionsRestoredDesc": "{{restoredCount}} 个连接已恢复，{{failedCount}} 个失败",
@@ -2504,7 +2514,7 @@
     "deleteNode": "删除节点",
     "probe": {
       "partial": "探测部分完成",
-      "scope": "低开销采集：仅手动读取本机，每分钟最多一次；限量采样，跳过进程遍历与防火墙查询，不连接对端。缺少资源限制工具时不采集，已有拓扑保留。",
+      "scope": "低开销采集：仅手动读取当前服务器，每台服务器每分钟最多一次；限量采样优先保留监听端口，截断结果标记为部分采集。跳过进程遍历与防火墙查询，不连接对端。缺少资源限制工具时不采集，已有拓扑保留。",
       "success": "探测完成",
       "successDetail": "新增 {{added}} 项，更新 {{updated}} 项，本次未出现 {{missing}} 项",
       "failed": "探测失败"

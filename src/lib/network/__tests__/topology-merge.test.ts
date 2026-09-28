@@ -1338,6 +1338,59 @@ describe('port-level topology links', () => {
 });
 
 describe('mixed and reciprocal evidence', () => {
+  it('does not fall back to a number-only match when the retained IP ownership is uncertain', () => {
+    const link = makePortLink({ targetNodeId: 'b', targetPortId: null, targetPort: 5432, targetIp: '10.0.0.2' });
+    const result = resolvePortLinkTargets({ nodeId: 'b', now: 2000, interfacesIndex: new Map(),
+      nodePorts: [makePort({ nodeId: 'b', port: 5432 })], existingPortLinks: [link] });
+    expect(result.resolved).toBe(0);
+    expect(result.links[0]).toBe(link);
+  });
+
+  it('preserves different unresolved destination addresses until their binds are known', () => {
+    const result = inferPortLinksFromPeers({ nodeId: 'a', nodePorts: [],
+      peers: ['10.0.0.2', '10.0.0.3'].map(remoteAddr => detectedPeer({ localAddr: '10.0.0.1', remoteAddr, remotePort: 5432 })),
+      interfacesIndex: new Map([['10.0.0.2', 'b'], ['10.0.0.3', 'b']]), existingPortLinks: [], now: 2000,
+    });
+    expect(result.links.map(link => link.targetIp)).toEqual(['10.0.0.2', '10.0.0.3']);
+    const resolved = resolvePortLinkTargets({ nodeId: 'b', now: 3000,
+      nodePorts: [makePort({ id: 'bind-2', nodeId: 'b', port: 5432, listenAddr: '10.0.0.2' }),
+        makePort({ id: 'bind-3', nodeId: 'b', port: 5432, listenAddr: '10.0.0.3' })],
+      interfacesIndex: new Map([['10.0.0.2', 'b'], ['10.0.0.3', 'b']]), existingPortLinks: result.links,
+    });
+    expect(resolved.links.map(link => link.targetPortId)).toEqual(['bind-2', 'bind-3']);
+    expect(resolved.links.every(link => link.lastConfirmedAt === 2000)).toBe(true);
+  });
+
+  it('does not attach a remote connection to a listener bound to a different address', () => {
+    const result = inferPortLinksFromPeers({ nodeId: 'a', nodePorts: [],
+      peers: [detectedPeer({ localAddr: '10.0.0.1', remoteAddr: '10.0.0.2', remotePort: 5432 })],
+      allPorts: [makePort({ id: 'wrong-bind', nodeId: 'b', port: 5432, listenAddr: '10.0.0.3' })],
+      interfacesIndex: new Map([['10.0.0.2', 'b']]), existingPortLinks: [], now: 2000,
+    });
+    expect(result.links[0].targetNodeId).toBe('b');
+    expect(result.links[0].targetPortId).toBeNull();
+  });
+
+  it('does not resolve an IPv6 endpoint to an IPv4 wildcard listener', () => {
+    const result = resolvePortLinkTargets({ nodeId: 'b',
+      nodePorts: [makePort({ id: 'v4-only', nodeId: 'b', port: 5432, listenAddr: '0.0.0.0' })],
+      interfacesIndex: new Map([['2001:db8::2', 'b']]), now: 2000,
+      existingPortLinks: [makePortLink({ targetNodeId: null, targetPortId: null, targetIp: '2001:db8::2', targetPort: 5432 })],
+    });
+    expect(result.links[0].targetPortId).toBeNull();
+    // Keep the exact endpoint for a later probe; losing it permits a wrong
+    // number-only match the next time this server is observed.
+    expect(result.links[0].targetIp).toBe('2001:db8::2');
+  });
+
+  it('does not report a resolved endpoint when a server-only source stays unchanged', () => {
+    const link = makePortLink({ sourceNodeId: 'b', sourcePortId: null, sourcePort: 0 });
+    const result = resolvePortLinkTargets({ nodeId: 'b', nodePorts: [], interfacesIndex: new Map(),
+      existingPortLinks: [link], now: 2000 });
+    expect(result.resolved).toBe(0);
+    expect(result.links[0]).toBe(link);
+  });
+
   it('matches equivalent IPv6 interface and socket address forms', () => {
     const node = makeNode({ id: 'v6', primaryIp: '2001:0DB8:0:0:0:0:0:1' });
     const index = buildInterfaceIpIndex([node], [makeInterface({ nodeId: 'v6', ipv4Addrs: [], ipv6Addrs: ['2001:db8::1/64'] })]);

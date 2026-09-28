@@ -17,8 +17,9 @@ const tauri = vi.hoisted(() => {
   });
   const closeHandlers: Array<(event: { preventDefault(): void }) => Promise<void> | void> = [];
   const destroy = vi.fn();
+  const hide = vi.fn();
   const processExit = vi.fn();
-  return { db, invoke, closeHandlers, destroy, processExit };
+  return { db, invoke, closeHandlers, destroy, hide, processExit };
 });
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: tauri.invoke }));
@@ -29,11 +30,13 @@ vi.mock('@tauri-apps/api/window', () => ({
       return () => undefined;
     },
     destroy: tauri.destroy,
+    hide: tauri.hide,
   }),
 }));
 vi.mock('@tauri-apps/plugin-process', () => ({ exit: tauri.processExit }));
 
 import { TerminalGroupProvider, useTerminalGroups } from '../lib/terminal-group-context';
+import { WindowCloseController } from '../components/window-close-controller';
 import {
   hydrateWorkspace,
   resetWorkspaceCache,
@@ -43,6 +46,7 @@ import {
 import { createDefaultState } from '../lib/terminal-group-reducer';
 import { createRoot } from 'react-dom/client';
 import { act } from 'react';
+import { waitFor } from '@testing-library/react';
 
 function Harness() {
   const { dispatch } = useTerminalGroups();
@@ -62,8 +66,11 @@ describe('TerminalGroupProvider — save workspace at close', () => {
     tauri.invoke.mockClear();
     tauri.closeHandlers.length = 0;
     tauri.destroy.mockClear();
+    tauri.hide.mockClear();
     tauri.processExit.mockClear();
     tauri.destroy.mockResolvedValue(undefined);
+    tauri.hide.mockResolvedValue(undefined);
+    tauri.processExit.mockResolvedValue(undefined);
     (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {};
     resetWorkspaceCache();
     await hydrateWorkspace();
@@ -84,11 +91,13 @@ describe('TerminalGroupProvider — save workspace at close', () => {
 
     const container = document.createElement('div');
     document.body.appendChild(container);
+    const root = createRoot(container);
     let finished = false;
     await act(async () => {
-      createRoot(container).render(
+      root.render(
         <TerminalGroupProvider>
           <Harness />
+          <WindowCloseController windows={false} />
         </TerminalGroupProvider>,
       );
       await Promise.resolve();
@@ -115,6 +124,7 @@ describe('TerminalGroupProvider — save workspace at close', () => {
       expect.objectContaining({ active_group_id: groupId }),
     ]);
 
+    await act(async () => root.unmount());
     document.body.removeChild(container);
   });
 
@@ -126,10 +136,12 @@ describe('TerminalGroupProvider — save workspace at close', () => {
 
     const container = document.createElement('div');
     document.body.appendChild(container);
+    const root = createRoot(container);
     await act(async () => {
-      createRoot(container).render(
+      root.render(
         <TerminalGroupProvider>
           <Harness />
+          <WindowCloseController windows={false} />
         </TerminalGroupProvider>,
       );
       await Promise.resolve();
@@ -144,6 +156,7 @@ describe('TerminalGroupProvider — save workspace at close', () => {
     expect(tauri.destroy).toHaveBeenCalled();
     expect(tauri.processExit).toHaveBeenCalledWith(0);
 
+    await act(async () => root.unmount());
     document.body.removeChild(container);
   });
 
@@ -156,10 +169,12 @@ describe('TerminalGroupProvider — save workspace at close', () => {
 
       const container = document.createElement('div');
       document.body.appendChild(container);
+      const root = createRoot(container);
       await act(async () => {
-        createRoot(container).render(
+        root.render(
           <TerminalGroupProvider>
             <Harness />
+            <WindowCloseController windows={false} />
           </TerminalGroupProvider>,
         );
         await Promise.resolve();
@@ -178,9 +193,52 @@ describe('TerminalGroupProvider — save workspace at close', () => {
 
       expect(tauri.destroy).toHaveBeenCalled();
 
+      await act(async () => root.unmount());
       document.body.removeChild(container);
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('offers exit or tray on Windows and keeps the window alive when hidden', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(<WindowCloseController windows />);
+      await Promise.resolve();
+    });
+    const request = { preventDefault: vi.fn() };
+    await act(async () => {
+      await tauri.closeHandlers[0]?.(request);
+    });
+    expect(request.preventDefault).toHaveBeenCalled();
+    expect(document.querySelector('[data-testid="window-close-choice"]')).toBeTruthy();
+    expect(tauri.hide).not.toHaveBeenCalled();
+    expect(tauri.processExit).not.toHaveBeenCalled();
+    await act(async () => {
+      (document.querySelector('[data-testid="window-close-cancel"]') as HTMLButtonElement).click();
+    });
+    expect(tauri.hide).not.toHaveBeenCalled();
+    expect(tauri.processExit).not.toHaveBeenCalled();
+
+    await act(async () => {
+      await tauri.closeHandlers[0]?.({ preventDefault: vi.fn() });
+    });
+    await act(async () => {
+      (document.querySelector('[data-testid="window-close-hide"]') as HTMLButtonElement).click();
+    });
+    await waitFor(() => expect(tauri.hide).toHaveBeenCalledTimes(1));
+    expect(tauri.processExit).not.toHaveBeenCalled();
+
+    await act(async () => {
+      await tauri.closeHandlers[0]?.({ preventDefault: vi.fn() });
+    });
+    await act(async () => {
+      (document.querySelector('[data-testid="window-close-exit"]') as HTMLButtonElement).click();
+    });
+    await waitFor(() => expect(tauri.processExit).toHaveBeenCalledWith(0));
+    await act(async () => root.unmount());
+    document.body.removeChild(container);
   });
 });
