@@ -100,7 +100,11 @@ fn start_db() -> Fixture {
          docker run -d --rm --name nt-probe-db --network {NET} \
            -p 127.0.0.1:19022:22 -p 127.0.0.1:19053:5353/udp {IMAGE_DB}"
     ));
-    Fixture { ip: container_ip("nt-probe-db"), host_ssh_port: 19022, host_service_port: 0 }
+    Fixture {
+        ip: container_ip("nt-probe-db"),
+        host_ssh_port: 19022,
+        host_service_port: 0,
+    }
 }
 
 fn start_web(db_ip: &str) -> Fixture {
@@ -132,7 +136,9 @@ async fn connect_ssh(port: u16) -> (SshClient, nexterm_lib::os_detect::OsInfo) {
         host: "127.0.0.1".into(),
         port,
         username: "root".into(),
-        auth_method: AuthMethod::Password { password: PASS.into() },
+        auth_method: AuthMethod::Password {
+            password: PASS.into(),
+        },
         keepalive_interval: Some(15),
         keepalive_max: Some(3),
         proxy: None,
@@ -143,7 +149,10 @@ async fn connect_ssh(port: u16) -> (SshClient, nexterm_lib::os_detect::OsInfo) {
         host_key_verification: false,
     };
     let mut client = SshClient::new();
-    client.connect(&config).await.expect("ssh connect to fixture");
+    client
+        .connect(&config)
+        .await
+        .expect("ssh connect to fixture");
     let os_info = detect_os(&client).await;
     (client, os_info)
 }
@@ -155,7 +164,9 @@ async fn truth_listen_ports(client: &SshClient) -> Vec<u16> {
         .execute_command("ss -H -tln | awk '{print $4}' | awk -F: '{print $NF}' | sort -un")
         .await
         .expect("ss -tln");
-    out.lines().filter_map(|l| l.trim().parse::<u16>().ok()).collect()
+    out.lines()
+        .filter_map(|l| l.trim().parse::<u16>().ok())
+        .collect()
 }
 
 /// The ephemeral source port our held connection uses on the host side — the
@@ -165,14 +176,19 @@ fn held_connection_source_port(host_port: u16) -> u16 {
     let out = sh(&format!(
         "lsof -nP -iTCP:{host_port} -sTCP:ESTABLISHED | awk 'NR>1 {{print $9}}' | sed 's/->.*//' | awk -F: '{{print $NF}}' | head -1"
     ));
-    out.lines().next().and_then(|v| v.trim().parse::<u16>().ok()).unwrap_or(0)
+    out.lines()
+        .next()
+        .and_then(|v| v.trim().parse::<u16>().ok())
+        .unwrap_or(0)
 }
 
 #[tokio::test]
 #[ignore]
 async fn probe_reports_only_real_listening_ports_across_environments() {
     if !live_enabled() || !image_exists(IMAGE_WEB) || !image_exists(IMAGE_DB) {
-        eprintln!("skipping: set TOPOLOGY_PROBE_LIVE=1 and build both fixture images (see module docs)");
+        eprintln!(
+            "skipping: set TOPOLOGY_PROBE_LIVE=1 and build both fixture images (see module docs)"
+        );
         return;
     }
     let _ = sh(&format!("docker network rm {NET} >/dev/null 2>&1 || true"));
@@ -203,13 +219,21 @@ async fn probe_reports_only_real_listening_ports_across_environments() {
 
     // ── probe web (Debian / GNU find -printf fdmap path) ──
     let (web_client, web_os) = connect_ssh(web.host_ssh_port).await;
-    assert_eq!(web_os.family, OsFamily::Debian, "web fixture must classify as Debian");
+    assert_eq!(
+        web_os.family,
+        OsFamily::Debian,
+        "web fixture must classify as Debian"
+    );
     let web_probe = run_probe(&web_client, &web_os, false).await;
     assert!(web_probe.success, "web probe failed: {:?}", web_probe.error);
 
     // ── probe db (Alpine / BusyBox `ls -l` fdmap fallback) ──
     let (db_client, db_os) = connect_ssh(db.host_ssh_port).await;
-    assert_eq!(db_os.family, OsFamily::Alpine, "db fixture must classify as Alpine");
+    assert_eq!(
+        db_os.family,
+        OsFamily::Alpine,
+        "db fixture must classify as Alpine"
+    );
     let db_probe = run_probe(&db_client, &db_os, false).await;
     assert!(db_probe.success, "db probe failed: {:?}", db_probe.error);
 
@@ -254,7 +278,8 @@ async fn probe_reports_only_real_listening_ports_across_environments() {
         for probe in [&web_probe, &db_probe] {
             for link in &probe.data.service_links {
                 assert_ne!(
-                    link.remote_port, Some(src),
+                    link.remote_port,
+                    Some(src),
                     "peer ephemeral source port {src} leaked: {link:?}"
                 );
                 if let Some(p1) = link.local_port {
@@ -269,7 +294,9 @@ async fn probe_reports_only_real_listening_ports_across_environments() {
         .data
         .service_links
         .iter()
-        .find(|l| l.direction == "outbound" && l.remote_addr == db.ip && l.remote_port == Some(6379))
+        .find(|l| {
+            l.direction == "outbound" && l.remote_addr == db.ip && l.remote_port == Some(6379)
+        })
         .unwrap_or_else(|| {
             panic!(
                 "web must report the db:6379 dependency (db ip {}), links: {:?}",
@@ -277,14 +304,20 @@ async fn probe_reports_only_real_listening_ports_across_environments() {
             )
         });
     assert_eq!(
-        to_db.local_port, Some(8080),
+        to_db.local_port,
+        Some(8080),
         "p1 must be socat's own listener 8080 via fd attribution — GNU find path, link: {to_db:?}"
     );
     assert_eq!(to_db.protocol, "tcp");
     assert!(to_db.connections >= 1);
     assert!(
-        web_probe.data.peers.iter().any(|p| p.remote_addr == db.ip && p.remote_port == Some(6379)),
-        "web peers must include {}:6379", db.ip
+        web_probe
+            .data
+            .peers
+            .iter()
+            .any(|p| p.remote_addr == db.ip && p.remote_port == Some(6379)),
+        "web peers must include {}:6379",
+        db.ip
     );
 
     // ═══ 4. db inbound edge web → db:6379, peer source port dropped ═══
@@ -293,7 +326,8 @@ async fn probe_reports_only_real_listening_ports_across_environments() {
         .service_links
         .iter()
         .filter(|l| l.direction == "inbound" && l.remote_addr == web.ip)
-        .collect();    assert!(
+        .collect();
+    assert!(
         !inbound.is_empty(),
         "db must report inbound edges from web ({}), links: {:?}",
         web.ip,

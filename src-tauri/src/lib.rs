@@ -363,10 +363,17 @@ pub fn run() {
                             .on_tray_icon_event(|tray, event| {
                                 if matches!(
                                     event,
-                                    TrayIconEvent::Click { button: MouseButton::Left, .. }
-                                        | TrayIconEvent::DoubleClick { button: MouseButton::Left, .. }
+                                    TrayIconEvent::Click {
+                                        button: MouseButton::Left,
+                                        ..
+                                    } | TrayIconEvent::DoubleClick {
+                                        button: MouseButton::Left,
+                                        ..
+                                    }
                                 ) {
-                                    if let Some(window) = tray.app_handle().get_webview_window("main") {
+                                    if let Some(window) =
+                                        tray.app_handle().get_webview_window("main")
+                                    {
                                         let _ = window.show();
                                         let _ = window.unminimize();
                                         let _ = window.set_focus();

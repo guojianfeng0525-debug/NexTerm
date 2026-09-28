@@ -38,7 +38,11 @@ fn image_exists() -> bool {
 }
 
 fn sh(cmd: &str) {
-    let out = std::process::Command::new("sh").arg("-c").arg(cmd).output().expect("sh");
+    let out = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(cmd)
+        .output()
+        .expect("sh");
     assert!(
         out.status.success(),
         "command failed: {cmd}\n{}",
@@ -75,7 +79,9 @@ async fn exec_stream_delivers_chunks_and_stops_cleanly() {
         host: "127.0.0.1".into(),
         port: 19122,
         username: "root".into(),
-        auth_method: AuthMethod::Password { password: "probepass".into() },
+        auth_method: AuthMethod::Password {
+            password: "probepass".into(),
+        },
         keepalive_interval: Some(15),
         keepalive_max: Some(3),
         proxy: None,
