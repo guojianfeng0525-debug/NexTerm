@@ -650,7 +650,11 @@ impl SshClient {
 
         self.probe_server_key = Some(format!(
             "{}:{}",
-            config.host.trim().trim_end_matches('.').to_ascii_lowercase(),
+            config
+                .host
+                .trim()
+                .trim_end_matches('.')
+                .to_ascii_lowercase(),
             config.port,
         ));
         self.session = Some(Arc::new(ssh_session));
@@ -661,10 +665,14 @@ impl SshClient {
     /// Bounded, read-only topology snapshot. Keep completed output on timeout,
     /// and close the channel here rather than cancelling its owner externally.
     pub async fn execute_probe_command(&self, command: &str) -> Result<(String, bool)> {
-        let session = self.session.as_ref().ok_or_else(|| anyhow::anyhow!("Not connected"))?;
+        let session = self
+            .session
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Not connected"))?;
         let deadline = tokio::time::Instant::now() + crate::network_probe::policy::CLIENT_TIMEOUT;
         let mut channel = tokio::time::timeout_at(deadline, session.channel_open_session())
-            .await.map_err(|_| anyhow::anyhow!("Probe channel open timed out"))??;
+            .await
+            .map_err(|_| anyhow::anyhow!("Probe channel open timed out"))??;
         let mut output = Vec::new();
         let mut complete = false;
         let result = tokio::time::timeout_at(deadline, async {
@@ -674,22 +682,39 @@ impl SshClient {
             while let Some(msg) = channel.wait().await {
                 match msg {
                     ChannelMsg::Data { data } | ChannelMsg::ExtendedData { data, .. } => {
-                        if output.len() + data.len() > crate::network_probe::policy::MAX_OUTPUT_BYTES { break; }
+                        if output.len() + data.len()
+                            > crate::network_probe::policy::MAX_OUTPUT_BYTES
+                        {
+                            break;
+                        }
                         output.extend_from_slice(&data);
                     }
                     ChannelMsg::ExitStatus { exit_status } => code = Some(exit_status),
                     ChannelMsg::Eof => eof = true,
-                    ChannelMsg::Close => { complete = code == Some(0); break; }
+                    ChannelMsg::Close => {
+                        complete = code == Some(0);
+                        break;
+                    }
                     _ => {}
                 }
-                if eof && code.is_some() { complete = code == Some(0); break; }
+                if eof && code.is_some() {
+                    complete = code == Some(0);
+                    break;
+                }
             }
             Ok::<(), anyhow::Error>(())
-        }).await;
+        })
+        .await;
         // Bound cleanup so a stalled session cannot hold this server's probe
         // slot indefinitely. No signal or command is sent to another host.
-        let _ = tokio::time::timeout(crate::network_probe::policy::CHANNEL_CLOSE_TIMEOUT, channel.close()).await;
-        if let Ok(Err(err)) = result { return Err(err); }
+        let _ = tokio::time::timeout(
+            crate::network_probe::policy::CHANNEL_CLOSE_TIMEOUT,
+            channel.close(),
+        )
+        .await;
+        if let Ok(Err(err)) = result {
+            return Err(err);
+        }
         Ok((String::from_utf8_lossy(&output).into_owned(), !complete))
     }
 

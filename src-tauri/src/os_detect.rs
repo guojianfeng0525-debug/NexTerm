@@ -64,6 +64,12 @@ pub struct OsInfoCache {
     cells: Arc<Mutex<HashMap<String, Arc<OnceCell<OsInfo>>>>>,
 }
 
+impl Default for OsInfoCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl OsInfoCache {
     pub fn new() -> Self {
         Self {
@@ -561,7 +567,8 @@ done
     /// then bounded established/other peers. Busy servers cannot push their
     /// listening ports out of a fixed prefix. Every omitted row is marked.
     pub fn proc_sockets_probe_cmd(&self) -> String {
-        format!(r#"
+        format!(
+            r#"
 echo "NT_PROC_BEGIN"
 for spec in "tcp /proc/net/tcp" "tcp6 /proc/net/tcp6" "udp /proc/net/udp" "udp6 /proc/net/udp6"; do
     set -- $spec
@@ -605,7 +612,10 @@ for spec in "tcp /proc/net/tcp" "tcp6 /proc/net/tcp6" "udp /proc/net/udp" "udp6 
     fi
 done
 echo "NT_PROC_END"
-"#, listeners = crate::network_probe::policy::LISTENER_ROWS, peers = crate::network_probe::policy::PEER_ROWS)
+"#,
+            listeners = crate::network_probe::policy::LISTENER_ROWS,
+            peers = crate::network_probe::policy::PEER_ROWS
+        )
     }
 
     /// Mandatory low-impact snapshot. Read only metadata, limited interfaces
@@ -621,7 +631,10 @@ echo "NT_PROC_END"
         s.push_str(self.os_release_probe_cmd());
         s.push_str("\necho \"###NT:interfaces###\"; { ");
         s.push_str(self.interfaces_probe_cmd());
-        s.push_str(&format!("; }} | nt_limit {}\n", crate::network_probe::policy::INTERFACE_ROWS));
+        s.push_str(&format!(
+            "; }} | nt_limit {}\n",
+            crate::network_probe::policy::INTERFACE_ROWS
+        ));
         if matches!(self.family, OsFamily::MacOS | OsFamily::Bsd) {
             // netstat's kernel snapshot can itself scale with every socket.
             // Fail closed until a bounded native source is available.
@@ -776,8 +789,12 @@ mod tests {
     fn test_topology_probe_cmd_section_order() {
         let full = OsInfo::default().topology_probe_cmd(true);
         let order = [
-            "###NT:hostname###", "###NT:os###", "###NT:interfaces###",
-            "###NT:proc_sockets###", "###NT:fdmap###", "###NT:end###",
+            "###NT:hostname###",
+            "###NT:os###",
+            "###NT:interfaces###",
+            "###NT:proc_sockets###",
+            "###NT:fdmap###",
+            "###NT:end###",
         ];
         let mut cursor = 0usize;
         for marker in order {
@@ -915,8 +932,6 @@ mod tests {
         assert!(!macos.contains("netstat"));
         assert!(macos.contains("NT_SKIPPED:low-impact policy"));
     }
-
-
 }
 
 #[cfg(test)]

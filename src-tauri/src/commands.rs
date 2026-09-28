@@ -1814,8 +1814,9 @@ pub enum LogStreamEvent {
     Error { stream_id: String, message: String },
 }
 
-static LOG_STREAMS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, tokio_util::sync::CancellationToken>>> =
-    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+static LOG_STREAMS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, tokio_util::sync::CancellationToken>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 
 static LOG_STREAM_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
@@ -1853,7 +1854,9 @@ pub async fn log_stream_start(
     );
     let cancel = tokio_util::sync::CancellationToken::new();
     {
-        let mut streams = LOG_STREAMS.lock().map_err(|_| "log stream registry poisoned")?;
+        let mut streams = LOG_STREAMS
+            .lock()
+            .map_err(|_| "log stream registry poisoned")?;
         if streams.len() >= LOG_STREAM_MAX {
             return Err("日志流数量已达上限（8），请先停止其他日志流".to_string());
         }
@@ -1929,15 +1932,11 @@ pub async fn log_stream_start(
     tokio::spawn(async move {
         use crate::ssh::StreamEnd;
 
-        let result = crate::ssh::SshClient::exec_stream(
-            &session,
-            &command,
-            cancel.clone(),
-            |chunk| {
+        let result =
+            crate::ssh::SshClient::exec_stream(&session, &command, cancel.clone(), |chunk| {
                 let _ = chunk_tx.send(chunk);
-            },
-        )
-        .await;
+            })
+            .await;
         // Drop the producer so the pump drains and exits.
         drop(chunk_tx);
 
@@ -5174,7 +5173,9 @@ pub async fn probe_network_topology(
         .ok_or("Server identity unavailable")?
         .to_owned();
     {
-        let mut slots = probe_slots().lock().map_err(|_| "probe limiter unavailable")?;
+        let mut slots = probe_slots()
+            .lock()
+            .map_err(|_| "probe limiter unavailable")?;
         reserve_topology_probe(&mut slots, &server, Instant::now())?;
     }
     let _probe_guard = TopologyProbeGuard(server);
@@ -5204,9 +5205,16 @@ mod topology_budget_tests {
         assert!(reserve_topology_probe(&mut slots, "server-a", now).is_err());
         slots.get_mut("server-a").unwrap().active = false;
         for second in [0, 1, 59] {
-            assert!(reserve_topology_probe(&mut slots, "server-a", now + Duration::from_secs(second)).is_err());
+            assert!(reserve_topology_probe(
+                &mut slots,
+                "server-a",
+                now + Duration::from_secs(second)
+            )
+            .is_err());
             assert_eq!(slots["server-a"].last, Some(now));
         }
-        assert!(reserve_topology_probe(&mut slots, "server-a", now + Duration::from_secs(60)).is_ok());
+        assert!(
+            reserve_topology_probe(&mut slots, "server-a", now + Duration::from_secs(60)).is_ok()
+        );
     }
 }

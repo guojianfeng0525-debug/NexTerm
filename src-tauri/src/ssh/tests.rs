@@ -657,8 +657,14 @@ fn wrap_stream_command_escapes_and_keeps_shape() {
 
     // Embedded single quotes must be escaped, never terminate the outer quote.
     let tricky = wrap_stream_command("journalctl -u 'my service' -f");
-    assert!(tricky.contains(r"journalctl -u '\''my service'\'' -f"), "quote escaping broken: {tricky}");
+    assert!(
+        tricky.contains(r"journalctl -u '\''my service'\'' -f"),
+        "quote escaping broken: {tricky}"
+    );
     // The outer shell string still ends where it should (last ' closes the
     // sh -c argument): count via the parked-read tail anchor.
-    assert!(tricky.ends_with("read _ || true'"), "wrapper tail anchor lost: {tricky}");
+    assert!(
+        tricky.ends_with("read _ || true'"),
+        "wrapper tail anchor lost: {tricky}"
+    );
 }
