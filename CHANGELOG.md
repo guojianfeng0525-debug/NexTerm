@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.19.5] - 2026-10-09
+
+### 🔖 NexTerm 2.19.5 — 弹窗布局修复
+
+### 修复
+
+- 修复文件删除确认框尺寸过大、位置偏移的问题；统一普通弹窗与确认框的居中、窗口边距、最大高度和长文本换行。
+- 清理连接、设置、拓扑、数据库、日志、文件传输和反编译等弹窗中冲突的定位与宽度设置；大型表单使用内部滚动区域，窗口缩小时保留底部操作。
+- 批量删除确认框单独滚动完整路径列表，保留服务器标识、项目数量和目录递归删除警告，默认焦点仍为取消。
+- 将浏览器原生确认框和文件名输入框改为统一样式；这些输入请求在切换页面、服务器、目录或关闭界面后取消，执行前再次检查所属面板。
+- 修复小窗口下设置和拓扑编辑的按钮溢出，补全弹窗关闭后向当前可见控件恢复焦点的处理及关闭按钮的翻译。
+
+### Contributors
+
+- [@guojianfeng0525-debug](https://github.com/guojianfeng0525-debug)
+
 ## [2.19.4] - 2026-10-09
 
 ### 🔖 NexTerm 2.19.4 — SSH 主动保活
