@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.19.4] - 2026-10-09
+
+### 🔖 NexTerm 2.19.4 — SSH 主动保活
+
+### 变更
+
+- SSH 默认每 15 秒发送协议保活心跳，容忍 20 次未收到回复；心跳由 Rust 后端驱动，不依赖终端标签是否可见。
+- 设置页的保活间隔下限从 30 秒降为 5 秒，单连接高级设置也支持 5 秒；统一校验前后端间隔，未指定单连接间隔时使用全局设置。
+
+### 修复
+
+- 修复旧版快速连接、导入连接未指定保活选项时被持久化为关闭的问题；保留已配置的单连接选项及明确的保活关闭设置。
+- 为 SSH 的直连、代理和跳板机 TCP 传输启用系统保活，配合 SSH 协议心跳维持空闲连接；保活不向终端注入字符或执行远程命令。
+- 本地 WebSocket 中断时保留原 SSH 和 PTY，会话仍存活则恢复原终端；确认 SSH 已关闭后才按自动重连设置重建连接，状态查询失败不销毁会话。
+- 恢复连接时更新会话代数，拒绝过期恢复请求，并阻止旧 WebSocket 回调、读取任务和关闭消息干扰当前终端；主动断开仍完整释放 PTY 和 SSH。
+- 调整 shell 退出时的清理顺序，发送队列中的最后一段输出后再报告会话结束。
+
+### Contributors
+
+- [@guojianfeng0525-debug](https://github.com/guojianfeng0525-debug)
+
 ## [2.19.3] - 2026-10-09
 
 ### 🔖 NexTerm 2.19.3 — 删除安全修复
