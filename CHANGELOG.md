@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.19.3] - 2026-10-09
+
+### 🔖 NexTerm 2.19.3 — 删除安全修复
+
+### 修复
+
+- 限制 Delete、全选和文件操作快捷键仅由当前可见页面或面板处理；网络拓扑删除仅修改 NexTerm 拓扑记录，隐藏的 SSH 文件面板不会响应拓扑页面的按键。
+- 文件删除确认固定服务器、完整路径、项目数量和目录删除范围；切换页面、连接或目录后撤销旧确认，批量删除在操作归属改变时停止剩余请求，并阻止重复确认或被其他弹窗遮盖的旧确认执行。
+- 禁止将 `.`、`..`、根目录和确认目录之外的目标作为远程删除路径；SSH、SFTP 和 FTP 删除命令在后端再次校验，SSH 删除使用明确的参数边界。
+- SFTP/FTP 文件面板和目录同步删除增加明确确认；同步的全选不会自动勾选删除项。
+- 限制编辑器保存快捷键仅保存当前编辑器已加载且有修改的文件，避免隐藏标签或未加载内容覆盖远程文件；上传和下载队列固定最初选择的服务器。
+- 保留 SSH/FTP 文件列表中的连续空格、制表符和尾部空格，避免文件操作使用被改写的名称；保留同一文件面板跨目录复制粘贴和重命名输入焦点。
+
+### Contributors
+
+- [@guojianfeng0525-debug](https://github.com/guojianfeng0525-debug)
+
 ## [2.19.2] - 2026-09-28
 
 ### 变更
