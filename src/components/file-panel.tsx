@@ -53,6 +53,7 @@ import { useWebviewFileDrop } from "@/lib/use-webview-file-drop";
 import { FileDeleteConfirmation } from './file-delete-confirmation';
 import { isDirectRemoteChild, isFileEntryName, type FileDeletionTarget } from '@/lib/file-deletion';
 import { useWorkspaceActivity } from '@/lib/workspace-activity';
+import { useDialogRequest } from './ui/use-dialog-request';
 
 // ---------- Types ----------
 
@@ -149,6 +150,13 @@ export const FilePanel = forwardRef<FilePanelRef, FilePanelProps>(
     });
     const containerRef = useRef<HTMLDivElement>(null);
     const { active, isCurrent } = useWorkspaceActivity(containerRef, workspaceActive && !disabled);
+    const { prompt: requestName, dialog: nameDialog } = useDialogRequest({
+      active, scopeKey: JSON.stringify([mode, label, currentPath]), canConfirm: isCurrent,
+    });
+    const nameOperationsRef = useRef({ onRename, onCreateDirectory });
+    useLayoutEffect(() => {
+      nameOperationsRef.current = { onRename, onCreateDirectory };
+    }, [onRename, onCreateDirectory]);
     const [deletion, setDeletion] = useState<{ directory: string; label: string; file: FileDeletionTarget; operation: NonNullable<typeof onDelete> } | null>(null);
     const deletionRef = useRef(deletion);
     deletionRef.current = deletion;
@@ -398,7 +406,8 @@ export const FilePanel = forwardRef<FilePanelRef, FilePanelProps>(
 
     const handleRename = async (oldName: string) => {
       if (!onRename) return;
-      const newName = prompt(t('filePanel.prompt.rename'), oldName);
+      const newName = await requestName(t('filePanel.prompt.rename'), oldName, isFileEntryName);
+      if (!isCurrent() || directoryRef.current !== currentPath || nameOperationsRef.current.onRename !== onRename) return;
       if (!newName || newName === oldName) return;
       try {
         await onRename(
@@ -416,7 +425,8 @@ export const FilePanel = forwardRef<FilePanelRef, FilePanelProps>(
 
     const handleCreateDir = async () => {
       if (!onCreateDirectory) return;
-      const name = prompt(t('filePanel.prompt.directoryName'));
+      const name = await requestName(t('filePanel.prompt.directoryName'), '', isFileEntryName);
+      if (!isCurrent() || directoryRef.current !== currentPath || nameOperationsRef.current.onCreateDirectory !== onCreateDirectory) return;
       if (!name) return;
       try {
         await onCreateDirectory(pathJoin(currentPath, name));
@@ -559,6 +569,7 @@ export const FilePanel = forwardRef<FilePanelRef, FilePanelProps>(
         tabIndex={0}
         data-panel-mode={mode}
       >
+        {nameDialog}
         {/* Panel header */}
         <div className="flex items-center gap-1 px-2 py-0.5 border-b bg-muted/60 shrink-0">
           <Badge

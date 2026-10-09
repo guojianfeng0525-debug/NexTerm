@@ -475,7 +475,7 @@ export function SyncDialog({
 
   return (
     <Dialog open={open} onOpenChange={isBusy ? undefined : onOpenChange}>
-      <DialogContent className={`top-[50%] left-[50%] -translate-x-1/2 -translate-y-1/2 flex flex-col sm:max-w-3xl max-h-[85vh] overflow-hidden ${compared ? "h-[85vh]" : "h-fit"}`}>
+      <DialogContent className={`flex flex-col max-w-3xl overflow-hidden ${compared ? "h-[720px]" : ""}`}>
         <DialogHeader className="shrink-0">
           <DialogTitle className="flex items-center gap-2">
             <ArrowRightLeft className="h-5 w-5" />
@@ -483,6 +483,7 @@ export function SyncDialog({
           </DialogTitle>
         </DialogHeader>
 
+        <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto">
         {/* ── Paths ── */}
         <div className="grid grid-cols-2 gap-3 text-xs shrink-0">
           <div>
@@ -612,7 +613,7 @@ export function SyncDialog({
 
         {/* ── Comparison Results ── */}
         {compared && (
-          <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
+          <div className="flex-1 min-h-48 flex flex-col overflow-hidden">
             {/* Summary bar */}
             <div className="flex items-center gap-2 text-xs py-1 flex-wrap shrink-0">
               {summary.toUpload > 0 && (
@@ -834,6 +835,7 @@ export function SyncDialog({
           </div>
         )}
 
+        </div>
         {/* ── Footer ── */}
         <DialogFooter className="gap-2 sm:gap-2 shrink-0">
           {isBusy && (

@@ -215,7 +215,7 @@ export function PortLinkEditorDialog({
     <>
       <Dialog open={open} onOpenChange={onOpenChange}>
         <DialogContent
-          className="!inset-0 !m-auto !h-[700px] !translate-x-0 !translate-y-0 flex max-h-[85vh] !w-[calc(100vw-2rem)] !max-w-none flex-col gap-0 overflow-hidden p-0 sm:!max-w-xl"
+          className="h-[700px] flex flex-col gap-0 overflow-hidden p-0 max-w-xl"
           data-testid="port-link-editor"
         >
           <DialogHeader className="shrink-0 border-b border-border px-6 py-4">
@@ -362,7 +362,7 @@ export function PortLinkEditorDialog({
           </div>
 
           <DialogFooter className="shrink-0 border-t border-border px-6 py-3">
-            <div className="flex w-full items-center justify-between gap-2">
+            <div className="flex w-full flex-wrap items-center justify-between gap-2">
               {link ? (
                 <Button
                   type="button"
@@ -376,7 +376,7 @@ export function PortLinkEditorDialog({
                   {t('network.portLinks.delete')}
                 </Button>
               ) : <span />}
-              <div className="flex items-center gap-2">
+              <div className="flex min-w-0 flex-wrap items-center gap-2">
                 <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
                   {t('common.cancel')}
                 </Button>
@@ -390,7 +390,7 @@ export function PortLinkEditorDialog({
       </Dialog>
 
       <Dialog open={confirmingDelete} onOpenChange={setConfirmingDelete}>
-        <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-sm">
+        <DialogContent className="overflow-y-auto max-w-sm">
           <DialogHeader>
             <DialogTitle>{t('network.portLinks.deleteTitle')}</DialogTitle>
             <DialogDescription>{t('network.portLinks.deleteDesc')}</DialogDescription>

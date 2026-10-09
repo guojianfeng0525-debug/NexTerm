@@ -408,7 +408,7 @@ export function DirectoryTransferDialog({
 
   return (
     <Dialog open={open} onOpenChange={isBusy ? undefined : onOpenChange}>
-      <DialogContent className="top-[50%] left-[50%] -translate-x-1/2 -translate-y-1/2 flex flex-col sm:max-w-md h-fit max-h-[60vh] overflow-hidden">
+      <DialogContent className="max-w-md">
         <DialogHeader className="shrink-0">
           <DialogTitle className="flex items-center gap-2">
             {direction === "upload" ? (

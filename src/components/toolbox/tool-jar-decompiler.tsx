@@ -13,7 +13,7 @@ import { Input } from '@/components/ui/input';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Badge } from '@/components/ui/badge';
 import { Progress } from '@/components/ui/progress';
-import { Dialog, DialogContent } from '@/components/ui/dialog';
+import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog';
 import {
   Archive,
   FolderOpen,
@@ -2425,8 +2425,9 @@ export function ToolJarDecompiler() {
 
       {/* Open Type dialog (JD-GUI Ctrl+T) */}
       <Dialog open={openTypeOpen && !!project} onOpenChange={(o) => { if (!o) setOpenTypeOpen(false); }}>
-        <DialogContent className="top-[8vh] translate-y-0 sm:max-w-[540px] p-0 gap-0 overflow-hidden">
-          <div className="flex items-center gap-2 px-3 py-2.5 border-b">
+        <DialogContent aria-describedby={undefined} className="max-w-[540px] p-0 gap-0 flex flex-col overflow-hidden">
+          <DialogTitle className="sr-only">{t('toolbox.jar.openType')}</DialogTitle>
+          <div className="flex items-center gap-2 px-3 pr-12 py-2.5 border-b shrink-0">
             <Search className="h-4 w-4 text-muted-foreground shrink-0" />
             <input
               ref={openTypeInputRef}
@@ -2487,7 +2488,7 @@ export function ToolJarDecompiler() {
           <div
             ref={openTypeListRef}
             tabIndex={-1}
-            className="max-h-[46vh] overflow-auto p-1.5 outline-none"
+            className="min-h-0 max-h-[46vh] overflow-auto p-1.5 outline-none"
             onKeyDown={(e) => {
               if (e.key === 'ArrowDown') {
                 e.preventDefault();
@@ -2547,7 +2548,7 @@ export function ToolJarDecompiler() {
               </>
             )}
           </div>
-          <div className="px-3 py-2 border-t text-[10px] text-muted-foreground flex gap-3">
+          <div className="px-3 py-2 border-t shrink-0 text-[10px] text-muted-foreground flex gap-3">
             <span>↑↓ {t('toolbox.jar.openTypeNav')}</span>
             <span>↵ {t('toolbox.jar.openTypeEnter')}</span>
             <span>esc {t('toolbox.jar.openTypeEsc')}</span>
@@ -2557,13 +2558,13 @@ export function ToolJarDecompiler() {
 
       {/* Type hierarchy dialog (JD-GUI Ctrl+H) */}
       <Dialog open={hierarchyOpen} onOpenChange={(o) => { if (!o) setHierarchyOpen(false); }}>
-        <DialogContent className="top-[8vh] translate-y-0 sm:max-w-[500px] p-0 gap-0 overflow-hidden" onKeyDown={handleHierarchyKeyDown}>
-          <div className="flex items-center gap-2 px-3 py-2.5 border-b">
+        <DialogContent aria-describedby={undefined} className="max-w-[500px] p-0 gap-0 flex flex-col overflow-hidden" onKeyDown={handleHierarchyKeyDown}>
+          <div className="flex items-center gap-2 px-3 pr-12 py-2.5 border-b shrink-0">
             <GitBranch className="h-4 w-4 text-muted-foreground shrink-0" />
-            <span className="text-sm font-semibold">{t('toolbox.jar.hierarchy')}</span>
+            <DialogTitle className="text-sm">{t('toolbox.jar.hierarchy')}</DialogTitle>
             <span className="ml-auto text-[10px] text-muted-foreground truncate font-mono">{hierarchyData?.target ?? selectedEntry}</span>
           </div>
-          <div className="max-h-[52vh] overflow-auto p-2 font-mono text-xs">
+          <div className="min-h-0 max-h-[52vh] overflow-auto p-2 font-mono text-xs">
             {hierarchyBusy ? (
               <div className="flex items-center justify-center py-8 text-muted-foreground">
                 <Loader2 className="h-4 w-4 animate-spin mr-2" /> {t('toolbox.jar.hierarchyLoading')}
@@ -2650,7 +2651,7 @@ export function ToolJarDecompiler() {
               <p className="py-6 text-center text-muted-foreground">{t('toolbox.jar.hierarchyEmpty')}</p>
             )}
           </div>
-          <div className="flex items-center gap-2 px-3 py-2 border-t text-[10px] text-muted-foreground">
+          <div className="flex items-center gap-2 px-3 py-2 border-t shrink-0 text-[10px] text-muted-foreground">
             <span>{t('toolbox.jar.hierarchyHint')}</span>
             <span className="ml-auto text-[10px] text-muted-foreground">F4 {t('toolbox.jar.hierarchyRefresh')}</span>
             <div className="flex items-center gap-1.5 ml-3">
@@ -2667,10 +2668,10 @@ export function ToolJarDecompiler() {
 
       {/* Go to Line dialog (JD-GUI Ctrl+L) */}
       <Dialog open={gotoOpen} onOpenChange={(o) => { if (!o) setGotoOpen(false); }}>
-        <DialogContent className="top-[8vh] translate-y-0 sm:max-w-[320px] p-0 gap-0 overflow-hidden">
-          <div className="flex items-center gap-2 px-3 py-2.5 border-b">
+        <DialogContent aria-describedby={undefined} className="max-w-[320px] p-0 gap-0 flex flex-col overflow-hidden">
+          <div className="flex items-center gap-2 px-3 pr-12 py-2.5 border-b shrink-0">
             <CornerDownRight className="h-4 w-4 text-muted-foreground" />
-            <span className="text-sm font-semibold">{t('toolbox.jar.gotoLine')}</span>
+            <DialogTitle className="text-sm">{t('toolbox.jar.gotoLine')}</DialogTitle>
           </div>
           <div className="p-3">
             <Input
@@ -2693,7 +2694,7 @@ export function ToolJarDecompiler() {
               </p>
             )}
           </div>
-          <div className="flex items-center justify-between px-3 py-2 border-t text-[10px] text-muted-foreground">
+          <div className="flex items-center justify-between px-3 py-2 border-t shrink-0 text-[10px] text-muted-foreground">
             <span>↵ {t('toolbox.jar.openTypeEnter')}</span>
             <div className="flex items-center gap-1.5">
               <Button size="sm" variant="outline" className="h-7 text-xs" onClick={() => setGotoOpen(false)}>
@@ -2709,8 +2710,8 @@ export function ToolJarDecompiler() {
 
       {/* Search in constant pools dialog (JD-GUI Ctrl+Shift+S) */}
       <Dialog open={constSearchOpen && !!project} onOpenChange={(o) => { if (!o) setConstSearchOpen(false); }}>
-        <DialogContent className="top-[8vh] translate-y-0 sm:max-w-[580px] p-0 gap-0 overflow-hidden">
-          <div className="flex items-center gap-2 px-3 py-2.5 border-b">
+        <DialogContent aria-describedby={undefined} className="max-w-[580px] p-0 gap-0 flex flex-col overflow-hidden">
+          <div className="flex items-center gap-2 px-3 pr-12 py-2.5 border-b shrink-0">
             <Search className="h-4 w-4 text-muted-foreground shrink-0" />
             <input
               autoFocus
@@ -2764,7 +2765,7 @@ export function ToolJarDecompiler() {
               {t('toolbox.jar.constReference')}
             </label>
           </div>
-          <div className="max-h-[42vh] overflow-auto p-1.5">
+          <div className="min-h-0 max-h-[42vh] overflow-auto p-1.5">
             {constResults.length === 0 ? (
               <p className="px-3 py-8 text-xs text-muted-foreground text-center">{constBusy ? '…' : t('toolbox.jar.constEmpty')}</p>
             ) : (
@@ -2809,7 +2810,7 @@ export function ToolJarDecompiler() {
               })()
             )}
           </div>
-          <div className="px-3 py-2 border-t text-[10px] text-muted-foreground flex justify-between">
+          <div className="px-3 py-2 border-t shrink-0 text-[10px] text-muted-foreground flex justify-between">
             <span>{t('toolbox.jar.constHint')}</span>
             <span>esc {t('toolbox.jar.openTypeEsc')}</span>
           </div>
@@ -2818,12 +2819,12 @@ export function ToolJarDecompiler() {
 
       {/* Preferences dialog (JD-GUI Ctrl+Shift+P) */}
       <Dialog open={prefsOpen} onOpenChange={(o) => { if (!o) setPrefsOpen(false); }}>
-        <DialogContent className="top-[8vh] translate-y-0 sm:max-w-[360px] p-0 gap-0 overflow-hidden">
-          <div className="flex items-center gap-2 px-3 py-2.5 border-b">
+        <DialogContent aria-describedby={undefined} className="max-w-[360px] p-0 gap-0 flex flex-col overflow-hidden">
+          <div className="flex items-center gap-2 px-3 pr-12 py-2.5 border-b shrink-0">
             <Settings className="h-4 w-4 text-muted-foreground" />
-            <span className="text-sm font-semibold">{t('toolbox.jar.preferences')}</span>
+            <DialogTitle className="text-sm">{t('toolbox.jar.preferences')}</DialogTitle>
           </div>
-          <div className="p-4 space-y-4">
+          <div className="min-h-0 overflow-y-auto p-4 space-y-4">
             <div>
               <div className="text-xs font-medium mb-1.5">{t('toolbox.jar.prefFontSize')}</div>
               <div className="flex items-center gap-2">
@@ -2884,24 +2885,24 @@ export function ToolJarDecompiler() {
               </label>
             </div>
           </div>
-          <div className="px-3 py-2 border-t text-[10px] text-muted-foreground flex justify-end">
+          <div className="px-3 py-2 border-t shrink-0 text-[10px] text-muted-foreground flex justify-end">
             <span>esc {t('toolbox.jar.openTypeEsc')}</span>
           </div>
         </DialogContent>
       </Dialog>
       {/* About dialog (JD-GUI F1) */}
       <Dialog open={aboutOpen} onOpenChange={(o) => { if (!o) setAboutOpen(false); }}>
-        <DialogContent className="top-[8vh] translate-y-0 sm:max-w-[360px] p-0 gap-0 overflow-hidden">
-          <div className="flex items-center gap-2 px-3 py-2.5 border-b">
+        <DialogContent aria-describedby={undefined} className="max-w-[360px] p-0 gap-0 flex flex-col overflow-hidden">
+          <div className="flex items-center gap-2 px-3 pr-12 py-2.5 border-b shrink-0">
             <Archive className="h-4 w-4 text-muted-foreground" />
-            <span className="text-sm font-semibold">{t('toolbox.jar.about')}</span>
+            <DialogTitle className="text-sm">{t('toolbox.jar.about')}</DialogTitle>
           </div>
           <div className="p-4 space-y-2">
             <p className="text-sm font-semibold">{t('toolbox.jar.aboutName')}</p>
             <p className="text-xs text-muted-foreground leading-relaxed">{t('toolbox.jar.aboutDesc')}</p>
             <p className="text-[10px] font-mono text-muted-foreground">{t('toolbox.jar.aboutVersion')}</p>
           </div>
-          <div className="px-3 py-2 border-t text-[10px] text-muted-foreground flex justify-end">
+          <div className="px-3 py-2 border-t shrink-0 text-[10px] text-muted-foreground flex justify-end">
             <Button size="sm" className="h-7 text-xs" onClick={() => setAboutOpen(false)}>
               {t('common.close')}
             </Button>

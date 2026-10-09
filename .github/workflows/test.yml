@@ -100,3 +100,24 @@ jobs:
 
       - name: Check locale key parity (en.json ↔ zh-CN.json)
         run: pnpm i18n:check
+
+  dialog-layout:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - uses: pnpm/action-setup@v4
+      - run: pnpm install --frozen-lockfile
+      - name: Install layout test browsers
+        run: pnpm exec playwright install --with-deps chromium webkit
+      - name: Check dialog geometry, focus, scrolling and actions
+        run: pnpm exec playwright test --config playwright.dialogs.config.ts --workers=2
+      - name: Upload failure traces
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dialog-layout-traces
+          path: test-results/
+          retention-days: 7

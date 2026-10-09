@@ -472,7 +472,7 @@ export function ToolVault() {
 
       {/* Record form */}
       <Dialog open={formOpen} onOpenChange={setFormOpen}>
-        <DialogContent className="top-[50%] left-[50%] -translate-x-1/2 -translate-y-1/2 max-h-[85vh] overflow-y-auto sm:max-w-lg">
+        <DialogContent className="overflow-y-auto max-w-lg">
           <DialogHeader>
             <DialogTitle>
               {editingEntry ? t('toolbox.vault.editRecord') : t('toolbox.vault.addRecord')}

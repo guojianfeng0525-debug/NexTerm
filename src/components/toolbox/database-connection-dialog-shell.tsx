@@ -46,14 +46,14 @@ export function DatabaseConnectionDialogShell({
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
-        className="top-[50%] left-[50%] -translate-x-1/2 -translate-y-1/2 flex max-h-[min(560px,calc(100vh-32px))] w-[720px] !max-w-[calc(100vw-32px)] flex-col gap-0 overflow-hidden rounded-md p-0"
+        className="h-[560px] max-w-[720px] flex flex-col gap-0 overflow-hidden p-0"
         data-testid={testId}
       >
         <DialogHeader className="h-12 shrink-0 justify-center border-b px-4 py-0">
           <DialogTitle className="text-sm">{title}</DialogTitle>
         </DialogHeader>
         <div className="flex min-h-0 flex-1">
-          <aside className="w-36 shrink-0 overflow-y-auto border-r bg-muted/20 p-1.5">
+          <aside className="w-28 sm:w-36 shrink-0 overflow-y-auto border-r bg-muted/20 p-1.5">
             {sections.map((section) => (
               <button
                 key={section.id}
@@ -65,7 +65,7 @@ export function DatabaseConnectionDialogShell({
               </button>
             ))}
           </aside>
-          <div className="min-w-0 flex-1 overflow-y-auto p-4">{children}</div>
+          <div className="min-h-0 min-w-0 flex-1 overflow-y-auto p-4">{children}</div>
         </div>
         <div className="flex h-14 shrink-0 justify-end gap-2 border-t px-4 py-3">
           <Button size="sm" type="button" variant="outline" className="rounded-sm" onClick={onSave}>
@@ -82,7 +82,7 @@ export function DatabaseConnectionDialogShell({
 }
 
 export function DatabaseConnectionFormGrid({ children }: { readonly children: ReactNode }) {
-  return <div className="grid grid-cols-2 gap-3">{children}</div>;
+  return <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">{children}</div>;
 }
 
 export function DatabaseConnectionField({
@@ -95,7 +95,7 @@ export function DatabaseConnectionField({
   readonly fullWidth?: boolean;
 }) {
   return (
-    <div className={`${fullWidth ? "col-span-2" : ""} space-y-1`}>
+    <div className={`${fullWidth ? "sm:col-span-2" : ""} min-w-0 space-y-1`}>
       <Label className="text-[11px] text-muted-foreground">{label}</Label>
       {children}
     </div>
@@ -103,5 +103,5 @@ export function DatabaseConnectionField({
 }
 
 export function DatabaseConnectionToggleRow({ children }: { readonly children: ReactNode }) {
-  return <div className="col-span-2 flex h-9 items-center gap-2">{children}</div>;
+  return <div className="sm:col-span-2 flex min-h-9 flex-wrap items-center gap-2">{children}</div>;
 }

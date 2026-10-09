@@ -136,7 +136,7 @@ export function LogCommandManager({
   return (
     <>
       <Dialog open={open} onOpenChange={onOpenChange}>
-        <DialogContent className="!inset-0 !m-auto !translate-x-0 !translate-y-0 flex max-h-[80vh] !w-[calc(100vw-2rem)] !max-w-none flex-col gap-0 overflow-hidden p-0 sm:!max-w-lg">
+        <DialogContent className="h-[560px] flex flex-col gap-0 overflow-hidden p-0">
           <DialogHeader className="shrink-0 border-b border-border px-5 py-3.5">
             <DialogTitle className="flex items-center gap-2 text-sm">
               <Terminal className="h-4 w-4" />
@@ -255,7 +255,7 @@ export function LogCommandManager({
 
       {/* Delete confirm */}
       <Dialog open={deleteTarget !== null} onOpenChange={(next) => { if (!next) setDeleteTarget(null); }}>
-        <DialogContent className="!inset-0 !m-auto !translate-x-0 !translate-y-0 !max-w-sm p-0">
+        <DialogContent className="max-w-sm p-0">
           <DialogHeader className="px-5 pt-4 pb-2">
             <DialogTitle className="text-sm">{t('logMonitor.cmdDeleteTitle')}</DialogTitle>
             <DialogDescription className="text-xs">{t('logMonitor.cmdDeleteDesc')}</DialogDescription>

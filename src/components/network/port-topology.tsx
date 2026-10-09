@@ -578,7 +578,7 @@ function PortEditDialog({ open, onOpenChange, port, onSave }: PortEditDialogProp
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="!inset-0 !m-auto !h-[430px] !translate-x-0 !translate-y-0 flex max-h-[85vh] !w-[calc(100vw-2rem)] !max-w-none flex-col gap-0 overflow-hidden p-0 sm:!max-w-md">
+      <DialogContent className="h-[430px] flex flex-col gap-0 overflow-hidden p-0 max-w-md">
         <DialogHeader className="shrink-0 border-b border-border px-6 py-4">
           <DialogTitle>{t('network.portTopology.editPort')}</DialogTitle>
           <DialogDescription><span className="font-mono">{port.port}/{port.protocol}</span> @ {port.listenAddr}</DialogDescription>

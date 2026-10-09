@@ -1759,7 +1759,7 @@ export function ToolApiDebug({ active = true }: ToolApiDebugProps) {
 
       {/* Save request dialog */}
       <Dialog open={saveDialogOpen} onOpenChange={setSaveDialogOpen}>
-        <DialogContent className="top-[50%] left-[50%] -translate-x-1/2 -translate-y-1/2 sm:max-w-sm">
+        <DialogContent className="max-w-sm">
           <DialogHeader>
             <DialogTitle>{t('toolbox.apiDebug.saveRequest')}</DialogTitle>
             <DialogDescription>{t('toolbox.apiDebug.saveRequestDesc')}</DialogDescription>
@@ -1800,7 +1800,7 @@ export function ToolApiDebug({ active = true }: ToolApiDebugProps) {
 
       {/* ── API document dialog ── */}
       <Dialog open={docOpen} onOpenChange={setDocOpen}>
-        <DialogContent className="top-[50%] left-[50%] -translate-x-1/2 -translate-y-1/2 sm:max-w-2xl max-h-[85vh] overflow-y-auto">
+        <DialogContent className="max-w-2xl overflow-y-auto">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <FileCode2 className="h-4 w-4 text-primary" />
@@ -1929,7 +1929,7 @@ export function ToolApiDebug({ active = true }: ToolApiDebugProps) {
 
       {/* Environments dialog */}
       <Dialog open={envDialogOpen} onOpenChange={setEnvDialogOpen}>
-        <DialogContent className="top-[50%] left-[50%] -translate-x-1/2 -translate-y-1/2 sm:max-w-lg max-h-[80vh] overflow-y-auto">
+        <DialogContent className="max-w-lg overflow-y-auto">
           <DialogHeader>
             <DialogTitle>{t('toolbox.apiDebug.manageEnv')}</DialogTitle>
             <DialogDescription>{t('toolbox.apiDebug.manageEnvDesc')}</DialogDescription>

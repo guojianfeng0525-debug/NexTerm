@@ -1329,7 +1329,7 @@ export function ServersView({
 
       {/* New folder dialog */}
       <Dialog open={folderDialogOpen} onOpenChange={setFolderDialogOpen}>
-        <DialogContent className="top-[50%] left-[50%] -translate-x-1/2 -translate-y-1/2 sm:max-w-sm">
+        <DialogContent className="max-w-sm">
           <DialogHeader>
             <DialogTitle>{t('serversView.newFolder')}</DialogTitle>
             <DialogDescription>{t('serversView.newFolderDesc')}</DialogDescription>
@@ -1358,7 +1358,7 @@ export function ServersView({
 
       {/* Rename folder dialog */}
       <Dialog open={renameFolderDialogOpen} onOpenChange={setRenameFolderDialogOpen}>
-        <DialogContent className="top-[50%] left-[50%] -translate-x-1/2 -translate-y-1/2 sm:max-w-sm">
+        <DialogContent className="max-w-sm">
           <DialogHeader>
             <DialogTitle>{t('serversView.renameFolderTitle')}</DialogTitle>
             <DialogDescription>{t('serversView.renameFolderDesc')}</DialogDescription>

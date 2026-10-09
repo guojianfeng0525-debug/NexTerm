@@ -74,6 +74,7 @@ import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuTrigger, C
 import { FileDeleteConfirmation } from './file-delete-confirmation';
 import { isDirectRemoteChild, isFileEntryName, type FileDeletionTarget } from '@/lib/file-deletion';
 import { ownsWorkspaceKey, useWorkspaceActivity } from '@/lib/workspace-activity';
+import { useDialogRequest } from './ui/use-dialog-request';
 import { toast } from 'sonner';
 import { isEditableTarget } from '@/lib/keyboard-shortcuts';
 import { prefGet, prefSet } from '@/lib/preferences';
@@ -193,6 +194,9 @@ export function IntegratedFileBrowser({ connectionId, host, isConnected, isActiv
   const [deletionBusy, setDeletionBusy] = useState(false);
   const scopeRef = useRef({ connectionId, currentPath });
   scopeRef.current = { connectionId, currentPath };
+  const { prompt: requestName, dialog: nameDialog } = useDialogRequest({
+    active, scopeKey: JSON.stringify([connectionId, currentPath]), canConfirm: isCurrent,
+  });
   const [directoryTransfer, setDirectoryTransfer] = useState<{
     sourcePath: string;
     destinationRoot: string;
@@ -1134,7 +1138,8 @@ export function IntegratedFileBrowser({ connectionId, host, isConnected, isActiv
   };
 
   const handleCreateFolder = async () => {
-    const folderName = prompt(t('fileBrowser.toast.enterFolderName'));
+    const folderName = await requestName(t('fileBrowser.toast.enterFolderName'), '', isFileEntryName);
+    if (!isCurrent() || scopeRef.current.connectionId !== connectionId || scopeRef.current.currentPath !== currentPath) return;
     if (folderName) {
       try {
         const folderPath = currentPath === '/' ? `/${folderName}` : `${currentPath}/${folderName}`;
@@ -1361,7 +1366,8 @@ export function IntegratedFileBrowser({ connectionId, host, isConnected, isActiv
   };
 
   const handleNewFile = async () => {
-    const fileName = prompt(t('fileBrowser.toast.enterFileName'));
+    const fileName = await requestName(t('fileBrowser.toast.enterFileName'), '', isFileEntryName);
+    if (!isCurrent() || scopeRef.current.connectionId !== connectionId || scopeRef.current.currentPath !== currentPath) return;
     if (fileName) {
       try {
         const filePath = currentPath === '/' ? `/${fileName}` : `${currentPath}/${fileName}`;
@@ -1593,6 +1599,7 @@ export function IntegratedFileBrowser({ connectionId, host, isConnected, isActiv
   return (
     <div ref={workspaceRef} tabIndex={0} data-testid="ssh-file-workspace" onKeyDown={handleKeyDown}
       className={`h-full flex flex-col bg-background border-t ${resizingColumn ? 'cursor-col-resize select-none' : ''}`}>
+      {nameDialog}
       {/* File Browser Toolbar */}
       <div className="relative z-10 pt-2 pb-1">
         <div className="flex items-center gap-0.5 overflow-x-auto whitespace-nowrap rounded-lg border border-border/70 bg-background/90 px-1.5 py-1 text-xs shadow-sm backdrop-blur-sm scrollbar-none">

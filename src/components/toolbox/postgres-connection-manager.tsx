@@ -15,6 +15,7 @@ import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialo
 import { readTextFile, stat, writeTextFile } from "@tauri-apps/plugin-fs";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { useDialogRequest } from '@/components/ui/use-dialog-request';
 import {
   Dialog,
   DialogContent,
@@ -137,6 +138,7 @@ export function PostgresConnectionManager({
   onTestConnection,
 }: PostgresConnectionManagerProps) {
   const { t } = useTranslation();
+  const { confirm: requestConfirmation, dialog: confirmationDialog } = useDialogRequest({ active: open });
   const lookup = t as (key: string) => string;
   const translate = (key: string, options?: Record<string, unknown>): string => {
     const raw = lookup(key);
@@ -379,7 +381,7 @@ export function PostgresConnectionManager({
   }
 
   async function deleteProfile(profile: PostgreSQLConnectionProfile) {
-    if (!window.confirm(translate("toolbox.postgres.deleteConfirm", { name: profile.name }))) return;
+    if (!await requestConfirmation(translate("toolbox.postgres.deleteConfirm", { name: profile.name }))) return;
     await onDeleteProfile(profile.id);
   }
 
@@ -387,6 +389,7 @@ export function PostgresConnectionManager({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
+      {confirmationDialog}
       <DialogContent className="max-w-2xl" data-testid="postgres-connection-manager">
         <DialogHeader>
           <DialogTitle>{translate("toolbox.postgres.connectionManager.title")}</DialogTitle>

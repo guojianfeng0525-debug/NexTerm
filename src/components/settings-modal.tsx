@@ -4,6 +4,7 @@ import { toast } from 'sonner';
 import { SSH_KEEPALIVE_INTERVAL } from '@/lib/ssh-keepalive';
 import { changeLanguage, getLanguagePreference, AUTO } from '@/lib/i18n';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from './ui/dialog';
+import { useDialogRequest } from './ui/use-dialog-request';
 import { PasswordInput } from './ui/password-input';
 import { changeAppLockPassword } from '@/lib/toolbox/app-lock';
 import { Button } from './ui/button';
@@ -73,6 +74,7 @@ interface SettingsModalProps {
 
 export function SettingsModal({ open, onOpenChange, onAppearanceChange }: SettingsModalProps) {
   const { t } = useTranslation();
+  const { confirm: requestConfirmation, dialog: confirmationDialog } = useDialogRequest({ active: open });
   const [languagePref, setLanguagePref] = useState<string>(() => getLanguagePreference());
   const [terminalAppearance, setTerminalAppearance] = useState<TerminalAppearanceSettings>(defaultAppearanceSettings);
   const [editorConfig, setEditorConfig] = useState<EditorConfig>(DEFAULT_EDITOR_CONFIG);
@@ -175,7 +177,7 @@ export function SettingsModal({ open, onOpenChange, onAppearanceChange }: Settin
   };
 
   const handleImportConfig = async () => {
-    if (!importMerge && !window.confirm(t('settings.advanced.importReplaceConfirm'))) return;
+    if (!importMerge && !await requestConfirmation(t('settings.advanced.importReplaceConfirm'))) return;
     setIsImporting(true);
     try {
       const restored = await importAllConfig(importMerge);
@@ -261,8 +263,8 @@ export function SettingsModal({ open, onOpenChange, onAppearanceChange }: Settin
     }
   };
 
-  const handleReset = () => {
-    if (confirm(t('settings.resetConfirm'))) {
+  const handleReset = async () => {
+    if (await requestConfirmation(t('settings.resetConfirm'))) {
       // Reset terminal appearance
       setTerminalAppearance(defaultAppearanceSettings);
       setEditorConfig(DEFAULT_EDITOR_CONFIG);
@@ -366,8 +368,9 @@ export function SettingsModal({ open, onOpenChange, onAppearanceChange }: Settin
 
   return (
     <>
+    {confirmationDialog}
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="top-[50%] left-[50%] -translate-x-1/2 -translate-y-1/2 w-[900px] h-[680px] !max-w-[90vw] max-h-[90vh] flex flex-col p-0 gap-0">
+      <DialogContent className="h-[680px] max-w-[900px] flex flex-col overflow-hidden p-0 gap-0">
         <DialogHeader className="px-6 pt-6 pb-4 border-b">
           <DialogTitle className="flex items-center gap-2">
             <div className="p-2 bg-primary/10 rounded-lg">
@@ -615,7 +618,7 @@ export function SettingsModal({ open, onOpenChange, onAppearanceChange }: Settin
                         if (file) {
                           // Check file size (max 5MB)
                           if (file.size > 5 * 1024 * 1024) {
-                            alert(t('settings.terminal.imageSizeWarning'));
+                            toast.error(t('settings.terminal.imageSizeWarning'));
                             return;
                           }
                           const reader = new FileReader();
@@ -1362,11 +1365,11 @@ export function SettingsModal({ open, onOpenChange, onAppearanceChange }: Settin
           </TabsContent>
         </Tabs>
 
-        <div className="flex justify-between px-6 py-4 border-t bg-muted/30">
+        <DialogFooter className="flex-col sm:flex-row sm:justify-between px-6 py-4 border-t bg-muted/30">
           <Button variant="ghost" onClick={handleReset}>
             {t('settings.button.resetToDefaults')}
           </Button>
-          <div className="flex gap-2">
+          <div className="flex flex-wrap justify-end gap-2">
             <Button variant="ghost" onClick={() => onOpenChange(false)}>
               {t('common.cancel')}
             </Button>
@@ -1374,13 +1377,13 @@ export function SettingsModal({ open, onOpenChange, onAppearanceChange }: Settin
               {t('settings.button.save')}
             </Button>
           </div>
-        </div>
+        </DialogFooter>
       </DialogContent>
     </Dialog>
 
     {/* Change app lock password dialog */}
     <Dialog open={changeLockOpen} onOpenChange={setChangeLockOpen}>
-      <DialogContent className="top-[50%] left-[50%] -translate-x-1/2 -translate-y-1/2 sm:max-w-sm">
+      <DialogContent className="max-w-sm">
         <DialogHeader>
           <DialogTitle>{t('settings.security.lockTitle')}</DialogTitle>
           <DialogDescription>{t('settings.security.changeLockPasswordDesc')}</DialogDescription>
@@ -1438,7 +1441,7 @@ export function SettingsModal({ open, onOpenChange, onAppearanceChange }: Settin
     </Dialog>
 
     <Dialog open={exportPasswordOpen} onOpenChange={setExportPasswordOpen}>
-      <DialogContent className="top-[50%] left-[50%] -translate-x-1/2 -translate-y-1/2 sm:max-w-sm">
+      <DialogContent className="max-w-sm">
         <DialogHeader>
           <DialogTitle>{t('settings.advanced.exportConfig')}</DialogTitle>
           <DialogDescription>{t('settings.advanced.passwordWarning')}</DialogDescription>

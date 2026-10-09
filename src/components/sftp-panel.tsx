@@ -351,7 +351,7 @@ export function SFTPPanel({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-6xl max-h-[90vh] overflow-hidden">
+      <DialogContent className="h-[720px] max-w-6xl flex flex-col overflow-hidden">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <Upload className="h-5 w-5" />
@@ -363,9 +363,9 @@ export function SFTPPanel({
           </DialogDescription>
         </DialogHeader>
 
-        <div className="grid grid-cols-2 gap-4 px-6 py-4 flex-1 overflow-hidden">
+        <div className="grid min-h-0 grid-cols-2 gap-4 flex-1 overflow-auto">
           {/* Local Files (Left Panel) */}
-          <div className="border rounded-lg">
+          <div className="min-h-0 min-w-0 flex flex-col border rounded-lg">
             <div className="p-3 border-b bg-muted/50">
               <div className="flex items-center justify-between">
                 <span className="font-medium">Local Files</span>
@@ -385,7 +385,7 @@ export function SFTPPanel({
                 readOnly
               />
             </div>
-            <ScrollArea className="h-[400px]">
+            <ScrollArea className="min-h-0 flex-1">
               <div className="p-2">
                 {[
                   {
@@ -434,7 +434,7 @@ export function SFTPPanel({
           </div>
 
           {/* Remote Files (Right Panel) */}
-          <div className="border rounded-lg">
+          <div className="min-h-0 min-w-0 flex flex-col border rounded-lg">
             <div className="p-3 border-b bg-muted/50">
               <div className="flex items-center justify-between">
                 <span className="font-medium">
@@ -478,7 +478,7 @@ export function SFTPPanel({
                 onChange={(e) => setCurrentPath(e.target.value)}
               />
             </div>
-            <ScrollArea className="h-[400px]">
+            <ScrollArea className="min-h-0 flex-1">
               <div className="p-2">
                 {files.map((file, index) => (
                   <div

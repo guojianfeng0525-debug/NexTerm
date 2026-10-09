@@ -3859,7 +3859,7 @@ export function ToolPostgres() {
         open={pendingSshTrust !== null}
         onOpenChange={(open) => !open && setPendingSshTrust(null)}
       >
-        <DialogContent className="top-[50%] left-[50%] -translate-x-1/2 -translate-y-1/2 w-[520px] max-w-[90vw] max-h-[85vh] overflow-y-auto">
+        <DialogContent className="max-w-[520px]">
           <DialogHeader>
             <DialogTitle>{t("toolbox.postgres.trustHostKeyTitle")}</DialogTitle>
             <DialogDescription>
@@ -4029,7 +4029,7 @@ export function ToolPostgres() {
           }
         }}
       >
-        <DialogContent className="grid w-[460px] grid-cols-[minmax(0,1fr)] max-w-[90vw] max-h-[85vh] overflow-y-auto">
+        <DialogContent className="max-w-[460px]">
           <DialogHeader><DialogTitle>{t("toolbox.postgres.saveToNotes")}</DialogTitle></DialogHeader>
           {(() => {
             const dialogNotes = NotesStorage.load();

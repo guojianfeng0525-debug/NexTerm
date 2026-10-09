@@ -221,7 +221,7 @@ export function TopologyNodeDialog({
   return (
     <>
       <Dialog open={open} onOpenChange={onOpenChange}>
-        <DialogContent className="!inset-0 !m-auto !h-[640px] !translate-x-0 !translate-y-0 flex max-h-[85vh] !w-[calc(100vw-2rem)] !max-w-none flex-col gap-0 overflow-hidden p-0 sm:!max-w-2xl">
+        <DialogContent className="h-[640px] flex flex-col gap-0 overflow-hidden p-0 max-w-2xl">
           <DialogHeader className="shrink-0 border-b border-border px-6 py-4">
             <DialogTitle>{t('topology.nodeDialog.title')}</DialogTitle>
             <DialogDescription>
@@ -359,8 +359,8 @@ export function TopologyNodeDialog({
           </ScrollArea>
 
           <DialogFooter className="shrink-0 border-t border-border px-6 py-3">
-            <div className="flex w-full items-center justify-between gap-2">
-              <div className="flex items-center gap-2">
+            <div className="flex w-full flex-wrap items-center justify-between gap-2">
+              <div className="flex min-w-0 flex-wrap items-center gap-2">
                 <Button
                   type="button"
                   variant="outline"
@@ -382,7 +382,7 @@ export function TopologyNodeDialog({
                   {t('topology.nodeDialog.delete')}
                 </Button>
               </div>
-              <div className="flex items-center gap-2">
+              <div className="flex min-w-0 flex-wrap items-center gap-2">
                 <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
                   {t('common.cancel')}
                 </Button>
@@ -397,7 +397,7 @@ export function TopologyNodeDialog({
 
       {/* Sibling dialog instead of a nested one — keeps focus handling sane. */}
       <Dialog open={confirmingDelete} onOpenChange={setConfirmingDelete}>
-        <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-sm">
+        <DialogContent className="overflow-y-auto max-w-sm">
           <DialogHeader>
             <DialogTitle>{t('topology.nodeDialog.deleteTitle')}</DialogTitle>
             <DialogDescription>

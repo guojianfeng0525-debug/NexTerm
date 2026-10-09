@@ -1940,7 +1940,7 @@ function AppContent() {
 
                       {/* Floating log viewer (detached from the sidebar tab) */}
                       <Dialog open={logsFloating} onOpenChange={(o) => { if (!o) setLogsFloating(false); }}>
-                        <DialogContent className="top-[6vh] translate-y-0 sm:max-w-[80vw] h-[84vh] p-0 gap-0 flex flex-col overflow-hidden">
+                        <DialogContent className="max-w-[80vw] h-[84vh] p-0 gap-0 flex flex-col overflow-hidden">
                           <div className="flex items-center gap-2 px-3 py-2 border-b shrink-0">
                             <ScrollText className="h-4 w-4 text-muted-foreground" />
                             <span className="text-sm font-semibold">{t('app.logMonitor')}</span>
