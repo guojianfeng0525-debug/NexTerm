@@ -265,15 +265,25 @@ pub async fn ssh_connect(
     let proxy = build_proxy(&request)?;
     let jump = build_jump(&request)?;
 
-    // Keepalive defaults match the connection dialog UI: enabled at 60 s / 3.
+    // Keepalive runs in the backend even while the WebView is hidden.
     let keepalive_enabled = request.keepalive_enabled.unwrap_or(true);
     let keepalive_interval = if keepalive_enabled {
-        Some(request.keepalive_interval.unwrap_or(60))
+        Some(
+            request
+                .keepalive_interval
+                .map(crate::ssh::keepalive::interval_seconds)
+                .unwrap_or(crate::ssh::keepalive::DEFAULT_INTERVAL),
+        )
     } else {
         None
     };
     let keepalive_max = if keepalive_enabled {
-        Some(request.keepalive_max.unwrap_or(3))
+        Some(
+            request
+                .keepalive_max
+                .filter(|value| *value > 0)
+                .unwrap_or(crate::ssh::keepalive::DEFAULT_MAX),
+        )
     } else {
         None
     };
@@ -327,12 +337,22 @@ fn build_ssh_config_from_request(request: &ConnectRequest) -> Result<SshConfig, 
 
     let keepalive_enabled = request.keepalive_enabled.unwrap_or(true);
     let keepalive_interval = if keepalive_enabled {
-        Some(request.keepalive_interval.unwrap_or(60))
+        Some(
+            request
+                .keepalive_interval
+                .map(crate::ssh::keepalive::interval_seconds)
+                .unwrap_or(crate::ssh::keepalive::DEFAULT_INTERVAL),
+        )
     } else {
         None
     };
     let keepalive_max = if keepalive_enabled {
-        Some(request.keepalive_max.unwrap_or(3))
+        Some(
+            request
+                .keepalive_max
+                .filter(|value| *value > 0)
+                .unwrap_or(crate::ssh::keepalive::DEFAULT_MAX),
+        )
     } else {
         None
     };
@@ -717,6 +737,14 @@ pub async fn ssh_cancel_connect(
             error: Some("No pending connection to cancel".to_string()),
         })
     }
+}
+
+#[tauri::command]
+pub async fn ssh_connection_alive(
+    connection_id: String,
+    state: State<'_, Arc<ConnectionManager>>,
+) -> Result<bool, String> {
+    Ok(state.is_ssh_connection_alive(&connection_id).await)
 }
 
 #[tauri::command]
@@ -4953,6 +4981,35 @@ mod proxy_config_tests {
             jump_host_key_fingerprint: None,
             host_key_verification: false,
         }
+    }
+
+    #[test]
+    fn keepalive_defaults_and_five_second_minimum_reach_ssh_config() {
+        let mut req = request(None);
+        let config = build_ssh_config_from_request(&req).unwrap();
+        assert_eq!(config.keepalive_interval, Some(15));
+        assert_eq!(config.keepalive_max, Some(20));
+        req.keepalive_interval = Some(5);
+        assert_eq!(
+            build_ssh_config_from_request(&req)
+                .unwrap()
+                .keepalive_interval,
+            Some(5)
+        );
+        req.keepalive_interval = Some(2);
+        assert_eq!(
+            build_ssh_config_from_request(&req)
+                .unwrap()
+                .keepalive_interval,
+            Some(5)
+        );
+        req.keepalive_enabled = Some(false);
+        assert_eq!(
+            build_ssh_config_from_request(&req)
+                .unwrap()
+                .keepalive_interval,
+            None
+        );
     }
 
     #[test]

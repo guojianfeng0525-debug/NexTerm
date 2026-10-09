@@ -134,6 +134,7 @@ impl ConnectionManager {
     }
 
     pub async fn close_connection(&self, connection_id: &str) -> Result<()> {
+        self.close_pty_connection(connection_id, None).await?;
         let mut connections = self.connections.write().await;
         if let Some(client) = connections.remove(connection_id) {
             let mut client = client.write().await;
@@ -154,6 +155,41 @@ impl ConnectionManager {
         connections.keys().cloned().collect()
     }
 
+    pub async fn is_ssh_connection_alive(&self, connection_id: &str) -> bool {
+        match self.get_connection(connection_id).await {
+            Some(client) => client.read().await.is_connected(),
+            None => false,
+        }
+    }
+
+    /// Reattach a transport to the same shell. Advancing its lease prevents an
+    /// old WebSocket's Close from tearing down the resumed session.
+    pub async fn resume_pty_connection(
+        &self,
+        connection_id: &str,
+        expected_generation: u64,
+        cols: u32,
+        rows: u32,
+    ) -> Result<Option<u64>> {
+        let mut generations = self.pty_generations.write().await;
+        let sessions = self.pty_sessions.read().await;
+        let Some(session) = sessions.get(connection_id) else {
+            return Ok(None);
+        };
+        if session.cancel.is_cancelled() || session.input_tx.is_closed() {
+            return Ok(None);
+        }
+        let Some(generation) = generations.get_mut(connection_id) else {
+            return Ok(None);
+        };
+        if *generation != expected_generation {
+            return Err(anyhow::anyhow!("PTY transport superseded"));
+        }
+        *generation += 1;
+        let _ = session.resize_tx.try_send((cols, rows));
+        Ok(Some(*generation))
+    }
+
     // ===== PTY Connection Management (Interactive Terminal) =====
 
     /// Start a PTY shell connection (like ttyd does)
@@ -172,6 +208,9 @@ impl ConnectionManager {
             .ok_or_else(|| anyhow::anyhow!("Connection not found"))?;
 
         let client = client.read().await;
+        if !client.is_connected() {
+            return Err(anyhow::anyhow!("SSH connection is closed"));
+        }
 
         // Bump the generation BEFORE cancelling the old session. The create
         // step below can take seconds (bash probe + channel open); with the
@@ -235,7 +274,15 @@ impl ConnectionManager {
 
     /// Read data from PTY (output for display)
     /// OPTIMIZED: Use try_recv first for immediate data, then short timeout
-    pub async fn read_from_pty(&self, connection_id: &str) -> Result<Vec<u8>> {
+    pub async fn read_from_pty(
+        &self,
+        connection_id: &str,
+        expected_generation: u64,
+    ) -> Result<Vec<u8>> {
+        let generations = self.pty_generations.read().await;
+        if generations.get(connection_id) != Some(&expected_generation) {
+            return Err(anyhow::anyhow!("PTY transport superseded"));
+        }
         let pty_sessions = self.pty_sessions.read().await;
         let pty = pty_sessions
             .get(connection_id)
@@ -270,8 +317,10 @@ impl ConnectionManager {
         connection_id: &str,
         expected_gen: Option<u64>,
     ) -> Result<()> {
+        // Keep the lease locked through removal so a concurrent resume cannot
+        // advance it between validation and cancellation.
+        let generations = self.pty_generations.read().await;
         if let Some(gen) = expected_gen {
-            let generations = self.pty_generations.read().await;
             let current_gen = generations.get(connection_id).copied().unwrap_or(0);
             if current_gen != gen {
                 tracing::info!(
@@ -565,5 +614,70 @@ mod tests {
 
         // Unknown connection returns None
         assert!(mgr.get_connection_type("conn-unknown").await.is_none());
+    }
+}
+
+#[cfg(test)]
+mod keepalive_tests {
+    use super::*;
+    use crate::ssh::test_server;
+    use std::{sync::atomic::Ordering, time::Duration};
+
+    #[tokio::test]
+    async fn resumed_shell_survives_stale_close_and_rejects_stale_readers() {
+        let server = test_server::spawn(Duration::from_secs(30)).await;
+        let manager = ConnectionManager::new();
+        manager
+            .create_connection("test".into(), server.config.clone())
+            .await
+            .unwrap();
+        let generation = manager
+            .start_pty_connection("test", 80, 24, None)
+            .await
+            .unwrap();
+        let original = manager.pty_sessions.read().await["test"].clone();
+        let resumed = manager
+            .resume_pty_connection("test", generation, 100, 40)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(resumed > generation);
+        assert!(Arc::ptr_eq(
+            &original,
+            &manager.pty_sessions.read().await["test"]
+        ));
+        manager
+            .close_pty_connection("test", Some(generation))
+            .await
+            .unwrap();
+        assert!(!original.cancel.is_cancelled());
+        assert!(manager
+            .resume_pty_connection("test", generation, 80, 24)
+            .await
+            .is_err());
+        assert!(manager.read_from_pty("test", generation).await.is_err());
+        manager
+            .write_to_pty("test", b"retained shell".to_vec())
+            .await
+            .unwrap();
+        let output = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let data = manager.read_from_pty("test", resumed).await.unwrap();
+                if !data.is_empty() {
+                    break data;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(output, b"retained shell");
+        assert_eq!(server.shells.load(Ordering::SeqCst), 1);
+        manager
+            .close_pty_connection("test", Some(resumed))
+            .await
+            .unwrap();
+        assert!(original.cancel.is_cancelled());
+        manager.close_connection("test").await.unwrap();
+        assert!(!manager.is_ssh_connection_alive("test").await);
     }
 }

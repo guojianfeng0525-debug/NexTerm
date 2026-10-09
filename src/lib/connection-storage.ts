@@ -14,6 +14,7 @@
  * renders).
  */
 import { rowList, rowUpsert, rowDelete, encField, decField } from './toolbox/db';
+import { SSH_KEEPALIVE_INTERVAL, SSH_KEEPALIVE_MAX } from './ssh-keepalive';
 /** Coerce an unknown DB value to string ('' when absent). */
 function str(v: unknown): string {
   return typeof v === 'string' ? v : '';
@@ -132,9 +133,10 @@ function connToRow(c: ConnectionData): Record<string, unknown> {
     default_directory: c.defaultDirectory ?? null,
     terminal_encoding: c.terminalEncoding ?? 'utf-8',
     terminal_startup_mode: c.terminalStartupMode ?? 'safe',
-    keep_alive: c.keepAlive ? 1 : 0,
-    keep_alive_interval: c.keepAliveInterval ?? null,
-    server_alive_count_max: c.serverAliveCountMax ?? null,
+    keep_alive: c.keepAlive === false ? 0 : 1,
+    // Preserve an explicit opt-out separately from legacy unset 0/NULL/NULL.
+    keep_alive_interval: c.keepAliveInterval ?? (c.keepAlive === false ? SSH_KEEPALIVE_INTERVAL : null),
+    server_alive_count_max: c.serverAliveCountMax ?? (c.keepAlive === false ? SSH_KEEPALIVE_MAX : null),
     domain: c.domain ?? null,
     rdp_resolution: c.rdpResolution ?? null,
     vnc_color_depth: c.vncColorDepth ?? null,
@@ -173,7 +175,8 @@ function rowToConn(row: Record<string, unknown>): ConnectionData {
     defaultDirectory: (row.default_directory as string) ?? undefined,
     terminalEncoding: (row.terminal_encoding as ConnectionData['terminalEncoding']) ?? 'utf-8',
     terminalStartupMode: (row.terminal_startup_mode as ConnectionData['terminalStartupMode']) ?? 'safe',
-    keepAlive: !!row.keep_alive,
+    keepAlive: row.keep_alive == null || (row.keep_alive === 0 && row.keep_alive_interval == null && row.server_alive_count_max == null)
+      ? undefined : !!row.keep_alive,
     keepAliveInterval: (row.keep_alive_interval as number) ?? undefined,
     serverAliveCountMax: (row.server_alive_count_max as number) ?? undefined,
     domain: (row.domain as string) ?? undefined,

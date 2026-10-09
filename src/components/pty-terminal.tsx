@@ -1340,16 +1340,13 @@ export function PtyTerminal({
     // effect run. Reset to false when we initiate an auto-reconnect after a
     // drop so the reconnect loop can function normally.
     let hasEverConnected = false;
-    // Set when a drop triggers auto-reconnect, so the Success message can
+    // Set when a drop triggers auto-reconnect, so PtyStarted can
     // warn the user that a fresh shell was started.
     let isReconnectAfterDrop = false;
 
-    // Unified auto-reconnect loop (effect-scoped so cleanup can cancel it):
-    // exponential backoff, each attempt performs a FULL reconnect through App
-    // (onReconnectTab) which rebuilds the backend SSH session and remounts the
-    // terminal on success. On failure the component stays mounted and the
-    // probe timer schedules the next attempt — retries never stop on their own
-    // and the countdown message keeps appearing.
+    // Restore the local transport first. Only a closed SSH handle warrants
+    // rebuilding the remote session through App (if auto reconnect is enabled).
+    let transportSuperseded = false;
     let autoReconnectTimer: ReturnType<typeof setTimeout> | null = null;
     let reconnectProbeTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -1439,6 +1436,7 @@ export function PtyTerminal({
       wsRef.current = ws;
 
       ws.onopen = () => {
+        if (!isRunning || wsRef.current !== ws) return;
         console.log(`[PTY Terminal] [${connectionId}] WebSocket connected`);
         term.writeln('\x1b[32m✓ WebSocket connected\x1b[0m');
         
@@ -1449,6 +1447,7 @@ export function PtyTerminal({
           cols: term.cols,
           rows: term.rows,
           default_directory: defaultDirectory?.trim() || null,
+          resume_generation: ptyGenerationRef.current,
         };
         console.log(`[PTY Terminal] [${connectionId}] Starting PTY connection with ${term.cols}x${term.rows}`);
         ws.send(JSON.stringify(startMsg));
@@ -1552,6 +1551,7 @@ export function PtyTerminal({
       const idDecoder = new TextDecoder();
 
       ws.onmessage = (event) => {
+        if (!isRunning || wsRef.current !== ws) return;
         // Binary frames carry raw PTY output.
         // Format: [0x01][id_len: u16 BE][connection_id bytes][payload bytes]
         if (event.data instanceof ArrayBuffer) {
@@ -1574,15 +1574,18 @@ export function PtyTerminal({
           switch (msg.type) {
             case 'Success':
               console.log(`[PTY Terminal] [${connectionId}]`, msg.message);
-              if (msg.message.includes('PTY connection started')) {
+              break;
+
+            case 'PtyStarted': {
+              if (msg.connection_id === connectionId && typeof msg.generation === 'number') {
                 reconnectAttemptsRef.current = 0;
                 autoReconnectAfterDropRef.current = 0; // Reset drop-reconnect counter on success
-                if (hasEverConnected || isReconnectAfterDrop) {
-                  // Reconnected after a drop — warn that a fresh shell was started
-                  term.writeln('\x1b[33m⚠ Previous session lost. New shell session started.\x1b[0m');
+                if (msg.resumed) {
+                  term.writeln(`\r\n\x1b[32m[${t('ptyTerminal.sessionPreserved')}]\x1b[0m`);
+                } else if (hasEverConnected || isReconnectAfterDrop) {
+                  term.writeln(`\x1b[33m${t('ptyTerminal.newShellAfterLoss')}\x1b[0m`);
                 } else {
-                  term.writeln('\x1b[32m✓ PTY connection started\x1b[0m');
-                  term.writeln('\x1b[90mYou can now use interactive commands: vim, less, more, top, etc.\x1b[0m');
+                  term.writeln(`\x1b[32m${t('ptyTerminal.sessionStarted')}\x1b[0m`);
                 }
                 hasEverConnected = true;
                 isReconnectAfterDrop = false;
@@ -1591,11 +1594,6 @@ export function PtyTerminal({
                   connectionStatusRef.current = 'connected';
                   onConnectionStatusChange?.(connectionId, 'connected');
                 }
-              }
-              break;
-            
-            case 'PtyStarted': {
-              if (msg.connection_id === connectionId && typeof msg.generation === 'number') {
                 ptyGenerationRef.current = msg.generation;
                 console.log(`[PTY Terminal] [${connectionId}] PTY generation: ${msg.generation}`);
                 signalReady(connectionId);
@@ -1619,6 +1617,7 @@ export function PtyTerminal({
               console.error('[PTY Terminal] Error:', msg.message);
               term.write(`\r\n\x1b[31m[Error: ${msg.message}]\x1b[0m\r\n`);
               const errorMsgLower = msg.message.toLowerCase();
+              if (errorMsgLower.includes('pty transport superseded')) transportSuperseded = true;
               // A missing backend session is NOT permanent: the unified
               // auto-reconnect loop rebuilds the session via App on the next
               // attempt. We only mark the tab disconnected so the loop's
@@ -1650,6 +1649,7 @@ export function PtyTerminal({
       };
 
       ws.onerror = (error) => {
+        if (!isRunning || wsRef.current !== ws) return;
         console.error('[PTY Terminal] WebSocket error:', error);
         term.write('\r\n\x1b[31m[WebSocket error]\x1b[0m\r\n');
         // Report disconnected status on WebSocket error
@@ -1660,12 +1660,8 @@ export function PtyTerminal({
       };
 
       // ── Unified auto-reconnect ──────────────────────────────────────────
-      // Any WS drop (first-connect failure OR session loss after a successful
-      // connection) enters one backoff loop. Every attempt goes through the
-      // App-level full reconnect (onReconnectTab), which rebuilds the backend
-      // SSH session and remounts this terminal on success; on failure the
-      // component stays mounted, the probe timer notices and the loop
-      // continues with the next (longer) delay — retries never silently stop.
+      // Local transport failures use the same shell while SSH is still alive.
+      // A failed status RPC is retried without destroying the remote session.
       const scheduleAutoReconnect = () => {
         if (autoReconnectTimer) {
           clearTimeout(autoReconnectTimer);
@@ -1682,11 +1678,29 @@ export function PtyTerminal({
           connectionStatusRef.current = 'connecting';
           onConnectionStatusChange?.(connectionId, 'connecting');
         }
-        term.write(`\r\n\x1b[33m[Connection lost. Reconnecting in ${Math.round(delay / 1000)}s (attempt ${attempt + 1})...]\x1b[0m\r\n`);
+        term.write(`\r\n\x1b[33m[${t('ptyTerminal.restoreTransport', { seconds: Math.round(delay / 1000), attempt: attempt + 1 })}]\x1b[0m\r\n`);
 
-        autoReconnectTimer = setTimeout(() => {
+        const restoreConnection = async () => {
           autoReconnectTimer = null;
           if (!isRunning) return;
+          let sshAlive: boolean;
+          try {
+            sshAlive = await invoke<boolean>('ssh_connection_alive', { connectionId });
+          } catch {
+            // A bridge/RPC failure is not evidence that the remote session died.
+            if (isRunning) scheduleAutoReconnect();
+            return;
+          }
+          if (!isRunning) return;
+          if (sshAlive) {
+            void connectWebSocket();
+            return;
+          }
+          if (prefGet<{ autoReconnect?: boolean }>('sshClientSettings', {}).autoReconnect === false) {
+            connectionStatusRef.current = 'disconnected';
+            onConnectionStatusChange?.(connectionId, 'disconnected');
+            return;
+          }
           // Full reconnect: rebuild the backend session via App.
           isReconnectAfterDrop = true;
           hasEverConnected = false;
@@ -1701,12 +1715,13 @@ export function PtyTerminal({
               scheduleAutoReconnect();
             }
           }, RECONNECT_PROBE_MS);
-        }, delay);
+        };
+        autoReconnectTimer = setTimeout(() => { void restoreConnection(); }, delay);
       };
 
       ws.onclose = () => {
         console.log('[PTY Terminal] WebSocket closed');
-        if (isRunning) {
+        if (isRunning && wsRef.current === ws && !transportSuperseded) {
           scheduleAutoReconnect();
         }
       };

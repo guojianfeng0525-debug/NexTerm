@@ -16,6 +16,7 @@ import {
   type DbTable,
 } from './toolbox/db';
 import { getAppLockKey } from './toolbox/app-lock';
+import { SSH_KEEPALIVE_INTERVAL, SSH_KEEPALIVE_MAX } from './ssh-keepalive';
 import { decryptPayload } from './toolbox/vault-crypto';
 import type { ConnectionData, ConnectionFolder, ActiveConnectionState } from './connection-storage';
 import type { ConnectionProfile } from './connection-profiles';
@@ -96,8 +97,8 @@ function connRow(c: ConnectionData): Record<string, unknown> {
     ftps_enabled: c.ftpsEnabled ? 1 : 0, proxy_type: c.proxyType ?? null,
     proxy_host: c.proxyHost ?? null, proxy_port: c.proxyPort ?? null,
     proxy_username: c.proxyUsername ?? null,
-    keep_alive: c.keepAlive ? 1 : 0, keep_alive_interval: c.keepAliveInterval ?? null,
-    server_alive_count_max: c.serverAliveCountMax ?? null, domain: c.domain ?? null,
+    keep_alive: c.keepAlive === false ? 0 : 1, keep_alive_interval: c.keepAliveInterval ?? (c.keepAlive === false ? SSH_KEEPALIVE_INTERVAL : null),
+    server_alive_count_max: c.serverAliveCountMax ?? (c.keepAlive === false ? SSH_KEEPALIVE_MAX : null), domain: c.domain ?? null,
     rdp_resolution: c.rdpResolution ?? null, vnc_color_depth: c.vncColorDepth ?? null,
     jump_host: c.jumpHost ?? null, jump_port: c.jumpPort ?? null,
     jump_username: c.jumpUsername ?? null, default_directory: c.defaultDirectory ?? null,

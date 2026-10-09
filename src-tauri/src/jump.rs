@@ -58,11 +58,13 @@ pub async fn connect_via_jump(
     // 1) Connect to the jump host.
     let mut jump_session = tokio::time::timeout(
         connection_timeout,
-        client::connect(
-            Arc::new(ssh_config),
-            (&jump.host[..], jump.port),
-            Client::new(jump.host_key_fingerprint.clone(), host_key_verification),
-        ),
+        async {
+            let stream = crate::ssh::keepalive::connect_tcp(&jump.host, jump.port).await?;
+            Ok::<_, anyhow::Error>(client::connect_stream(
+                Arc::new(ssh_config), stream,
+                Client::new(jump.host_key_fingerprint.clone(), host_key_verification),
+            ).await?)
+        },
     )
     .await
     .map_err(|_| anyhow::anyhow!("Jump host connection timed out after 3 seconds. Please check the jump host address and network connectivity."))?

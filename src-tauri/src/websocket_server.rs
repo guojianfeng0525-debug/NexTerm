@@ -25,6 +25,9 @@ pub enum WsMessage {
         /// Optional initial working directory — the shell `cd`s into it on
         /// startup (mirrors a per-server "default directory").
         default_directory: Option<String>,
+        /// Reuse this shell after a frontend transport interruption.
+        #[serde(default)]
+        resume_generation: Option<u64>,
     },
     /// Terminal input (user typing)
     Input {
@@ -64,6 +67,7 @@ pub enum WsMessage {
     PtyStarted {
         connection_id: String,
         generation: u64,
+        resumed: bool,
     },
 
     // ===== Desktop (RDP/VNC) messages =====
@@ -246,6 +250,7 @@ async fn flush_output(
     connection_id: &str,
     accumulated: &mut Vec<u8>,
     cancel: &CancellationToken,
+    transport_cancel: &CancellationToken,
 ) -> SendOutcome {
     if accumulated.is_empty() {
         return SendOutcome::Sent;
@@ -255,6 +260,7 @@ async fn flush_output(
     tokio::select! {
         biased;
         _ = cancel.cancelled() => SendOutcome::Closed,
+        _ = transport_cancel.cancelled() => SendOutcome::Closed,
         result = tx.send(Message::Binary(frame.into())) => match result {
             Ok(()) => SendOutcome::Sent,
             Err(_) => SendOutcome::Closed,
@@ -331,18 +337,33 @@ impl WebSocketServer {
         let (tx, mut rx) = mpsc::channel::<Message>(WS_OUTPUT_QUEUE_CAPACITY);
         let output_controls: OutputControls = Arc::new(Mutex::new(HashMap::new()));
         let mut active_pty_generations: HashMap<String, u64> = HashMap::new();
+        let transport_cancel = CancellationToken::new();
 
         // Forward messages from the bounded channel to the WebSocket.
+        let sender_cancel = transport_cancel.clone();
         let ws_sender_task = tokio::spawn(async move {
-            while let Some(msg) = rx.recv().await {
+            let mut heartbeat = tokio::time::interval(Duration::from_secs(15));
+            heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            heartbeat.tick().await;
+            loop {
+                let msg = tokio::select! {
+                    _ = sender_cancel.cancelled() => break,
+                    _ = heartbeat.tick() => Message::Ping(Vec::new().into()),
+                    msg = rx.recv() => match msg { Some(msg) => msg, None => break },
+                };
                 if ws_sender.send(msg).await.is_err() {
+                    sender_cancel.cancel();
                     break;
                 }
             }
         });
 
         // Handle incoming WebSocket messages
-        while let Some(msg) = ws_receiver.next().await {
+        loop {
+            let msg = tokio::select! {
+                _ = transport_cancel.cancelled() => break,
+                msg = ws_receiver.next() => match msg { Some(msg) => msg, None => break },
+            };
             match msg {
                 Ok(Message::Binary(data)) => {
                     // Binary INPUT command from frontend (fast path, no JSON).
@@ -400,7 +421,12 @@ impl WebSocketServer {
                         }
                     };
                     match self
-                        .handle_message(ws_msg, tx.clone(), output_controls.clone())
+                        .handle_message(
+                            ws_msg,
+                            tx.clone(),
+                            output_controls.clone(),
+                            transport_cancel.clone(),
+                        )
                         .await
                     {
                         Ok(PtyLifecycleEvent::Started {
@@ -442,21 +468,9 @@ impl WebSocketServer {
             }
         }
 
-        // Clean up all active PTY sessions so the SSH channel and reader task
-        // are torn down promptly when the browser tab closes.
-        for (connection_id, generation) in active_pty_generations {
-            if let Err(e) = self
-                .connection_manager
-                .close_pty_connection(&connection_id, Some(generation))
-                .await
-            {
-                tracing::warn!(
-                    "Failed to close PTY session {} on WebSocket cleanup: {}",
-                    connection_id,
-                    e
-                );
-            }
-        }
+        // A transport drop is not a request to terminate the remote shell.
+        // Explicit Close / ssh_disconnect still release the session promptly.
+        transport_cancel.cancel();
         output_controls.lock().await.clear();
         ws_sender_task.abort();
 
@@ -469,6 +483,7 @@ impl WebSocketServer {
         msg: WsMessage,
         tx: WsTx,
         output_controls: OutputControls,
+        transport_cancel: CancellationToken,
     ) -> Result<PtyLifecycleEvent> {
         match msg {
             WsMessage::StartPty {
@@ -476,6 +491,7 @@ impl WebSocketServer {
                 cols,
                 rows,
                 default_directory,
+                resume_generation,
             } => {
                 tracing::info!(
                     "Starting PTY connection: {} ({}x{})",
@@ -484,10 +500,28 @@ impl WebSocketServer {
                     rows
                 );
 
-                let generation = self
-                    .connection_manager
-                    .start_pty_connection(&connection_id, cols, rows, default_directory.as_deref())
-                    .await?;
+                let resumed_generation = match resume_generation {
+                    Some(generation) => {
+                        self.connection_manager
+                            .resume_pty_connection(&connection_id, generation, cols, rows)
+                            .await?
+                    }
+                    None => None,
+                };
+                let resumed = resumed_generation.is_some();
+                let generation = match resumed_generation {
+                    Some(generation) => generation,
+                    None => {
+                        self.connection_manager
+                            .start_pty_connection(
+                                &connection_id,
+                                cols,
+                                rows,
+                                default_directory.as_deref(),
+                            )
+                            .await?
+                    }
+                };
 
                 let cancel_token = self
                     .connection_manager
@@ -514,6 +548,7 @@ impl WebSocketServer {
                 let started = WsMessage::PtyStarted {
                     connection_id: connection_id.clone(),
                     generation,
+                    resumed,
                 };
                 send_control(&tx, &started).await?;
 
@@ -532,6 +567,7 @@ impl WebSocketServer {
                         // --- Read from PTY (1 ms poll) ---
                         let read_result = tokio::select! {
                             biased;
+                            _ = transport_cancel.cancelled() => break,
                             _ = cancel_token.cancelled() => {
                                 tracing::info!(
                                     "PTY reader task cancelled for {}",
@@ -543,10 +579,11 @@ impl WebSocketServer {
                                     &connection_id_clone,
                                     &mut accumulated,
                                     &cancel_token,
+                                    &transport_cancel,
                                 ).await;
                                 return;
                             }
-                            result = connection_manager.read_from_pty(&connection_id_clone) => result,
+                            result = connection_manager.read_from_pty(&connection_id_clone, generation) => result,
                         };
 
                         match read_result {
@@ -559,6 +596,7 @@ impl WebSocketServer {
                                     let ok = tokio::select! {
                                         biased;
                                         _ = cancel_token.cancelled() => false,
+                                        _ = transport_cancel.cancelled() => false,
                                         r = credits.acquire() => r.map(|p| { p.forget(); true }).unwrap_or(false),
                                     };
                                     if !ok {
@@ -569,6 +607,7 @@ impl WebSocketServer {
                                         &connection_id_clone,
                                         &mut accumulated,
                                         &cancel_token,
+                                        &transport_cancel,
                                     )
                                     .await
                                         == SendOutcome::Closed
@@ -587,6 +626,7 @@ impl WebSocketServer {
                                     let ok = tokio::select! {
                                         biased;
                                         _ = cancel_token.cancelled() => false,
+                                        _ = transport_cancel.cancelled() => false,
                                         r = credits.acquire() => r.map(|p| { p.forget(); true }).unwrap_or(false),
                                     };
                                     if !ok {
@@ -597,6 +637,7 @@ impl WebSocketServer {
                                         &connection_id_clone,
                                         &mut accumulated,
                                         &cancel_token,
+                                        &transport_cancel,
                                     )
                                     .await
                                         == SendOutcome::Closed
@@ -607,6 +648,9 @@ impl WebSocketServer {
                                 }
                             }
                             Err(e) => {
+                                if e.to_string() == "PTY transport superseded" {
+                                    break;
+                                }
                                 tracing::error!(
                                     "Error reading from PTY {}: {}",
                                     connection_id_clone,
@@ -900,5 +944,87 @@ impl WebSocketServer {
                 Ok(PtyLifecycleEvent::None)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod keepalive_tests {
+    use super::*;
+    use crate::ssh::test_server;
+    use std::sync::atomic::Ordering;
+
+    async fn started(
+        ws: &mut tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>,
+        generation: Option<u64>,
+    ) -> (u64, bool) {
+        ws.send(Message::Text(
+            serde_json::to_string(&WsMessage::StartPty {
+                connection_id: "fixture".into(),
+                cols: 80,
+                rows: 24,
+                default_directory: None,
+                resume_generation: generation,
+            })
+            .unwrap()
+            .into(),
+        ))
+        .await
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Message::Text(text) = ws.next().await.unwrap().unwrap() {
+                    if let WsMessage::PtyStarted {
+                        generation,
+                        resumed,
+                        ..
+                    } = serde_json::from_str(&text).unwrap()
+                    {
+                        break (generation, resumed);
+                    }
+                }
+            }
+        })
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn websocket_drop_preserves_the_remote_shell_for_reattachment() {
+        let ssh = test_server::spawn(Duration::from_secs(30)).await;
+        let manager = Arc::new(ConnectionManager::new());
+        manager
+            .create_connection("fixture".into(), ssh.config.clone())
+            .await
+            .unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let server = Arc::new(WebSocketServer::new(manager.clone()));
+        let serving = tokio::spawn(async move {
+            for _ in 0..2 {
+                let (stream, _) = listener.accept().await.unwrap();
+                let server = server.clone();
+                tokio::spawn(async move {
+                    server.handle_connection(stream).await.unwrap();
+                });
+            }
+        });
+        let (mut first, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        let (generation, resumed) = started(&mut first, None).await;
+        assert!(!resumed);
+        let session_cancel = manager.get_pty_cancel_token("fixture").await.unwrap();
+        first.close(None).await.unwrap();
+        drop(first);
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert!(!session_cancel.is_cancelled());
+        assert!(manager.is_ssh_connection_alive("fixture").await);
+        let (mut second, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        let (next_generation, resumed) = started(&mut second, Some(generation)).await;
+        assert!(resumed);
+        assert!(next_generation > generation);
+        assert_eq!(ssh.shells.load(Ordering::SeqCst), 1);
+        second.close(None).await.unwrap();
+        manager.close_connection("fixture").await.unwrap();
+        assert!(session_cancel.is_cancelled());
+        serving.await.unwrap();
     }
 }

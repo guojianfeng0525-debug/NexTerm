@@ -12,6 +12,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+pub(crate) mod keepalive;
+
 /// Preferred host-key algorithms advertised to the server, ordered from most to
 /// least preferred.  RSA variants (including the legacy `ssh-rsa` / SHA-1) are
 /// included so that older servers that only offer RSA host keys are still
@@ -456,7 +458,10 @@ impl SshClient {
     }
 
     pub async fn connect(&mut self, config: &SshConfig) -> Result<()> {
-        let keepalive_interval = config.keepalive_interval.map(Duration::from_secs);
+        let keepalive_interval = config
+            .keepalive_interval
+            .map(keepalive::interval_seconds)
+            .map(Duration::from_secs);
 
         let ssh_config = client::Config {
             preferred: russh::Preferred {
@@ -468,7 +473,10 @@ impl SshClient {
             // configured number of missed replies russh closes the connection,
             // preventing the server from silently dropping idle sessions.
             keepalive_interval,
-            keepalive_max: config.keepalive_max.unwrap_or(3) as usize,
+            keepalive_max: config
+                .keepalive_max
+                .filter(|max| *max > 0)
+                .unwrap_or(keepalive::DEFAULT_MAX) as usize,
             // russh 0.62: disable Nagle's algorithm for lower-latency
             // interactive traffic (applies to the target session AND the
             // jump-hop session, which shares this config).
@@ -489,11 +497,13 @@ impl SshClient {
             tracing::info!("[ssh] connecting via jump host {}:{}", jump.host, jump.port);
             let mut jump_session = tokio::time::timeout(
                 connection_timeout,
-                client::connect(
-                    Arc::clone(&ssh_config),
-                    (&jump.host[..], jump.port),
-                    Client::new(jump.host_key_fingerprint.clone(), config.host_key_verification),
-                ),
+                async {
+                    let stream = keepalive::connect_tcp(&jump.host, jump.port).await?;
+                    Ok::<_, anyhow::Error>(client::connect_stream(
+                        Arc::clone(&ssh_config), stream,
+                        Client::new(jump.host_key_fingerprint.clone(), config.host_key_verification),
+                    ).await?)
+                },
             )
             .await
             .map_err(|_| anyhow::anyhow!("Jump host connection timed out after 3 seconds. Please check the jump host address and network connectivity."))?
@@ -605,11 +615,13 @@ impl SshClient {
         } else {
             tokio::time::timeout(
                 connection_timeout,
-                client::connect(
-                    Arc::clone(&ssh_config),
-                    (&config.host[..], config.port),
-                    Client::new(config.host_key_fingerprint.clone(), config.host_key_verification),
-                ),
+                async {
+                    let stream = keepalive::connect_tcp(&config.host, config.port).await?;
+                    Ok::<_, anyhow::Error>(client::connect_stream(
+                        Arc::clone(&ssh_config), stream,
+                        Client::new(config.host_key_fingerprint.clone(), config.host_key_verification),
+                    ).await?)
+                },
             )
             .await
             .map_err(|_| anyhow::anyhow!("Connection timed out after 3 seconds. Please check the host address and network connectivity."))?
@@ -869,31 +881,31 @@ impl SshClient {
     }
 
     pub async fn disconnect(&mut self) -> Result<()> {
-        if let Some(session) = self.session.take() {
-            // Try to unwrap Arc, if we're the only owner
-            match Arc::try_unwrap(session) {
-                Ok(session) => {
-                    session
-                        .disconnect(Disconnect::ByApplication, "", "English")
-                        .await?;
-                }
-                Err(arc_session) => {
-                    // Other references exist, just drop our reference
-                    drop(arc_session);
-                }
+        let result = match self.session.take() {
+            Some(session) => {
+                session
+                    .disconnect(Disconnect::ByApplication, "", "English")
+                    .await
             }
-        }
+            None => Ok(()),
+        };
         // Close the jump-host session so the tunnel is torn down too.
         if let Some(jump) = self.jump_handle.take() {
             let _ = jump
                 .disconnect(Disconnect::ByApplication, "", "English")
                 .await;
         }
-        Ok(())
+        result.map_err(Into::into)
     }
 
     pub fn is_connected(&self) -> bool {
-        self.session.is_some()
+        self.session
+            .as_ref()
+            .is_some_and(|session| !session.is_closed())
+            && self
+                .jump_handle
+                .as_ref()
+                .is_none_or(|jump| !jump.is_closed())
     }
 
     /// Create a persistent PTY shell session (like ttyd)
@@ -969,6 +981,7 @@ impl SshClient {
             // Increased capacity for better buffering during fast input
             let (input_tx, mut input_rx) = mpsc::channel::<Vec<u8>>(1000); // Increased from 100
             let (output_tx, output_rx) = mpsc::channel::<Vec<u8>>(128); // Bounded: back-pressure to SSH window
+            let cancel = CancellationToken::new();
 
             let channel_id = channel.id();
 
@@ -985,41 +998,51 @@ impl SshClient {
             // Spawn task to handle input (frontend → SSH)
             // This is similar to ttyd's pty_write and INPUT command handling
             // Key: immediate write + flush for responsiveness
+            let input_cancel = cancel.clone();
             tokio::spawn(async move {
                 let mut writer = input_channel;
-                while let Some(data) = input_rx.recv().await {
-                    // Write data immediately
-                    if let Err(e) = writer.write_all(&data).await {
+                loop {
+                    let data = tokio::select! {
+                        _ = input_cancel.cancelled() => break,
+                        data = input_rx.recv() => match data { Some(data) => data, None => break },
+                    };
+                    let result = tokio::select! {
+                        _ = input_cancel.cancelled() => break,
+                        result = async {
+                            writer.write_all(&data).await?;
+                            writer.flush().await
+                        } => result,
+                    };
+                    if let Err(e) = result {
                         tracing::warn!("[PTY] Failed to send data to SSH: {}", e);
                         break;
                     }
-                    // Critical: flush immediately after write (like ttyd)
-                    // This ensures data is sent to PTY without buffering delay
-                    if let Err(e) = writer.flush().await {
-                        tracing::warn!("[PTY] Failed to flush data to SSH: {}", e);
-                        break;
-                    }
                 }
+                input_cancel.cancel();
             });
 
             // Spawn task to handle output (SSH → frontend) AND resize requests.
             // The channel must stay in this task because `wait()` requires `&mut self`,
             // but we also need `window_change()` which only requires `&self`.
             // We use `tokio::select!` to multiplex between output reading and resize.
+            let output_cancel = cancel.clone();
             tokio::spawn(async move {
                 loop {
                     tokio::select! {
+                        _ = output_cancel.cancelled() => break,
                         msg = channel.wait() => {
                             match msg {
                                 Some(ChannelMsg::Data { data }) => {
-                                    if output_tx.send(data.to_vec()).await.is_err() {
-                                        break;
+                                    tokio::select! {
+                                        _ = output_cancel.cancelled() => break,
+                                        result = output_tx.send(data.to_vec()) => if result.is_err() { break; },
                                     }
                                 }
                                 Some(ChannelMsg::ExtendedData { data, .. }) => {
                                     // stderr data (also send to output)
-                                    if output_tx.send(data.to_vec()).await.is_err() {
-                                        break;
+                                    tokio::select! {
+                                        _ = output_cancel.cancelled() => break,
+                                        result = output_tx.send(data.to_vec()) => if result.is_err() { break; },
                                     }
                                 }
                                 Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None => {
@@ -1049,6 +1072,8 @@ impl SshClient {
                         }
                     }
                 }
+                output_cancel.cancel();
+                let _ = tokio::time::timeout(Duration::from_secs(1), channel.close()).await;
             });
 
             Ok(PtySession {
@@ -1056,7 +1081,7 @@ impl SshClient {
                 output_rx: Arc::new(tokio::sync::Mutex::new(output_rx)),
                 channel_id,
                 resize_tx,
-                cancel: CancellationToken::new(),
+                cancel,
             })
         } else {
             Err(anyhow::anyhow!("Not connected"))
@@ -1280,5 +1305,7 @@ pub(crate) fn load_private_key(
     })
 }
 
+#[cfg(test)]
+pub(crate) mod test_server;
 #[cfg(test)]
 mod tests;

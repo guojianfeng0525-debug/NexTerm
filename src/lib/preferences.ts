@@ -15,6 +15,7 @@
  * hydration completes).
  */
 import { rowGet, rowUpsert, rowDelete, legacyDbGet, type DbTable, type Row } from './toolbox/db';
+import { SSH_KEEPALIVE_INTERVAL } from './ssh-keepalive';
 
 type SettingsRow = Row & {
   language?: unknown;
@@ -86,7 +87,7 @@ function assembleSshSettings(): Record<string, unknown> {
     suggestionDebounceMs: num(settings.suggestion_debounce_ms, 50),
     suggestionTuiGateEnabled: bool(settings.suggestion_tui_gate_enabled, true),
     connectionTimeout: num(settings.connection_timeout, 30),
-    keepAliveInterval: num(settings.keep_alive_interval, 60),
+    keepAliveInterval: num(settings.keep_alive_interval, SSH_KEEPALIVE_INTERVAL),
     defaultProtocol: str(settings.default_protocol, 'SSH'),
     newSession: str(settings.new_session_shortcut, 'Ctrl+N'),
     closeSession: str(settings.close_session_shortcut, 'Ctrl+W'),

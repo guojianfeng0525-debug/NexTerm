@@ -8,6 +8,14 @@
  * reconnect) carries the same fields.
  */
 
+import { prefGet } from './preferences';
+import { keepaliveInterval, positiveKeepaliveValue, SSH_KEEPALIVE_INTERVAL, SSH_KEEPALIVE_MAX } from './ssh-keepalive';
+
+export function getSshKeepaliveDefaults() {
+  const settings = prefGet<{ keepAliveInterval?: number }>('sshClientSettings', {});
+  return { interval: keepaliveInterval(settings.keepAliveInterval, SSH_KEEPALIVE_INTERVAL), max: SSH_KEEPALIVE_MAX };
+}
+
 /** Subset of ConnectionConfig / ConnectionData that the SSH connect request needs. */
 export interface SshConnectRequestSource {
   host: string;
@@ -82,8 +90,8 @@ export interface SftpConnectRequest {
 /**
  * Build the `ssh_connect` request payload from a connection config.
  *
- * Defaults mirror the connection dialog UI: keepalive enabled (60 s interval,
- * 3 max), no proxy. When keepalive or proxy is disabled the
+ * Unspecified intervals inherit the app setting (15 s by default), with
+ * 20 missed replies tolerated. When keepalive or proxy is disabled the
  * corresponding fields are sent as null so the backend disables them.
  */
 export function buildSshConnectRequest(
@@ -91,6 +99,7 @@ export function buildSshConnectRequest(
   source: SshConnectRequestSource,
 ): SshConnectRequest {
   const keepAlive = source.keepAlive !== false;
+  const defaults = getSshKeepaliveDefaults();
   const proxyType = source.proxyType ?? 'none';
   const proxyEnabled = proxyType !== 'none';
   const jumpEnabled = !!source.jumpHost?.trim();
@@ -107,8 +116,8 @@ export function buildSshConnectRequest(
     key_path: source.privateKeyPath || null,
     passphrase: source.passphrase || null,
     keepalive_enabled: keepAlive,
-    keepalive_interval: keepAlive ? (source.keepAliveInterval ?? 60) : null,
-    keepalive_max: keepAlive ? (source.serverAliveCountMax ?? 3) : null,
+    keepalive_interval: keepAlive ? keepaliveInterval(source.keepAliveInterval, defaults.interval) : null,
+    keepalive_max: keepAlive ? positiveKeepaliveValue(source.serverAliveCountMax, defaults.max) : null,
     proxy_type: proxyType,
     proxy_host: proxyEnabled ? (source.proxyHost || null) : null,
     proxy_port: proxyEnabled ? (source.proxyPort ?? null) : null,

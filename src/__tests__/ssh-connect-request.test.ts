@@ -1,5 +1,11 @@
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { buildSshConnectRequest, type SshConnectRequestSource } from '../lib/ssh-connect-request';
+
+const defaults = vi.hoisted(() => ({ interval: 15 }));
+vi.mock('../lib/preferences', () => ({
+  prefGet: () => ({ keepAliveInterval: defaults.interval }),
+}));
+beforeEach(() => { defaults.interval = 15; });
 
 const baseSource: SshConnectRequestSource = {
   host: 'example.com',
@@ -32,17 +38,37 @@ describe('buildSshConnectRequest', () => {
     expect(req.password).toBe('');
   });
 
-  it('applies default advanced settings matching the UI (keepalive 60/3, no proxy)', () => {
+  it('applies default advanced settings matching the UI (keepalive 15/20, no proxy)', () => {
     const req = buildSshConnectRequest('conn-1', baseSource);
 
     expect(req.keepalive_enabled).toBe(true);
-    expect(req.keepalive_interval).toBe(60);
-    expect(req.keepalive_max).toBe(3);
+    expect(req.keepalive_interval).toBe(15);
+    expect(req.keepalive_max).toBe(20);
     expect(req.proxy_type).toBe('none');
     expect(req.proxy_host).toBeNull();
     expect(req.proxy_port).toBeNull();
     expect(req.proxy_username).toBeNull();
     expect(req.proxy_password).toBeNull();
+  });
+
+  it('inherits the global interval unless the connection overrides it', () => {
+    defaults.interval = 25;
+    expect(buildSshConnectRequest('conn-1', baseSource).keepalive_interval).toBe(25);
+    expect(buildSshConnectRequest('conn-1', { ...baseSource, keepAliveInterval: 10 }).keepalive_interval).toBe(10);
+  });
+
+  it('replaces invalid heartbeat values instead of disabling or spinning', () => {
+    defaults.interval = 0;
+    const req = buildSshConnectRequest('conn-1', { ...baseSource, keepAliveInterval: NaN, serverAliveCountMax: 0 });
+    expect(req.keepalive_interval).toBe(15);
+    expect(req.keepalive_max).toBe(20);
+  });
+
+  it('supports a five second interval and enforces that minimum', () => {
+    defaults.interval = 5;
+    expect(buildSshConnectRequest('conn-1', baseSource).keepalive_interval).toBe(5);
+    expect(buildSshConnectRequest('conn-1', { ...baseSource, keepAliveInterval: 5 }).keepalive_interval).toBe(5);
+    expect(buildSshConnectRequest('conn-1', { ...baseSource, keepAliveInterval: 2 }).keepalive_interval).toBe(5);
   });
 
   it('forwards custom advanced settings', () => {
@@ -106,8 +132,8 @@ describe('buildSshConnectRequest', () => {
     });
 
     expect(req.keepalive_enabled).toBe(true);
-    expect(req.keepalive_interval).toBe(60);
-    expect(req.keepalive_max).toBe(3);
+    expect(req.keepalive_interval).toBe(15);
+    expect(req.keepalive_max).toBe(20);
   });
 
   it('falls back to port 22 and password auth for partial sources', () => {

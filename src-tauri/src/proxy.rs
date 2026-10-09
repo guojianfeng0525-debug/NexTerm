@@ -100,6 +100,8 @@ pub async fn connect_via_proxy(
         )
     })?;
 
+    crate::ssh::keepalive::configure_tcp(&stream)?;
+
     // The handshake is also bounded by `timeout`: a proxy that accepts the TCP
     // connection but stalls mid-handshake must not hang the SSH connect
     // indefinitely (the direct-connection path is bounded by the same timeout).

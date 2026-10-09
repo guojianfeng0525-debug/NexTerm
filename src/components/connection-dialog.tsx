@@ -23,7 +23,8 @@ import {
 import { ConnectionProfileManager, type ConnectionProfile } from '../lib/connection-profiles';
 import { ConnectionStorageManager } from '../lib/connection-storage';
 import { selectJumpHostCandidates } from '../lib/jump-host';
-import { buildSshConnectRequest } from '../lib/ssh-connect-request';
+import { keepaliveInterval } from '../lib/ssh-keepalive';
+import { buildSshConnectRequest, getSshKeepaliveDefaults } from '../lib/ssh-connect-request';
 import { toast } from 'sonner';
 import {
   Server,
@@ -146,8 +147,8 @@ export function ConnectionDialog({
     terminalEncoding: 'utf-8',
     terminalStartupMode: 'safe',
     keepAlive: true,
-    keepAliveInterval: 60,
-    serverAliveCountMax: 3
+    keepAliveInterval: getSshKeepaliveDefaults().interval,
+    serverAliveCountMax: getSshKeepaliveDefaults().max
   };
 
   const [config, setConfig] = useState<ConnectionConfig>(defaultConfig);
@@ -206,8 +207,8 @@ export function ConnectionDialog({
     port: 22 as number | '',
     proxyPort: 8080 as number | '',
     jumpPort: 22 as number | '',
-    keepAliveInterval: 60 as number | '',
-    serverAliveCountMax: 3 as number | '',
+    keepAliveInterval: getSshKeepaliveDefaults().interval as number | '',
+    serverAliveCountMax: getSshKeepaliveDefaults().max as number | '',
   };
   const [displayValues, setDisplayValues] = useState(initialDisplayValues);
 
@@ -279,8 +280,8 @@ export function ConnectionDialog({
           port: editingConnection.port ?? 22,
           proxyPort: editingConnection.proxyPort ?? 8080,
           jumpPort: editingConnection.jumpPort ?? 22,
-          keepAliveInterval: editingConnection.keepAliveInterval ?? 60,
-          serverAliveCountMax: editingConnection.serverAliveCountMax ?? 3,
+          keepAliveInterval: editingConnection.keepAliveInterval ?? getSshKeepaliveDefaults().interval,
+          serverAliveCountMax: editingConnection.serverAliveCountMax ?? getSshKeepaliveDefaults().max,
         });
         // When editing, don't show "save as connection" since it already exists
         setSaveAsConnection(false);
@@ -493,7 +494,7 @@ export function ConnectionDialog({
             terminalEncoding: config.terminalEncoding,
             terminalStartupMode: config.terminalStartupMode,
             keepAlive: config.keepAlive,
-            keepAliveInterval: config.keepAliveInterval,
+            keepAliveInterval: keepaliveInterval(config.keepAliveInterval, getSshKeepaliveDefaults().interval),
             serverAliveCountMax: config.serverAliveCountMax,
             domain: config.domain,
             rdpResolution: config.rdpResolution,
@@ -528,7 +529,7 @@ export function ConnectionDialog({
             terminalEncoding: config.terminalEncoding,
             terminalStartupMode: config.terminalStartupMode,
             keepAlive: config.keepAlive,
-            keepAliveInterval: config.keepAliveInterval,
+            keepAliveInterval: keepaliveInterval(config.keepAliveInterval, getSshKeepaliveDefaults().interval),
             serverAliveCountMax: config.serverAliveCountMax,
             domain: config.domain,
             rdpResolution: config.rdpResolution,
@@ -585,7 +586,7 @@ export function ConnectionDialog({
         terminalEncoding: config.terminalEncoding,
         terminalStartupMode: config.terminalStartupMode,
         keepAlive: config.keepAlive,
-        keepAliveInterval: config.keepAliveInterval,
+        keepAliveInterval: keepaliveInterval(config.keepAliveInterval, getSshKeepaliveDefaults().interval),
         serverAliveCountMax: config.serverAliveCountMax,
         lastConnected: new Date().toISOString(),
       });
@@ -616,7 +617,7 @@ export function ConnectionDialog({
         terminalEncoding: config.terminalEncoding,
         terminalStartupMode: config.terminalStartupMode,
         keepAlive: config.keepAlive,
-        keepAliveInterval: config.keepAliveInterval,
+        keepAliveInterval: keepaliveInterval(config.keepAliveInterval, getSshKeepaliveDefaults().interval),
         serverAliveCountMax: config.serverAliveCountMax,
       });
     }
@@ -790,7 +791,7 @@ const handleCancelConnectionAttempt = async () => {
       jumpPassword: jumpEnabled ? config.jumpPassword : undefined,
       jumpUseKey: jumpEnabled ? config.jumpUseKey : undefined,
       keepAlive: config.keepAlive,
-      keepAliveInterval: config.keepAliveInterval,
+      keepAliveInterval: keepaliveInterval(config.keepAliveInterval, getSshKeepaliveDefaults().interval),
       serverAliveCountMax: config.serverAliveCountMax,
       domain: config.domain,
       rdpResolution: config.rdpResolution,
@@ -1522,8 +1523,15 @@ const handleCancelConnectionAttempt = async () => {
                                 <Input
                                   id="keep-alive-interval"
                                   type="number"
+                                  min={5}
+                                  step={1}
                                   value={displayValues.keepAliveInterval}
                                   onChange={(e) => handleNumberInput('keepAliveInterval', e.target.value, (n) => updateConfig({ keepAliveInterval: n }))}
+                                  onBlur={() => {
+                                    const interval = keepaliveInterval(config.keepAliveInterval, getSshKeepaliveDefaults().interval);
+                                    updateConfig({ keepAliveInterval: interval });
+                                    setDisplayValues(prev => ({ ...prev, keepAliveInterval: interval }));
+                                  }}
                                 />
                               </div>
                               <div className="space-y-2">

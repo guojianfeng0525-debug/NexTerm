@@ -545,6 +545,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             password_ime::set_password_ime,
             commands::ssh_connect,
+            commands::ssh_connection_alive,
             commands::ssh_host_key_fingerprint,
             commands::ssh_cancel_connect,
             commands::ssh_disconnect,

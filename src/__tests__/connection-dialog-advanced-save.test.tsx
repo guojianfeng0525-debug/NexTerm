@@ -73,9 +73,22 @@ describe('ConnectionDialog advanced tab save', () => {
       expect.objectContaining({
         keepAlive: true,
         keepAliveInterval: 30,
-        serverAliveCountMax: 3,
+        serverAliveCountMax: 20,
       }),
     );
+  });
+
+  it('saves a five second interval and clamps values below the minimum', async () => {
+    render(<ConnectionDialog open onOpenChange={vi.fn()} onConnect={vi.fn()} editingConnection={baseConnection} />);
+    fireEvent.mouseDown(screen.getByRole('tab', { name: 'Advanced' }), { button: 0 });
+    const input = await screen.findByLabelText('Interval (seconds)');
+    expect(input.getAttribute('min')).toBe('5');
+    fireEvent.change(input, { target: { value: '5' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    expect(ConnectionStorageManager.updateConnection).toHaveBeenLastCalledWith('conn-1', expect.objectContaining({ keepAliveInterval: 5 }));
+    fireEvent.change(input, { target: { value: '2' } });
+    fireEvent.blur(input);
+    expect((input as HTMLInputElement).value).toBe('5');
   });
 
   it('shows default advanced values for legacy connections missing them', async () => {
@@ -97,9 +110,9 @@ describe('ConnectionDialog advanced tab save', () => {
     // KeepAlive defaults to ON.
     expect(switches[0].getAttribute('data-state')).toBe('checked');
 
-    // numeric inputs default to 60 / 3
-    expect((screen.getByLabelText('Interval (seconds)') as HTMLInputElement).value).toBe('60');
-    expect((screen.getByLabelText('Max Count') as HTMLInputElement).value).toBe('3');
+    // numeric inputs default to 15 / 20
+    expect((screen.getByLabelText('Interval (seconds)') as HTMLInputElement).value).toBe('15');
+    expect((screen.getByLabelText('Max Count') as HTMLInputElement).value).toBe('20');
   });
 
   it('persists existing proxy config unchanged when saving', async () => {

@@ -12,6 +12,7 @@ const mocks = vi.hoisted(() => {
   const webSockets: Array<any> = [];
   const terminalCallbacks = {
     onWorkingDirectoryChange: vi.fn(),
+    onReconnectTab: vi.fn(),
   };
 
   class MockTerminal {
@@ -88,7 +89,9 @@ const mocks = vi.hoisted(() => {
     return terminal;
   });
 
-  return { terminals, fitAddons, searchAddons, webSockets, terminalCallbacks, Terminal, MockFitAddon, MockWebSocket };
+  const invoke = vi.fn(async (command: string) => command === 'get_websocket_port' ? 9001 : true);
+  const settings = { autoReconnect: true };
+  return { invoke, settings, terminals, fitAddons, searchAddons, webSockets, terminalCallbacks, Terminal, MockFitAddon, MockWebSocket };
 });
 
 vi.mock('@xterm/xterm', () => ({
@@ -123,8 +126,10 @@ vi.mock('@xterm/addon-search', () => ({
 }));
 
 vi.mock('@tauri-apps/api/core', () => ({
-  invoke: vi.fn(async (command: string) => (command === 'get_websocket_port' ? 9001 : undefined)),
+  invoke: mocks.invoke,
 }));
+
+vi.mock('../lib/preferences', () => ({ prefGet: (_key: string, fallback: unknown) => _key === 'sshClientSettings' ? mocks.settings : fallback }));
 
 vi.mock('@tauri-apps/plugin-clipboard-manager', () => ({
   readText: vi.fn().mockResolvedValue(''),
@@ -231,6 +236,8 @@ describe('PtyTerminal activation', () => {
   beforeEach(() => {
     vi.useFakeTimers();
     vi.clearAllMocks();
+    mocks.invoke.mockImplementation(async (command: string) => command === 'get_websocket_port' ? 9001 : true);
+    mocks.settings.autoReconnect = true;
     mocks.terminals.length = 0;
     mocks.fitAddons.length = 0;
     mocks.searchAddons.length = 0;
@@ -267,6 +274,73 @@ describe('PtyTerminal activation', () => {
     cleanup();
     vi.useRealTimers();
     vi.unstubAllGlobals();
+  });
+
+  async function connectedSocket() {
+    renderTerminal(true);
+    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+    const ws = mocks.webSockets[0];
+    expect(ws).toBeDefined();
+    act(() => {
+      ws.onopen?.();
+      ws.onmessage?.({ data: JSON.stringify({ type: 'PtyStarted', connection_id: 'connection-1', generation: 7, resumed: false }) });
+    });
+    return ws;
+  }
+
+  async function dropSocket(ws: any) {
+    act(() => { ws.readyState = 3; ws.onclose?.(); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(2200); });
+  }
+
+  it('reattaches to the original shell after a local transport drop', async () => {
+    const ws = await connectedSocket();
+    await dropSocket(ws);
+    expect(mocks.invoke).toHaveBeenCalledWith('ssh_connection_alive', { connectionId: 'connection-1' });
+    expect(mocks.terminalCallbacks.onReconnectTab).not.toHaveBeenCalled();
+    expect(mocks.terminals).toHaveLength(1);
+    const resumed = mocks.webSockets[1];
+    act(() => { resumed.onopen?.(); });
+    expect(JSON.parse(resumed.send.mock.calls[0][0])).toMatchObject({ type: 'StartPty', resume_generation: 7 });
+    act(() => {
+      resumed.onmessage?.({ data: JSON.stringify({ type: 'PtyStarted', connection_id: 'connection-1', generation: 8, resumed: true }) });
+      ws.onclose?.();
+      ws.onopen?.();
+    });
+    await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+    expect(mocks.webSockets).toHaveLength(2);
+    expect(mocks.terminals[0].writeln).toHaveBeenCalledWith(expect.stringContaining('Original terminal session restored'));
+    expect(mocks.terminals[0].writeln).not.toHaveBeenCalledWith(expect.stringContaining('Previous session lost'));
+  });
+
+  it('rebuilds SSH only after the backend confirms it is closed', async () => {
+    const ws = await connectedSocket();
+    mocks.invoke.mockImplementation(async (command: string) => command === 'get_websocket_port' ? 9001 : false);
+    await dropSocket(ws);
+    expect(mocks.terminalCallbacks.onReconnectTab).toHaveBeenCalledExactlyOnceWith('connection-1');
+    expect(mocks.webSockets).toHaveLength(1);
+  });
+
+  it('does not destroy a session when its status RPC fails', async () => {
+    const ws = await connectedSocket();
+    mocks.invoke.mockRejectedValueOnce(new Error('IPC unavailable'));
+    await dropSocket(ws);
+    expect(mocks.terminalCallbacks.onReconnectTab).not.toHaveBeenCalled();
+    expect(mocks.webSockets).toHaveLength(1);
+    await act(async () => { await vi.advanceTimersByTimeAsync(4300); });
+    expect(mocks.webSockets).toHaveLength(2);
+  });
+
+  it('honors disabled auto reconnect for dead SSH while still restoring a live transport', async () => {
+    const ws = await connectedSocket();
+    mocks.settings.autoReconnect = false;
+    await dropSocket(ws);
+    expect(mocks.webSockets).toHaveLength(2);
+    const resumed = mocks.webSockets[1];
+    mocks.invoke.mockImplementation(async (command: string) => command === 'get_websocket_port' ? 9001 : false);
+    await dropSocket(resumed);
+    expect(mocks.terminalCallbacks.onReconnectTab).not.toHaveBeenCalled();
+    expect(mocks.webSockets).toHaveLength(2);
   });
 
   it('does not focus the terminal when it mounts inactive', () => {

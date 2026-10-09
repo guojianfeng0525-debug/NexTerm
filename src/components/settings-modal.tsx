@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
+import { SSH_KEEPALIVE_INTERVAL } from '@/lib/ssh-keepalive';
 import { changeLanguage, getLanguagePreference, AUTO } from '@/lib/i18n';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from './ui/dialog';
 import { PasswordInput } from './ui/password-input';
@@ -92,7 +93,7 @@ export function SettingsModal({ open, onOpenChange, onAppearanceChange }: Settin
     // Connection settings
     defaultProtocol: 'SSH',
     connectionTimeout: 30,
-    keepAliveInterval: 60,
+    keepAliveInterval: SSH_KEEPALIVE_INTERVAL,
     autoReconnect: true,
     
     // Security settings
@@ -275,7 +276,7 @@ export function SettingsModal({ open, onOpenChange, onAppearanceChange }: Settin
         scrollbackLines: 10000,
         defaultProtocol: 'SSH',
         connectionTimeout: 30,
-        keepAliveInterval: 60,
+        keepAliveInterval: SSH_KEEPALIVE_INTERVAL,
         autoReconnect: true,
         hostKeyVerification: true,
         savePasswords: false,
@@ -932,9 +933,9 @@ export function SettingsModal({ open, onOpenChange, onAppearanceChange }: Settin
                   <Slider
                     value={[settings.keepAliveInterval]}
                     onValueChange={([value]) => updateSetting('keepAliveInterval', value)}
-                    min={30}
+                    min={5}
                     max={300}
-                    step={30}
+                    step={5}
                   />
                 </div>
 
