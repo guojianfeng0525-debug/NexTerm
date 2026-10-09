@@ -651,6 +651,24 @@ impl WebSocketServer {
                                 if e.to_string() == "PTY transport superseded" {
                                     break;
                                 }
+                                if !accumulated.is_empty() {
+                                    let ok = tokio::select! {
+                                        _ = cancel_token.cancelled() => false,
+                                        _ = transport_cancel.cancelled() => false,
+                                        permit = credits.acquire() => permit.map(|p| { p.forget(); true }).unwrap_or(false),
+                                    };
+                                    if !ok {
+                                        break;
+                                    }
+                                    let _ = flush_output(
+                                        &tx_clone,
+                                        &connection_id_clone,
+                                        &mut accumulated,
+                                        &cancel_token,
+                                        &transport_cancel,
+                                    )
+                                    .await;
+                                }
                                 tracing::error!(
                                     "Error reading from PTY {}: {}",
                                     connection_id_clone,
@@ -1022,6 +1040,45 @@ mod keepalive_tests {
         assert!(resumed);
         assert!(next_generation > generation);
         assert_eq!(ssh.shells.load(Ordering::SeqCst), 1);
+        for message in [
+            WsMessage::Resume {
+                connection_id: "fixture".into(),
+            },
+            WsMessage::Input {
+                connection_id: "fixture".into(),
+                data: b"fixture-exit".to_vec(),
+            },
+        ] {
+            second
+                .send(Message::Text(
+                    serde_json::to_string(&message).unwrap().into(),
+                ))
+                .await
+                .unwrap();
+        }
+        let output = tokio::time::timeout(Duration::from_secs(3), async {
+            let mut output = Vec::new();
+            loop {
+                match second.next().await.unwrap().unwrap() {
+                    Message::Binary(frame) => {
+                        let id_len = u16::from_be_bytes([frame[1], frame[2]]) as usize;
+                        output.extend_from_slice(&frame[3 + id_len..]);
+                    }
+                    Message::Text(text)
+                        if matches!(
+                            serde_json::from_str::<WsMessage>(&text).unwrap(),
+                            WsMessage::Error { .. }
+                        ) =>
+                    {
+                        break output
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(output, b"final shell output\r\n");
         second.close(None).await.unwrap();
         manager.close_connection("fixture").await.unwrap();
         assert!(session_cancel.is_cancelled());

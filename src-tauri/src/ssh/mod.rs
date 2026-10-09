@@ -998,7 +998,8 @@ impl SshClient {
             // Spawn task to handle input (frontend → SSH)
             // This is similar to ttyd's pty_write and INPUT command handling
             // Key: immediate write + flush for responsiveness
-            let input_cancel = cancel.clone();
+            let input_cancel = cancel.child_token();
+            let stop_input = input_cancel.clone();
             tokio::spawn(async move {
                 let mut writer = input_channel;
                 loop {
@@ -1072,7 +1073,9 @@ impl SshClient {
                         }
                     }
                 }
-                output_cancel.cancel();
+                // End input on remote EOF, but let the transport reader drain
+                // queued final output before reporting that the shell exited.
+                stop_input.cancel();
                 let _ = tokio::time::timeout(Duration::from_secs(1), channel.close()).await;
             });
 

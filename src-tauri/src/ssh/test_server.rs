@@ -76,6 +76,11 @@ impl server::Handler for Echo {
         session: &mut server::Session,
     ) -> Result<(), Self::Error> {
         self.input_bytes.fetch_add(data.len(), Ordering::SeqCst);
+        if data == b"fixture-exit" {
+            session.data(channel, b"final shell output\r\n".to_vec())?;
+            session.eof(channel)?;
+            return session.close(channel);
+        }
         session.data(channel, data.to_vec())
     }
 }
