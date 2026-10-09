@@ -11,6 +11,8 @@ export type TransferStatus =
 export type TransferDirection = "upload" | "download";
 
 export interface TransferItem {
+  /** Immutable connection that owned the transfer when it was queued. */
+  connectionId?: string;
   id: string;
   fileName: string;
   direction: TransferDirection;
@@ -35,6 +37,7 @@ export type TransferAction =
         sourcePath: string;
         destinationPath: string;
         totalBytes: number;
+        connectionId?: string;
       }>;
     }
   | { type: "START"; id: string }
@@ -71,6 +74,7 @@ export function transferQueueReducer(
   switch (action.type) {
     case "ENQUEUE": {
       const newItems: TransferItem[] = action.items.map((item) => ({
+        ...(item.connectionId ? { connectionId: item.connectionId } : {}),
         id: generateTransferId(),
         fileName: item.fileName,
         direction: item.direction,

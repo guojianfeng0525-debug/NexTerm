@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useReducer, useRef, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useReducer, useRef, useCallback, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import { invoke, Channel } from '@tauri-apps/api/core';
 import { writeText as writeClipboardText } from '@tauri-apps/plugin-clipboard-manager';
@@ -11,6 +11,7 @@ import { ScrollArea } from './ui/scroll-area';
 import {
   transferQueueReducer,
   getNextQueuedTransfer,
+  type TransferAction,
 } from '@/lib/transfer-queue-reducer';
 import {
   buildDirectoryUploadPlan,
@@ -70,7 +71,9 @@ import {
   LocateFixed,
 } from 'lucide-react';
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuTrigger, ContextMenuSeparator } from './ui/context-menu';
-import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "./ui/alert-dialog";
+import { FileDeleteConfirmation } from './file-delete-confirmation';
+import { isDirectRemoteChild, isFileEntryName, type FileDeletionTarget } from '@/lib/file-deletion';
+import { ownsWorkspaceKey, useWorkspaceActivity } from '@/lib/workspace-activity';
 import { toast } from 'sonner';
 import { isEditableTarget } from '@/lib/keyboard-shortcuts';
 import { prefGet, prefSet } from '@/lib/preferences';
@@ -90,6 +93,7 @@ interface IntegratedFileBrowserProps {
   connectionId: string;
   host?: string;
   isConnected: boolean;
+  isActive?: boolean;
   terminalWorkingDirectory?: { path: string; sequence: number };
   onClose: () => void;
   /** Called when user wants to open a file in the Log Monitor */
@@ -118,12 +122,16 @@ const treeStateCache = new Map<string, {
 const treeScrollCache = new Map<string, number>();
 const FOLLOW_TERMINAL_DIRECTORY_KEY = 'nexterm-follow-terminal-directory';
 
-export function IntegratedFileBrowser({ connectionId, host: _host, isConnected, terminalWorkingDirectory, onClose: _onClose, onOpenInLogMonitor, onOpenInEditor }: IntegratedFileBrowserProps) {
+export function IntegratedFileBrowser({ connectionId, host, isConnected, isActive = true, terminalWorkingDirectory, onClose: _onClose, onOpenInLogMonitor, onOpenInEditor }: IntegratedFileBrowserProps) {
   const { t } = useTranslation();
+  const workspaceRef = useRef<HTMLDivElement>(null);
+  const { active, isCurrent } = useWorkspaceActivity(workspaceRef, isActive && isConnected);
   const [currentPath, setCurrentPath] = useState('/home');
   const [files, setFiles] = useState<FileItem[]>([]);
   const [selectedFiles, setSelectedFiles] = useState<Set<string>>(new Set());
-  const [transfers, dispatchTransfer] = useReducer(transferQueueReducer, []);
+  const [transfers, dispatchTransferAction] = useReducer(transferQueueReducer, []);
+  const dispatchTransfer = (action: TransferAction) => dispatchTransferAction(action.type === 'ENQUEUE'
+    ? { ...action, items: action.items.map(item => ({ ...item, connectionId })) } : action);
   const [queueExpanded, setQueueExpanded] = useState(false);
   const processTransferRef = useRef(false);
   const [searchTerm, setSearchTerm] = useState('');
@@ -173,12 +181,34 @@ export function IntegratedFileBrowser({ connectionId, host: _host, isConnected, 
   } | null>(null);
   const [renamingFile, setRenamingFile] = useState<FileItem | null>(null);
   const [newFileName, setNewFileName] = useState('');
-  const [deletingFile, setDeletingFile] = useState<FileItem | null>(null);
+  const [deletion, setDeletion] = useState<{
+    connectionId: string;
+    parentPath: string;
+    label: string;
+    files: FileDeletionTarget[];
+  } | null>(null);
+  const deletionRef = useRef(deletion);
+  deletionRef.current = deletion;
+  const deletionBusyRef = useRef(false);
+  const [deletionBusy, setDeletionBusy] = useState(false);
+  const scopeRef = useRef({ connectionId, currentPath });
+  scopeRef.current = { connectionId, currentPath };
   const [directoryTransfer, setDirectoryTransfer] = useState<{
     sourcePath: string;
     destinationRoot: string;
     destinationDirectoryName: string;
   } | null>(null);
+
+  useLayoutEffect(() => {
+    deletionRef.current = null;
+    setDeletion(null);
+    setRenamingFile(null);
+    setDirectoryTransfer(null);
+  }, [connectionId, currentPath, active]);
+  useLayoutEffect(() => {
+    setClipboard(null);
+    clipboardBatchRef.current = null;
+  }, [connectionId, active]);
   
   // Column widths state
   const [columnWidths, setColumnWidths] = useState({
@@ -313,10 +343,10 @@ export function IntegratedFileBrowser({ connectionId, host: _host, isConnected, 
   // eslint-disable-next-line react-hooks/exhaustive-deps -- sequence intentionally re-runs follow after every completed prompt
   }, [connectionId, isConnected, followTerminalDirectory, terminalWorkingDirectory?.path, terminalWorkingDirectory?.sequence]);
 
-  // Keyboard shortcuts
-  useEffect(() => {
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (isEditableTarget(event.target)) {
+  // Container-owned shortcuts: hidden pages and dialog portals cannot reach them.
+  const handleKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+      if (!isCurrent() || !ownsWorkspaceKey(workspaceRef.current, event.nativeEvent)
+        || isEditableTarget(event.target) || event.repeat || event.altKey || event.shiftKey || isLoading) {
         return;
       }
 
@@ -325,14 +355,14 @@ export function IntegratedFileBrowser({ connectionId, host: _host, isConnected, 
           case 'c':
             if (selectedFiles.size > 0) {
               event.preventDefault();
-              const selectedFileItems = files.filter(f => selectedFiles.has(f.name));
+              const selectedFileItems = files.filter(f => isFileEntryName(f.name) && selectedFiles.has(f.name));
               handleCopyFiles(selectedFileItems);
             }
             break;
           case 'x':
             if (selectedFiles.size > 0) {
               event.preventDefault();
-              const selectedFileItems = files.filter(f => selectedFiles.has(f.name));
+              const selectedFileItems = files.filter(f => isFileEntryName(f.name) && selectedFiles.has(f.name));
               handleCutFiles(selectedFileItems);
             }
             break;
@@ -342,7 +372,7 @@ export function IntegratedFileBrowser({ connectionId, host: _host, isConnected, 
             break;
           case 'a':
             event.preventDefault();
-            setSelectedFiles(new Set(files.map(f => f.name)));
+            setSelectedFiles(new Set(files.filter(f => isFileEntryName(f.name)).map(f => f.name)));
             break;
           case 'r':
             event.preventDefault();
@@ -351,8 +381,7 @@ export function IntegratedFileBrowser({ connectionId, host: _host, isConnected, 
         }
       } else if (event.key === 'Delete' && selectedFiles.size > 0) {
         event.preventDefault();
-        const selectedFileItems = files.filter(f => selectedFiles.has(f.name));
-        selectedFileItems.forEach(handleDeleteFile);
+        requestDeleteFiles(files.filter(f => selectedFiles.has(f.name)));
       } else if (event.key === 'F2' && selectedFiles.size === 1) {
         event.preventDefault();
         const selectedFile = files.find(f => selectedFiles.has(f.name));
@@ -366,11 +395,6 @@ export function IntegratedFileBrowser({ connectionId, host: _host, isConnected, 
         }
       }
     };
-
-    document.addEventListener('keydown', handleKeyDown);
-    return () => document.removeEventListener('keydown', handleKeyDown);
-  // eslint-disable-next-line react-hooks/exhaustive-deps -- loadFiles/handlePasteFiles are stable inline fns; adding them would cause infinite re-renders
-  }, [selectedFiles, files, clipboard, renamingFile]);
 
   // Column resize effect
   useEffect(() => {
@@ -455,6 +479,7 @@ export function IntegratedFileBrowser({ connectionId, host: _host, isConnected, 
   useEffect(() => {
     const nextItem = getNextQueuedTransfer(transfers);
     if (!nextItem || processTransferRef.current) return;
+    const transferConnectionId = nextItem.connectionId ?? connectionId;
 
     processTransferRef.current = true;
     dispatchTransfer({ type: "START", id: nextItem.id });
@@ -486,7 +511,7 @@ export function IntegratedFileBrowser({ connectionId, host: _host, isConnected, 
           const result = await invoke<{ success: boolean; bytes_transferred?: number; error?: string }>(
             "upload_remote_file",
             {
-              connectionId,
+              connectionId: transferConnectionId,
               localPath: nextItem.sourcePath,
               remotePath: nextItem.destinationPath,
               onProgress: channel,
@@ -496,7 +521,7 @@ export function IntegratedFileBrowser({ connectionId, host: _host, isConnected, 
           if (result.success) {
             dispatchTransfer({ type: "COMPLETE", id: nextItem.id });
             toast.success(t('fileBrowser.toast.uploaded', { name: nextItem.fileName }));
-            void loadFiles();
+            if (scopeRef.current.connectionId === transferConnectionId) void loadFiles();
           } else {
             dispatchTransfer({
               type: "FAIL",
@@ -511,7 +536,7 @@ export function IntegratedFileBrowser({ connectionId, host: _host, isConnected, 
           const result = await invoke<{ success: boolean; bytes_transferred?: number; error?: string }>(
             "download_remote_file",
             {
-              connectionId,
+              connectionId: transferConnectionId,
               remotePath: nextItem.sourcePath,
               localPath: nextItem.destinationPath,
               onProgress: channel,
@@ -916,6 +941,7 @@ export function IntegratedFileBrowser({ connectionId, host: _host, isConnected, 
   };
 
   const handleFileSelect = (fileName: string, event: React.MouseEvent) => {
+    if (!isFileEntryName(fileName)) return;
     // Only select/deselect if Ctrl (Windows/Linux) or Cmd (Mac) is pressed
     if (event.ctrlKey || event.metaKey) {
       event.stopPropagation();
@@ -931,7 +957,8 @@ export function IntegratedFileBrowser({ connectionId, host: _host, isConnected, 
   };
 
   const handleFileClick = (file: FileItem, event: React.MouseEvent) => {
-    console.log('handleFileClick called', { file, ctrlKey: event.ctrlKey, metaKey: event.metaKey });
+    if (isEditableTarget(event.target)) return;
+    workspaceRef.current?.focus();
     
     if (event.ctrlKey || event.metaKey) {
       // Ctrl/Cmd + Click: toggle selection
@@ -1126,43 +1153,49 @@ export function IntegratedFileBrowser({ connectionId, host: _host, isConnected, 
     }
   };
 
-  function handleDeleteFile(file: FileItem) {
-    console.log('[FileBrowser] Opening delete confirmation for:', file.name);
-    setDeletingFile(file);
+  function requestDeleteFiles(items: FileItem[]) {
+    if (!isCurrent() || isLoading || deletionBusyRef.current || lastLoadedConnectionIdRef.current !== connectionId) return;
+    const targets = items.filter(file => isFileEntryName(file.name) && isDirectRemoteChild(file.path, currentPath));
+    if (targets.length === 0) return;
+    setDeletion({ connectionId, parentPath: currentPath, label: host ?? connectionId,
+      files: targets.map(file => ({ name: file.name, path: file.path, isDirectory: file.type === 'directory' })) });
+  }
+
+  function handleDeleteFile(file: FileItem) { requestDeleteFiles([file]); }
+
+  const cancelDeleteFile = () => {
+    deletionRef.current = null;
+    setDeletion(null);
   };
 
   const confirmDeleteFile = async () => {
-    if (!deletingFile) return;
-    
-    console.log('[FileBrowser] Confirming delete for:', deletingFile.name);
+    const request = deletionRef.current;
+    const ownsRequest = () => request !== null && deletionRef.current === request && isCurrent()
+      && scopeRef.current.connectionId === request.connectionId && scopeRef.current.currentPath === request.parentPath;
+    if (!request || !ownsRequest() || deletionBusyRef.current) return;
+    deletionBusyRef.current = true;
+    setDeletionBusy(true);
     try {
-      const filePath = deletingFile.path;
-      console.log('[FileBrowser] Deleting file', { 
-        filePath,
-        isDirectory: deletingFile.type === 'directory',
-        connectionId
-      });
-
-      await invoke<boolean>('delete_file', {
-        connectionId,
-        path: filePath,
-        isDirectory: deletingFile.type === 'directory'
-      });
-      
-      toast.success(t('fileBrowser.toast.deleted', { name: deletingFile.name }));
-      setDeletingFile(null);
-      void loadFiles();
+      for (const file of request.files) {
+        if (!ownsRequest() || !isDirectRemoteChild(file.path, request.parentPath)) break;
+        await invoke<boolean>('delete_file', {
+          connectionId: request.connectionId, path: file.path, parentPath: request.parentPath, isDirectory: file.isDirectory,
+        });
+      }
+      if (ownsRequest()) {
+        cancelDeleteFile();
+        setSelectedFiles(new Set());
+        void loadFiles();
+      }
     } catch (error) {
-      console.error('[FileBrowser] Failed to delete file:', error);
       toast.error(t('fileBrowser.toast.deleteFailed'), {
         description: error instanceof Error ? error.message : t('fileBrowser.toast.deleteFailedDesc'),
       });
+      cancelDeleteFile(); // A partially completed batch must be reviewed again before retrying.
+    } finally {
+      deletionBusyRef.current = false;
+      setDeletionBusy(false);
     }
-  };
-
-  const cancelDeleteFile = () => {
-    console.log('[FileBrowser] User cancelled deletion');
-    setDeletingFile(null);
   };
 
   function handleCopyFiles(files: FileItem[]) {
@@ -1216,6 +1249,8 @@ export function IntegratedFileBrowser({ connectionId, host: _host, isConnected, 
    *    current remote directory. Failures toast and never crash.
    */
   async function handlePasteWithSystemClipboard() {
+    const ownsPaste = () => isCurrent() && scopeRef.current.connectionId === connectionId && scopeRef.current.currentPath === currentPath;
+    if (!ownsPaste()) return;
     if (clipboard) {
       await handlePasteFiles();
       return;
@@ -1229,6 +1264,7 @@ export function IntegratedFileBrowser({ connectionId, host: _host, isConnected, 
       return;
     }
     if (!localPaths || localPaths.length === 0) return;
+    if (!ownsPaste()) return;
     const items = buildFileUploadItems(localPaths, currentPath);
     if (items.length === 0) return;
     dispatchTransfer({ type: "ENQUEUE", items });
@@ -1241,9 +1277,12 @@ export function IntegratedFileBrowser({ connectionId, host: _host, isConnected, 
   };
 
   async function handlePasteFiles() {
+    const ownsPaste = () => isCurrent() && scopeRef.current.connectionId === connectionId && scopeRef.current.currentPath === currentPath;
+    if (!ownsPaste()) return;
     if (clipboard) {
       try {
         for (const file of clipboard.files) {
+          if (!ownsPaste() || !isFileEntryName(file.name)) return;
           const destPath = currentPath === '/' ? `/${file.name}` : `${currentPath}/${file.name}`;
           
           if (clipboard.operation === 'copy') {
@@ -1264,7 +1303,7 @@ export function IntegratedFileBrowser({ connectionId, host: _host, isConnected, 
         const operation = clipboard.operation === 'copy' ? 'copied' : 'moved';
         toast.success(t('fileBrowser.toast.pasted', { count: clipboard.files.length, operation }));
         setClipboard(null);
-        void loadFiles();
+        if (ownsPaste()) void loadFiles();
       } catch (error) {
         console.error('Failed to paste files:', error);
         toast.error(t('fileBrowser.toast.pasteFailed'), {
@@ -1275,12 +1314,14 @@ export function IntegratedFileBrowser({ connectionId, host: _host, isConnected, 
   };
 
   function handleRenameFile(file: FileItem) {
+    if (!isCurrent() || !isFileEntryName(file.name) || !isDirectRemoteChild(file.path, currentPath)) return;
     setRenamingFile(file);
     setNewFileName(file.name);
   };
 
   const handleRenameConfirm = async () => {
-    if (renamingFile && newFileName.trim()) {
+    if (isCurrent() && lastLoadedConnectionIdRef.current === connectionId && renamingFile
+      && isDirectRemoteChild(renamingFile.path, currentPath) && isFileEntryName(newFileName)) {
       try {
         const oldPath = currentPath === '/' ? `/${renamingFile.name}` : `${currentPath}/${renamingFile.name}`;
         const newPath = currentPath === '/' ? `/${newFileName}` : `${currentPath}/${newFileName}`;
@@ -1469,7 +1510,7 @@ export function IntegratedFileBrowser({ connectionId, host: _host, isConnected, 
   }, [connectionId, currentPath, isConnected, loadFiles]);
 
   const { isDragOver: isDraggingOver, clearDragOver } = useWebviewFileDrop({
-    enabled: isConnected,
+    enabled: active,
     targetRef: dropZoneRef,
     onDrop: handleOsFilesDropped,
     priority: 0,
@@ -1550,7 +1591,8 @@ export function IntegratedFileBrowser({ connectionId, host: _host, isConnected, 
   }
 
   return (
-    <div className={`h-full flex flex-col bg-background border-t ${resizingColumn ? 'cursor-col-resize select-none' : ''}`}>
+    <div ref={workspaceRef} tabIndex={0} data-testid="ssh-file-workspace" onKeyDown={handleKeyDown}
+      className={`h-full flex flex-col bg-background border-t ${resizingColumn ? 'cursor-col-resize select-none' : ''}`}>
       {/* File Browser Toolbar */}
       <div className="relative z-10 pt-2 pb-1">
         <div className="flex items-center gap-0.5 overflow-x-auto whitespace-nowrap rounded-lg border border-border/70 bg-background/90 px-1.5 py-1 text-xs shadow-sm backdrop-blur-sm scrollbar-none">
@@ -1899,7 +1941,7 @@ export function IntegratedFileBrowser({ connectionId, host: _host, isConnected, 
                                 // nested double-menu root cause is fixed in
                                 // ui/context-menu.tsx (trigger stopPropagation).
                                 e.stopPropagation();
-                                if (!selectedFiles.has(file.name)) {
+                                if (!isParent && !selectedFiles.has(file.name)) {
                                   setSelectedFiles(new Set([file.name]));
                                 }
                               }}
@@ -2135,7 +2177,7 @@ export function IntegratedFileBrowser({ connectionId, host: _host, isConnected, 
         expanded={queueExpanded}
         onToggleExpanded={() => setQueueExpanded(p => !p)}
         onCancel={(item) => {
-          void invoke('cancel_file_transfer', { connectionId, transferId: item.id });
+          void invoke('cancel_file_transfer', { connectionId: item.connectionId ?? connectionId, transferId: item.id });
         }}
       />
 
@@ -2154,29 +2196,9 @@ export function IntegratedFileBrowser({ connectionId, host: _host, isConnected, 
         />
       )}
 
-      {/* Delete Confirmation Dialog */}
-      <AlertDialog open={!!deletingFile} onOpenChange={(open) => !open && setDeletingFile(null)}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>{deletingFile?.type === 'directory' ? t('fileBrowser.deleteFolderTitle') : t('fileBrowser.deleteFileTitle')}</AlertDialogTitle>
-            <AlertDialogDescription>
-              {t('fileBrowser.deleteConfirm', { name: deletingFile?.name })}
-              {deletingFile?.type === 'directory' && (
-                <span className="block mt-2 text-destructive font-medium">
-                  {t('fileBrowser.deleteFolderWarning')}
-                </span>
-              )}
-              {t('fileBrowser.cannotBeUndone')}
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel onClick={cancelDeleteFile}>{t('common.cancel')}</AlertDialogCancel>
-            <AlertDialogAction onClick={confirmDeleteFile} className="bg-destructive hover:bg-destructive/90">
-              {t('common.delete')}
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+      <FileDeleteConfirmation open={!!deletion && active && deletion.connectionId === connectionId && deletion.parentPath === currentPath}
+        targetLabel={deletion?.label ?? ''} files={deletion?.files ?? []} remote recursive busy={deletionBusy}
+        onCancel={cancelDeleteFile} onConfirm={confirmDeleteFile} />
 
     </div>
   );

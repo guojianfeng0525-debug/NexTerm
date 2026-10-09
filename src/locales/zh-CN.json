@@ -562,6 +562,21 @@
     "hoursAgo": "{{count}}小时前",
     "daysAgo": "{{count}}天前"
   },
+  "fileDeletion": {
+    "remoteTitle_one": "删除 {{count}} 个远程项目？",
+    "remoteTitle_other": "删除 {{count}} 个远程项目？",
+    "localTitle_one": "删除 {{count}} 个本地项目？",
+    "localTitle_other": "删除 {{count}} 个本地项目？",
+    "description": "只删除下方列出的目标路径，此操作无法撤销。",
+    "server": "服务器：{{target}}",
+    "location": "位置：{{target}}",
+    "directory": "目录",
+    "file": "文件",
+    "recursiveWarning": "将删除列出的目录及其全部内容。",
+    "confirm_one": "删除 {{count}} 个项目",
+    "confirm_other": "删除 {{count}} 个项目",
+    "deleting": "正在删除…"
+  },
   "fileBrowser": {
     "connectPrompt": "连接到 SSH 以浏览远程文件",
     "disconnected": "与 {{name}} 的连接已断开",
@@ -3034,6 +3049,7 @@
     "deleteSelectedCount_one": "删除 {{count}} 个选中项",
     "deleteSelectedCount_other": "删除 {{count}} 个选中项",
     "deleteSelectedTitle": "删除选中节点",
+    "localDeleteScope": "仅删除 NexTerm 中的拓扑记录，不操作服务器文件。",
     "deleteSelectedDesc_one": "将删除 {{count}} 个节点及其网络接口、路由、防火墙与端口数据，以及相关连接关系，此操作不可撤销。",
     "deleteSelectedDesc_other": "将删除 {{count}} 个节点及其网络接口、路由、防火墙与端口数据，以及相关连接关系，此操作不可撤销。",
     "details": {

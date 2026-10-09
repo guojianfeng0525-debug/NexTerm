@@ -96,3 +96,54 @@ describe('SyncDialog remote downloads', () => {
     expect(mocks.invoke.mock.calls.some(([command]) => command === 'download_remote_file')).toBe(false);
   });
 });
+
+
+describe('SyncDialog deletion approval', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.invoke.mockImplementation(async (command: string) => command === 'list_remote_files_recursive'
+      ? [{ relative_path: 'obsolete.txt', name: 'obsolete.txt', size: 1, modified: null, file_type: 'File' }] : []);
+  });
+  afterEach(cleanup);
+  async function prepareSync(canOperate = () => true) {
+    const remove = vi.fn().mockResolvedValue(undefined);
+    const props = { open: true, onOpenChange: () => {}, connectionId: 'sync-server-a', targetLabel: 'server-a',
+      localPath: '/local', remotePath: '/srv/app', canOperate,
+      onLoadLocalDir: async () => [], onLoadRemoteDir: async () => [], onCreateRemoteDir: async () => {},
+      onDeleteRemoteItem: remove, onSyncComplete: () => {} };
+    const view = render(<SyncDialog {...props} />);
+    fireEvent.click(document.getElementById('sync-delete')!);
+    fireEvent.click(screen.getByRole('button', { name: 'Compare' }));
+    await screen.findByText('obsolete.txt');
+    return { ...view, props, remove };
+  }
+  function selectOrphan() { fireEvent.click(screen.getByText('obsolete.txt').closest('tr')!.querySelector('[role="checkbox"]')!); }
+  it('bulk select does not opt in to remote deletions', async () => {
+    const { remove } = await prepareSync();
+    fireEvent.click(screen.getByRole('button', { name: 'Select all' }));
+    expect((screen.getByRole('button', { name: 'Sync (0 items)' }) as HTMLButtonElement).disabled).toBe(true);
+    expect(remove).not.toHaveBeenCalled();
+  });
+  it('requires a second confirmation with server and exact deletion paths', async () => {
+    const { remove } = await prepareSync(); selectOrphan();
+    fireEvent.click(screen.getByRole('button', { name: 'Sync (1 items)' }));
+    expect(remove).not.toHaveBeenCalled();
+    expect(screen.getByRole('alertdialog').textContent).toContain('server-a');
+    expect(screen.getByRole('alertdialog').textContent).toContain('/srv/app/obsolete.txt');
+    fireEvent.click(screen.getByRole('button', { name: 'Delete 1 item' }));
+    await waitFor(() => expect(remove).toHaveBeenCalledWith('/srv/app/obsolete.txt', false));
+  });
+  it('rejects confirmation immediately if the owning page is no longer active', async () => {
+    let active = true; const { remove } = await prepareSync(() => active); selectOrphan();
+    fireEvent.click(screen.getByRole('button', { name: 'Sync (1 items)' }));
+    active = false; fireEvent.click(screen.getByRole('button', { name: 'Delete 1 item' }));
+    expect(remove).not.toHaveBeenCalled();
+  });
+  it('invalidates deletion approval on connection changes', async () => {
+    const { remove, props, rerender } = await prepareSync(); selectOrphan();
+    fireEvent.click(screen.getByRole('button', { name: 'Sync (1 items)' }));
+    const oldConfirm = screen.getByRole('button', { name: 'Delete 1 item' });
+    rerender(<SyncDialog {...props} connectionId="sync-server-b" />); fireEvent.click(oldConfirm);
+    expect(remove).not.toHaveBeenCalled(); expect(screen.queryByRole('alertdialog')).toBeNull();
+  });
+});

@@ -1845,8 +1845,10 @@ function AppContent() {
                           >
                             <ErrorBoundary label="File Browser">
                               <IntegratedFileBrowser
+                              isActive={section === 'terminal'}
                               connectionId={activeConnection.connectionId}
-                              host={activeConnection.host}
+                              host={activeConnection.username && activeConnection.host
+                                ? `${activeConnection.username}@${activeConnection.host}` : activeConnection.host}
                               isConnected={activeConnection.status === 'connected'}
                               terminalWorkingDirectory={terminalWorkingDirectories[activeConnection.connectionId]}
                               onClose={() => {}}
@@ -2038,7 +2040,7 @@ function AppContent() {
             <ToolMySql />
           </div>
           <div className={cn('absolute inset-0 bg-background', section === 'topology' ? '' : 'hidden')}>
-            <ToolTopology />
+            <ToolTopology isActive={section === 'topology'} />
           </div>
           {section === 'jar' && (
             <div className="absolute inset-0 bg-background">

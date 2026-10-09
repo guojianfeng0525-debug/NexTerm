@@ -8,6 +8,7 @@ pub mod db;
 pub mod desktop_protocol;
 pub mod desktop_transport;
 pub mod documents;
+mod file_deletion;
 mod ftp_client;
 mod jump;
 mod ls_parser;

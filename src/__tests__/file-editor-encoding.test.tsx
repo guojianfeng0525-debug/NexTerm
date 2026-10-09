@@ -145,3 +145,42 @@ describe('FileEditorView encoding conversion', () => {
     });
   });
 });
+
+
+describe('FileEditorView workspace ownership', () => {
+  it('never saves an unloaded file through Ctrl+S', async () => {
+    mocks.invoke.mockReturnValue(new Promise(() => {}));
+    renderEditor();
+    fireEvent.keyDown(document.body, { key: 's', ctrlKey: true });
+    expect(mocks.invoke.mock.calls.some(([cmd]) => cmd === 'create_file_with_encoding')).toBe(false);
+  });
+  it('does not save unchanged content', async () => {
+    renderEditor(); await screen.findByTestId('code-editor-mock');
+    fireEvent.keyDown(screen.getByTestId('code-editor-mock'), { key: 's', ctrlKey: true });
+    expect(mocks.invoke.mock.calls.some(([cmd]) => cmd === 'create_file_with_encoding')).toBe(false);
+  });
+  it('foreign Ctrl+S cannot save a dirty remote editor', async () => {
+    renderEditor(); const editor = await screen.findByTestId('code-editor-mock');
+    fireEvent.change(editor, { target: { value: 'unsaved edits' } });
+    fireEvent.keyDown(document.body, { key: 's', ctrlKey: true });
+    expect(mocks.invoke.mock.calls.some(([cmd]) => cmd === 'create_file_with_encoding')).toBe(false);
+  });
+  it('hidden editor rejects Ctrl+S and direct save-button activation', async () => {
+    renderEditor(); const editor = await screen.findByTestId('code-editor-mock');
+    fireEvent.change(editor, { target: { value: 'unsaved edits' } });
+    const save = screen.getByRole('button', { name: /save/i });
+    screen.getByTestId('file-editor-workspace').style.display = 'none';
+    fireEvent.keyDown(editor, { key: 's', ctrlKey: true }); fireEvent.click(save);
+    expect(mocks.invoke.mock.calls.some(([cmd]) => cmd === 'create_file_with_encoding')).toBe(false);
+  });
+  it('only the focused editor saves when multiple editors are mounted', async () => {
+    render(<><FileEditorView connectionId="a" filePath="/a.txt" fileName="a.txt" isConnected />
+      <FileEditorView connectionId="b" filePath="/b.txt" fileName="b.txt" isConnected /></>);
+    const editors = await screen.findAllByTestId('code-editor-mock');
+    fireEvent.change(editors[0], { target: { value: 'first edit' } });
+    fireEvent.change(editors[1], { target: { value: 'second edit' } });
+    fireEvent.keyDown(editors[0], { key: 's', ctrlKey: true });
+    await waitFor(() => expect(mocks.invoke.mock.calls.filter(([cmd]) => cmd === 'create_file_with_encoding')).toHaveLength(1));
+    expect(mocks.invoke).toHaveBeenCalledWith('create_file_with_encoding', { connectionId: 'a', path: '/a.txt', content: 'first edit', encoding: 'utf-8' });
+  });
+});

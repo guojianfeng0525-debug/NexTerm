@@ -1,6 +1,7 @@
 import React, {
   useState,
   useEffect,
+  useLayoutEffect,
   useCallback,
   useRef,
   useImperativeHandle,
@@ -49,6 +50,9 @@ import {
   localBreadcrumbSegments,
 } from "@/lib/file-entry-types";
 import { useWebviewFileDrop } from "@/lib/use-webview-file-drop";
+import { FileDeleteConfirmation } from './file-delete-confirmation';
+import { isDirectRemoteChild, isFileEntryName, type FileDeletionTarget } from '@/lib/file-deletion';
+import { useWorkspaceActivity } from '@/lib/workspace-activity';
 
 // ---------- Types ----------
 
@@ -56,6 +60,7 @@ export interface FilePanelProps {
   mode: "local" | "remote";
   label: string;
   isActive: boolean;
+  workspaceActive?: boolean;
   initialPath?: string;
 
   // Data operations (provided by parent)
@@ -104,6 +109,7 @@ export const FilePanel = forwardRef<FilePanelRef, FilePanelProps>(
       mode,
       label,
       isActive,
+      workspaceActive = true,
       initialPath,
       onLoadDirectory,
       onDelete,
@@ -142,13 +148,25 @@ export const FilePanel = forwardRef<FilePanelRef, FilePanelProps>(
       permissions: 85,
     });
     const containerRef = useRef<HTMLDivElement>(null);
+    const { active, isCurrent } = useWorkspaceActivity(containerRef, workspaceActive && !disabled);
+    const [deletion, setDeletion] = useState<{ directory: string; label: string; file: FileDeletionTarget; operation: NonNullable<typeof onDelete> } | null>(null);
+    const deletionRef = useRef(deletion);
+    deletionRef.current = deletion;
+    const deletingRef = useRef(false);
+    const [deleting, setDeleting] = useState(false);
+    const directoryRef = useRef(currentPath);
+    directoryRef.current = currentPath;
+    useLayoutEffect(() => {
+      deletionRef.current = null;
+      setDeletion(null);
+    }, [active, currentPath, onDelete]);
 
     // OS-native file drop — enabled only on the remote panel when the parent
     // supplied a handler and the panel isn't disabled. Hit-test uses the
     // container's bounding rect via the singleton Tauri `onDragDropEvent`
     // subscription in `useWebviewFileDrop`.
     const { isDragOver: isOsDragOver } = useWebviewFileDrop({
-      enabled: mode === "remote" && !disabled && !!onOsFilesDropped,
+      enabled: mode === "remote" && active && !!onOsFilesDropped,
       targetRef: containerRef,
       onDrop: (paths) => {
         if (onOsFilesDropped) void Promise.resolve(onOsFilesDropped(paths));
@@ -191,7 +209,7 @@ export const FilePanel = forwardRef<FilePanelRef, FilePanelProps>(
         setShowOverlay(true);
         try {
           const result = await onLoadDirectory(path);
-          setEntries(result);
+          setEntries(result.filter(entry => isFileEntryName(entry.name)));
           setCurrentPath(path);
           onPathChange?.(path);
           setSelectedNames(new Set());
@@ -347,17 +365,34 @@ export const FilePanel = forwardRef<FilePanelRef, FilePanelProps>(
     };
 
     // ------ File operations ------
-    const handleDelete = async (name: string, isDirectory: boolean) => {
-      if (!onDelete) return;
+    const handleDelete = (name: string, isDirectory: boolean) => {
+      if (!onDelete || !isCurrent() || loading || deletingRef.current || !isFileEntryName(name)) return;
       const fullPath = pathJoin(currentPath, name);
+      if (mode === 'remote' && !isDirectRemoteChild(fullPath, currentPath)) return;
+      setDeletion({ directory: currentPath, label, file: { name, path: fullPath, isDirectory }, operation: onDelete });
+    };
+
+    const cancelDelete = () => { deletionRef.current = null; setDeletion(null); };
+    const confirmDelete = async () => {
+      const request = deletionRef.current;
+      if (!request || !isCurrent() || directoryRef.current !== request.directory || deletingRef.current) return;
+      deletingRef.current = true;
+      setDeleting(true);
       try {
-        await onDelete(fullPath, isDirectory);
-        toast.success(t('filePanel.toast.deleted'), { description: name });
-        loadDirectory(currentPath);
+        await request.operation(request.file.path, request.file.isDirectory);
+        if (isCurrent() && deletionRef.current === request) {
+          toast.success(t('filePanel.toast.deleted'), { description: request.file.name });
+          cancelDelete();
+          void loadDirectory(request.directory);
+        }
       } catch (err) {
         toast.error(t('filePanel.toast.deleteFailed'), {
           description: err instanceof Error ? err.message : String(err),
         });
+        cancelDelete();
+      } finally {
+        deletingRef.current = false;
+        setDeleting(false);
       }
     };
 
@@ -874,6 +909,9 @@ export const FilePanel = forwardRef<FilePanelRef, FilePanelProps>(
             {currentPath}
           </span>
         </div>
+        <FileDeleteConfirmation open={!!deletion && active} targetLabel={deletion?.label ?? ''}
+          files={deletion ? [deletion.file] : []} remote={mode === 'remote'} recursive={mode === 'local'} busy={deleting}
+          onCancel={cancelDelete} onConfirm={confirmDelete} />
       </div>
     );
   },

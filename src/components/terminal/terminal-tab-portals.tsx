@@ -120,6 +120,7 @@ function TerminalTabContent({ tab, themeKey }: { tab: TerminalTab; themeKey: num
   } else if (tab.tabType === 'file-browser') {
     content = (
       <FileBrowserView
+        isActive={isActive}
         connectionId={tab.id}
         connectionName={tab.name}
         host={tab.host}
@@ -131,6 +132,7 @@ function TerminalTabContent({ tab, themeKey }: { tab: TerminalTab; themeKey: num
   } else if (tab.tabType === 'editor' && tab.editorFilePath && tab.editorConnectionId) {
     content = (
       <FileEditorView
+        isActive={isActive}
         connectionId={tab.editorConnectionId}
         filePath={tab.editorFilePath}
         fileName={tab.name}

@@ -268,6 +268,7 @@ describe('remote file editor encoding', () => {
     await invokeInApp<boolean>('delete_file', {
       connectionId,
       path: REMOTE_PATH,
+      parentPath: REMOTE_PATH.slice(0, REMOTE_PATH.lastIndexOf('/')) || '/',
       isDirectory: false,
     });
   });

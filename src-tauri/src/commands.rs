@@ -1097,9 +1097,11 @@ pub async fn create_directory(
 pub async fn delete_file(
     connection_id: String,
     path: String,
+    parent_path: String,
     is_directory: bool,
     state: State<'_, Arc<ConnectionManager>>,
 ) -> Result<bool, String> {
+    crate::file_deletion::validate_remote_delete_target(&path, &parent_path)?;
     let connection = state
         .get_connection(&connection_id)
         .await
@@ -1107,9 +1109,9 @@ pub async fn delete_file(
 
     let client = connection.read().await;
     let command = if is_directory {
-        format!("rm -rf '{}'", shell_escape_single_quoted(&path))
+        format!("rm -rf -- '{}'", shell_escape_single_quoted(&path))
     } else {
-        format!("rm -f '{}'", shell_escape_single_quoted(&path))
+        format!("rm -f -- '{}'", shell_escape_single_quoted(&path))
     };
 
     match client.execute_command(&command).await {
@@ -3737,9 +3739,11 @@ pub async fn upload_remote_file(
 pub async fn delete_remote_item(
     connection_id: String,
     path: String,
+    parent_path: String,
     is_directory: bool,
     state: State<'_, Arc<ConnectionManager>>,
 ) -> Result<CommandResponse, String> {
+    crate::file_deletion::validate_remote_delete_target(&path, &parent_path)?;
     let conn_type = state
         .get_connection_type(&connection_id)
         .await

@@ -13,6 +13,7 @@ import {
 } from "./ui/select";
 const CodeEditor = lazy(() => import("./code-editor").then((m) => ({ default: m.CodeEditor })));
 import { classifyFileByExtension, type FileViewKind } from "@/lib/editor-config";
+import { ownsWorkspaceKey, useWorkspaceActivity } from '@/lib/workspace-activity';
 
 interface Base64FileResponse {
   data: string;
@@ -29,6 +30,7 @@ interface FileEditorViewProps {
   fileName: string;
   /** Whether the underlying SSH connection is alive */
   isConnected: boolean;
+  isActive?: boolean;
 }
 
 const TEXT_ENCODINGS = [
@@ -53,8 +55,17 @@ export function FileEditorView({
   filePath,
   fileName,
   isConnected,
+  isActive = true,
 }: FileEditorViewProps) {
   const { t } = useTranslation();
+  const workspaceRef = useRef<HTMLDivElement>(null);
+  const { isCurrent } = useWorkspaceActivity(workspaceRef, isActive && isConnected);
+  const savingRef = useRef(false);
+  const fileIdentity = JSON.stringify([connectionId, filePath]);
+  const identityRef = useRef(fileIdentity);
+  identityRef.current = fileIdentity;
+  const loadedIdentityRef = useRef<string | null>(null);
+  const loadGenerationRef = useRef(0);
   const [content, setContent] = useState("");
   const [savedContent, setSavedContent] = useState("");
   const [encoding, setEncoding] = useState("utf-8");
@@ -96,22 +107,27 @@ export function FileEditorView({
 
   const loadFile = useCallback(async (encodingOverride?: string) => {
     if (fileKind === "text") {
+      const generation = ++loadGenerationRef.current;
+      loadedIdentityRef.current = null;
       const encodingToLoad = encodingOverride ?? encodingRef.current;
       setLoading(true);
       setError(null);
       try {
         const response = await readTextFile(encodingToLoad);
+        if (generation !== loadGenerationRef.current || identityRef.current !== fileIdentity) return;
+        loadedIdentityRef.current = fileIdentity;
         setContent(response.content);
         setSavedContent(response.content);
         setEncoding(encodingToLoad);
         setSavedEncoding(encodingToLoad);
         setDecodeHadErrors(response.hadErrors);
       } catch (err) {
+        if (generation !== loadGenerationRef.current || identityRef.current !== fileIdentity) return;
         const msg = err instanceof Error ? err.message : String(err);
         setError(msg);
         toast.error(t('fileEditorView.failedToLoad'), { description: msg });
       } finally {
-        setLoading(false);
+        if (generation === loadGenerationRef.current && identityRef.current === fileIdentity) setLoading(false);
       }
     } else if (fileKind === "image") {
       setImageLoading(true);
@@ -130,7 +146,7 @@ export function FileEditorView({
       }
     }
     // For "binary" kind, no remote loading needed
-  }, [fileKind, readTextFile]);
+  }, [fileKind, readTextFile, fileIdentity]);
 
   useEffect(() => {
     if (isConnected) {
@@ -139,16 +155,21 @@ export function FileEditorView({
   }, [isConnected, loadFile]);
 
   const handleSave = useCallback(async () => {
+    if (!isCurrent() || loadedIdentityRef.current !== fileIdentity || loading || error || !dirty || savingRef.current) return;
+    savingRef.current = true;
     setSaving(true);
+    const savedText = contentRef.current;
+    const savedTextEncoding = encodingRef.current;
     try {
       await invoke<boolean>("create_file_with_encoding", {
         connectionId,
         path: filePath,
-        content: contentRef.current,
-        encoding: encodingRef.current,
+        content: savedText,
+        encoding: savedTextEncoding,
       });
-      setSavedContent(contentRef.current);
-      setSavedEncoding(encodingRef.current);
+      if (identityRef.current !== fileIdentity) return;
+      setSavedContent(savedText);
+      setSavedEncoding(savedTextEncoding);
       setDecodeHadErrors(false);
       toast.success(t('fileEditorView.fileSaved', {
         fileName,
@@ -158,9 +179,10 @@ export function FileEditorView({
       const msg = err instanceof Error ? err.message : String(err);
       toast.error(t('fileEditorView.failedToSave'), { description: msg });
     } finally {
+      savingRef.current = false;
       setSaving(false);
     }
-  }, [connectionId, filePath, fileName, t]);
+  }, [connectionId, filePath, fileName, t, isCurrent, loading, error, dirty, fileIdentity]);
 
   const handleEncodingChange = useCallback(async (nextEncoding: string) => {
     if (fileKind !== "text" || nextEncoding === encodingRef.current) return;
@@ -218,18 +240,14 @@ export function FileEditorView({
     }
   }, [connectionId, filePath, fileName]);
 
-  // Ctrl+S / Cmd+S to save (only for text files)
-  useEffect(() => {
-    if (fileKind !== "text") return;
-    const onKeyDown = (e: KeyboardEvent) => {
-      if ((e.ctrlKey || e.metaKey) && e.key === "s") {
-        e.preventDefault();
-        void handleSave();
-      }
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [handleSave, fileKind]);
+  const onEditorKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (fileKind !== 'text' || !isCurrent() || !ownsWorkspaceKey(workspaceRef.current, event.nativeEvent)) return;
+    if ((event.ctrlKey || event.metaKey) && !event.shiftKey && !event.altKey && event.key.toLowerCase() === 's') {
+      event.preventDefault();
+      event.stopPropagation();
+      void handleSave();
+    }
+  };
 
   // ---------- Shared header toolbar ----------
   const renderToolbar = (showSaveButton: boolean) => (
@@ -286,7 +304,7 @@ export function FileEditorView({
           size="sm"
           className="h-6 px-2"
           onClick={handleSave}
-          disabled={saving || !dirty}
+          disabled={saving || loading || !dirty || !isActive}
           title={t('fileEditorView.saveTooltip')}
         >
           <Save className="h-3.5 w-3.5 mr-1" />
@@ -417,7 +435,7 @@ export function FileEditorView({
   }
 
   return (
-    <div className="h-full flex flex-col bg-background">
+    <div ref={workspaceRef} data-testid="file-editor-workspace" onKeyDown={onEditorKeyDown} className="h-full flex flex-col bg-background">
       {renderToolbar(true)}
       {/* Editor */}
       <div className="flex-1 min-h-0">

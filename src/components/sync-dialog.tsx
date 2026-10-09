@@ -6,7 +6,7 @@
  *
  * Flow: Configure → Compare → Review → Sync
  */
-import React, { useState, useCallback, useRef } from "react";
+import React, { useState, useCallback, useRef, useLayoutEffect } from "react";
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
 import { invoke } from "@tauri-apps/api/core";
@@ -49,6 +49,8 @@ import {
 } from "lucide-react";
 import type { FileEntry } from "@/lib/file-entry-types";
 import { pathJoin, formatSize } from "@/lib/file-entry-types";
+import { remoteDeleteParent } from '@/lib/file-deletion';
+import { FileDeleteConfirmation } from './file-delete-confirmation';
 import {
   type SyncEntry,
   type SyncConfig,
@@ -68,6 +70,9 @@ export interface SyncDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   connectionId: string;
+  isActive?: boolean;
+  canOperate?: () => boolean;
+  targetLabel?: string;
   localPath: string;
   remotePath: string;
   /** Callbacks for actual file operations */
@@ -121,6 +126,9 @@ export function SyncDialog({
   open,
   onOpenChange,
   connectionId,
+  isActive = true,
+  canOperate,
+  targetLabel,
   localPath,
   remotePath,
   onLoadLocalDir,
@@ -146,6 +154,26 @@ export function SyncDialog({
   });
   const cancelRef = useRef(false);
   const activeTransferIdRef = useRef<string | null>(null);
+  const generationRef = useRef(0);
+  const comparedGenerationRef = useRef(-1);
+  const syncingRef = useRef(false);
+  const [deleteApproval, setDeleteApproval] = useState<{ entries: SyncEntry[]; generation: number } | null>(null);
+  const scopeRef = useRef({ open, isActive, connectionId, localPath, remotePath, canOperate });
+  scopeRef.current = { open, isActive, connectionId, localPath, remotePath, canOperate };
+  useLayoutEffect(() => {
+    generationRef.current++;
+    cancelRef.current = true;
+    setDeleteApproval(null);
+    setCompared(false);
+    setEntries([]);
+    setProgress({ ...INITIAL_SYNC_PROGRESS });
+    return () => { cancelRef.current = true; generationRef.current++; };
+  }, [open, isActive, connectionId, localPath, remotePath]);
+  const ownsScope = useCallback(() => {
+    const current = scopeRef.current;
+    return current.open && current.isActive && current.connectionId === connectionId
+      && current.localPath === localPath && current.remotePath === remotePath && (current.canOperate?.() ?? true);
+  }, [connectionId, localPath, remotePath]);
 
   // Filter for result table
   const [showSkipped, setShowSkipped] = useState(false);
@@ -160,6 +188,8 @@ export function SyncDialog({
 
   // ── Compare directories ──
   const handleCompare = useCallback(async () => {
+    if (!ownsScope()) return;
+    const generation = ++generationRef.current;
     cancelRef.current = false;
     setCompared(false);
     setEntries([]);
@@ -201,7 +231,7 @@ export function SyncDialog({
           }),
         ]);
 
-        if (cancelRef.current) return;
+        if (cancelRef.current || generation !== generationRef.current || !ownsScope()) return;
 
         // Build comparison from recursive flat lists
         const results = compareRecursiveEntries(
@@ -217,7 +247,7 @@ export function SyncDialog({
           onLoadRemoteDir(remotePath),
         ]);
 
-        if (cancelRef.current) return;
+        if (cancelRef.current || generation !== generationRef.current || !ownsScope()) return;
 
         const results = compareDirectories(
           localEntries,
@@ -229,6 +259,7 @@ export function SyncDialog({
       }
 
       setCompared(true);
+      comparedGenerationRef.current = generation;
       setProgress((p) => ({ ...p, phase: "completed" }));
     } catch (err) {
       toast.error(t('syncDialog.comparisonFailed'), {
@@ -248,17 +279,21 @@ export function SyncDialog({
     connectionId,
     onLoadLocalDir,
     onLoadRemoteDir,
+    ownsScope,
   ]);
 
   // ── Execute sync ──
-  const handleSync = useCallback(async () => {
-    const checkedEntries = entries.filter((e) => e.checked);
+  const handleSync = useCallback(async (approvedEntries: SyncEntry[]) => {
+    if (!ownsScope() || syncingRef.current || comparedGenerationRef.current !== generationRef.current) return;
+    const generation = generationRef.current;
+    const checkedEntries = approvedEntries;
     if (checkedEntries.length === 0) {
       toast.info(t('syncDialog.noItemsSelected'));
       return;
     }
 
     cancelRef.current = false;
+    syncingRef.current = true;
 
     // Sort: directories first (so we create dirs before uploading into them)
     const sorted = [...checkedEntries].sort((a, b) => {
@@ -288,7 +323,8 @@ export function SyncDialog({
     let errorCount = 0;
 
     for (const entry of sorted) {
-      if (cancelRef.current) {
+      if (cancelRef.current || generation !== generationRef.current || !ownsScope()) {
+        syncingRef.current = false;
         setProgress((p) => ({ ...p, phase: "cancelled" }));
         toast.info(t('syncDialog.syncCancelled'));
         return;
@@ -332,6 +368,8 @@ export function SyncDialog({
           }
           case "delete-remote": {
             const delPath = pathJoin(remotePath, entry.relativePath);
+            const rootPrefix = remotePath.replace(/\/+$/, '') + '/';
+            if (!remoteDeleteParent(delPath) || !delPath.startsWith(rootPrefix)) throw new Error('Unsafe sync deletion path');
             await onDeleteRemoteItem(delPath, entry.isDirectory);
             break;
           }
@@ -365,6 +403,8 @@ export function SyncDialog({
       processedItems++;
     }
 
+    syncingRef.current = false;
+    if (!ownsScope() || generation !== generationRef.current) return;
     setProgress((p) => ({
       ...p,
       phase: "completed",
@@ -384,14 +424,24 @@ export function SyncDialog({
 
     onSyncComplete();
   }, [
-    entries,
     localPath,
     remotePath,
     connectionId,
     onCreateRemoteDir,
     onDeleteRemoteItem,
     onSyncComplete,
+    ownsScope,
   ]);
+
+  const requestSync = () => {
+    if (!ownsScope() || syncingRef.current || comparedGenerationRef.current !== generationRef.current) return;
+    const selected = entries.filter(entry => entry.checked).map(entry => ({ ...entry }));
+    if (selected.some(entry => entry.action === 'delete-remote')) {
+      setDeleteApproval({ entries: selected, generation: generationRef.current });
+    } else {
+      void handleSync(selected);
+    }
+  };
 
   // ── Toggle check on entry ──
   const toggleEntry = (index: number) => {
@@ -404,7 +454,7 @@ export function SyncDialog({
   const selectAll = () =>
     setEntries((prev) =>
       prev.map((e) =>
-        e.action !== "skip" ? { ...e, checked: true } : e,
+        e.action !== "skip" && e.action !== "delete-remote" ? { ...e, checked: true } : e,
       ),
     );
   const selectNone = () =>
@@ -816,7 +866,7 @@ export function SyncDialog({
           {compared && (
             <Button
               size="sm"
-              onClick={handleSync}
+              onClick={requestSync}
               disabled={
                 isBusy ||
                 entries.filter((e) => e.checked).length === 0
@@ -828,6 +878,17 @@ export function SyncDialog({
           )}
         </DialogFooter>
       </DialogContent>
+      <FileDeleteConfirmation open={open && isActive && !!deleteApproval}
+        targetLabel={targetLabel ?? connectionId} remote
+        files={deleteApproval?.entries.filter(entry => entry.action === 'delete-remote').map(entry => ({
+          name: entry.relativePath, path: pathJoin(remotePath, entry.relativePath), isDirectory: entry.isDirectory,
+        })) ?? []}
+        onCancel={() => setDeleteApproval(null)}
+        onConfirm={() => {
+          const approval = deleteApproval;
+          setDeleteApproval(null);
+          if (approval && approval.generation === generationRef.current) return handleSync(approval.entries);
+        }} />
     </Dialog>
   );
 }

@@ -27,7 +27,7 @@ use crate::sftp_client::{FileEntry, FileEntryType};
 /// Returns `None` for blank lines, `total NNN` summary lines, or lines that
 /// don't match any recognised layout.
 pub fn parse_ls_long_line(line: &str) -> Option<FileEntry> {
-    let line = line.trim();
+    let line = line.trim_end_matches(['\r', '\n']).trim_start();
     if line.is_empty() {
         return None;
     }
@@ -62,7 +62,8 @@ pub fn parse_ls_long_line(line: &str) -> Option<FileEntry> {
     if name_end >= tokens.len() {
         return None;
     }
-    let name_raw = tokens[name_end..].join(" ");
+    let name_start = tokens[name_end].as_ptr() as usize - line.as_ptr() as usize;
+    let name_raw = line[name_start..].to_string();
     // For symlinks, strip the " -> target" suffix.
     let name = if matches!(file_type, FileEntryType::Symlink) {
         name_raw
@@ -286,6 +287,13 @@ fn is_leap_year(y: i64) -> bool {
 // =============================================================================
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn preserves_filename_whitespace_for_file_operations() {
+        let entry =
+            super::parse_ls_long_line("-rw-r--r-- 1 root root 12 2025-01-15 12:32 a  b\tc.txt  ")
+                .unwrap();
+        assert_eq!(entry.name, "a  b\tc.txt  ");
+    }
     use super::*;
 
     // ---- GNU long-iso format (SSH with --time-style=long-iso) ----

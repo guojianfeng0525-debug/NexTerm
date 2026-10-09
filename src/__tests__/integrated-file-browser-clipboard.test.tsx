@@ -203,7 +203,7 @@ describe('IntegratedFileBrowser system-clipboard Ctrl+C', () => {
     await renderBrowser();
     await selectFiles(['alpha.txt', 'beta.log']);
 
-    fireEvent(document, ctrlKey('c'));
+    fireEvent(screen.getByTestId('ssh-file-workspace'), ctrlKey('c'));
 
     // 1. Cache dir is requested first.
     await waitFor(() => {
@@ -256,7 +256,7 @@ describe('IntegratedFileBrowser system-clipboard Ctrl+C', () => {
     await renderBrowser('conn-partial');
     await selectFiles(['alpha.txt', 'beta.log']);
 
-    fireEvent(document, ctrlKey('c'));
+    fireEvent(screen.getByTestId('ssh-file-workspace'), ctrlKey('c'));
 
     await waitFor(() => {
       expect(invokeCalls('download_remote_file')).toHaveLength(2);
@@ -274,7 +274,7 @@ describe('IntegratedFileBrowser system-clipboard Ctrl+C', () => {
     await renderBrowser();
     await selectFiles(['alpha.txt', 'beta.log']);
 
-    fireEvent(document, ctrlKey('c'));
+    fireEvent(screen.getByTestId('ssh-file-workspace'), ctrlKey('c'));
 
     // Virtual clipboard toast fires immediately (existing remote→remote flow).
     await waitFor(() => {
@@ -305,7 +305,7 @@ describe('IntegratedFileBrowser system-clipboard Ctrl+C', () => {
       expect(screen.getByText('1 selected')).toBeTruthy();
     });
 
-    fireEvent(document, ctrlKey('c'));
+    fireEvent(screen.getByTestId('ssh-file-workspace'), ctrlKey('c'));
 
     // Virtual clipboard still populated, but no system-clipboard download.
     await waitFor(() => {
@@ -324,7 +324,7 @@ describe('IntegratedFileBrowser system-clipboard Ctrl+C', () => {
     await renderBrowser('conn-cache-fail');
     await selectFiles(['alpha.txt']);
 
-    fireEvent(document, ctrlKey('c'));
+    fireEvent(screen.getByTestId('ssh-file-workspace'), ctrlKey('c'));
 
     // Virtual clipboard still works; no crash, no error toast for this path.
     await waitFor(() => {
@@ -345,7 +345,7 @@ describe('IntegratedFileBrowser system-clipboard Ctrl+V', () => {
     });
     await renderBrowser('conn-paste-upload');
 
-    fireEvent(document, ctrlKey('v'));
+    fireEvent(screen.getByTestId('ssh-file-workspace'), ctrlKey('v'));
 
     await waitFor(() => {
       expect(invokeCalls('clipboard_read_files')).toHaveLength(1);
@@ -366,14 +366,14 @@ describe('IntegratedFileBrowser system-clipboard Ctrl+V', () => {
     await selectFiles(['alpha.txt', 'beta.log']);
 
     // Ctrl+C fills the virtual clipboard (and kicks a clipboard download).
-    fireEvent(document, ctrlKey('c'));
+    fireEvent(screen.getByTestId('ssh-file-workspace'), ctrlKey('c'));
     await waitFor(() => {
       expect(invokeCalls('get_clipboard_cache_dir')).toHaveLength(1);
     });
     // Reset call log so only the paste behavior is inspected below.
     mocks.invoke.mockClear();
 
-    fireEvent(document, ctrlKey('v'));
+    fireEvent(screen.getByTestId('ssh-file-workspace'), ctrlKey('v'));
 
     // Remote copy_file is used; clipboard_read_files is never called.
     await waitFor(() => {
@@ -391,7 +391,7 @@ describe('IntegratedFileBrowser system-clipboard Ctrl+V', () => {
     });
     await renderBrowser('conn-read-fail');
 
-    expect(() => fireEvent(document, ctrlKey('v'))).not.toThrow();
+    expect(() => fireEvent(screen.getByTestId('ssh-file-workspace'), ctrlKey('v'))).not.toThrow();
 
     await waitFor(() => {
       expect(
@@ -404,7 +404,7 @@ describe('IntegratedFileBrowser system-clipboard Ctrl+V', () => {
     await renderBrowser('conn-empty');
     mocks.invoke.mockClear();
 
-    fireEvent(document, ctrlKey('v'));
+    fireEvent(screen.getByTestId('ssh-file-workspace'), ctrlKey('v'));
 
     await waitFor(() => {
       expect(invokeCalls('clipboard_read_files')).toHaveLength(1);
@@ -420,7 +420,7 @@ describe('IntegratedFileBrowser system-clipboard Ctrl+V', () => {
     });
     await renderBrowser('conn-cmd-v');
 
-    fireEvent(document, metaKey('v'));
+    fireEvent(screen.getByTestId('ssh-file-workspace'), metaKey('v'));
 
     await waitFor(() => {
       expect(invokeCalls('clipboard_read_files')).toHaveLength(1);

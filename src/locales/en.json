@@ -562,6 +562,21 @@
     "hoursAgo": "{{count}}h ago",
     "daysAgo": "{{count}}d ago"
   },
+  "fileDeletion": {
+    "remoteTitle_one": "Delete {{count}} remote item?",
+    "remoteTitle_other": "Delete {{count}} remote items?",
+    "localTitle_one": "Delete {{count}} local item?",
+    "localTitle_other": "Delete {{count}} local items?",
+    "description": "Only the listed paths on this target will be deleted. This action cannot be undone.",
+    "server": "Server: {{target}}",
+    "location": "Location: {{target}}",
+    "directory": "Directory",
+    "file": "File",
+    "recursiveWarning": "The listed directories and all their contents will be deleted.",
+    "confirm_one": "Delete {{count}} item",
+    "confirm_other": "Delete {{count}} items",
+    "deleting": "Deleting…"
+  },
   "fileBrowser": {
     "connectPrompt": "Connect to SSH to browse remote files",
     "disconnected": "Connection lost to {{name}}",
@@ -3034,6 +3049,7 @@
     "deleteSelectedCount_one": "Delete {{count}} selected",
     "deleteSelectedCount_other": "Delete {{count}} selected",
     "deleteSelectedTitle": "Delete selected nodes",
+    "localDeleteScope": "This removes topology records in NexTerm only. Server files are unaffected.",
     "deleteSelectedDesc_one": "This deletes {{count}} node with its interfaces, routes, firewall and port data, plus every related link. This cannot be undone.",
     "deleteSelectedDesc_other": "This deletes {{count}} nodes with their interfaces, routes, firewall and port data, plus every related link. This cannot be undone.",
     "details": {

@@ -34,6 +34,7 @@ import {
   ContextMenuTrigger,
 } from '@/components/ui/context-menu';
 import { cn } from '@/lib/utils';
+import { ownsWorkspaceKey } from '@/lib/workspace-activity';
 import { computeAutoLayout, type Vec2 } from './topology-layout';
 import type {
   LinkType,
@@ -728,9 +729,12 @@ export function TopologyGraph({
   const handleCanvasKeyDown = useCallback(
     (event: React.KeyboardEvent<SVGSVGElement>) => {
       if (event.key !== 'Delete' && event.key !== 'Backspace') return;
+      if (event.defaultPrevented || event.repeat || event.nativeEvent.isComposing || event.ctrlKey || event.metaKey || event.altKey || event.shiftKey
+        || !ownsWorkspaceKey(event.currentTarget.parentElement, event.nativeEvent)) return;
       const ids = [...selectedIdSet].filter(id => nodeById.has(id));
       if (ids.length === 0) return;
       event.preventDefault();
+      event.stopPropagation();
       onRequestDeleteNodes(ids);
     },
     [nodeById, onRequestDeleteNodes, selectedIdSet],

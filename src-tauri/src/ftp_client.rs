@@ -364,7 +364,7 @@ impl FtpClient {
 /// the size is the rightmost numeric token to the left of the date. Everything
 /// after the date triple is the file name (preserving embedded spaces).
 fn parse_ftp_list_line(line: &str) -> Option<FileEntry> {
-    let line = line.trim();
+    let line = line.trim_end_matches(['\r', '\n']).trim_start();
     if line.is_empty() {
         return None;
     }
@@ -403,7 +403,9 @@ fn parse_ftp_list_line(line: &str) -> Option<FileEntry> {
     let modified = parse_ftp_modified(month, day, time_or_year);
 
     // Name is everything after the date triple (preserves embedded spaces).
-    let name_raw = tokens[month_idx + 3..].join(" ");
+    let name_token = tokens.get(month_idx + 3)?;
+    let name_start = name_token.as_ptr() as usize - line.as_ptr() as usize;
+    let name_raw = line[name_start..].to_string();
     // For symlinks, strip the " -> target" suffix.
     let name = if matches!(file_type, FileEntryType::Symlink) {
         name_raw
@@ -564,6 +566,13 @@ fn is_leap_year(y: i64) -> bool {
 // =============================================================================
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn preserves_filename_whitespace_for_file_operations() {
+        let entry =
+            super::parse_ftp_list_line("-rw-r--r-- 1 root root 12 Jan 15 12:32 a  b\tc.txt  ")
+                .unwrap();
+        assert_eq!(entry.name, "a  b\tc.txt  ");
+    }
     use super::*;
 
     /// Helper – read env vars or skip the test.

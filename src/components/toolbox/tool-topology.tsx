@@ -7,7 +7,7 @@
  * probing itself is never triggered from this view.
  */
 
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
 import { Network, Plus, Search, Wand2, ZoomIn, ZoomOut, Maximize2, Eye, EyeOff, Pencil, Trash2 } from 'lucide-react';
@@ -42,6 +42,7 @@ import {
 } from '@/lib/network/topology-storage';
 import type { NetworkLink, NetworkNode, NetworkPort } from '@/lib/network/topology-types';
 import { cn } from '@/lib/utils';
+import { useWorkspaceActivity } from '@/lib/workspace-activity';
 import { ConnectionStorageManager } from '@/lib/connection-storage';
 import { SERVER_GROUP_ROOT } from '@/lib/network/address-scope';
 import {
@@ -70,8 +71,10 @@ function formatTimestamp(value: number | null | undefined): string {
   return new Date(value).toLocaleString();
 }
 
-export function ToolTopology() {
+export function ToolTopology({ isActive = true }: { isActive?: boolean }) {
   const { t } = useTranslation();
+  const workspaceRef = useRef<HTMLDivElement>(null);
+  const { active, isCurrent } = useWorkspaceActivity(workspaceRef, isActive);
   const graphRef = useRef<TopologyGraphHandle | null>(null);
 
   const [nodes, setNodes] = useState<NetworkNode[]>([]);
@@ -91,6 +94,14 @@ export function ToolTopology() {
   const [bulkDeleteTargets, setBulkDeleteTargets] = useState<NetworkNode[]>([]);
   const [deleteLinkTarget, setDeleteLinkTarget] = useState<NetworkLink | null>(null);
   const [drillDownPort, setDrillDownPort] = useState<{ nodeId: string; portId: string; host: string } | null>(null);
+
+  useLayoutEffect(() => {
+    setDeleteNodeTarget(null);
+    setBulkDeleteTargets([]);
+    setDeleteLinkTarget(null);
+    setNodeDialogOpen(false);
+    setLinkDialogOpen(false);
+  }, [active, isolationGroup, search, showHidden]);
 
   const reload = useCallback(() => {
     setNodes(listNodes());
@@ -242,6 +253,7 @@ export function ToolTopology() {
 
   const handleDeleteNode = useCallback(
     (id: string) => {
+      if (!isCurrent()) return;
       const node = nodes.find((item) => item.id === id);
       removeNode(id);
       if (selectedNodeId === id) setSelectedNodeId(null);
@@ -251,11 +263,12 @@ export function ToolTopology() {
         description: node ? nodeLabel(node) : undefined,
       });
     },
-    [nodes, reload, selectedNodeId, t],
+    [isCurrent, nodes, reload, selectedNodeId, t],
   );
 
   const handleDeleteNodes = useCallback(
     (ids: string[]) => {
+      if (!isCurrent()) return;
       const targets = visibleNodes.filter(node => ids.includes(node.id));
       if (targets.length === 0) return;
       removeNodes(targets.map(node => node.id));
@@ -264,12 +277,13 @@ export function ToolTopology() {
       reload();
       toast.success(t('topology.toast.nodesDeleted', { count: targets.length }));
     },
-    [reload, t, visibleNodes],
+    [isCurrent, reload, t, visibleNodes],
   );
 
   const openBulkNodeDelete = useCallback(() => {
+    if (!isCurrent()) return;
     setBulkDeleteTargets(visibleNodes.filter(node => selectedVisibleIds.has(node.id)));
-  }, [selectedVisibleIds, visibleNodes]);
+  }, [isCurrent, selectedVisibleIds, visibleNodes]);
 
   const handleMoveNode = useCallback(
     (id: string, x: number, y: number) => {
@@ -335,12 +349,13 @@ export function ToolTopology() {
 
   const handleDeleteLink = useCallback(
     (id: string) => {
+      if (!isCurrent()) return;
       removeLink(id);
       if (selectedLinkId === id) setSelectedLinkId(null);
       reload();
       toast.success(t('topology.toast.linkDeleted'));
     },
-    [reload, selectedLinkId, t],
+    [isCurrent, reload, selectedLinkId, t],
   );
 
   /* ── render ───────────────────────────────────────────────────────────── */
@@ -348,7 +363,7 @@ export function ToolTopology() {
   const hasAnyNode = visibleNodes.length > 0;
 
   return (
-    <div className="h-full flex flex-col overflow-hidden">
+    <div ref={workspaceRef} data-testid="topology-workspace" className="h-full flex flex-col overflow-hidden">
       {/* Toolbar */}
       <div className="flex shrink-0 flex-wrap items-center gap-3 border-b border-border px-4 py-3">
         <div className="min-w-0">
@@ -530,9 +545,10 @@ export function ToolTopology() {
               onHideNode={handleHideNode}
               onToggleLinkHidden={handleToggleLinkHidden}
               onRequestDeleteNode={(id) =>
-                setDeleteNodeTarget(nodes.find((item) => item.id === id) ?? null)
+                isCurrent() && setDeleteNodeTarget(nodes.find((item) => item.id === id) ?? null)
               }
               onRequestDeleteNodes={(ids) => {
+                if (!isCurrent()) return;
                 setBulkDeleteTargets(visibleNodes.filter(node => ids.includes(node.id)));
               }}
               onMoveNode={handleMoveNode}
@@ -583,7 +599,7 @@ export function ToolTopology() {
 
       {/* Dialogs */}
       <TopologyNodeDialog
-        open={nodeDialogOpen}
+        open={active && nodeDialogOpen}
         onOpenChange={setNodeDialogOpen}
         node={selectedNode}
         interfaceCount={nodeStats.interfaces}
@@ -593,7 +609,7 @@ export function ToolTopology() {
         onDelete={handleDeleteNode}
       />
       <LinkEditorDialog
-        open={linkDialogOpen}
+        open={active && linkDialogOpen}
         onOpenChange={setLinkDialogOpen}
         link={editingLink}
         nodes={visibleNodes}
@@ -603,7 +619,7 @@ export function ToolTopology() {
       />
 
       <AlertDialog
-        open={!!deleteNodeTarget}
+        open={active && !!deleteNodeTarget}
         onOpenChange={(open) => !open && setDeleteNodeTarget(null)}
       >
         <AlertDialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-sm">
@@ -613,6 +629,7 @@ export function ToolTopology() {
               {t('topology.deleteNodeDesc', {
                 name: deleteNodeTarget ? nodeLabel(deleteNodeTarget) : '',
               })}
+              <span className="mt-2 block">{t('topology.localDeleteScope')}</span>
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -632,7 +649,7 @@ export function ToolTopology() {
       </AlertDialog>
 
       <AlertDialog
-        open={bulkDeleteTargets.length > 0}
+        open={active && bulkDeleteTargets.length > 0}
         onOpenChange={(open) => !open && setBulkDeleteTargets([])}
       >
         <AlertDialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-sm">
@@ -640,8 +657,12 @@ export function ToolTopology() {
             <AlertDialogTitle>{t('topology.deleteSelectedTitle')}</AlertDialogTitle>
             <AlertDialogDescription>
               {t('topology.deleteSelectedDesc', { count: bulkDeleteTargets.length })}
+              <span className="mt-2 block">{t('topology.localDeleteScope')}</span>
             </AlertDialogDescription>
           </AlertDialogHeader>
+          <ul className="max-h-48 space-y-1 overflow-auto text-sm">
+            {bulkDeleteTargets.map(node => <li key={node.id} className="break-all">{nodeLabel(node)} — {node.primaryIp}</li>)}
+          </ul>
           <AlertDialogFooter>
             <AlertDialogCancel>{t('common.cancel')}</AlertDialogCancel>
             <AlertDialogAction
@@ -659,13 +680,17 @@ export function ToolTopology() {
       </AlertDialog>
 
       <AlertDialog
-        open={!!deleteLinkTarget}
+        open={active && !!deleteLinkTarget}
         onOpenChange={(open) => !open && setDeleteLinkTarget(null)}
       >
         <AlertDialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-sm">
           <AlertDialogHeader>
             <AlertDialogTitle>{t('topology.linkDialog.deleteTitle')}</AlertDialogTitle>
-            <AlertDialogDescription>{t('topology.linkDialog.deleteDesc')}</AlertDialogDescription>
+            <AlertDialogDescription>
+              {t('topology.linkDialog.deleteDesc')}
+              <span className="mt-2 block">{t('topology.localDeleteScope')}</span>
+              {deleteLinkTarget && <span className="mt-2 block">{labelForId(deleteLinkTarget.sourceNodeId)} → {labelForId(deleteLinkTarget.targetNodeId)}</span>}
+            </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>{t('common.cancel')}</AlertDialogCancel>

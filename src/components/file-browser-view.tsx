@@ -21,9 +21,13 @@ import { TransferControls } from "./transfer-controls";
 import { TransferQueue } from "./transfer-queue";
 import type { FileEntry } from "@/lib/file-entry-types";
 import { pathJoin } from "@/lib/file-entry-types";
+import { remoteDeleteParent } from '@/lib/file-deletion';
+import { ownsWorkspaceKey, useWorkspaceActivity } from '@/lib/workspace-activity';
+import { isEditableTarget } from '@/lib/keyboard-shortcuts';
 import {
   transferQueueReducer,
   getNextQueuedTransfer,
+  type TransferAction,
 } from "@/lib/transfer-queue-reducer";
 import {
   buildMixedDropUploadPlan,
@@ -40,6 +44,7 @@ export interface FileBrowserViewProps {
   host?: string;
   protocol?: string;
   isConnected: boolean;
+  isActive?: boolean;
   onReconnect?: () => void;
 }
 
@@ -51,11 +56,18 @@ export function FileBrowserView({
   host,
   protocol: _protocol,
   isConnected,
+  isActive = true,
   onReconnect,
 }: FileBrowserViewProps) {
   const { t } = useTranslation();
+  const workspaceRef = useRef<HTMLDivElement>(null);
+  const { active, isCurrent } = useWorkspaceActivity(workspaceRef, isActive && isConnected);
+  const connectionRef = useRef(connectionId);
+  connectionRef.current = connectionId;
   const [activePanel, setActivePanel] = useState<"local" | "remote">("local");
-  const [transfers, dispatchTransfer] = useReducer(transferQueueReducer, []);
+  const [transfers, dispatchTransferAction] = useReducer(transferQueueReducer, []);
+  const dispatchTransfer = (action: TransferAction) => dispatchTransferAction(action.type === 'ENQUEUE'
+    ? { ...action, items: action.items.map(item => ({ ...item, connectionId })) } : action);
   const [queueExpanded, setQueueExpanded] = useState(false);
   const [syncDialogOpen, setSyncDialogOpen] = useState(false);
   const [dirTransfer, setDirTransfer] = useState<{
@@ -71,6 +83,10 @@ export function FileBrowserView({
 
   const localPanelRef = useRef<FilePanelRef>(null);
   const remotePanelRef = useRef<FilePanelRef>(null);
+  useEffect(() => {
+    setSyncDialogOpen(false);
+    setDirTransfer(null);
+  }, [active, connectionId]);
 
   // Selection counts for transfer controls
   const [localSelCount, setLocalSelCount] = useState(0);
@@ -120,13 +136,15 @@ export function FileBrowserView({
 
   const deleteRemoteItem = useCallback(
     async (path: string, isDirectory: boolean) => {
+      const parentPath = remoteDeleteParent(path);
+      if (!isCurrent() || connectionRef.current !== connectionId || !parentPath) throw new Error('Deletion workspace is no longer active');
       const result = await invoke<{ success: boolean; error?: string }>(
         "delete_remote_item",
-        { connectionId, path, isDirectory },
+        { connectionId, path, parentPath, isDirectory },
       );
       if (!result.success) throw new Error(result.error ?? "Delete failed");
     },
-    [connectionId],
+    [connectionId, isCurrent],
   );
 
   const renameRemoteItem = useCallback(
@@ -158,6 +176,7 @@ export function FileBrowserView({
   useEffect(() => {
     const nextItem = getNextQueuedTransfer(transfers);
     if (!nextItem || processTransferRef.current) return;
+    const transferConnectionId = nextItem.connectionId ?? connectionId;
 
     processTransferRef.current = true;
     dispatchTransfer({ type: "START", id: nextItem.id });
@@ -190,7 +209,7 @@ export function FileBrowserView({
           const result = await invoke<{ success: boolean; error?: string }>(
             "upload_remote_file",
             {
-              connectionId,
+              connectionId: transferConnectionId,
               localPath: nextItem.sourcePath,
               remotePath: nextItem.destinationPath,
               onProgress,
@@ -211,7 +230,7 @@ export function FileBrowserView({
           const result = await invoke<{ success: boolean; error?: string }>(
             "download_remote_file",
             {
-              connectionId,
+              connectionId: transferConnectionId,
               remotePath: nextItem.sourcePath,
               localPath: nextItem.destinationPath,
               onProgress,
@@ -508,6 +527,7 @@ export function FileBrowserView({
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
+      if (!isCurrent() || !ownsWorkspaceKey(workspaceRef.current, e.nativeEvent) || isEditableTarget(e.target)) return;
       if (e.key === "Tab" && !e.ctrlKey && !e.metaKey && !e.altKey) {
         e.preventDefault();
         setActivePanel((prev) => (prev === "local" ? "remote" : "local"));
@@ -534,7 +554,7 @@ export function FileBrowserView({
         setSyncDialogOpen(true);
       }
     },
-    [activePanel, handleUploadButton, handleDownloadButton],
+    [activePanel, handleUploadButton, handleDownloadButton, isCurrent],
   );
 
   // ------ Selection tracking ------
@@ -571,6 +591,7 @@ export function FileBrowserView({
   // ------ Render ------
   return (
     <div
+      ref={workspaceRef}
       className="h-full w-full flex flex-col bg-background text-foreground"
       onKeyDown={handleKeyDown}
       tabIndex={-1}
@@ -590,6 +611,8 @@ export function FileBrowserView({
             minSize={20}
           >
             <FilePanel
+              key={`local-${connectionId}`}
+              workspaceActive={active}
               ref={localPanelRef}
               mode="local"
               label={t('fileBrowser.local')}
@@ -637,9 +660,11 @@ export function FileBrowserView({
             minSize={20}
           >
             <FilePanel
+              key={`remote-${connectionId}`}
+              workspaceActive={active}
               ref={remotePanelRef}
               mode="remote"
-              label={host ?? connectionName}
+              label={host ? `${connectionName} (${host})` : connectionName}
               isActive={activePanel === "remote"}
               initialPath="/"
               onLoadDirectory={loadRemoteDirectory}
@@ -662,12 +687,16 @@ export function FileBrowserView({
           dispatch={dispatchTransfer}
           expanded={queueExpanded}
           onToggleExpanded={() => setQueueExpanded((p) => !p)}
-          onCancel={(item) => { void invoke('cancel_file_transfer', { connectionId, transferId: item.id }); }}
+          onCancel={(item) => { void invoke('cancel_file_transfer', { connectionId: item.connectionId ?? connectionId, transferId: item.id }); }}
         />
       </div>
 
       {/* Sync Dialog */}
       <SyncDialog
+        key={connectionId}
+        isActive={active}
+        canOperate={isCurrent}
+        targetLabel={host ? `${connectionName} (${host})` : connectionName}
         open={syncDialogOpen}
         onOpenChange={setSyncDialogOpen}
         connectionId={connectionId}
