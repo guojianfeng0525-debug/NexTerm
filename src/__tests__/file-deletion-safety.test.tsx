@@ -131,6 +131,8 @@ async function prepare(active = true) {
     terminalWorkingDirectory: { path: '/srv/app/logs', sequence: 1 } };
   const view = render(<><IntegratedFileBrowser {...props} /><svg data-testid="foreign-page" tabIndex={0} /></>);
   await screen.findByTitle(active ? '/srv/app/logs' : '/home');
+  // Inactive workspaces already display /home before the asynchronous listing arrives.
+  await screen.findByText('alpha.txt');
   return { ...view, props };
 }
 function select(name = 'alpha.txt') { fireEvent.click(screen.getByText(name), { ctrlKey: true }); }
