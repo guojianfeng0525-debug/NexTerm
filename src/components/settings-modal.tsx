@@ -177,7 +177,7 @@ export function SettingsModal({ open, onOpenChange, onAppearanceChange }: Settin
   };
 
   const handleImportConfig = async () => {
-    if (!importMerge && !await requestConfirmation(t('settings.advanced.importReplaceConfirm'))) return;
+    if (!importMerge && !await requestConfirmation(t('settings.advanced.importReplaceConfirm'), { title: t('settings.advanced.importConfig'), confirmLabel: t('settings.advanced.importConfig'), destructive: true })) return;
     setIsImporting(true);
     try {
       const restored = await importAllConfig(importMerge);
@@ -264,7 +264,7 @@ export function SettingsModal({ open, onOpenChange, onAppearanceChange }: Settin
   };
 
   const handleReset = async () => {
-    if (await requestConfirmation(t('settings.resetConfirm'))) {
+    if (await requestConfirmation(t('settings.resetConfirm'), { title: t('common.reset'), confirmLabel: t('common.reset'), destructive: true })) {
       // Reset terminal appearance
       setTerminalAppearance(defaultAppearanceSettings);
       setEditorConfig(DEFAULT_EDITOR_CONFIG);

@@ -397,7 +397,7 @@ export function TopologyNodeDialog({
 
       {/* Sibling dialog instead of a nested one — keeps focus handling sane. */}
       <Dialog open={confirmingDelete} onOpenChange={setConfirmingDelete}>
-        <DialogContent className="overflow-y-auto max-w-sm">
+        <DialogContent className="overflow-y-auto max-w-[400px]">
           <DialogHeader>
             <DialogTitle>{t('topology.nodeDialog.deleteTitle')}</DialogTitle>
             <DialogDescription>

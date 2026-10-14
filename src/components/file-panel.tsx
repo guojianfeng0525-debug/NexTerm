@@ -157,7 +157,7 @@ export const FilePanel = forwardRef<FilePanelRef, FilePanelProps>(
     useLayoutEffect(() => {
       nameOperationsRef.current = { onRename, onCreateDirectory };
     }, [onRename, onCreateDirectory]);
-    const [deletion, setDeletion] = useState<{ directory: string; label: string; file: FileDeletionTarget; operation: NonNullable<typeof onDelete> } | null>(null);
+    const [deletion, setDeletion] = useState<{ directory: string; label: string; files: FileDeletionTarget[]; operation: NonNullable<typeof onDelete> } | null>(null);
     const deletionRef = useRef(deletion);
     deletionRef.current = deletion;
     const deletingRef = useRef(false);
@@ -373,11 +373,14 @@ export const FilePanel = forwardRef<FilePanelRef, FilePanelProps>(
     };
 
     // ------ File operations ------
-    const handleDelete = (name: string, isDirectory: boolean) => {
+    const handleDelete = (name: string, _isDirectory: boolean) => {
       if (!onDelete || !isCurrent() || loading || deletingRef.current || !isFileEntryName(name)) return;
       const fullPath = pathJoin(currentPath, name);
       if (mode === 'remote' && !isDirectRemoteChild(fullPath, currentPath)) return;
-      setDeletion({ directory: currentPath, label, file: { name, path: fullPath, isDirectory }, operation: onDelete });
+      const targets = selectedNames.has(name) ? entries.filter(entry => selectedNames.has(entry.name)) : entries.filter(entry => entry.name === name);
+      setDeletion({ directory: currentPath, label, files: targets.filter(entry => isFileEntryName(entry.name)).map(entry => ({
+        name: entry.name, path: pathJoin(currentPath, entry.name), isDirectory: entry.file_type === 'Directory',
+      })), operation: onDelete });
     };
 
     const cancelDelete = () => { deletionRef.current = null; setDeletion(null); };
@@ -387,9 +390,12 @@ export const FilePanel = forwardRef<FilePanelRef, FilePanelProps>(
       deletingRef.current = true;
       setDeleting(true);
       try {
-        await request.operation(request.file.path, request.file.isDirectory);
+        for (const file of request.files) {
+          if (!isCurrent() || directoryRef.current !== request.directory || deletionRef.current !== request) break;
+          await request.operation(file.path, file.isDirectory);
+        }
         if (isCurrent() && deletionRef.current === request) {
-          toast.success(t('filePanel.toast.deleted'), { description: request.file.name });
+          toast.success(t('filePanel.toast.deleted'), { description: request.files.map(file => file.name).join(', ') });
           cancelDelete();
           void loadDirectory(request.directory);
         }
@@ -755,6 +761,12 @@ export const FilePanel = forwardRef<FilePanelRef, FilePanelProps>(
                               className={`border-b border-border/40 cursor-pointer transition-colors ${isSelected ? `${selectedBg} font-medium` : "hover:bg-muted/40"}`}
                               onClick={(e) => handleRowClick(idx, e)}
                               onDoubleClick={() => handleDoubleClick(entry)}
+                              onContextMenu={(event) => {
+                                event.stopPropagation();
+                                onFocus();
+                                if (!selectedNames.has(entry.name)) setSelectedNames(new Set([entry.name]));
+                                setLastSelectedIndex(idx);
+                              }}
                               draggable
                               onDragStart={(e) => handleDragStart(e, entry)}
                             >
@@ -825,6 +837,7 @@ export const FilePanel = forwardRef<FilePanelRef, FilePanelProps>(
                               </ContextMenuItem>
                             )}
                             <ContextMenuItem
+                              disabled={selectedNames.has(entry.name) && selectedNames.size > 1}
                               onClick={() => handleRename(entry.name)}
                             >
                               <Pencil className="h-3.5 w-3.5 mr-2" />
@@ -921,7 +934,7 @@ export const FilePanel = forwardRef<FilePanelRef, FilePanelProps>(
           </span>
         </div>
         <FileDeleteConfirmation open={!!deletion && active} targetLabel={deletion?.label ?? ''}
-          files={deletion ? [deletion.file] : []} remote={mode === 'remote'} recursive={mode === 'local'} busy={deleting}
+          files={deletion?.files ?? []} remote={mode === 'remote'} recursive={mode === 'local'} busy={deleting}
           onCancel={cancelDelete} onConfirm={confirmDelete} />
       </div>
     );

@@ -1037,7 +1037,7 @@ export function ToolMySql() {
       </DatabaseConnectionDialogShell>
       {deleteTarget && (
         <Dialog open onOpenChange={() => setDeleteTarget(null)}>
-          <DialogContent>
+          <DialogContent className="max-w-[400px]">
             <DialogHeader>
               <DialogTitle>{t("toolbox.mysql.deleteConnection")}</DialogTitle>
             </DialogHeader>

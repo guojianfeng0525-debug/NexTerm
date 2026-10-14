@@ -26,6 +26,7 @@ mod sftp_client;
 mod sqlite;
 pub mod ssh;
 mod toolbox;
+mod upload;
 pub mod vnc_client;
 mod websocket_server;
 
@@ -602,6 +603,7 @@ pub fn run() {
             commands::download_remote_file,
             commands::download_remote_file_confined,
             commands::upload_remote_file,
+            commands::inspect_remote_uploads,
             commands::cancel_file_transfer,
             commands::delete_remote_item,
             commands::create_remote_directory,

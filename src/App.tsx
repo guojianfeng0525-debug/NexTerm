@@ -111,14 +111,13 @@ function AppContent() {
     Record<string, { path: string; sequence: number }>
   >({});
 
-  const handleWorkingDirectoryChange = useCallback((connectionId: string, path: string) => {
-    setTerminalWorkingDirectories((previous) => ({
-      ...previous,
-      [connectionId]: {
-        path,
-        sequence: ++workingDirectorySequenceRef.current,
-      },
-    }));
+  const handleWorkingDirectoryChange = useCallback((connectionId: string, path: string | null) => {
+    setTerminalWorkingDirectories((previous) => {
+      const next = { ...previous };
+      if (path === null) delete next[connectionId];
+      else next[connectionId] = { path, sequence: ++workingDirectorySequenceRef.current };
+      return next;
+    });
   }, []);
 
   // Suggestion-context accessor: latest known cwd for a terminal instance.

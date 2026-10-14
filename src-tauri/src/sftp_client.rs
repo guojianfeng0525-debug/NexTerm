@@ -457,7 +457,7 @@ impl StandaloneSftpClient {
 }
 
 /// Convert a Unix timestamp (seconds since epoch) to ISO 8601 string.
-fn chrono_from_unix_timestamp(secs: u64) -> String {
+pub(crate) fn chrono_from_unix_timestamp(secs: u64) -> String {
     use std::time::UNIX_EPOCH;
     let time = UNIX_EPOCH + Duration::from_secs(secs);
     // Format as ISO 8601

@@ -3,7 +3,10 @@
 `DialogContent` and `AlertDialogContent` share `ui/dialog-layout.tsx`. All business
 dialogs inherit a viewport that centers the content with 16px outer spacing.
 Content uses its natural height, is limited to `100dvh - 32px`, and defaults to
-512px maximum width. The viewport owns positioning: do not add `fixed`, `inset`,
+512px maximum width for ordinary dialogs. Confirmations use 400px by default,
+480px for file/dependency lists and 560px for upload comparisons, host-key
+trust and multiple-action choices (see `file-management-workflow.md`).
+The viewport owns positioning: do not add `fixed`, `inset`,
 `top`, `left`, translation, auto margins or responsive maximum-width overrides
 to Content. Mixing these with the old transform centering caused stretched or
 displaced confirmations in WKWebView.

@@ -18,6 +18,7 @@ import {
 import { FilePanel } from "./file-panel";
 import type { FilePanelRef } from "./file-panel";
 import { TransferControls } from "./transfer-controls";
+import { useUploadPlanner, type UploadProgress } from './use-upload-planner';
 import { TransferQueue } from "./transfer-queue";
 import type { FileEntry } from "@/lib/file-entry-types";
 import { pathJoin } from "@/lib/file-entry-types";
@@ -31,6 +32,8 @@ import {
 } from "@/lib/transfer-queue-reducer";
 import {
   buildMixedDropUploadPlan,
+  buildDirectoryUploadPlan,
+  type UploadQueueInput,
   type DroppedPathStat,
   type LocalPathStat,
   type LocalRecursiveUploadEntry,
@@ -66,17 +69,36 @@ export function FileBrowserView({
   connectionRef.current = connectionId;
   const [activePanel, setActivePanel] = useState<"local" | "remote">("local");
   const [transfers, dispatchTransferAction] = useReducer(transferQueueReducer, []);
-  const dispatchTransfer = (action: TransferAction) => dispatchTransferAction(action.type === 'ENQUEUE'
-    ? { ...action, items: action.items.map(item => ({ ...item, connectionId })) } : action);
+  const { planUploads, upload, conflictDialog, pendingCount, checkingCount } = useUploadPlanner({
+    connectionId, label: host ? `${connectionName} (${host})` : connectionName, active, connected: isConnected, canOperate: isCurrent,
+  });
+  const transferAbortRef = useRef(new Map<string, AbortController>());
+  const dispatchTransfer = useCallback((action: TransferAction) => {
+    if (action.type === 'CANCEL') transferAbortRef.current.get(action.id)?.abort();
+    if (action.type !== 'ENQUEUE') { dispatchTransferAction(action); return; }
+    const owned = action.items.map(item => ({ ...item, connectionId }));
+    const downloads = owned.filter(item => item.direction === 'download');
+    if (downloads.length) dispatchTransferAction({ type: 'ENQUEUE', items: downloads });
+    const uploads = owned.filter(item => item.direction === 'upload');
+    if (uploads.length) void planUploads(uploads).then(planned => {
+      if (planned) dispatchTransferAction({ type: 'ENQUEUE', items: planned });
+    }).catch((error: unknown) => toast.error(t('uploadConflict.checkFailed'), { description: String(error) }));
+  }, [connectionId, planUploads, t]);
+  useEffect(() => () => { transferAbortRef.current.forEach(controller => controller.abort()); }, []);
+  useEffect(() => {
+    if (!isConnected) dispatchTransferAction({ type: 'EXPIRE_APPROVALS', connectionId });
+  }, [connectionId, isConnected]);
   const [queueExpanded, setQueueExpanded] = useState(false);
   const [syncDialogOpen, setSyncDialogOpen] = useState(false);
-  const [dirTransfer, setDirTransfer] = useState<{
+  const [dirTransfers, setDirTransfers] = useState<Array<{
+    id: string;
     open: boolean;
     direction: "upload" | "download";
     sourcePath: string;
     destPath: string;
     destinationDirectoryName?: string;
-  } | null>(null);
+  }>>([]);
+  const dirTransfer = dirTransfers[0] ?? null;
   const [localHomePath, setLocalHomePath] = useState<string | undefined>(
     undefined,
   );
@@ -85,8 +107,8 @@ export function FileBrowserView({
   const remotePanelRef = useRef<FilePanelRef>(null);
   useEffect(() => {
     setSyncDialogOpen(false);
-    setDirTransfer(null);
   }, [active, connectionId]);
+  useEffect(() => { setDirTransfers([]); }, [connectionId]);
 
   // Selection counts for transfer controls
   const [localSelCount, setLocalSelCount] = useState(0);
@@ -177,6 +199,7 @@ export function FileBrowserView({
     const nextItem = getNextQueuedTransfer(transfers);
     if (!nextItem || processTransferRef.current) return;
     const transferConnectionId = nextItem.connectionId ?? connectionId;
+    if (!isConnected && transferConnectionId === connectionId) return;
 
     processTransferRef.current = true;
     dispatchTransfer({ type: "START", id: nextItem.id });
@@ -186,8 +209,9 @@ export function FileBrowserView({
         // The backend emits small, throttled byte samples. Derive rate here so
         // the UI stays independent from the transport implementation.
         const lastSample = { bytes: 0, time: Date.now() };
-        const onProgress = new Channel<{ totalBytes: number; transferredBytes: number }>();
-        onProgress.onmessage = ({ totalBytes, transferredBytes }) => {
+        const onProgress = new Channel<UploadProgress>();
+        onProgress.onmessage = ({ totalBytes, transferredBytes, phase }) => {
+          if (phase === 'committing') { dispatchTransferAction({ type: 'COMMIT', id: nextItem.id }); return; }
           const now = Date.now();
           const elapsedSeconds = (now - lastSample.time) / 1000;
           const bytesSinceLastSample = transferredBytes - lastSample.bytes;
@@ -206,18 +230,16 @@ export function FileBrowserView({
         };
 
         if (nextItem.direction === "upload") {
-          const result = await invoke<{ success: boolean; error?: string }>(
-            "upload_remote_file",
-            {
-              connectionId: transferConnectionId,
-              localPath: nextItem.sourcePath,
-              remotePath: nextItem.destinationPath,
-              onProgress,
-              transferId: nextItem.id,
-            },
-          );
+          const controller = new AbortController();
+          transferAbortRef.current.set(nextItem.id, controller);
+          const result = await upload({ ...nextItem, connectionId: transferConnectionId }, nextItem.id, onProgress, controller.signal,
+            waiting => dispatchTransferAction({ type: waiting ? 'WAIT' : 'START', id: nextItem.id }));
+          if (result.cancelled || result.skipped) {
+            dispatchTransferAction({ type: result.skipped ? 'SKIP' : 'CANCEL', id: nextItem.id });
+            return;
+          }
           if (result.success) {
-            dispatchTransfer({ type: "COMPLETE", id: nextItem.id });
+            dispatchTransfer({ type: "COMPLETE", id: nextItem.id, destinationPath: result.destination_path, committed: result.committed });
             remotePanelRef.current?.refresh();
           } else {
             dispatchTransfer({
@@ -269,33 +291,38 @@ export function FileBrowserView({
           error: err instanceof Error ? err.message : String(err),
         });
       } finally {
+        transferAbortRef.current.delete(nextItem.id);
         processTransferRef.current = false;
       }
     };
 
     doTransfer();
-  }, [transfers, connectionId]);
+  }, [transfers, connectionId, isConnected]);
 
   // ------ Transfer initiation helpers ------
-  const enqueueUpload = useCallback(
-    (files: FileEntry[], localDir: string) => {
-      const remotePath = remotePanelRef.current?.getCurrentPath() ?? "/";
-      const fileItems = files.filter((f) => f.file_type === "File");
-      if (fileItems.length === 0) return;
-      dispatchTransfer({
-        type: "ENQUEUE",
-        items: fileItems.map((f) => ({
-          fileName: f.name,
-          direction: "upload" as const,
-          sourcePath: pathJoin(localDir, f.name),
-          destinationPath: pathJoin(remotePath, f.name),
-          totalBytes: f.size,
-        })),
-      });
-      toast.info(t('fileBrowser.toast.queuedUpload', { count: fileItems.length }));
-    },
-    [],
-  );
+  const enqueueUpload = useCallback(async (files: FileEntry[], localDir: string, destination?: string) => {
+    const remotePath = destination ?? remotePanelRef.current?.getCurrentPath() ?? '/';
+    try {
+      const items: UploadQueueInput[] = files.filter(file => file.file_type !== 'Directory').map(file => ({
+        connectionId, fileName: file.name, direction: 'upload', sourcePath: pathJoin(localDir, file.name),
+        destinationPath: pathJoin(remotePath, file.name), totalBytes: file.size,
+      }));
+      const directories = new Set<string>();
+      for (const directory of files.filter(file => file.file_type === 'Directory')) {
+        const source = pathJoin(localDir, directory.name);
+        const entries = await invoke<LocalRecursiveUploadEntry[]>('list_local_files_recursive', { path: source, excludePatterns: [] });
+        const plan = buildDirectoryUploadPlan(source, remotePath, entries);
+        items.push(...plan.items.map(item => ({ ...item, connectionId })));
+        plan.directories.forEach(path => directories.add(path));
+      }
+      const approved = items.length ? await planUploads(items) : [];
+      if (!approved || connectionRef.current !== connectionId) return;
+      for (const path of directories) await createRemoteDirectory(path);
+      if (approved.length) dispatchTransferAction({ type: 'ENQUEUE', items: approved });
+      else remotePanelRef.current?.refresh();
+      toast.info(t('fileBrowser.toast.queuedUpload', { count: items.length }));
+    } catch (error) { toast.error(t('uploadConflict.checkFailed'), { description: String(error) }); }
+  }, [connectionId, createRemoteDirectory, planUploads, t]);
 
   // ------ OS-native file drop onto the remote panel ------
   // Stat each path in parallel, recurse each dropped directory, build a single
@@ -335,6 +362,9 @@ export function FileBrowserView({
         }));
         const plan = buildMixedDropUploadPlan(dropped, remotePath);
 
+        const approved = plan.items.length ? await planUploads(plan.items.map(item => ({ ...item, connectionId }))) : [];
+        if (!approved || connectionRef.current !== connectionId) return;
+
         // Create remote directories depth-first. `create_remote_directory`
         // returns { success, error? } rather than throwing, so we accumulate
         // failures into a single warning toast.
@@ -370,7 +400,7 @@ export function FileBrowserView({
         }
 
         if (plan.items.length > 0) {
-          dispatchTransfer({ type: "ENQUEUE", items: plan.items });
+          dispatchTransferAction({ type: "ENQUEUE", items: approved });
           toast.info(
             t('fileBrowser.toast.queuedUploadToPath', { count: plan.items.length, path: remotePath }) +
               (createdDirectoryCount > 0
@@ -408,9 +438,12 @@ export function FileBrowserView({
   );
 
   const enqueueDownload = useCallback(
-    (files: FileEntry[], remoteDir: string) => {
-      const localPath = localPanelRef.current?.getCurrentPath() ?? "/";
-      const fileItems = files.filter((f) => f.file_type === "File");
+    (files: FileEntry[], remoteDir: string, destination?: string) => {
+      const localPath = destination ?? localPanelRef.current?.getCurrentPath() ?? "/";
+      setDirTransfers(previous => [...previous, ...files.filter(file => file.file_type === 'Directory').map(file => ({
+        id: crypto.randomUUID(), open: true, direction: 'download' as const, sourcePath: pathJoin(remoteDir, file.name), destPath: localPath, destinationDirectoryName: file.name,
+      }))]);
+      const fileItems = files.filter((f) => f.file_type !== "Directory");
       if (fileItems.length === 0) return;
       dispatchTransfer({
         type: "ENQUEUE",
@@ -424,7 +457,7 @@ export function FileBrowserView({
       });
       toast.info(t('fileBrowser.toast.queuedDownload', { count: fileItems.length }));
     },
-    [],
+    [dispatchTransfer, t],
   );
 
   const handleUploadButton = useCallback(() => {
@@ -446,55 +479,30 @@ export function FileBrowserView({
   // ------ Drop transfer handler ------
   useEffect(() => {
     const handler = (e: Event) => {
+      if (!isCurrent() || !(e.target instanceof Node) || !workspaceRef.current?.contains(e.target)) return;
       const detail = (e as CustomEvent).detail;
       if (!detail) return;
       const { targetMode, targetPath, sourcePath, files } = detail;
 
-      if (targetMode === "remote") {
-        // Files dropped onto remote panel → upload
-        dispatchTransfer({
-          type: "ENQUEUE",
-          items: files
-            .filter((f: { file_type: string }) => f.file_type === "File")
-            .map((f: { name: string; size: number }) => ({
-              fileName: f.name,
-              direction: "upload" as const,
-              sourcePath: pathJoin(sourcePath, f.name),
-              destinationPath: pathJoin(targetPath, f.name),
-              totalBytes: f.size,
-            })),
-        });
-      } else {
-        // Files dropped onto local panel → download
-        dispatchTransfer({
-          type: "ENQUEUE",
-          items: files
-            .filter((f: { file_type: string }) => f.file_type === "File")
-            .map((f: { name: string; size: number }) => ({
-              fileName: f.name,
-              direction: "download" as const,
-              sourcePath: pathJoin(sourcePath, f.name),
-              destinationPath: pathJoin(targetPath, f.name),
-              totalBytes: f.size,
-            })),
-        });
-      }
+      if (targetMode === 'remote') void enqueueUpload(files, sourcePath, targetPath);
+      else enqueueDownload(files, sourcePath, targetPath);
     };
 
     document.addEventListener("nexterm-drop-transfer", handler);
     return () => document.removeEventListener("nexterm-drop-transfer", handler);
-  }, []);
+  }, [enqueueUpload, enqueueDownload, isCurrent]);
 
   // ------ Directory transfer callbacks ------
   const handleUploadDirectory = useCallback(
     (dirName: string, sourceDirPath: string) => {
       const remotePath = remotePanelRef.current?.getCurrentPath() ?? "/";
-      setDirTransfer({
+      setDirTransfers(previous => [...previous, {
+        id: crypto.randomUUID(),
         open: true,
         direction: "upload",
         sourcePath: pathJoin(sourceDirPath, dirName),
         destPath: pathJoin(remotePath, dirName),
-      });
+      }]);
     },
     [],
   );
@@ -502,18 +510,20 @@ export function FileBrowserView({
   const handleDownloadDirectory = useCallback(
     (dirName: string, sourceDirPath: string) => {
       const localPath = localPanelRef.current?.getCurrentPath() ?? "/";
-      setDirTransfer({
+      setDirTransfers(previous => [...previous, {
+        id: crypto.randomUUID(),
         open: true,
         direction: "download",
         sourcePath: pathJoin(sourceDirPath, dirName),
         destPath: localPath,
         destinationDirectoryName: dirName,
-      });
+      }]);
     },
     [],
   );
 
   const handleDirTransferComplete = useCallback(() => {
+    setDirTransfers(previous => previous.slice(1));
     localPanelRef.current?.refresh();
     remotePanelRef.current?.refresh();
   }, []);
@@ -681,8 +691,10 @@ export function FileBrowserView({
           </ResizablePanel>
         </ResizablePanelGroup>
 
+        {conflictDialog}
         {/* Transfer Queue */}
         <TransferQueue
+          pendingCount={pendingCount} checkingCount={checkingCount}
           transfers={transfers}
           dispatch={dispatchTransfer}
           expanded={queueExpanded}
@@ -712,9 +724,12 @@ export function FileBrowserView({
       {/* Directory Transfer Dialog */}
       {dirTransfer && (
         <DirectoryTransferDialog
+          key={dirTransfer.id}
+          isActive={active}
+          isConnected={isConnected}
           open={dirTransfer.open}
           onOpenChange={(open) => {
-            if (!open) setDirTransfer(null);
+            if (!open) setDirTransfers(previous => previous.slice(1));
           }}
           direction={dirTransfer.direction}
           connectionId={connectionId}

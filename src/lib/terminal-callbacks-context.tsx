@@ -11,7 +11,7 @@ export interface TerminalCallbacks {
   /** Full reconnect: re-establishes the backend connection then remounts the terminal. */
   onReconnectTab?: (tabId: string) => void | Promise<void>;
   /** Reports a terminal's remote working directory without coupling it to the file browser. */
-  onWorkingDirectoryChange?: (connectionId: string, path: string) => void;
+  onWorkingDirectoryChange?: (connectionId: string, path: string | null) => void;
   /** Reads a terminal's last known remote working directory (for suggestion context). */
   getWorkingDirectory?: (connectionId: string) => string | undefined;
 }

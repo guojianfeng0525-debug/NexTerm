@@ -430,7 +430,7 @@ export function LinkEditorDialog({
       </Dialog>
 
       <Dialog open={confirmingDelete} onOpenChange={setConfirmingDelete}>
-        <DialogContent className="overflow-y-auto max-w-sm">
+        <DialogContent className="overflow-y-auto max-w-[400px]">
           <DialogHeader>
             <DialogTitle>{t('topology.linkDialog.deleteTitle')}</DialogTitle>
             <DialogDescription>{t('topology.linkDialog.deleteDesc')}</DialogDescription>

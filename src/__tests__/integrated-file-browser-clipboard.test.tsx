@@ -72,6 +72,9 @@ vi.mock('../components/ui/context-menu', () => ({
   ),
   ContextMenuTrigger: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
   ContextMenuSeparator: () => <hr />,
+  ContextMenuSub: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
+  ContextMenuSubContent: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
+  ContextMenuSubTrigger: ({ children }: { children: React.ReactNode }) => <button>{children}</button>,
 }));
 
 vi.mock('../components/ui/resizable', () => ({
@@ -150,7 +153,8 @@ function installInvoke(overrides: Record<string, () => unknown> = {}) {
     copy_file: () => true,
   };
   const impl = { ...defaults, ...overrides };
-  mocks.invoke.mockImplementation((cmd: string) => {
+  mocks.invoke.mockImplementation((cmd: string, args: { paths?: string[] }) => {
+    if (cmd === 'inspect_remote_uploads') return Promise.resolve(args.paths?.map(path => ({ path, version: null })));
     const handler = impl[cmd];
     if (handler) return Promise.resolve(handler());
     return Promise.resolve(undefined);
@@ -170,10 +174,10 @@ async function renderBrowser(connectionId = 'conn-clip') {
   expect(await screen.findByText('beta.log')).toBeTruthy();
 }
 
-/** Ctrl/Cmd+Click file rows to select exactly the named files (no ".."). */
+/** Start a fresh selection, then extend it with Ctrl/Cmd (no ".."). */
 async function selectFiles(names: string[]) {
-  for (const name of names) {
-    fireEvent.click(screen.getByText(name), { ctrlKey: true });
+  for (const [index, name] of names.entries()) {
+    fireEvent.click(screen.getByText(name), { ctrlKey: index > 0 });
   }
   await waitFor(() => {
     expect(screen.getAllByText(`${names.length} selected`).length).toBeGreaterThan(0);

@@ -945,6 +945,7 @@ pub struct FileTransferResponse {
 pub struct TransferProgress {
     pub total_bytes: u64,
     pub transferred_bytes: u64,
+    pub phase: Option<&'static str>,
 }
 
 /// Throttle: at most one progress event per ~80 ms so the IPC channel isn't
@@ -961,6 +962,7 @@ fn send_progress(
     let _ = channel.send(TransferProgress {
         total_bytes: total,
         transferred_bytes: transferred,
+        phase: None,
     });
     *last_send = std::time::Instant::now();
 }
@@ -3299,30 +3301,128 @@ pub async fn list_remote_files(
     path: String,
     state: State<'_, Arc<ConnectionManager>>,
 ) -> Result<Vec<FileEntry>, String> {
-    let conn_type = state
-        .get_connection_type(&connection_id)
-        .await
-        .ok_or_else(|| format!("No file connection found for '{}'", connection_id))?;
+    list_remote_directory(state.inner(), &connection_id, &path).await
+}
 
-    match conn_type.as_str() {
-        "SFTP" => {
+async fn list_remote_directory(
+    state: &Arc<ConnectionManager>,
+    connection_id: &str,
+    path: &str,
+) -> Result<Vec<FileEntry>, String> {
+    match state.get_connection_type(connection_id).await.as_deref() {
+        Some("SFTP") => {
             let sftp_map = state.get_sftp_connection().await;
             let connections = sftp_map.read().await;
             let client = connections
-                .get(&connection_id)
+                .get(connection_id)
                 .ok_or("SFTP connection not found")?;
-            client.list_dir(&path).await.map_err(|e| e.to_string())
+            client.list_dir(path).await.map_err(|e| e.to_string())
         }
-        "FTP" => {
+        Some("FTP") => {
             let ftp_map = state.get_ftp_connection().await;
             let mut connections = ftp_map.write().await;
             let client = connections
-                .get_mut(&connection_id)
+                .get_mut(connection_id)
                 .ok_or("FTP connection not found")?;
-            client.list_dir(&path).await.map_err(|e| e.to_string())
+            client.list_dir(path).await.map_err(|e| e.to_string())
         }
-        _ => Err(format!("Unsupported protocol: {}", conn_type)),
+        None | Some("SSH") => {
+            let connection = state
+                .get_connection(connection_id)
+                .await
+                .ok_or("SSH connection not found")?;
+            let client = connection.read().await;
+            let sftp = client
+                .open_sftp_session()
+                .await
+                .map_err(|e| e.to_string())?;
+            crate::sftp_client::list_sftp_dir(&sftp, path)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        Some(other) => Err(format!("Unsupported protocol: {other}")),
     }
+}
+
+async fn inspect_upload_target(
+    state: &Arc<ConnectionManager>,
+    connection_id: &str,
+    path: &str,
+    cache: &mut HashMap<String, Vec<FileEntry>>,
+) -> Result<crate::upload::UploadTarget, String> {
+    use crate::upload::{parent_and_name, UploadTarget, UploadVersion};
+    let (parent, name) = parent_and_name(path)?;
+    if !cache.contains_key(parent) {
+        match list_remote_directory(state, connection_id, parent).await {
+            Ok(entries) => {
+                cache.insert(parent.to_owned(), entries);
+            }
+            Err(original_error) => {
+                // A missing ancestor means a new directory upload. A listing
+                // error for an existing ancestor is never interpreted as absence.
+                let mut missing = parent;
+                loop {
+                    if missing == "/" {
+                        return Err(original_error);
+                    }
+                    let (ancestor, child) = parent_and_name(missing)?;
+                    let entries = if let Some(entries) = cache.get(ancestor) {
+                        entries.clone()
+                    } else {
+                        match list_remote_directory(state, connection_id, ancestor).await {
+                            Ok(entries) => {
+                                cache.insert(ancestor.to_owned(), entries.clone());
+                                entries
+                            }
+                            Err(_) => {
+                                missing = ancestor;
+                                continue;
+                            }
+                        }
+                    };
+                    if entries.iter().any(|entry| entry.name == child) {
+                        return Err(original_error);
+                    }
+                    return Ok(UploadTarget {
+                        path: path.to_owned(),
+                        version: None,
+                    });
+                }
+            }
+        }
+    }
+    let version = cache
+        .get(parent)
+        .and_then(|entries| entries.iter().find(|entry| entry.name == name))
+        .map(|entry| UploadVersion {
+            kind: match entry.file_type {
+                FileEntryType::File => "File",
+                FileEntryType::Directory => "Directory",
+                FileEntryType::Symlink => "Symlink",
+            }
+            .into(),
+            size: entry.size,
+            modified: entry.modified.clone(),
+        });
+    Ok(UploadTarget {
+        path: path.to_owned(),
+        version,
+    })
+}
+
+#[tauri::command]
+pub async fn inspect_remote_uploads(
+    connection_id: String,
+    paths: Vec<String>,
+    state: State<'_, Arc<ConnectionManager>>,
+) -> Result<Vec<crate::upload::UploadTarget>, String> {
+    let mut cache = HashMap::new();
+    let mut targets = Vec::with_capacity(paths.len());
+    for path in paths {
+        targets
+            .push(inspect_upload_target(state.inner(), &connection_id, &path, &mut cache).await?);
+    }
+    Ok(targets)
 }
 
 async fn download_remote_file_to_path(
@@ -3460,8 +3560,8 @@ async fn rename_remote_file(
                 .await
                 .map_err(|e| e.to_string())
         }
-        Some(other) => Err(format!("Unsupported protocol: {}", other)),
-        None => {
+        Some(other) if other != "SSH" => Err(format!("Unsupported protocol: {}", other)),
+        None | Some("SSH") => {
             let connection = state
                 .get_connection(connection_id)
                 .await
@@ -3472,6 +3572,7 @@ async fn rename_remote_file(
                 .await
                 .map_err(|e| e.to_string())
         }
+        Some(other) => Err(format!("Unsupported protocol: {other}")),
     }
 }
 
@@ -3493,7 +3594,7 @@ async fn remove_remote_file(state: &Arc<ConnectionManager>, connection_id: &str,
                 None => return,
             }
         }
-        None => match state.get_connection(connection_id).await {
+        None | Some("SSH") => match state.get_connection(connection_id).await {
             Some(connection) => {
                 let client = connection.read().await;
                 client.remove_remote_file(path).await
@@ -3647,14 +3748,17 @@ pub async fn download_remote_file_confined(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)] // Stable IPC contract; grouping would break the frontend payload shape.
 pub async fn upload_remote_file(
     connection_id: String,
     local_path: String,
     remote_path: String,
     on_progress: tauri::ipc::Channel<TransferProgress>,
     transfer_id: Option<String>,
+    expected_target: Option<crate::upload::UploadVersion>,
+    conflict_policy: Option<String>,
     state: State<'_, Arc<ConnectionManager>>,
-) -> Result<FileTransferResponse, String> {
+) -> Result<crate::upload::UploadResponse, String> {
     let cancel = match transfer_id.as_deref() {
         Some(id) => Some(
             state
@@ -3664,21 +3768,84 @@ pub async fn upload_remote_file(
         ),
         None => None,
     };
-    let conn_type = state.get_connection_type(&connection_id).await;
-    let staging_path = transfer_staging_path(&remote_path, transfer_id.as_deref());
+    let result = perform_remote_upload(
+        &connection_id,
+        &local_path,
+        &remote_path,
+        on_progress,
+        transfer_id.as_deref(),
+        expected_target.as_ref(),
+        conflict_policy.as_deref(),
+        state.inner(),
+        cancel,
+    )
+    .await;
+    if let Some(id) = transfer_id.as_deref() {
+        state.finish_transfer(&connection_id, id).await;
+    }
+    result
+}
 
+#[allow(clippy::too_many_arguments)] // Mirrors the IPC request together with its cancellation lifecycle.
+async fn perform_remote_upload(
+    connection_id: &str,
+    local_path: &str,
+    requested_path: &str,
+    on_progress: tauri::ipc::Channel<TransferProgress>,
+    transfer_id: Option<&str>,
+    expected_target: Option<&crate::upload::UploadVersion>,
+    conflict_policy: Option<&str>,
+    state: &Arc<ConnectionManager>,
+    cancel: Option<tokio_util::sync::CancellationToken>,
+) -> Result<crate::upload::UploadResponse, String> {
+    use crate::upload::{self, UploadResponse};
+    let lock = upload::connection_lock(connection_id).await;
+    let _guard = if let Some(cancel) = cancel.as_ref() {
+        tokio::select! { guard = lock.lock() => guard, _ = cancel.cancelled() => return Err("Transfer cancelled".into()) }
+    } else {
+        lock.lock().await
+    };
+    let mut remote_path = requested_path.to_owned();
+    let mut inspection_cache = HashMap::new();
+    let mut target =
+        inspect_upload_target(state, connection_id, &remote_path, &mut inspection_cache).await?;
+    if conflict_policy == Some("keep-both") && target.version.is_some() {
+        let mut found = false;
+        for number in 1..=10000 {
+            let candidate = upload::numbered_copy(requested_path, number);
+            let inspected =
+                inspect_upload_target(state, connection_id, &candidate, &mut inspection_cache)
+                    .await?;
+            if inspected.version.is_none() {
+                remote_path = candidate;
+                target = inspected;
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            return Err("No available upload filename".into());
+        }
+    }
+    if let Some(version) = target.version.as_ref() {
+        if conflict_policy != Some("replace") || !upload::may_replace(version, expected_target) {
+            return Ok(UploadResponse::conflict(target));
+        }
+    }
+    let conn_type = state.get_connection_type(connection_id).await;
+    let staging_path = transfer_staging_path(&remote_path, transfer_id);
     let transfer = async {
         match conn_type.as_deref() {
             Some("SFTP") => {
                 let sftp_map = state.get_sftp_connection().await;
                 let connections = sftp_map.read().await;
                 let client = connections
-                    .get(&connection_id)
+                    .get(connection_id)
                     .ok_or_else(|| anyhow::anyhow!("SFTP connection not found"))?;
                 let mut last = std::time::Instant::now();
                 let ch2 = on_progress.clone();
                 client
-                    .upload_file_with_progress(&local_path, &staging_path, move |total, done| {
+                    .upload_file_with_progress(local_path, &staging_path, move |total, done| {
                         send_progress(&ch2, total, done, &mut last);
                     })
                     .await
@@ -3688,79 +3855,126 @@ pub async fn upload_remote_file(
                 let config = ftp_map
                     .read()
                     .await
-                    .get(&connection_id)
+                    .get(connection_id)
                     .ok_or_else(|| anyhow::anyhow!("FTP connection not found"))?
                     .transfer_config()?;
                 let mut client = crate::ftp_client::FtpClient::connect(&config).await?;
                 let mut last = std::time::Instant::now();
                 let ch2 = on_progress.clone();
                 client
-                    .upload_file_with_progress(&local_path, &staging_path, move |total, done| {
+                    .upload_file_with_progress(local_path, &staging_path, move |total, done| {
                         send_progress(&ch2, total, done, &mut last);
                     })
                     .await
             }
-            Some(other) => Err(anyhow::anyhow!("Unsupported protocol: {}", other)),
-            None => {
+            None | Some("SSH") => {
                 // 回退到 SSH 连接（集成文件浏览器使用的 SSH 连接不会登记在
                 // connection_types 中）。
-                let connection = state.get_connection(&connection_id).await.ok_or_else(|| {
+                let connection = state.get_connection(connection_id).await.ok_or_else(|| {
                     anyhow::anyhow!("No connection found for '{}'", connection_id)
                 })?;
                 let client = connection.read().await;
                 let mut last = std::time::Instant::now();
                 let ch2 = on_progress.clone();
                 client
-                    .upload_file_with_progress(&local_path, &staging_path, move |total, done| {
+                    .upload_file_with_progress(local_path, &staging_path, move |total, done| {
                         send_progress(&ch2, total, done, &mut last);
                     })
                     .await
             }
+            Some(other) => Err(anyhow::anyhow!("Unsupported protocol: {other}")),
         }
     };
-    let result = if let Some(cancel) = cancel {
-        tokio::select! {
-            result = transfer => result,
-            _ = cancel.cancelled() => Err(anyhow::anyhow!("Transfer cancelled")),
-        }
+
+    let result = if let Some(cancel) = cancel.as_ref() {
+        tokio::select! { result = transfer => result, _ = cancel.cancelled() => Err(anyhow::anyhow!("Transfer cancelled")) }
     } else {
         transfer.await
     };
-    let result = match result {
-        Ok(bytes) => {
-            match rename_remote_file(state.inner(), &connection_id, &staging_path, &remote_path)
-                .await
-            {
-                Ok(()) => Ok(bytes),
-                Err(error) => {
-                    remove_remote_file(state.inner(), &connection_id, &staging_path).await;
-                    Err(anyhow::anyhow!(error))
-                }
-            }
-        }
+    let bytes = match result {
+        Ok(bytes) => bytes,
         Err(error) => {
-            remove_remote_file(state.inner(), &connection_id, &staging_path).await;
-            Err(error)
+            remove_remote_file(state, connection_id, &staging_path).await;
+            return Ok(UploadResponse {
+                success: false,
+                committed: false,
+                bytes_transferred: None,
+                error: Some(error.to_string()),
+                conflict: None,
+                destination_path: remote_path,
+            });
         }
     };
-    if let Some(id) = transfer_id.as_deref() {
-        state.finish_transfer(&connection_id, id).await;
+    // Revalidate immediately before publication. Approval is for one observed
+    // file version, never for a directory, symlink, or a changed destination.
+    let current = match inspect_upload_target(
+        state,
+        connection_id,
+        &remote_path,
+        &mut HashMap::new(),
+    )
+    .await
+    {
+        Ok(current) => current,
+        Err(error) => {
+            remove_remote_file(state, connection_id, &staging_path).await;
+            return Err(error);
+        }
+    };
+    if let Some(version) = current.version.as_ref() {
+        if conflict_policy != Some("replace") || !upload::may_replace(version, expected_target) {
+            remove_remote_file(state, connection_id, &staging_path).await;
+            return Ok(UploadResponse::conflict(current));
+        }
     }
-
-    match result {
-        Ok(bytes) => Ok(FileTransferResponse {
-            success: true,
-            bytes_transferred: Some(bytes),
-            data: None,
-            error: None,
-        }),
-        Err(e) => Ok(FileTransferResponse {
-            success: false,
-            bytes_transferred: None,
-            data: None,
-            error: Some(e.to_string()),
-        }),
+    let backup = current.version.as_ref().map(|_| {
+        format!(
+            "{}.nexterm-backup-{}",
+            remote_path,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        )
+    });
+    if let Some(path) = backup.as_ref() {
+        let inspection =
+            inspect_upload_target(state, connection_id, path, &mut HashMap::new()).await;
+        if !inspection
+            .as_ref()
+            .is_ok_and(|target| target.version.is_none())
+        {
+            remove_remote_file(state, connection_id, &staging_path).await;
+            return Err(inspection
+                .err()
+                .unwrap_or_else(|| "Upload backup path already exists".into()));
+        }
     }
+    // Cancellation applies to transport, not this short recoverable transaction.
+    let _ = on_progress.send(TransferProgress {
+        total_bytes: bytes,
+        transferred_bytes: bytes,
+        phase: Some("committing"),
+    });
+    let result = upload::publish(
+        &staging_path,
+        &remote_path,
+        backup.as_deref(),
+        |old, new| async move { rename_remote_file(state, connection_id, &old, &new).await },
+        |path| async move { remove_remote_file(state, connection_id, &path).await },
+    )
+    .await;
+    if result.is_err() {
+        remove_remote_file(state, connection_id, &staging_path).await;
+    }
+    Ok(UploadResponse {
+        success: result.is_ok(),
+        committed: result.is_ok(),
+        bytes_transferred: result.as_ref().ok().map(|_| bytes),
+        error: result.err(),
+        conflict: None,
+        destination_path: remote_path,
+    })
 }
 
 #[tauri::command]
@@ -3825,6 +4039,22 @@ pub async fn create_remote_directory(
     path: String,
     state: State<'_, Arc<ConnectionManager>>,
 ) -> Result<CommandResponse, String> {
+    let current =
+        inspect_upload_target(state.inner(), &connection_id, &path, &mut HashMap::new()).await?;
+    if let Some(version) = current.version {
+        return if version.kind == "Directory" {
+            Ok(CommandResponse {
+                success: true,
+                output: Some(format!("Directory already exists: {path}")),
+                error: None,
+            })
+        } else {
+            Err(format!(
+                "Cannot create directory: '{path}' is an existing {}",
+                version.kind
+            ))
+        };
+    }
     let conn_type = state
         .get_connection_type(&connection_id)
         .await
@@ -4251,6 +4481,7 @@ pub struct LocalPathStat {
     pub is_directory: bool,
     pub is_symlink: bool,
     pub size: u64,
+    pub modified: Option<String>,
 }
 
 #[tauri::command]
@@ -4267,6 +4498,7 @@ pub async fn stat_local_path(path: String) -> Result<LocalPathStat, String> {
                 is_directory: false,
                 is_symlink: false,
                 size: 0,
+                modified: None,
             })
         }
     };
@@ -4283,6 +4515,11 @@ pub async fn stat_local_path(path: String) -> Result<LocalPathStat, String> {
         is_directory: md.is_dir(),
         is_symlink,
         size: if md.is_file() { md.len() } else { 0 },
+        modified: md
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|time| crate::sftp_client::chrono_from_unix_timestamp(time.as_secs())),
     })
 }
 

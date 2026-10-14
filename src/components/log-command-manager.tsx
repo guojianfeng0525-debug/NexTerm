@@ -255,7 +255,7 @@ export function LogCommandManager({
 
       {/* Delete confirm */}
       <Dialog open={deleteTarget !== null} onOpenChange={(next) => { if (!next) setDeleteTarget(null); }}>
-        <DialogContent className="max-w-sm p-0">
+        <DialogContent className="max-w-[400px] p-0">
           <DialogHeader className="px-5 pt-4 pb-2">
             <DialogTitle className="text-sm">{t('logMonitor.cmdDeleteTitle')}</DialogTitle>
             <DialogDescription className="text-xs">{t('logMonitor.cmdDeleteDesc')}</DialogDescription>

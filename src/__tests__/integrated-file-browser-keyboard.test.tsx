@@ -77,6 +77,9 @@ vi.mock('../components/ui/context-menu', () => ({
   ),
   ContextMenuTrigger: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
   ContextMenuSeparator: () => <hr />,
+  ContextMenuSub: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
+  ContextMenuSubContent: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
+  ContextMenuSubTrigger: ({ children }: { children: React.ReactNode }) => <button>{children}</button>,
 }));
 
 vi.mock('../components/ui/resizable', () => ({
@@ -101,6 +104,19 @@ afterEach(() => {
 });
 
 describe('IntegratedFileBrowser keyboard shortcuts', () => {
+  it('restores cached rows for their own server before a refresh completes', async () => {
+    const entry = (name: string) => ({ name, size: 1, modified: null, permissions: null, file_type: 'File' });
+    mocks.invoke.mockImplementation(async (command: string, args: { connectionId: string }) => command === 'list_files'
+      ? [entry(args.connectionId === 'cache-server-a' ? 'server-a.txt' : 'server-b.txt')] : []);
+    const view = render(<IntegratedFileBrowser connectionId="cache-server-a" isConnected onClose={() => {}} />);
+    await screen.findByText('server-a.txt');
+    view.rerender(<IntegratedFileBrowser connectionId="cache-server-b" isConnected onClose={() => {}} />);
+    await screen.findByText('server-b.txt');
+    mocks.invoke.mockImplementation(() => new Promise(() => {}));
+    view.rerender(<IntegratedFileBrowser connectionId="cache-server-a" isConnected onClose={() => {}} />);
+    expect(screen.queryByText('server-b.txt')).toBeNull();
+    expect(screen.getByText('server-a.txt')).toBeTruthy();
+  });
   it('does not intercept document shortcuts from editable targets', () => {
     render(
       <IntegratedFileBrowser
@@ -192,7 +208,7 @@ describe('IntegratedFileBrowser terminal directory following', () => {
     });
   });
 
-  it('returns to the same terminal directory after manual navigation on the next prompt', async () => {
+  it('pauses after manual navigation until following is explicitly resumed', async () => {
     const { rerender } = render(
       <IntegratedFileBrowser
         connectionId="conn-manual"
@@ -234,6 +250,9 @@ describe('IntegratedFileBrowser terminal directory following', () => {
         terminalWorkingDirectory={{ path: '/srv/app', sequence: 2 }}
       />,
     );
+
+    expect(mocks.invoke.mock.calls.filter(([, args]) => args.path === '/srv/app')).toHaveLength(1);
+    fireEvent.click(screen.getByTitle('Follow terminal directory'));
 
     await waitFor(() => {
       expect(

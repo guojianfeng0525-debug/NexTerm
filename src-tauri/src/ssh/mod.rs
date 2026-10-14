@@ -38,11 +38,8 @@ pub static PREFERRED_HOST_KEY_ALGOS: &[keys::Algorithm] = &[
 
 const BASH_VERSION_PROBE: &str = r#"printf '__NEXTERM_BASH_VERSION__%s' "${BASH_VERSION-}""#;
 const BASH_VERSION_MARKER: &str = "__NEXTERM_BASH_VERSION__";
-// Bash shell-integration (OSC 7 cwd reporting) — exercised by unit tests;
-// production wiring is pending the terminal-integration batch.
-#[cfg_attr(not(test), allow(dead_code))]
+// Bash shell-integration (OSC 7 cwd reporting).
 const BASH_SHELL_INTEGRATION_PREFIX: &str = r#" stty echo; __nexterm_report_cwd(){ local p=${PWD//%/%25}; p=${p// /%20}; p=${p//#/%23}; p=${p//\?/%3F}; printf '\033]7;file://%s%s\033\\' "${HOSTNAME:-localhost}" "$p"; }; "#;
-#[cfg_attr(not(test), allow(dead_code))]
 const BASH_SHELL_INTEGRATION_SUFFIX: &str = "printf '\\r\\033[2K'\n";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -59,9 +56,6 @@ pub(crate) fn bash_version_from_probe(output: &str) -> Option<BashVersion> {
     Some(BashVersion { major, minor })
 }
 
-// Bash shell-integration command builder — exercised by unit tests;
-// production wiring is pending the terminal-integration batch.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn bash_shell_integration_command(version: BashVersion) -> Vec<u8> {
     let prompt_command = if version >= (BashVersion { major: 5, minor: 1 }) {
         r#"if declare -p PROMPT_COMMAND &>/dev/null; then PROMPT_COMMAND=("${PROMPT_COMMAND[@]}" __nexterm_report_cwd); else PROMPT_COMMAND=(__nexterm_report_cwd); fi; "#
@@ -74,6 +68,30 @@ pub(crate) fn bash_shell_integration_command(version: BashVersion) -> Vec<u8> {
         BASH_SHELL_INTEGRATION_PREFIX, prompt_command, BASH_SHELL_INTEGRATION_SUFFIX
     )
     .into_bytes()
+}
+
+/// Install prompt reporting from a startup file, never through readline input.
+/// Source the same profiles as a login shell before appending our prompt hook.
+pub(crate) fn bash_startup_command(version: BashVersion, directory: Option<&str>) -> String {
+    let integration = String::from_utf8(bash_shell_integration_command(version))
+        .expect("shell integration is UTF-8");
+    let mut startup = String::from(
+        "shopt -s login_shell; if [[ -r /etc/profile ]]; then source /etc/profile; fi; \
+         for __nexterm_profile in ~/.bash_profile ~/.bash_login ~/.profile; do \
+         if [[ -r $__nexterm_profile ]]; then source \"$__nexterm_profile\"; break; fi; done; \
+         unset __nexterm_profile; ",
+    );
+    if let Some(directory) = directory.map(str::trim).filter(|path| !path.is_empty()) {
+        startup.push_str(&format!(
+            "cd -- '{}' || exit; ",
+            directory.replace('\'', "'\\''")
+        ));
+    }
+    startup.push_str(&integration);
+    format!(
+        "exec \"${{SHELL:-/bin/bash}}\" --rcfile <(printf '%s' '{}') -i",
+        startup.replace('\'', "'\\''")
+    )
 }
 
 /// Canonical OpenSSH-compatible SHA-256 host-key fingerprint.
@@ -959,13 +977,9 @@ impl SshClient {
             let default_directory = default_directory
                 .map(str::trim)
                 .filter(|dir| !dir.is_empty());
-            if let (Some(dir), Some(_)) = (default_directory, bash_version) {
-                let escaped = dir.replace('\'', "'\\''");
+            if let Some(version) = bash_version {
                 channel
-                    .exec(
-                        true,
-                        format!("cd -- '{}' && exec \"${{SHELL:-/bin/bash}}\" -l", escaped),
-                    )
+                    .exec(true, bash_startup_command(version, default_directory))
                     .await
                     .map_err(|e| {
                         anyhow::anyhow!("Failed to start shell in default directory: {e}")

@@ -1578,6 +1578,7 @@ export function PtyTerminal({
 
             case 'PtyStarted': {
               if (msg.connection_id === connectionId && typeof msg.generation === 'number') {
+                if (!msg.resumed) onWorkingDirectoryChange?.(connectionId, null);
                 reconnectAttemptsRef.current = 0;
                 autoReconnectAfterDropRef.current = 0; // Reset drop-reconnect counter on success
                 if (msg.resumed) {

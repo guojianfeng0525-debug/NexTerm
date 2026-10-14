@@ -613,7 +613,12 @@
       "openInLogMonitor": "在日志监视器中打开",
       "openInOS": "在系统中打开",
       "uploadFolder": "上传文件夹",
-      "syncDirectories": "同步目录"
+      "syncDirectories": "同步目录",
+      "deleteCount_one": "删除 {{count}} 个项目",
+      "deleteCount_other": "删除 {{count}} 个项目",
+      "pasteCount_one": "粘贴 {{count}} 个项目",
+      "pasteCount_other": "粘贴 {{count}} 个项目",
+      "more": "更多"
     },
     "toast": {
       "queuedUpload_one": "已排队 {{count}} 个文件等待上传",
@@ -717,6 +722,14 @@
       "cancelled": "已取消",
       "upload": "上传",
       "download": "下载"
+    },
+    "follow": {
+      "active": "跟随中",
+      "paused": "已暂停跟随",
+      "failed": "目录同步失败",
+      "waiting": "等待终端目录",
+      "unavailable": "未收到目录，请手动定位",
+      "retry": "重试同步"
     }
   },
   "contextMenu": {
@@ -997,7 +1010,21 @@
     "noTransfers": "暂无传输",
     "clear": "清除",
     "openFile": "打开文件",
-    "showInFolder": "在文件夹中显示"
+    "showInFolder": "在文件夹中显示",
+    "skippedCount_one": "{{count}} 已跳过",
+    "skippedCount_other": "{{count}} 已跳过",
+    "cancelledCount_one": "{{count}} 已取消",
+    "cancelledCount_other": "{{count}} 已取消",
+    "status": {
+      "waiting": "等待确认",
+      "committing": "提交中",
+      "skipped": "已跳过",
+      "cancelled": "已取消"
+    },
+    "checkingBatches_one": "正在检查 {{count}} 批上传",
+    "checkingBatches_other": "正在检查 {{count}} 批上传",
+    "waitingBatches_one": "{{count}} 批等待确认",
+    "waitingBatches_other": "{{count}} 批等待确认"
   },
   "transferControls": {
     "upload": "上传",
@@ -3189,5 +3216,34 @@
     "editLink": "编辑关系",
     "hideLink": "隐藏关系",
     "unhideLink": "取消隐藏关系"
+  },
+  "uploadConflict": {
+    "title_one": "处理 {{count}} 个上传冲突",
+    "title_other": "处理 {{count}} 个上传冲突",
+    "description": "目标：{{target}}。请选择同名文件的处理方式，默认跳过。",
+    "skip": "跳过",
+    "keepBoth": "保留两份",
+    "replace": "覆盖文件",
+    "applyAll": "应用于本批次所有同类冲突",
+    "local": "本地文件",
+    "remote": "现有目标",
+    "unknownSize": "大小未知",
+    "unknownTime": "修改时间未知",
+    "typeConflict": "目标类型不同，仅支持保留两份或跳过。",
+    "action": "处理方式",
+    "actionFor": "处理 {{path}}",
+    "continue": "继续上传",
+    "sourceMissing": "本地文件已不存在：{{path}}",
+    "checkFailed": "上传检查失败",
+    "skippedCount": "已跳过 {{count}} 个文件",
+    "kind": {
+      "File": "文件",
+      "Directory": "文件夹",
+      "Symlink": "符号链接",
+      "Queued": "本批次中的另一个文件"
+    },
+    "syncSummary": "同步结果：{{success}} 项成功，{{skipped}} 项跳过，{{failed}} 项失败",
+    "invalidInspection": "上传目标检查结果无效，请刷新后重试",
+    "planExpired": "上传计划已失效，请重新选择文件"
   }
 }

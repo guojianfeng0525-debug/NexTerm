@@ -43,6 +43,8 @@ interface TransferQueueProps {
   expanded: boolean;
   onToggleExpanded: () => void;
   onCancel?: (item: TransferItem) => void;
+  pendingCount?: number;
+  checkingCount?: number;
 }
 
 // ---------- Helpers ----------
@@ -71,13 +73,17 @@ function statusIcon(status: TransferItem["status"]) {
     case "queued":
       return <Clock className="h-3.5 w-3.5 text-muted-foreground" />;
     case "transferring":
+    case "committing":
       return <Loader2 className="h-3.5 w-3.5 animate-spin text-blue-500" />;
     case "completed":
       return <CheckCircle2 className="h-3.5 w-3.5 text-green-500" />;
     case "failed":
       return <AlertCircle className="h-3.5 w-3.5 text-destructive" />;
     case "cancelled":
+    case "skipped":
       return <Ban className="h-3.5 w-3.5 text-muted-foreground" />;
+    case "waiting":
+      return <Clock className="h-3.5 w-3.5 text-amber-500" />;
   }
 }
 
@@ -89,6 +95,8 @@ export function TransferQueue({
   expanded,
   onToggleExpanded,
   onCancel,
+  pendingCount = 0,
+  checkingCount = 0,
 }: TransferQueueProps) {
   const { t } = useTranslation();
   const activeCount = getActiveTransferCount(transfers);
@@ -102,7 +110,7 @@ export function TransferQueue({
     prevActiveCount.current = activeCount;
   }, [activeCount, expanded, onToggleExpanded]);
 
-  if (transfers.length === 0 && !expanded) {
+  if (transfers.length === 0 && !expanded && !pendingCount && !checkingCount) {
     return null;
   }
 
@@ -110,6 +118,8 @@ export function TransferQueue({
     (t) => t.status === "completed",
   ).length;
   const failedCount = transfers.filter((t) => t.status === "failed").length;
+  const skippedCount = transfers.filter(item => item.status === 'skipped').length;
+  const cancelledCount = transfers.filter(item => item.status === 'cancelled').length;
 
   return (
     <Collapsible
@@ -126,6 +136,8 @@ export function TransferQueue({
               <ChevronUp className="h-3 w-3" />
             )}
             {t('transferQueue.transfers')}
+            {checkingCount > 0 && <span>{t('transferQueue.checkingBatches', { count: checkingCount })}</span>}
+            {pendingCount > 0 && <span>{t('transferQueue.waitingBatches', { count: pendingCount })}</span>}
             {activeCount > 0 && (
               <Badge
                 variant="secondary"
@@ -140,6 +152,8 @@ export function TransferQueue({
             {failedCount > 0 && (
               <span className="text-destructive">{t('transferQueue.failed', { count: failedCount })}</span>
             )}
+            {skippedCount > 0 && <span>{t('transferQueue.skippedCount', { count: skippedCount })}</span>}
+            {cancelledCount > 0 && <span>{t('transferQueue.cancelledCount', { count: cancelledCount })}</span>}
           </span>
           {transfers.length > 0 && (
             <Button
@@ -181,10 +195,11 @@ export function TransferQueue({
                   {statusIcon(item.status)}
                   <span
                     className="truncate flex-1 min-w-0"
-                    title={item.fileName}
+                    title={`${item.sourcePath} → ${item.destinationPath}`}
                   >
                     {item.fileName}
                   </span>
+                  {(item.status === 'waiting' || item.status === 'committing' || item.status === 'skipped' || item.status === 'cancelled') && <span className="shrink-0 text-muted-foreground">{t(`transferQueue.status.${item.status}`)}</span>}
 
                   {item.status === "transferring" && (
                     <>
@@ -277,6 +292,7 @@ export function TransferQueue({
                   )}
 
                   {(item.status === "queued" ||
+                    item.status === 'waiting' ||
                     item.status === "transferring") && (
                     <Button
                       variant="ghost"

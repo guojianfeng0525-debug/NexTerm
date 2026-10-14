@@ -1,4 +1,5 @@
 import type { TransferDirection } from "./transfer-queue-reducer";
+import type { UploadApproval } from './upload-conflicts';
 
 export interface LocalRecursiveUploadEntry {
   relative_path: string;
@@ -7,7 +8,8 @@ export interface LocalRecursiveUploadEntry {
   file_type: string;
 }
 
-export interface UploadQueueInput {
+export interface UploadQueueInput extends UploadApproval {
+  connectionId?: string;
   fileName: string;
   direction: TransferDirection;
   sourcePath: string;

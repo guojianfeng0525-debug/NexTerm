@@ -622,7 +622,7 @@ export function ToolTopology({ isActive = true }: { isActive?: boolean }) {
         open={active && !!deleteNodeTarget}
         onOpenChange={(open) => !open && setDeleteNodeTarget(null)}
       >
-        <AlertDialogContent className="max-w-sm">
+        <AlertDialogContent className="max-w-[400px]">
           <AlertDialogHeader>
             <AlertDialogTitle>{t('topology.deleteNodeTitle')}</AlertDialogTitle>
             <AlertDialogDescription>
@@ -652,7 +652,7 @@ export function ToolTopology({ isActive = true }: { isActive?: boolean }) {
         open={active && bulkDeleteTargets.length > 0}
         onOpenChange={(open) => !open && setBulkDeleteTargets([])}
       >
-        <AlertDialogContent className="max-w-sm">
+        <AlertDialogContent className="max-w-[400px]">
           <AlertDialogHeader>
             <AlertDialogTitle>{t('topology.deleteSelectedTitle')}</AlertDialogTitle>
             <AlertDialogDescription>
@@ -683,7 +683,7 @@ export function ToolTopology({ isActive = true }: { isActive?: boolean }) {
         open={active && !!deleteLinkTarget}
         onOpenChange={(open) => !open && setDeleteLinkTarget(null)}
       >
-        <AlertDialogContent className="max-w-sm">
+        <AlertDialogContent className="max-w-[400px]">
           <AlertDialogHeader>
             <AlertDialogTitle>{t('topology.linkDialog.deleteTitle')}</AlertDialogTitle>
             <AlertDialogDescription>

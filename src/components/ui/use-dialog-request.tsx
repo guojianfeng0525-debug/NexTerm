@@ -10,6 +10,9 @@ type Request = {
   message: string;
   initialValue?: string;
   validate?: (value: string) => boolean;
+  title?: string;
+  confirmLabel?: string;
+  destructive?: boolean;
   scopeKey: string;
   resolve: (value: string | null) => void;
 };
@@ -60,16 +63,16 @@ export function useDialogRequest({ active, scopeKey = '', canConfirm }: {
 
   const prompt = useCallback((message: string, initialValue = '', validate?: (value: string) => boolean) =>
     request({ kind: 'prompt', message, initialValue, validate }), [request]);
-  const confirm = useCallback(async (message: string) =>
-    (await request({ kind: 'confirm', message })) !== null, [request]);
+  const confirm = useCallback(async (message: string, options?: Pick<Request, 'title' | 'confirmLabel' | 'destructive'>) =>
+    (await request({ kind: 'confirm', message, ...options })) !== null, [request]);
   const visible = !!pending && active && pending.scopeKey === scopeKey;
   const validValue = value.length > 0 && (pending?.validate?.(value) ?? true);
   const dialog = pending?.kind === 'confirm' ? (
     <AlertDialog open={visible} onOpenChange={open => { if (!open) finish(null); }}>
       <AlertDialogContent>
-        <AlertDialogHeader><AlertDialogTitle>{t('common.confirm')}</AlertDialogTitle><AlertDialogDescription>{pending.message}</AlertDialogDescription></AlertDialogHeader>
+        <AlertDialogHeader><AlertDialogTitle>{pending.title ?? t('common.confirm')}</AlertDialogTitle><AlertDialogDescription>{pending.message}</AlertDialogDescription></AlertDialogHeader>
         <AlertDialogFooter><AlertDialogCancel onClick={() => finish(null)}>{t('common.cancel')}</AlertDialogCancel>
-          <AlertDialogAction onClick={event => { event.preventDefault(); finish('confirmed'); }}>{t('common.confirm')}</AlertDialogAction>
+          <AlertDialogAction className={pending.destructive ? 'bg-destructive hover:bg-destructive/90' : undefined} onClick={event => { event.preventDefault(); finish('confirmed'); }}>{pending.confirmLabel ?? t('common.confirm')}</AlertDialogAction>
         </AlertDialogFooter>
       </AlertDialogContent>
     </AlertDialog>

@@ -182,8 +182,8 @@ mod ssh_contract_tests {
 mod shell_integration_tests {
     use crate::sftp_client::list_sftp_dir;
     use crate::ssh::{
-        bash_shell_integration_command, bash_version_from_probe, AuthMethod, BashVersion,
-        PtySession, SshClient, SshConfig,
+        bash_shell_integration_command, bash_startup_command, bash_version_from_probe, AuthMethod,
+        BashVersion, PtySession, SshClient, SshConfig,
     };
     use std::time::Duration;
     use tokio::time::{timeout, Instant};
@@ -259,6 +259,66 @@ mod shell_integration_tests {
                 .any(|window| window == b"]7;file://"));
             assert!(command.ends_with(b"\n"));
         }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn startup_reports_directory_preserves_profile_and_keeps_setup_out_of_history() {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+        let fixture = tempfile::tempdir().unwrap();
+        let profile = fixture.path().join("profile");
+        let history = fixture.path().join("history");
+        let working = fixture.path().join("release files'测试");
+        std::fs::create_dir(&working).unwrap();
+        std::fs::write(
+            &profile,
+            format!(
+                "HISTFILE='{}'; PROMPT_COMMAND='printf profile-hook'; PS1='fixture> ';",
+                history.display()
+            ),
+        )
+        .unwrap();
+        let mut command =
+            bash_startup_command(BashVersion { major: 3, minor: 2 }, working.to_str());
+        command = command
+            .replace("${SHELL:-/bin/bash}", "/bin/bash")
+            .replace("/etc/profile", profile.to_str().unwrap())
+            .replace("~/.bash_profile", "/nonexistent-nexterm-profile")
+            .replace("~/.bash_login", "/nonexistent-nexterm-login")
+            .replace("~/.profile", "/nonexistent-nexterm-legacy");
+        let mut child = Command::new("/bin/bash")
+            .arg("--noprofile")
+            .arg("--norc")
+            .arg("-c")
+            .arg(command)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"printf 'user-command\\n'\nhistory\nexit\n")
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stdout.contains("]7;file://"));
+        assert!(stdout.contains("release%20files'测试"));
+        assert!(stdout.contains("profile-hook"));
+        let history = std::fs::read_to_string(history).unwrap();
+        assert!(history.contains("user-command"));
+        assert!(!history.contains("__nexterm_report_cwd"));
+        assert!(!history.contains("--rcfile"));
+        assert!(!stderr.contains("syntax error"));
     }
 
     async fn read_until(pty: &PtySession, needle: &[u8]) -> Vec<u8> {

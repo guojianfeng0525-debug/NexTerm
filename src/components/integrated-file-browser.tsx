@@ -23,6 +23,7 @@ import {
   type UploadQueueInput,
 } from '@/lib/upload-paths';
 import { useWebviewFileDrop } from '@/lib/use-webview-file-drop';
+import { useUploadPlanner, type UploadProgress } from './use-upload-planner';
 import { TransferQueue } from './transfer-queue';
 import { DirectoryTransferDialog } from './directory-transfer-dialog';
 import { DirectoryTree } from './directory-tree';
@@ -70,7 +71,7 @@ import {
   SearchX,
   LocateFixed,
 } from 'lucide-react';
-import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuTrigger, ContextMenuSeparator } from './ui/context-menu';
+import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuTrigger, ContextMenuSeparator, ContextMenuSub, ContextMenuSubTrigger, ContextMenuSubContent } from './ui/context-menu';
 import { FileDeleteConfirmation } from './file-delete-confirmation';
 import { isDirectRemoteChild, isFileEntryName, type FileDeletionTarget } from '@/lib/file-deletion';
 import { ownsWorkspaceKey, useWorkspaceActivity } from '@/lib/workspace-activity';
@@ -131,8 +132,25 @@ export function IntegratedFileBrowser({ connectionId, host, isConnected, isActiv
   const [files, setFiles] = useState<FileItem[]>([]);
   const [selectedFiles, setSelectedFiles] = useState<Set<string>>(new Set());
   const [transfers, dispatchTransferAction] = useReducer(transferQueueReducer, []);
-  const dispatchTransfer = (action: TransferAction) => dispatchTransferAction(action.type === 'ENQUEUE'
-    ? { ...action, items: action.items.map(item => ({ ...item, connectionId })) } : action);
+  const { planUploads, upload, conflictDialog, pendingCount, checkingCount } = useUploadPlanner({
+    connectionId, label: host ?? connectionId, active, connected: isConnected, canOperate: isCurrent,
+  });
+  const transferAbortRef = useRef(new Map<string, AbortController>());
+  const dispatchTransfer = useCallback((action: TransferAction) => {
+    if (action.type === 'CANCEL') transferAbortRef.current.get(action.id)?.abort();
+    if (action.type !== 'ENQUEUE') { dispatchTransferAction(action); return; }
+    const owned = action.items.map(item => ({ ...item, connectionId }));
+    const downloads = owned.filter(item => item.direction === 'download');
+    if (downloads.length) dispatchTransferAction({ type: 'ENQUEUE', items: downloads });
+    const uploads = owned.filter(item => item.direction === 'upload');
+    if (uploads.length) void planUploads(uploads).then(planned => {
+      if (planned) dispatchTransferAction({ type: 'ENQUEUE', items: planned });
+    }).catch((error: unknown) => toast.error(t('uploadConflict.checkFailed'), { description: String(error) }));
+  }, [connectionId, planUploads, t]);
+  useEffect(() => () => { transferAbortRef.current.forEach(controller => controller.abort()); }, []);
+  useEffect(() => {
+    if (!isConnected) dispatchTransferAction({ type: 'EXPIRE_APPROVALS', connectionId });
+  }, [connectionId, isConnected]);
   const [queueExpanded, setQueueExpanded] = useState(false);
   const processTransferRef = useRef(false);
   const [searchTerm, setSearchTerm] = useState('');
@@ -141,6 +159,17 @@ export function IntegratedFileBrowser({ connectionId, host, isConnected, isActiv
   const [followTerminalDirectory, setFollowTerminalDirectory] = useState(
     () => prefGet<boolean>(FOLLOW_TERMINAL_DIRECTORY_KEY, true),
   );
+  const [followPaused, setFollowPaused] = useState(false);
+  const [followFailed, setFollowFailed] = useState(false);
+  const [directoryReportMissing, setDirectoryReportMissing] = useState(false);
+  const selectionAnchorRef = useRef<string | null>(null);
+  useEffect(() => { setFollowPaused(false); setFollowFailed(false); }, [connectionId]);
+  useEffect(() => {
+    setDirectoryReportMissing(false);
+    if (!isConnected || terminalWorkingDirectory) return;
+    const timer = setTimeout(() => setDirectoryReportMissing(true), 5000);
+    return () => clearTimeout(timer);
+  }, [connectionId, isConnected, terminalWorkingDirectory]);
   const loadingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // 组件卸载时清掉最小加载时长计时器，避免 jsdom 环境销毁后继续 setState。
@@ -197,17 +226,19 @@ export function IntegratedFileBrowser({ connectionId, host, isConnected, isActiv
   const { prompt: requestName, dialog: nameDialog } = useDialogRequest({
     active, scopeKey: JSON.stringify([connectionId, currentPath]), canConfirm: isCurrent,
   });
-  const [directoryTransfer, setDirectoryTransfer] = useState<{
+  const [directoryTransfers, setDirectoryTransfers] = useState<Array<{
+    id: string;
+    connectionId: string;
     sourcePath: string;
     destinationRoot: string;
     destinationDirectoryName: string;
-  } | null>(null);
+  }>>([]);
+  const directoryTransfer = directoryTransfers[0] ?? null;
 
   useLayoutEffect(() => {
     deletionRef.current = null;
     setDeletion(null);
     setRenamingFile(null);
-    setDirectoryTransfer(null);
   }, [connectionId, currentPath, active]);
   useLayoutEffect(() => {
     setClipboard(null);
@@ -236,7 +267,6 @@ export function IntegratedFileBrowser({ connectionId, host, isConnected, isActiv
   // Navigation history state (back/forward)
   const [navHistory, setNavHistory] = useState<string[]>(['/home']);
   const [navIndex, setNavIndex] = useState(0);
-  const navInProgress = React.useRef(false);
 
   // Editable address bar state
   const [isEditingPath, setIsEditingPath] = useState(false);
@@ -255,35 +285,19 @@ export function IntegratedFileBrowser({ connectionId, host, isConnected, isActiv
     { name: 'data.json', type: 'file', size: 5120, modified: new Date('2024-01-12'), permissions: '-rw-r--r--', owner: 'www-data', group: 'www-data', path: 'data.json' }
   ];
 
-  // Restore or initialize state when connection changes.
-  // IMPORTANT: update effectiveConnectionIdRef and committedPathRef FIRST
-  // (synchronously) so the save effect and load effects read correct values.
-  //
-  // When switching to a connection that has cached state, we deliberately
-  // do NOT call any setState — this avoids an unnecessary re-render that
-  // would flash the previous connection's files.  The safety-net effect
-  // below handles loading fresh files for the new connection.
-  //
-  // For a brand-new connection (no cache), we reset state to defaults so the
-  // UI starts clean.
-  useEffect(() => {
+  // Restore the owning connection before paint. Cached rows must never remain
+  // associated with the previously visible server while a fresh load is pending.
+  useLayoutEffect(() => {
     effectiveConnectionIdRef.current = connectionId;
-    if (connectionId) {
-      const cached = sessionStateCache.get(connectionId);
-      const newPath = cached?.currentPath ?? '/home';
-      committedPathRef.current = newPath;
-      if (!cached) {
-        // New connection — reset state to defaults.
-        setCurrentPath('/home');
-        setFiles([]);
-        setSelectedFiles(new Set());
-        setSearchTerm('');
-        setNavHistory(['/home']);
-        setNavIndex(0);
-      }
-      // Cached connection: skip setState to avoid re-render.
-      // The safety-net effect will load fresh files.
-    }
+    const cached = sessionStateCache.get(connectionId);
+    const path = cached?.currentPath ?? '/home';
+    committedPathRef.current = path;
+    setCurrentPath(path);
+    setFiles(cached?.files ?? []);
+    setSelectedFiles(new Set(cached?.selectedFiles ?? []));
+    setSearchTerm(cached?.searchTerm ?? '');
+    setNavHistory([path]);
+    setNavIndex(0);
   }, [connectionId]);
 
   // Persist state to cache whenever data changes.
@@ -336,6 +350,8 @@ export function IntegratedFileBrowser({ connectionId, host, isConnected, isActiv
   useEffect(() => {
     if (
       !followTerminalDirectory
+      || followPaused
+      || !active
       || !isConnected
       || !terminalWorkingDirectory
       || terminalWorkingDirectory.path === committedPathRef.current
@@ -345,7 +361,7 @@ export function IntegratedFileBrowser({ connectionId, host, isConnected, isActiv
 
     void loadFiles(terminalWorkingDirectory.path, true);
   // eslint-disable-next-line react-hooks/exhaustive-deps -- sequence intentionally re-runs follow after every completed prompt
-  }, [connectionId, isConnected, followTerminalDirectory, terminalWorkingDirectory?.path, terminalWorkingDirectory?.sequence]);
+  }, [connectionId, isConnected, active, followTerminalDirectory, followPaused, terminalWorkingDirectory?.path, terminalWorkingDirectory?.sequence]);
 
   // Container-owned shortcuts: hidden pages and dialog portals cannot reach them.
   const handleKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
@@ -484,6 +500,7 @@ export function IntegratedFileBrowser({ connectionId, host, isConnected, isActiv
     const nextItem = getNextQueuedTransfer(transfers);
     if (!nextItem || processTransferRef.current) return;
     const transferConnectionId = nextItem.connectionId ?? connectionId;
+    if (!isConnected && transferConnectionId === connectionId) return;
 
     processTransferRef.current = true;
     dispatchTransfer({ type: "START", id: nextItem.id });
@@ -493,8 +510,9 @@ export function IntegratedFileBrowser({ connectionId, host, isConnected, isActiv
         // Real-time progress via a Tauri Channel: the backend streams
         // (totalBytes, transferredBytes); we compute speed + percent here.
         const lastSampleRef = { bytes: 0, time: Date.now() };
-        const channel = new Channel<{ totalBytes: number; transferredBytes: number }>();
+        const channel = new Channel<UploadProgress>();
         channel.onmessage = (p) => {
+          if (p.phase === 'committing') { dispatchTransferAction({ type: 'COMMIT', id: nextItem.id }); return; }
           const now = Date.now();
           const dt = (now - lastSampleRef.time) / 1000;
           const dBytes = p.transferredBytes - lastSampleRef.bytes;
@@ -512,18 +530,16 @@ export function IntegratedFileBrowser({ connectionId, host, isConnected, isActiv
         };
 
         if (nextItem.direction === "upload") {
-          const result = await invoke<{ success: boolean; bytes_transferred?: number; error?: string }>(
-            "upload_remote_file",
-            {
-              connectionId: transferConnectionId,
-              localPath: nextItem.sourcePath,
-              remotePath: nextItem.destinationPath,
-              onProgress: channel,
-              transferId: nextItem.id,
-            },
-          );
+          const controller = new AbortController();
+          transferAbortRef.current.set(nextItem.id, controller);
+          const result = await upload({ ...nextItem, connectionId: transferConnectionId }, nextItem.id, channel, controller.signal,
+            waiting => dispatchTransferAction({ type: waiting ? 'WAIT' : 'START', id: nextItem.id }));
+          if (result.cancelled || result.skipped) {
+            dispatchTransferAction({ type: result.skipped ? 'SKIP' : 'CANCEL', id: nextItem.id });
+            return;
+          }
           if (result.success) {
-            dispatchTransfer({ type: "COMPLETE", id: nextItem.id });
+            dispatchTransfer({ type: "COMPLETE", id: nextItem.id, destinationPath: result.destination_path, committed: result.committed });
             toast.success(t('fileBrowser.toast.uploaded', { name: nextItem.fileName }));
             if (scopeRef.current.connectionId === transferConnectionId) void loadFiles();
           } else {
@@ -592,13 +608,14 @@ export function IntegratedFileBrowser({ connectionId, host, isConnected, isActiv
         // Thrown download (cancelled / IPC error): also release the batch slot.
         settleClipboardBatch(nextItem.destinationPath, false);
       } finally {
+        transferAbortRef.current.delete(nextItem.id);
         processTransferRef.current = false;
       }
     };
 
     void doTransfer();
   // eslint-disable-next-line react-hooks/exhaustive-deps -- loadFiles is a stable inline fn; adding it would cause infinite re-renders
-  }, [transfers, connectionId]);
+  }, [transfers, connectionId, isConnected]);
 
   const handleResizeStart = (columnName: string, e: React.MouseEvent) => {
     e.preventDefault();
@@ -659,7 +676,7 @@ export function IntegratedFileBrowser({ connectionId, host, isConnected, isActiv
     [connectionId],
   );
 
-  async function loadFiles(pathOverride?: string, preservePathOnError = false) {
+  async function loadFiles(pathOverride?: string, preservePathOnError = false, historyMode: 'reset' | 'preserve' = 'reset') {
     if (!connectionId || !isConnected) {
       // Don't clear files on disconnect — preserve the cached file list so
       // the user still sees their directory contents when reconnecting or
@@ -667,7 +684,7 @@ export function IntegratedFileBrowser({ connectionId, host, isConnected, isActiv
       return;
     }
     
-    const targetPath = pathOverride ?? currentPath;
+    const targetPath = pathOverride ?? scopeRef.current.currentPath;
     const gen = ++loadGenRef.current;
     const isCancelled = () => gen !== loadGenRef.current;
     setIsLoading(true);
@@ -737,15 +754,15 @@ export function IntegratedFileBrowser({ connectionId, host, isConnected, isActiv
         // intentionally skips setCurrentPath to avoid an extra re-render,
         // so we update it here together with files in a single batched
         // setState — breadcrumb and file list stay consistent.
-        if (currentPath !== targetPath) {
+        if (scopeRef.current.currentPath !== targetPath) {
           if (preservePathOnError) followedPathLoadRef.current = targetPath;
           setCurrentPath(targetPath);
-          setNavHistory([targetPath]);
-          setNavIndex(0);
+          if (historyMode === 'reset') { setNavHistory([targetPath]); setNavIndex(0); }
           setSelectedFiles(new Set());
         }
         lastLoadedConnectionIdRef.current = connectionId;
         lastFailedFollowPathRef.current = null;
+        if (preservePathOnError) setFollowFailed(false);
       } else {
         // Empty or whitespace-only output — directory is genuinely empty
         // or the SSH command returned nothing.
@@ -761,25 +778,27 @@ export function IntegratedFileBrowser({ connectionId, host, isConnected, isActiv
           path: targetPath.split('/').slice(0, -1).join('/') || '/'
         }] : [];
         setFiles(emptyFiles);
-        if (currentPath !== targetPath) {
+        if (scopeRef.current.currentPath !== targetPath) {
           if (preservePathOnError) followedPathLoadRef.current = targetPath;
           setCurrentPath(targetPath);
-          setNavHistory([targetPath]);
-          setNavIndex(0);
+          if (historyMode === 'reset') { setNavHistory([targetPath]); setNavIndex(0); }
           setSelectedFiles(new Set());
         }
         lastLoadedConnectionIdRef.current = connectionId;
         lastFailedFollowPathRef.current = null;
+        if (preservePathOnError) setFollowFailed(false);
       }
+      return true;
     } catch (error) {
       // CancelledError means a newer load superseded this one — discard silently.
       if (error instanceof CancelledError || gen !== loadGenRef.current) return;
 
       if (preservePathOnError) {
+        setFollowFailed(true);
         const failedPath = `${connectionId}:${targetPath}`;
         if (lastFailedFollowPathRef.current !== failedPath) {
           lastFailedFollowPathRef.current = failedPath;
-          toast.warning(t('fileBrowser.toast.followDirectoryFailed', { path: targetPath }), {
+          toast.warning(historyMode === 'reset' ? t('fileBrowser.toast.followDirectoryFailed', { path: targetPath }) : t('fileBrowser.toast.loadFailed'), {
             description: error instanceof Error ? error.message : t('fileBrowser.toast.loadFailedDesc'),
           });
         }
@@ -812,36 +831,29 @@ export function IntegratedFileBrowser({ connectionId, host, isConnected, isActiv
   // ── Navigation helpers ──
 
   /** Navigate to a path and record in history (unless triggered by back/forward) */
-  const navigateTo = (path: string) => {
-    if (path === currentPath) return;
-    if (!navInProgress.current) {
-      // Trim any forward history past the current index, then push new entry
-      setNavHistory((prev) => [...prev.slice(0, navIndex + 1), path]);
-      setNavIndex((prev) => prev + 1);
-    }
-    setCurrentPath(path);
+  const navigateTo = async (path: string) => {
+    if (path === committedPathRef.current) return;
+    setFollowPaused(true);
+    const generation = loadGenRef.current + 1;
+    const loaded = await loadFiles(path, true, 'preserve');
+    if (!loaded || generation !== loadGenRef.current) return;
+    setNavHistory(previous => [...previous.slice(0, navIndex + 1), path]);
+    setNavIndex(previous => previous + 1);
   };
 
   const canGoBack = navIndex > 0;
   const canGoForward = navIndex < navHistory.length - 1;
 
-  const goBack = () => {
-    if (!canGoBack) return;
-    navInProgress.current = true;
-    const newIndex = navIndex - 1;
-    setNavIndex(newIndex);
-    setCurrentPath(navHistory[newIndex]);
-    // Reset flag after state flush
-    setTimeout(() => { navInProgress.current = false; }, 0);
+  const goBack = async () => {
+    if (!canGoBack || isLoading) return;
+    setFollowPaused(true);
+    if (await loadFiles(navHistory[navIndex - 1], true, 'preserve')) setNavIndex(navIndex - 1);
   };
 
-  const goForward = () => {
-    if (!canGoForward) return;
-    navInProgress.current = true;
-    const newIndex = navIndex + 1;
-    setNavIndex(newIndex);
-    setCurrentPath(navHistory[newIndex]);
-    setTimeout(() => { navInProgress.current = false; }, 0);
+  const goForward = async () => {
+    if (!canGoForward || isLoading) return;
+    setFollowPaused(true);
+    if (await loadFiles(navHistory[navIndex + 1], true, 'preserve')) setNavIndex(navIndex + 1);
   };
 
   const goUp = () => {
@@ -964,17 +976,20 @@ export function IntegratedFileBrowser({ connectionId, host, isConnected, isActiv
     if (isEditableTarget(event.target)) return;
     workspaceRef.current?.focus();
     
-    if (event.ctrlKey || event.metaKey) {
+    if (event.shiftKey && selectionAnchorRef.current) {
+      const anchor = sortedFiles.findIndex(item => item.name === selectionAnchorRef.current);
+      const end = sortedFiles.findIndex(item => item.name === file.name);
+      if (anchor >= 0 && end >= 0) {
+        setSelectedFiles(new Set(sortedFiles.slice(Math.min(anchor, end), Math.max(anchor, end) + 1)
+          .filter(item => item.name !== '..').map(item => item.name)));
+      }
+    } else if (event.ctrlKey || event.metaKey) {
       // Ctrl/Cmd + Click: toggle selection
       handleFileSelect(file.name, event);
     } else {
-      // Regular click on directory: navigate into it
-      if (file.type === 'directory') {
-        console.log('Click - navigating to directory:', file.path);
-        navigateTo(file.path);
-      }
-      // Regular click on file: do nothing (or optionally preview)
+      setSelectedFiles(new Set(file.name === '..' ? [] : [file.name]));
     }
+    if (!event.shiftKey) selectionAnchorRef.current = file.name;
   };
 
   const handleUpload = async (remoteDirectory?: string) => {
@@ -1016,6 +1031,7 @@ export function IntegratedFileBrowser({ connectionId, host, isConnected, isActiv
       if (directoryPaths.length === 0) return;
 
       const queuedItems: UploadQueueInput[] = [];
+      const directories = new Set<string>();
       let createdDirectoryCount = 0;
       const dirErrors: string[] = [];
 
@@ -1033,24 +1049,17 @@ export function IntegratedFileBrowser({ connectionId, host, isConnected, isActiv
           entries,
         );
 
-        // Create remote directories before enqueuing file transfers.
-        // Shell-quote escaping is handled on the Rust side.
-        for (const planDirectory of plan.directories) {
-          try {
-            await invoke<boolean>("create_directory", {
-              connectionId,
-              path: planDirectory,
-            });
-            createdDirectoryCount += 1;
-          } catch (err) {
-            dirErrors.push(
-              `${planDirectory}: ${err instanceof Error ? err.message : String(err)}`,
-            );
-          }
-        }
+        plan.directories.forEach(directory => directories.add(directory));
         queuedItems.push(...plan.items);
       }
 
+      const approved = queuedItems.length ? await planUploads(queuedItems.map(item => ({ ...item, connectionId }))) : [];
+      if (!approved) return;
+      for (const directory of directories) {
+        if (scopeRef.current.connectionId !== connectionId) return;
+        try { await invoke('create_directory', { connectionId, path: directory }); createdDirectoryCount++; }
+        catch (error) { dirErrors.push(`${directory}: ${String(error)}`); }
+      }
       if (dirErrors.length > 0) {
         toast.warning(t('fileBrowser.toast.dirCreationFailed', { count: dirErrors.length }), {
           description: dirErrors.slice(0, 3).join("\n"),
@@ -1058,10 +1067,7 @@ export function IntegratedFileBrowser({ connectionId, host, isConnected, isActiv
       }
 
       if (queuedItems.length > 0) {
-        dispatchTransfer({
-          type: "ENQUEUE",
-          items: queuedItems,
-        });
+        dispatchTransferAction({ type: "ENQUEUE", items: approved });
         toast.info(
           t('fileBrowser.toast.queuedFolderUpload', { count: queuedItems.length, folderCount: directoryPaths.length, createdCount: createdDirectoryCount }),
         );
@@ -1101,10 +1107,13 @@ export function IntegratedFileBrowser({ connectionId, host, isConnected, isActiv
 
   const handleDownloadMultiple = async (selectedFileItems: FileItem[]) => {
     const filesToDownload = selectedFileItems.filter(f => f.type === 'file');
-    if (filesToDownload.length === 0) return;
+    if (!selectedFileItems.length) return;
     try {
       const destDir = await tauriOpen({ directory: true });
-      if (!destDir) return;
+      if (!destDir || Array.isArray(destDir) || scopeRef.current.connectionId !== connectionId) return;
+      setDirectoryTransfers(previous => [...previous, ...selectedFileItems.filter(file => file.type === 'directory' && file.name !== '..').map(file => ({
+        id: crypto.randomUUID(), connectionId, sourcePath: file.path, destinationRoot: destDir, destinationDirectoryName: file.name,
+      }))]);
 
       dispatchTransfer({
         type: "ENQUEUE",
@@ -1116,7 +1125,7 @@ export function IntegratedFileBrowser({ connectionId, host, isConnected, isActiv
           totalBytes: f.size,
         })),
       });
-      toast.info(t('fileBrowser.toast.queuedDownload', { count: filesToDownload.length }));
+      toast.info(t('fileBrowser.toast.queuedDownload', { count: selectedFileItems.length }));
     } catch (error) {
       console.error('Download dialog error:', error);
     }
@@ -1127,11 +1136,7 @@ export function IntegratedFileBrowser({ connectionId, host, isConnected, isActiv
       const destDir = await tauriOpen({ directory: true });
       if (!destDir || Array.isArray(destDir)) return;
 
-      setDirectoryTransfer({
-        sourcePath: directory.path,
-        destinationRoot: destDir,
-        destinationDirectoryName: directory.name,
-      });
+      setDirectoryTransfers(previous => [...previous, { id: crypto.randomUUID(), connectionId, sourcePath: directory.path, destinationRoot: destDir, destinationDirectoryName: directory.name }]);
     } catch (error) {
       console.error('Download directory dialog error:', error);
     }
@@ -1166,7 +1171,6 @@ export function IntegratedFileBrowser({ connectionId, host, isConnected, isActiv
       files: targets.map(file => ({ name: file.name, path: file.path, isDirectory: file.type === 'directory' })) });
   }
 
-  function handleDeleteFile(file: FileItem) { requestDeleteFiles([file]); }
 
   const cancelDeleteFile = () => {
     deletionRef.current = null;
@@ -1281,14 +1285,14 @@ export function IntegratedFileBrowser({ connectionId, host, isConnected, isActiv
     toast.success(t('fileBrowser.toast.cutToClipboard', { count: files.length }));
   };
 
-  async function handlePasteFiles() {
+  async function handlePasteFiles(destinationDirectory = currentPath) {
     const ownsPaste = () => isCurrent() && scopeRef.current.connectionId === connectionId && scopeRef.current.currentPath === currentPath;
     if (!ownsPaste()) return;
     if (clipboard) {
       try {
         for (const file of clipboard.files) {
           if (!ownsPaste() || !isFileEntryName(file.name)) return;
-          const destPath = currentPath === '/' ? `/${file.name}` : `${currentPath}/${file.name}`;
+          const destPath = destinationDirectory === '/' ? `/${file.name}` : `${destinationDirectory}/${file.name}`;
           
           if (clipboard.operation === 'copy') {
             await invoke<boolean>('copy_file', {
@@ -1460,6 +1464,9 @@ export function IntegratedFileBrowser({ connectionId, host, isConnected, isActiv
 
       const plan = buildMixedDropUploadPlan(dropped, currentPath);
 
+      const approved = plan.items.length ? await planUploads(plan.items.map(item => ({ ...item, connectionId }))) : [];
+      if (!approved || scopeRef.current.connectionId !== connectionId) return;
+
       // Create remote directories in order (depth-first). Shell quoting is
       // handled on the Rust side; failures are accumulated and reported.
       let createdDirectoryCount = 0;
@@ -1485,7 +1492,7 @@ export function IntegratedFileBrowser({ connectionId, host, isConnected, isActiv
       }
 
       if (plan.items.length > 0) {
-        dispatchTransfer({ type: "ENQUEUE", items: plan.items });
+        dispatchTransferAction({ type: "ENQUEUE", items: approved });
         toast.info(
           t('fileBrowser.toast.queuedUploadToPath', { count: plan.items.length, path: currentPath }) +
             (createdDirectoryCount > 0
@@ -1700,8 +1707,10 @@ export function IntegratedFileBrowser({ connectionId, host, isConnected, isActiv
           </div>
 
           <Toggle
-            pressed={followTerminalDirectory}
+            pressed={followTerminalDirectory && !followPaused}
             onPressedChange={(pressed) => {
+              setFollowPaused(false);
+              setFollowFailed(false);
               setFollowTerminalDirectory(pressed);
               prefSet(FOLLOW_TERMINAL_DIRECTORY_KEY, pressed);
             }}
@@ -1710,6 +1719,17 @@ export function IntegratedFileBrowser({ connectionId, host, isConnected, isActiv
           >
             <LocateFixed className="h-3.5 w-3.5" />
           </Toggle>
+          <span className="max-w-40 truncate text-xs text-muted-foreground" role="status">
+            {t(!followTerminalDirectory || followPaused ? 'fileBrowser.follow.paused'
+              : followFailed ? 'fileBrowser.follow.failed'
+              : !terminalWorkingDirectory ? directoryReportMissing ? 'fileBrowser.follow.unavailable' : 'fileBrowser.follow.waiting'
+              : 'fileBrowser.follow.active')}
+          </span>
+          {followFailed && terminalWorkingDirectory && (
+            <Button variant="ghost" size="sm" className="h-6 px-2" onClick={() => void loadFiles(terminalWorkingDirectory.path, true)}>
+              {t('fileBrowser.follow.retry')}
+            </Button>
+          )}
 
           {/* Refresh */}
           <Button variant="ghost" size="icon" className="h-6 w-6 shrink-0 rounded-md" title={t('fileBrowser.toolbar.refresh')} onClick={() => loadFiles()} disabled={isLoading}>
@@ -1921,15 +1941,13 @@ export function IntegratedFileBrowser({ connectionId, host, isConnected, isActiv
                         const isParent = file.name === '..';
                         const isDir = file.type === 'directory' && !isParent;
                         const isSel = selectedFiles.has(file.name);
+                        const actionFiles = isSel ? files.filter(item => item.name !== '..' && selectedFiles.has(item.name)) : [file];
                         return (
-                        <ContextMenu key={index} onOpenChange={(open) => {
-                          // Clear the right-click selection when the context menu closes (loses focus)
-                          if (!open) {
-                            setSelectedFiles(new Set());
-                          }
-                        }}>
+                        <ContextMenu key={file.path}>
                           <ContextMenuTrigger asChild>
                             <div
+                              data-file-path={file.path}
+                              data-selected={isSel}
                               className={`flex items-center px-2 py-1 cursor-pointer transition-colors duration-100 rounded-md mx-1 my-px ${
                                 isSel
                                   ? 'bg-accent/80 ring-1 ring-inset ring-accent-foreground/10'
@@ -1987,17 +2005,17 @@ export function IntegratedFileBrowser({ connectionId, host, isConnected, isActiv
                           </ContextMenuTrigger>
 
                           <ContextMenuContent
-                            className="w-64 max-h-64"
-                            collisionPadding={64}
+                            className="w-64"
+                            collisionPadding={8}
                           >
                   {/* File-specific actions */}
                   {file.type === 'file' && (
                     <>
-                      <ContextMenuItem onClick={() => handleFileDoubleClick(file)}>
+                      <ContextMenuItem disabled={actionFiles.length !== 1} onClick={() => handleFileDoubleClick(file)}>
                         <Eye className="mr-2 h-4 w-4" />
                         {t('fileBrowser.contextMenu.open')}
                       </ContextMenuItem>
-                      <ContextMenuItem onClick={() => handleFileDoubleClick(file)}>
+                      <ContextMenuItem disabled={actionFiles.length !== 1} onClick={() => handleFileDoubleClick(file)}>
                         <Edit className="mr-2 h-4 w-4" />
                         {t('fileBrowser.contextMenu.openInEditor')}
                       </ContextMenuItem>
@@ -2019,19 +2037,19 @@ export function IntegratedFileBrowser({ connectionId, host, isConnected, isActiv
                   {/* Directory-specific actions */}
                   {file.type === 'directory' && file.name !== '..' && (
                     <>
-                      <ContextMenuItem onClick={() => handleFileDoubleClick(file)}>
+                      <ContextMenuItem disabled={actionFiles.length !== 1} onClick={() => handleFileDoubleClick(file)}>
                         <Folder className="mr-2 h-4 w-4" />
                         {t('fileBrowser.contextMenu.openFolder')}
                       </ContextMenuItem>
-                      <ContextMenuItem onClick={() => handleDownloadDirectory(file)}>
+                      <ContextMenuItem onClick={() => actionFiles.length > 1 ? handleDownloadMultiple(actionFiles) : handleDownloadDirectory(file)}>
                         <FolderDown className="mr-2 h-4 w-4" />
-                        {t('fileBrowser.contextMenu.downloadDirectory')}
+                        {actionFiles.length > 1 ? t('fileBrowser.downloadSelected', { count: actionFiles.length }) : t('fileBrowser.contextMenu.downloadDirectory')}
                       </ContextMenuItem>
-                      <ContextMenuItem onClick={() => void handleUpload(file.path)}>
+                      <ContextMenuItem disabled={actionFiles.length !== 1} onClick={() => void handleUpload(file.path)}>
                         <Upload className="mr-2 h-4 w-4" />
                         {t('fileBrowser.contextMenu.upload')}
                       </ContextMenuItem>
-                      <ContextMenuItem onClick={() => void handleUploadFolder(file.path)}>
+                      <ContextMenuItem disabled={actionFiles.length !== 1} onClick={() => void handleUploadFolder(file.path)}>
                         <FolderUp className="mr-2 h-4 w-4" />
                         {t('fileBrowser.contextMenu.uploadFolder')}
                       </ContextMenuItem>
@@ -2042,29 +2060,25 @@ export function IntegratedFileBrowser({ connectionId, host, isConnected, isActiv
                   {/* Common actions */}
                   {file.name !== '..' && (
                     <>
-                      <ContextMenuItem onClick={() => handleCopyFiles([file])}>
+                      <ContextMenuItem onClick={() => handleCopyFiles(actionFiles)}>
                         <Copy className="mr-2 h-4 w-4" />
                         {t('fileBrowser.contextMenu.copy')}
                       </ContextMenuItem>
-                      <ContextMenuItem onClick={() => handleCutFiles([file])}>
+                      <ContextMenuItem onClick={() => handleCutFiles(actionFiles)}>
                         <Scissors className="mr-2 h-4 w-4" />
                         {t('fileBrowser.contextMenu.cut')}
                       </ContextMenuItem>
                       {clipboard && (
-                        <ContextMenuItem onClick={handlePasteFiles}>
+                        <ContextMenuItem onClick={() => void handlePasteFiles(file.type === 'directory' ? file.path : currentPath)}>
                           <ClipboardPaste className="mr-2 h-4 w-4" />
-                          {t('fileBrowser.contextMenu.paste')} {clipboard.files.length} item(s)
+                          {t('fileBrowser.contextMenu.pasteCount', { count: clipboard.files.length })}
                         </ContextMenuItem>
                       )}
                       <ContextMenuSeparator />
                       
-                      <ContextMenuItem onClick={() => handleRenameFile(file)}>
+                      <ContextMenuItem disabled={actionFiles.length !== 1} onClick={() => handleRenameFile(file)}>
                         <FileEdit className="mr-2 h-4 w-4" />
                         {t('fileBrowser.contextMenu.rename')}
-                      </ContextMenuItem>
-                      <ContextMenuItem onClick={() => handleDuplicateFile(file)}>
-                        <Layers className="mr-2 h-4 w-4" />
-                        {t('fileBrowser.contextMenu.duplicate')}
                       </ContextMenuItem>
                       <ContextMenuSeparator />
                     </>
@@ -2073,29 +2087,29 @@ export function IntegratedFileBrowser({ connectionId, host, isConnected, isActiv
                   {/* Download for files */}
                   {file.type === 'file' && (
                     <>
-                      <ContextMenuItem onClick={() => handleDownload(file)}>
+                      <ContextMenuItem onClick={() => actionFiles.length > 1 ? handleDownloadMultiple(actionFiles) : handleDownload(file)}>
                         <Download className="mr-2 h-4 w-4" />
-                        {t('fileBrowser.contextMenu.download')}
+                        {actionFiles.length > 1 ? t('fileBrowser.downloadSelected', { count: actionFiles.length }) : t('fileBrowser.contextMenu.download')}
                       </ContextMenuItem>
-                      {selectedFiles.size > 1 && (
-                        <ContextMenuItem onClick={() => handleDownloadMultiple(files.filter(f => selectedFiles.has(f.name)))}>
-                          <Download className="mr-2 h-4 w-4" />
-                          {t('fileBrowser.downloadSelected', { count: selectedFiles.size })}
-                        </ContextMenuItem>
-                      )}
+
                       <ContextMenuSeparator />
                     </>
                   )}
 
-                  {/* Information and sharing */}
-                  <ContextMenuItem onClick={() => handleCopyPath(file)}>
-                    <Link className="mr-2 h-4 w-4" />
-                    {t('fileBrowser.contextMenu.copyPath')}
-                  </ContextMenuItem>
-                  <ContextMenuItem onClick={() => handleFileInfo(file)}>
-                    <Info className="mr-2 h-4 w-4" />
-                    {t('fileBrowser.contextMenu.fileInfo')}
-                  </ContextMenuItem>
+                  <ContextMenuSub>
+                    <ContextMenuSubTrigger>{t('fileBrowser.contextMenu.more')}</ContextMenuSubTrigger>
+                    <ContextMenuSubContent className="w-48">
+                      <ContextMenuItem disabled={actionFiles.length !== 1} onClick={() => handleCopyPath(file)}>
+                        <Link className="mr-2 h-4 w-4" />{t('fileBrowser.contextMenu.copyPath')}
+                      </ContextMenuItem>
+                      <ContextMenuItem disabled={actionFiles.length !== 1} onClick={() => handleFileInfo(file)}>
+                        <Info className="mr-2 h-4 w-4" />{t('fileBrowser.contextMenu.fileInfo')}
+                      </ContextMenuItem>
+                      {!isParent && <ContextMenuItem disabled={actionFiles.length !== 1} onClick={() => handleDuplicateFile(file)}>
+                        <Layers className="mr-2 h-4 w-4" />{t('fileBrowser.contextMenu.duplicate')}
+                      </ContextMenuItem>}
+                    </ContextMenuSubContent>
+                  </ContextMenuSub>
 
                   {/* Destructive actions */}
                   {file.name !== '..' && (
@@ -2103,10 +2117,10 @@ export function IntegratedFileBrowser({ connectionId, host, isConnected, isActiv
                       <ContextMenuSeparator />
                       <ContextMenuItem 
                         className="text-destructive focus:text-destructive"
-                        onClick={() => handleDeleteFile(file)}
+                        onClick={() => requestDeleteFiles(actionFiles)}
                       >
                         <Trash2 className="mr-2 h-4 w-4" />
-                        {t('fileBrowser.contextMenu.delete')}
+                        {t('fileBrowser.contextMenu.deleteCount', { count: actionFiles.length })}
                       </ContextMenuItem>
                     </>
                   )}
@@ -2131,9 +2145,9 @@ export function IntegratedFileBrowser({ connectionId, host, isConnected, isActiv
               
               {clipboard && (
                 <>
-                  <ContextMenuItem onClick={handlePasteFiles}>
+                  <ContextMenuItem onClick={() => void handlePasteFiles()}>
                     <ClipboardPaste className="mr-2 h-4 w-4" />
-                    {t('fileBrowser.contextMenu.paste')} {clipboard.files.length} item(s)
+                    {t('fileBrowser.contextMenu.pasteCount', { count: clipboard.files.length })}
                   </ContextMenuItem>
                   <ContextMenuSeparator />
                 </>
@@ -2179,6 +2193,7 @@ export function IntegratedFileBrowser({ connectionId, host, isConnected, isActiv
 
       {/* Transfer Queue */}
       <TransferQueue
+          pendingCount={pendingCount} checkingCount={checkingCount}
         transfers={transfers}
         dispatch={dispatchTransfer}
         expanded={queueExpanded}
@@ -2192,20 +2207,24 @@ export function IntegratedFileBrowser({ connectionId, host, isConnected, isActiv
         <DirectoryTransferDialog
           open
           onOpenChange={(open) => {
-            if (!open) setDirectoryTransfer(null);
+            if (!open) setDirectoryTransfers(previous => previous.slice(1));
           }}
+          key={directoryTransfer.id}
+          isActive={active && directoryTransfer.connectionId === connectionId}
+          isConnected={directoryTransfer.connectionId === connectionId ? isConnected : true}
           direction="download"
-          connectionId={connectionId}
+          connectionId={directoryTransfer.connectionId}
           sourcePath={directoryTransfer.sourcePath}
           destPath={directoryTransfer.destinationRoot}
           destinationDirectoryName={directoryTransfer.destinationDirectoryName}
-          onComplete={() => {}}
+          onComplete={() => setDirectoryTransfers(previous => previous.slice(1))}
         />
       )}
 
       <FileDeleteConfirmation open={!!deletion && active && deletion.connectionId === connectionId && deletion.parentPath === currentPath}
         targetLabel={deletion?.label ?? ''} files={deletion?.files ?? []} remote recursive busy={deletionBusy}
         onCancel={cancelDeleteFile} onConfirm={confirmDeleteFile} />
+      {conflictDialog}
 
     </div>
   );

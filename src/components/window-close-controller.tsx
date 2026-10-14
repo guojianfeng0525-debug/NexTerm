@@ -97,7 +97,7 @@ export function WindowCloseController({
   if (!windows) return null;
   return (
     <AlertDialog open={open} onOpenChange={setOpen}>
-      <AlertDialogContent data-testid="window-close-choice">
+      <AlertDialogContent data-testid="window-close-choice" className="max-w-[560px]">
         <AlertDialogHeader>
           <AlertDialogTitle>{t('app.close.title')}</AlertDialogTitle>
           <AlertDialogDescription>{t('app.close.description')}</AlertDialogDescription>

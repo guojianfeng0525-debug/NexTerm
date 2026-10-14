@@ -3859,7 +3859,7 @@ export function ToolPostgres() {
         open={pendingSshTrust !== null}
         onOpenChange={(open) => !open && setPendingSshTrust(null)}
       >
-        <DialogContent className="max-w-[520px]">
+        <DialogContent className="max-w-[560px]">
           <DialogHeader>
             <DialogTitle>{t("toolbox.postgres.trustHostKeyTitle")}</DialogTitle>
             <DialogDescription>
@@ -3942,7 +3942,7 @@ export function ToolPostgres() {
           setObjectDropPreview(null);
         }
       }}>
-        <AlertDialogContent data-testid="postgres-object-drop-confirm">
+        <AlertDialogContent data-testid="postgres-object-drop-confirm" className="max-w-[480px]">
           <AlertDialogHeader>
             <AlertDialogTitle>{t("toolbox.postgres.dropConfirmTitle")}</AlertDialogTitle>
             <AlertDialogDescription>
@@ -3993,7 +3993,7 @@ export function ToolPostgres() {
         </AlertDialogContent>
       </AlertDialog>
       <AlertDialog open={disconnectTarget !== null} onOpenChange={(open) => !open && setDisconnectTarget(null)}>
-        <AlertDialogContent>
+        <AlertDialogContent className="max-w-[560px]">
           <AlertDialogHeader>
             <AlertDialogTitle>{t("toolbox.postgres.disconnectUnsavedTitle")}</AlertDialogTitle>
             <AlertDialogDescription>{t("toolbox.postgres.disconnectUnsavedDescription")}</AlertDialogDescription>

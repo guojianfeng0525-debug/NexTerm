@@ -77,6 +77,9 @@ vi.mock('../components/ui/context-menu', () => ({
   ),
   ContextMenuTrigger: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
   ContextMenuSeparator: () => <hr />,
+  ContextMenuSub: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
+  ContextMenuSubContent: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
+  ContextMenuSubTrigger: ({ children }: { children: React.ReactNode }) => <button>{children}</button>,
 }));
 
 vi.mock('../components/ui/resizable', () => ({
@@ -127,7 +130,7 @@ async function prepare(active = true) {
   const props = { connectionId: id, host: 'server-a', isConnected: true, isActive: active, onClose: () => {},
     terminalWorkingDirectory: { path: '/srv/app/logs', sequence: 1 } };
   const view = render(<><IntegratedFileBrowser {...props} /><svg data-testid="foreign-page" tabIndex={0} /></>);
-  await screen.findByTitle('/srv/app/logs');
+  await screen.findByTitle(active ? '/srv/app/logs' : '/home');
   return { ...view, props };
 }
 function select(name = 'alpha.txt') { fireEvent.click(screen.getByText(name), { ctrlKey: true }); }
@@ -245,8 +248,9 @@ describe('File deletion ownership and immutable confirmation', () => {
   it('queued uploads retain their original server after switching connections', async () => {
     const { props, rerender } = await prepare(); let resolve!: (value: { success: boolean }) => void;
     let uploadCount = 0;
-    mocks.invoke.mockImplementation((command: string) => {
+    mocks.invoke.mockImplementation((command: string, args: { paths: string[] }) => {
       if (command === 'list_files') return Promise.resolve(listing);
+      if (command === 'inspect_remote_uploads') return Promise.resolve((args.paths as string[]).map(path => ({ path, version: null })));
       if (command === 'upload_remote_file') {
         uploadCount++;
         return uploadCount === 1 ? new Promise(r => { resolve = r; }) : Promise.resolve({ success: true });

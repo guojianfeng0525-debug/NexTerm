@@ -120,10 +120,10 @@ describe("transfer-queue-reducer", () => {
       expect(next[0].startedAt).toBeDefined();
     });
 
-    it("transitions any matching item to transferring (no guard on status)", () => {
+    it("does not restart a completed item from a stale START action", () => {
       const state = [makeItem({ id: "t1", status: "completed" })];
       const next = transferQueueReducer(state, { type: "START", id: "t1" });
-      expect(next[0].status).toBe("transferring");
+      expect(next[0].status).toBe("completed");
     });
 
     it("does not affect other items", () => {
@@ -484,4 +484,40 @@ describe("transfer-queue-reducer property tests", () => {
       current.filter((t) => t.status === "transferring").length,
     ).toBe(1);
   });
+});
+
+describe('upload confirmation and commit lifecycle', () => {
+  it('keeps waiting transfers cancellable without resurrecting late results', () => {
+    let state = [makeItem({ id: 'waiting', status: 'transferring' })];
+    state = transferQueueReducer(state, { type: 'WAIT', id: 'waiting' });
+    expect(getActiveTransferCount(state)).toBe(1);
+    state = transferQueueReducer(state, { type: 'CANCEL', id: 'waiting' });
+    state = transferQueueReducer(state, { type: 'COMPLETE', id: 'waiting' });
+    expect(state[0].status).toBe('cancelled');
+  });
+
+  it('protects committing transfers and records the actual keep-both destination', () => {
+    let state = [makeItem({ id: 'commit', status: 'transferring' })];
+    state = transferQueueReducer(state, { type: 'COMMIT', id: 'commit' });
+    state = transferQueueReducer(state, { type: 'CANCEL', id: 'commit' });
+    expect(state[0].status).toBe('committing');
+    state = transferQueueReducer(state, { type: 'COMPLETE', id: 'commit', destinationPath: '/remote/test (1).txt' });
+    expect(state[0]).toMatchObject({ status: 'completed', destinationPath: '/remote/test (1).txt', fileName: 'test (1).txt' });
+  });
+
+  it('expires overwrite approval on retry and counts skips separately', () => {
+    const failed = makeItem({ id: 'retry', status: 'failed', conflictPolicy: 'replace', expectedTarget: { kind: 'File', size: 1, modified: null } });
+    const retried = transferQueueReducer([failed], { type: 'RETRY', id: 'retry' });
+    expect(retried[0].expectedTarget).toBeUndefined();
+    expect(retried[0].conflictPolicy).toBe('ask');
+    const skipped = transferQueueReducer([], { type: 'ENQUEUE', items: [{ ...failed, skip: true }] });
+    expect(skipped[0].status).toBe('skipped'); expect(getActiveTransferCount(skipped)).toBe(0);
+    expect(transferQueueReducer(skipped, { type: 'CLEAR_COMPLETED' })).toEqual([]);
+  });
+});
+
+it('reports an upload completed when publication won the race with cancellation', () => {
+  const cancelled = [makeItem({ id: 'publication-race', status: 'cancelled' })];
+  expect(transferQueueReducer(cancelled, { type: 'COMPLETE', id: 'publication-race' })[0].status).toBe('cancelled');
+  expect(transferQueueReducer(cancelled, { type: 'COMPLETE', id: 'publication-race', committed: true })[0].status).toBe('completed');
 });

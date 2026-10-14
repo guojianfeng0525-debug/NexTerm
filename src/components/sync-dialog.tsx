@@ -9,8 +9,10 @@
 import React, { useState, useCallback, useRef, useLayoutEffect } from "react";
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
-import { invoke } from "@tauri-apps/api/core";
+import { Channel, invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
+import { useUploadPlanner, type UploadProgress } from './use-upload-planner';
+import type { UploadQueueInput } from '@/lib/upload-paths';
 import {
   Dialog,
   DialogContent,
@@ -153,6 +155,8 @@ export function SyncDialog({
     ...INITIAL_SYNC_PROGRESS,
   });
   const cancelRef = useRef(false);
+  const syncAbortRef = useRef<AbortController | null>(null);
+  const [committing, setCommitting] = useState(false);
   const activeTransferIdRef = useRef<string | null>(null);
   const generationRef = useRef(0);
   const comparedGenerationRef = useRef(-1);
@@ -163,17 +167,23 @@ export function SyncDialog({
   useLayoutEffect(() => {
     generationRef.current++;
     cancelRef.current = true;
+    syncAbortRef.current?.abort();
     setDeleteApproval(null);
     setCompared(false);
     setEntries([]);
     setProgress({ ...INITIAL_SYNC_PROGRESS });
-    return () => { cancelRef.current = true; generationRef.current++; };
+    return () => { cancelRef.current = true; syncAbortRef.current?.abort(); generationRef.current++; };
   }, [open, isActive, connectionId, localPath, remotePath]);
   const ownsScope = useCallback(() => {
     const current = scopeRef.current;
     return current.open && current.isActive && current.connectionId === connectionId
       && current.localPath === localPath && current.remotePath === remotePath && (current.canOperate?.() ?? true);
   }, [connectionId, localPath, remotePath]);
+
+  const { planUploads, upload, conflictDialog } = useUploadPlanner({
+    connectionId, label: `${connectionId}: ${remotePath}`, active: open && isActive,
+    canOperate: () => ownsScope() && !cancelRef.current,
+  });
 
   // Filter for result table
   const [showSkipped, setShowSkipped] = useState(false);
@@ -280,6 +290,9 @@ export function SyncDialog({
     onLoadLocalDir,
     onLoadRemoteDir,
     ownsScope,
+    planUploads,
+    upload,
+    t,
   ]);
 
   // ── Execute sync ──
@@ -318,6 +331,28 @@ export function SyncDialog({
       totalBytes,
     });
 
+    const controller = new AbortController();
+    syncAbortRef.current = controller;
+    let plannedUploads: UploadQueueInput[] | null;
+    try {
+      const uploads: UploadQueueInput[] = sorted.filter(entry => entry.action === 'upload').map(entry => ({
+        connectionId, fileName: entry.relativePath.split('/').pop() ?? entry.relativePath, direction: 'upload',
+        sourcePath: pathJoin(localPath, entry.relativePath), destinationPath: pathJoin(remotePath, entry.relativePath), totalBytes: entry.localSize ?? 0,
+      }));
+      plannedUploads = uploads.length ? await planUploads(uploads, controller.signal) : [];
+    } catch (error) {
+      syncingRef.current = false;
+      setProgress(p => ({ ...p, phase: 'error' }));
+      toast.error(t('uploadConflict.checkFailed'), { description: String(error) });
+      return;
+    }
+    if (!plannedUploads || !ownsScope() || generation !== generationRef.current) {
+      syncingRef.current = false;
+      if (ownsScope()) setProgress(p => ({ ...p, phase: 'cancelled' }));
+      return;
+    }
+    let skippedFiles = 0;
+
     let processedItems = 0;
     let bytesTransferred = 0;
     let errorCount = 0;
@@ -350,16 +385,14 @@ export function SyncDialog({
           }
           case "upload": {
             const srcPath = pathJoin(localPath, entry.relativePath);
-            const destPath = pathJoin(remotePath, entry.relativePath);
-            const result = await invoke<{
-              success: boolean;
-              error?: string;
-            }>("upload_remote_file", {
-              connectionId,
-              localPath: srcPath,
-              remotePath: destPath,
-              transferId,
-            });
+            const planned = plannedUploads.find(item => item.sourcePath === srcPath);
+            if (!planned) throw new Error(t('uploadConflict.planExpired'));
+            const channel = new Channel<UploadProgress>();
+            channel.onmessage = progress => { if (progress.phase === 'committing') setCommitting(true); };
+            const result = await upload(planned, transferId, channel, controller.signal);
+            setCommitting(false);
+            if (result.cancelled) { cancelRef.current = true; break; }
+            if (result.skipped) { skippedFiles++; break; }
             if (!result.success) {
               throw new Error(result.error ?? "Upload failed");
             }
@@ -393,6 +426,7 @@ export function SyncDialog({
           }
         }
       } catch (err) {
+        setCommitting(false);
         errorCount++;
         toast.error(`Failed: ${entry.relativePath}`, {
           description: err instanceof Error ? err.message : String(err),
@@ -404,6 +438,7 @@ export function SyncDialog({
     }
 
     syncingRef.current = false;
+    if (cancelRef.current) { if (ownsScope()) setProgress(p => ({ ...p, phase: 'cancelled' })); return; }
     if (!ownsScope() || generation !== generationRef.current) return;
     setProgress((p) => ({
       ...p,
@@ -414,14 +449,15 @@ export function SyncDialog({
 
     if (errorCount === 0) {
       toast.success(
-        `Sync complete: ${processedItems} item(s) synchronized`,
+        t('uploadConflict.syncSummary', { success: processedItems - skippedFiles, skipped: skippedFiles, failed: 0 }),
       );
     } else {
       toast.warning(
-        `Sync finished with ${errorCount} error(s) out of ${processedItems} items`,
+        t('uploadConflict.syncSummary', { success: processedItems - skippedFiles - errorCount, skipped: skippedFiles, failed: errorCount }),
       );
     }
 
+    if (skippedFiles) toast.info(t('uploadConflict.skippedCount', { count: skippedFiles }));
     onSyncComplete();
   }, [
     localPath,
@@ -431,6 +467,9 @@ export function SyncDialog({
     onDeleteRemoteItem,
     onSyncComplete,
     ownsScope,
+    planUploads,
+    upload,
+    t,
   ]);
 
   const requestSync = () => {
@@ -841,9 +880,11 @@ export function SyncDialog({
           {isBusy && (
             <Button
               variant="destructive"
+              disabled={committing}
               size="sm"
               onClick={() => {
                 cancelRef.current = true;
+                syncAbortRef.current?.abort();
                 const transferId = activeTransferIdRef.current;
                 if (transferId) {
                   void invoke("cancel_file_transfer", { connectionId, transferId });
@@ -880,6 +921,7 @@ export function SyncDialog({
           )}
         </DialogFooter>
       </DialogContent>
+      {conflictDialog}
       <FileDeleteConfirmation open={open && isActive && !!deleteApproval}
         targetLabel={targetLabel ?? connectionId} remote
         files={deleteApproval?.entries.filter(entry => entry.action === 'delete-remote').map(entry => ({

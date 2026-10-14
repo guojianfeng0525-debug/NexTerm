@@ -613,7 +613,12 @@
       "openInLogMonitor": "Open in Log Monitor",
       "openInOS": "Open in OS",
       "uploadFolder": "Upload Folder",
-      "syncDirectories": "Sync Directories"
+      "syncDirectories": "Sync Directories",
+      "deleteCount_one": "Delete {{count}} item",
+      "deleteCount_other": "Delete {{count}} items",
+      "pasteCount_one": "Paste {{count}} item",
+      "pasteCount_other": "Paste {{count}} items",
+      "more": "More"
     },
     "toast": {
       "queuedUpload_one": "Queued {{count}} file for upload",
@@ -717,6 +722,14 @@
       "cancelled": "Cancelled",
       "upload": "Upload",
       "download": "Download"
+    },
+    "follow": {
+      "active": "Following terminal",
+      "paused": "Following paused",
+      "failed": "Directory sync failed",
+      "waiting": "Waiting for terminal directory",
+      "unavailable": "No directory report; browse manually",
+      "retry": "Retry sync"
     }
   },
   "contextMenu": {
@@ -997,7 +1010,21 @@
     "noTransfers": "No transfers",
     "clear": "Clear",
     "openFile": "Open file",
-    "showInFolder": "Show in folder"
+    "showInFolder": "Show in folder",
+    "skippedCount_one": "{{count}} skipped",
+    "skippedCount_other": "{{count}} skipped",
+    "cancelledCount_one": "{{count}} cancelled",
+    "cancelledCount_other": "{{count}} cancelled",
+    "status": {
+      "waiting": "Waiting for confirmation",
+      "committing": "Committing",
+      "skipped": "Skipped",
+      "cancelled": "Cancelled"
+    },
+    "checkingBatches_one": "Checking {{count}} upload batch",
+    "checkingBatches_other": "Checking {{count}} upload batches",
+    "waitingBatches_one": "{{count}} batch awaiting confirmation",
+    "waitingBatches_other": "{{count}} batches awaiting confirmation"
   },
   "transferControls": {
     "upload": "Upload",
@@ -3189,5 +3216,34 @@
     "editLink": "Edit relationship",
     "hideLink": "Hide relationship",
     "unhideLink": "Unhide relationship"
+  },
+  "uploadConflict": {
+    "title_one": "Resolve {{count}} upload conflict",
+    "title_other": "Resolve {{count}} upload conflicts",
+    "description": "Destination: {{target}}. Choose how to handle existing files. Skip is the default.",
+    "skip": "Skip",
+    "keepBoth": "Keep both",
+    "replace": "Replace file",
+    "applyAll": "Apply to this batch",
+    "local": "Local file",
+    "remote": "Existing destination",
+    "unknownSize": "Unknown size",
+    "unknownTime": "Unknown modification time",
+    "typeConflict": "This destination type cannot be replaced. Keep both or skip.",
+    "action": "Action",
+    "actionFor": "Action for {{path}}",
+    "continue": "Continue upload",
+    "sourceMissing": "Local file no longer exists: {{path}}",
+    "checkFailed": "Upload inspection failed",
+    "skippedCount": "Skipped {{count}} files",
+    "kind": {
+      "File": "File",
+      "Directory": "Folder",
+      "Symlink": "Symbolic link",
+      "Queued": "Another file in this batch"
+    },
+    "syncSummary": "Sync results: {{success}} successful, {{skipped}} skipped, {{failed}} failed",
+    "invalidInspection": "The upload destination inspection is invalid. Refresh and try again.",
+    "planExpired": "The upload plan is no longer available. Select the files again."
   }
 }

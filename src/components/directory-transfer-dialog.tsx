@@ -13,6 +13,7 @@ import React, { useState, useCallback, useRef, useEffect } from "react";
 import { useTranslation } from 'react-i18next';
 import { invoke, Channel } from "@tauri-apps/api/core";
 import { toast } from "sonner";
+import { useUploadPlanner, type UploadProgress } from './use-upload-planner';
 import {
   Dialog,
   DialogContent,
@@ -45,6 +46,8 @@ function formatSpeed(bytesPerSec: number): string {
 
 export interface DirectoryTransferDialogProps {
   open: boolean;
+  isActive?: boolean;
+  isConnected?: boolean;
   onOpenChange: (open: boolean) => void;
   /** "upload" = local dir → remote, "download" = remote dir → local */
   direction: "upload" | "download";
@@ -89,6 +92,8 @@ const initialProgress: TransferProgress = {
 
 export function DirectoryTransferDialog({
   open,
+  isActive = true,
+  isConnected = true,
   onOpenChange,
   direction,
   connectionId,
@@ -104,6 +109,16 @@ export function DirectoryTransferDialog({
   const cancelRef = useRef(false);
   const activeTransferIdRef = useRef<string | null>(null);
   const startedRef = useRef(false);
+  const runAbortRef = useRef<AbortController | null>(null);
+  const [committing, setCommitting] = useState(false);
+  const scopeRef = useRef({ open, connectionId, sourcePath, destPath });
+  scopeRef.current = { open, connectionId, sourcePath, destPath };
+  const ownsScope = useCallback(() => !cancelRef.current && scopeRef.current.open
+    && scopeRef.current.connectionId === connectionId && scopeRef.current.sourcePath === sourcePath
+    && scopeRef.current.destPath === destPath, [connectionId, sourcePath, destPath]);
+  const { planUploads, upload, conflictDialog } = useUploadPlanner({
+    connectionId, label: `${connectionId}: ${destPath}`, active: open && isActive, connected: isConnected, canOperate: ownsScope,
+  });
 
   // Auto-start transfer when dialog opens
   useEffect(() => {
@@ -111,15 +126,18 @@ export function DirectoryTransferDialog({
       startedRef.current = true;
       cancelRef.current = false;
       setProgress({ ...initialProgress });
-      runTransfer();
+      const controller = new AbortController();
+      runAbortRef.current = controller;
+      void runTransfer(controller.signal);
     }
     if (!open) {
       startedRef.current = false;
     }
+    return () => { runAbortRef.current?.abort(); startedRef.current = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open]);
+  }, [open, connectionId, sourcePath, destPath]);
 
-  const runTransfer = useCallback(async () => {
+  const runTransfer = useCallback(async (signal: AbortSignal) => {
     try {
       // Phase 1: Enumerate source directory
       setProgress((p) => ({ ...p, phase: "enumerating" }));
@@ -150,7 +168,7 @@ export function DirectoryTransferDialog({
         );
       }
 
-      if (cancelRef.current) {
+      if (cancelRef.current || signal.aborted) {
         setProgress((p) => ({ ...p, phase: "cancelled" }));
         return;
       }
@@ -172,6 +190,18 @@ export function DirectoryTransferDialog({
         : "";
       const destinationRelativePath = (relativePath: string) =>
         `${destinationPrefix}${relativePath}`;
+
+      const plannedUploads = direction === 'upload' && files.length ? await planUploads(files.map(file => ({
+        connectionId, fileName: file.name, direction: 'upload',
+        sourcePath: `${sourcePath.replace(/\/+$/, '')}/${file.relative_path}`,
+        destinationPath: `${destPath.replace(/\/+$/, '')}/${file.relative_path}`, totalBytes: file.size,
+      })), signal) : [];
+      if (direction === 'upload' && !plannedUploads || signal.aborted) {
+        if (!signal.aborted) setProgress(p => ({ ...p, phase: 'cancelled' }));
+        return;
+      }
+      if (direction === 'upload') setProgress(p => ({ ...p, totalBytes: plannedUploads?.filter(item => !item.skip).reduce((sum, item) => sum + item.totalBytes, 0) ?? 0 }));
+      let skippedFiles = 0;
 
       // Phase 2: Create directory structure
       // Sort dirs by path depth so parents come first
@@ -208,7 +238,7 @@ export function DirectoryTransferDialog({
 
       let processedDirs = 0;
       for (const dir of sortedDirs) {
-        if (cancelRef.current) {
+        if (cancelRef.current || signal.aborted) {
           setProgress((p) => ({ ...p, phase: "cancelled" }));
           return;
         }
@@ -268,7 +298,7 @@ export function DirectoryTransferDialog({
       };
 
       for (const file of files) {
-        if (cancelRef.current) {
+        if (cancelRef.current || signal.aborted) {
           setProgress((p) => ({ ...p, phase: "cancelled" }));
           return;
         }
@@ -288,27 +318,20 @@ export function DirectoryTransferDialog({
         }));
 
         // Per-file real-time progress channel from the backend.
-        const channel = new Channel<{ totalBytes: number; transferredBytes: number }>();
+        const fileStartBytes = bytesTransferred;
+        const channel = new Channel<UploadProgress>();
         channel.onmessage = (p) => {
-          emitProgress(bytesTransferred + p.transferredBytes);
+          if (p.phase === 'committing') setCommitting(true);
+          emitProgress(fileStartBytes + p.transferredBytes);
         };
 
         try {
           if (direction === "upload") {
-            const fileDestPath =
-              destPath === "/"
-                ? `/${file.relative_path}`
-                : `${destPath}/${file.relative_path}`;
-            const result = await invoke<{
-              success: boolean;
-              error?: string;
-            }>("upload_remote_file", {
-              connectionId,
-              localPath: fileSrcPath,
-              remotePath: fileDestPath,
-              onProgress: channel,
-              transferId,
-            });
+            const planned = plannedUploads?.find(item => item.sourcePath === fileSrcPath);
+            if (!planned) throw new Error(t('uploadConflict.planExpired'));
+            const result = await upload(planned, transferId, channel, signal);
+            if (result.cancelled) { setProgress(p => ({ ...p, phase: 'cancelled' })); return; }
+            if (result.skipped) { skippedFiles++; processedFiles++; activeTransferIdRef.current = null; continue; }
             if (!result.success) {
               throw new Error(result.error ?? "Upload failed");
             }
@@ -331,7 +354,7 @@ export function DirectoryTransferDialog({
           }
           // Ensure the counter reflects the file even if the backend sent no
           // progress events (e.g. tiny files that finished in one chunk).
-          emitProgress(bytesTransferred + file.size);
+          emitProgress(fileStartBytes + file.size);
         } catch (err) {
           setProgress((p) => ({
             ...p,
@@ -341,6 +364,7 @@ export function DirectoryTransferDialog({
             ],
           }));
         }
+        setCommitting(false);
         activeTransferIdRef.current = null;
 
         processedFiles++;
@@ -366,7 +390,7 @@ export function DirectoryTransferDialog({
 
       if (errorCount === 0) {
         toast.success(
-          t('directoryTransferDialog.toast.complete', { context: direction, processedFiles, processedDirs }),
+          t('directoryTransferDialog.toast.complete', { context: direction, processedFiles: processedFiles - skippedFiles, processedDirs }),
         );
       } else {
         toast.warning(
@@ -374,8 +398,10 @@ export function DirectoryTransferDialog({
         );
       }
 
+      if (skippedFiles) toast.info(t('uploadConflict.skippedCount', { count: skippedFiles }));
       onComplete();
     } catch (err) {
+      if (signal.aborted) return;
       setProgress((p) => ({
         ...p,
         phase: "error",
@@ -388,7 +414,7 @@ export function DirectoryTransferDialog({
         description: err instanceof Error ? err.message : String(err),
       });
     }
-  }, [direction, connectionId, sourcePath, destPath, destinationDirectoryName, onComplete]);
+  }, [direction, connectionId, sourcePath, destPath, destinationDirectoryName, onComplete, planUploads, upload, t]);
 
   const isBusy =
     progress.phase === "enumerating" || progress.phase === "transferring";
@@ -407,7 +433,7 @@ export function DirectoryTransferDialog({
   const _dirName = sourcePath.split("/").filter(Boolean).pop() ?? sourcePath;
 
   return (
-    <Dialog open={open} onOpenChange={isBusy ? undefined : onOpenChange}>
+    <Dialog open={open && isActive} onOpenChange={isBusy ? undefined : onOpenChange}>
       <DialogContent className="max-w-md">
         <DialogHeader className="shrink-0">
           <DialogTitle className="flex items-center gap-2">
@@ -551,9 +577,11 @@ export function DirectoryTransferDialog({
           {isBusy && (
             <Button
               variant="destructive"
+              disabled={committing}
               size="sm"
               onClick={() => {
                 cancelRef.current = true;
+                runAbortRef.current?.abort();
                 const transferId = activeTransferIdRef.current;
                 if (transferId) {
                   void invoke("cancel_file_transfer", { connectionId, transferId });
@@ -575,6 +603,7 @@ export function DirectoryTransferDialog({
           )}
         </DialogFooter>
       </DialogContent>
+      {conflictDialog}
     </Dialog>
   );
 }

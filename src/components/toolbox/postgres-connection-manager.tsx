@@ -381,7 +381,7 @@ export function PostgresConnectionManager({
   }
 
   async function deleteProfile(profile: PostgreSQLConnectionProfile) {
-    if (!await requestConfirmation(translate("toolbox.postgres.deleteConfirm", { name: profile.name }))) return;
+    if (!await requestConfirmation(translate("toolbox.postgres.deleteConfirm", { name: profile.name }), { title: translate("toolbox.postgres.deleteConnectionConfirmTitle"), confirmLabel: translate("common.delete"), destructive: true })) return;
     await onDeleteProfile(profile.id);
   }
 

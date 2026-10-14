@@ -20,7 +20,7 @@ export function FileDeleteConfirmation({ open, targetLabel, files, remote, recur
   const dialogRef = useRef<HTMLDivElement>(null);
   return (
     <AlertDialog open={open} onOpenChange={next => { if (!next) onCancel(); }}>
-      <AlertDialogContent ref={dialogRef}>
+      <AlertDialogContent ref={dialogRef} className="max-w-[480px]">
         <AlertDialogHeader>
           <AlertDialogTitle>{t(remote ? 'fileDeletion.remoteTitle' : 'fileDeletion.localTitle', { count: files.length })}</AlertDialogTitle>
           <AlertDialogDescription>

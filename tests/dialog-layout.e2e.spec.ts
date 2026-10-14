@@ -33,10 +33,12 @@ async function expectInViewport(dialog: Locator, page: Page) {
 for (const viewport of [{ width: 1280, height: 800 }, { width: 900, height: 600 }, { width: 640, height: 480 }, { width: 375, height: 480 }]) {
   test.describe(`${viewport.width}x${viewport.height}`, () => {
     test.use({ viewport });
-    for (const kind of ['alert', 'long-alert', 'files', 'form', 'connection', 'settings', 'log', 'database', 'node', 'sync']) {
+    for (const kind of ['alert', 'long-alert', 'files', 'upload-conflicts', 'wide-confirm', 'form', 'connection', 'settings', 'log', 'database', 'node', 'sync']) {
       test(`${kind} stays centered and bounded with reachable actions`, async ({ page }) => {
         const dialog = await openFixture(page, kind);
         await expectInViewport(dialog, page);
+        const confirmationWidths: Record<string, number> = { alert: 400, 'long-alert': 400, files: 480, 'upload-conflicts': 560, 'wide-confirm': 560 };
+        if (confirmationWidths[kind]) expect((await dialog.boundingBox())!.width).toBeCloseTo(Math.min(confirmationWidths[kind], viewport.width - 32), 0);
         const footer = dialog.locator('[data-slot="dialog-footer"], [data-slot="alert-dialog-footer"]');
         if (await footer.count()) {
           const box = (await footer.boundingBox())!;
@@ -115,4 +117,112 @@ test('nested settings confirmation is bounded and Cancel restores the parent dia
   // Safari does not focus buttons on pointer clicks; restore the prior focused
   // control inside the parent instead of imposing Chromium's mouse behavior.
   await expect.poll(() => parent.evaluate(el => el.contains(document.activeElement))).toBe(true);
+});
+
+async function openFileBrowser(page: Page, kind = 'file-browser') {
+  await page.addInitScript(() => {
+    const calls: Array<{ command: string; args: Record<string, unknown> }> = [];
+    Object.assign(window, { __fileTestCalls: calls, __TAURI_INTERNALS__: {
+      transformCallback: () => 1,
+      invoke: (command: string, args: Record<string, unknown> = {}) => {
+        calls.push({ command, args });
+        if (command === 'get_home_directory') return Promise.resolve('/local');
+        if (command === 'list_files' || command === 'list_local_files' || command === 'list_remote_files') return Promise.resolve([
+          { name: 'alpha.txt', size: 10, file_type: 'File', modified: null, permissions: null },
+          { name: 'beta.txt', size: 20, file_type: 'File', modified: null, permissions: null },
+          { name: 'docs', size: 0, file_type: 'Directory', modified: null, permissions: null },
+        ]);
+        if (command === 'plugin:dialog|open') return Promise.resolve(['/local/alpha.txt', '/local/new.txt']);
+        if (command === 'inspect_remote_uploads') return Promise.resolve((args.paths as string[]).map(path => ({ path,
+          version: path.endsWith('/alpha.txt') ? { kind: 'File', size: 10, modified: '2026-10-14 10:00:00' } : null })));
+        if (command === 'stat_local_path') return Promise.resolve({ exists: true, size: 30, modified: '2026-10-14 11:00:00' });
+        if (command === 'upload_remote_file') return Promise.resolve({ success: true, destination_path: args.remotePath });
+        if (command === 'row_get') return Promise.resolve(null);
+        if (command === 'row_list' || command.startsWith('list_')) return Promise.resolve([]);
+        return Promise.resolve(true);
+      },
+    } });
+  });
+  await page.goto(`/tests/fixtures/dialog-layout.html?case=${kind}&lang=en`);
+  if (kind === 'file-browser') {
+    await expect(page.getByTitle('/srv/app', { exact: true })).toBeVisible();
+    await expect(page.locator('[data-file-path="/srv/app/alpha.txt"]')).toBeVisible();
+  } else {
+    await expect(page.getByTestId('dual-active').locator('[data-panel-mode="local"]').getByText('alpha.txt', { exact: true })).toBeVisible();
+  }
+  await page.waitForTimeout(350);
+}
+
+test('file right-click preserves multi-selection and deletion targets the full batch', async ({ page }) => {
+  await openFileBrowser(page);
+  const alpha = page.locator('[data-file-path="/srv/app/alpha.txt"]');
+  const beta = page.locator('[data-file-path="/srv/app/beta.txt"]');
+  await alpha.click(); await beta.click({ modifiers: ['ControlOrMeta'] });
+  await beta.click({ button: 'right' });
+  await expect(page.getByRole('menu')).toHaveCount(1);
+  await expect(alpha).toHaveAttribute('data-selected', 'true');
+  await expect(beta).toHaveAttribute('data-selected', 'true');
+  await page.keyboard.press('Escape');
+  await expect(beta).toHaveAttribute('data-selected', 'true');
+  await beta.click({ button: 'right' });
+  await page.getByRole('menuitem', { name: 'Delete 2 items', exact: true }).click();
+  const dialog = page.getByRole('alertdialog');
+  await expect(dialog.getByText('/srv/app/alpha.txt', { exact: true })).toBeVisible();
+  await expect(dialog.getByText('/srv/app/beta.txt', { exact: true })).toBeVisible();
+  await dialog.getByRole('button', { name: 'Delete 2 items', exact: true }).click();
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __fileTestCalls: Array<{ command: string }> }).__fileTestCalls.filter(call => call.command === 'delete_file').length)).toBe(2);
+});
+
+test('manual browsing pauses terminal following until explicitly resumed', async ({ page }) => {
+  await openFileBrowser(page);
+  const folder = page.locator('[data-file-path="/srv/app/docs"]');
+  await folder.click();
+  await expect(page.getByTitle('/srv/app', { exact: true })).toBeVisible();
+  await folder.dblclick();
+  await expect(page.getByTitle('/srv/app/docs', { exact: true })).toBeVisible();
+  await page.getByTestId('terminal-cd').click();
+  await expect(page.getByTitle('/srv/app/docs', { exact: true })).toBeVisible();
+  await expect(page.getByTestId('ssh-file-workspace').getByRole('status')).toHaveText('Following paused');
+  await page.getByTitle('Follow terminal directory', { exact: true }).click();
+  await expect(page.getByTitle('/var/log', { exact: true })).toBeVisible();
+});
+
+test('upload conflicts are approved together and retain their original directory', async ({ page }) => {
+  await openFileBrowser(page);
+  await page.getByTitle('Upload files', { exact: true }).click();
+  const dialog = page.getByRole('alertdialog');
+  await expect(dialog).toBeVisible(); await expectInViewport(dialog, page);
+  await expect(dialog.getByRole('button', { name: 'Cancel', exact: true })).toBeFocused();
+  expect(await page.evaluate(() => (window as unknown as { __fileTestCalls: Array<{ command: string }> }).__fileTestCalls.filter(call => call.command === 'upload_remote_file').length)).toBe(0);
+  await dialog.getByRole('combobox', { name: 'Action for /srv/app/alpha.txt', exact: true }).selectOption('replace');
+  // A background terminal event cannot retarget this upload batch.
+  await page.getByTestId('terminal-cd').evaluate((button: HTMLButtonElement) => button.click());
+  await dialog.getByRole('button', { name: 'Continue upload', exact: true }).click();
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __fileTestCalls: Array<{ command: string }> }).__fileTestCalls.filter(call => call.command === 'upload_remote_file').length)).toBe(2);
+  const uploads = await page.evaluate(() => (window as unknown as { __fileTestCalls: Array<{ command: string; args: Record<string, unknown> }> }).__fileTestCalls.filter(call => call.command === 'upload_remote_file').map(call => call.args));
+  expect(uploads.map(args => args.remotePath)).toEqual(['/srv/app/alpha.txt', '/srv/app/new.txt']);
+  expect(uploads[0].conflictPolicy).toBe('replace');
+});
+
+test('standalone right-click selects its file before initiating upload', async ({ page }) => {
+  await openFileBrowser(page, 'file-browser-dual');
+  await page.getByTestId('dual-active').locator('[data-panel-mode="local"]').getByText('alpha.txt', { exact: true }).click({ button: 'right' });
+  await page.getByRole('menuitem', { name: 'Upload to remote', exact: true }).click();
+  const dialog = page.getByRole('alertdialog');
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByText('/local/alpha.txt', { exact: true })).toBeVisible();
+  await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+  expect(await page.evaluate(() => (window as unknown as { __fileTestCalls: Array<{ command: string }> }).__fileTestCalls.filter(call => call.command === 'upload_remote_file').length)).toBe(0);
+});
+
+test('cross-panel drops cannot enqueue uploads in another mounted workspace', async ({ page }) => {
+  await openFileBrowser(page, 'file-browser-dual');
+  await page.getByTestId('dual-active').locator('[data-panel-mode="remote"]').evaluate(panel => {
+    panel.dispatchEvent(new CustomEvent('nexterm-drop-transfer', { bubbles: true, detail: {
+      targetMode: 'remote', targetPath: '/', sourcePath: '/local', files: [{ name: 'new.txt', size: 30, file_type: 'File' }],
+    } }));
+  });
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __fileTestCalls: Array<{ command: string }> }).__fileTestCalls.filter(call => call.command === 'upload_remote_file').length)).toBe(1);
+  const owners = await page.evaluate(() => (window as unknown as { __fileTestCalls: Array<{ command: string; args: Record<string, unknown> }> }).__fileTestCalls.filter(call => call.command === 'upload_remote_file').map(call => call.args.connectionId));
+  expect(owners).toEqual(['fixture-dual']);
 });

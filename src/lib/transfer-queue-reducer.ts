@@ -1,16 +1,20 @@
 // Transfer Queue State Management
 // Manages file transfers between local and remote panels.
+import type { UploadApproval } from './upload-conflicts';
 
 export type TransferStatus =
   | "queued"
   | "transferring"
+  | "waiting"
+  | "committing"
+  | "skipped"
   | "completed"
   | "failed"
   | "cancelled";
 
 export type TransferDirection = "upload" | "download";
 
-export interface TransferItem {
+export interface TransferItem extends UploadApproval {
   /** Immutable connection that owned the transfer when it was queued. */
   connectionId?: string;
   id: string;
@@ -31,7 +35,7 @@ export interface TransferItem {
 export type TransferAction =
   | {
       type: "ENQUEUE";
-      items: Array<{
+      items: Array<UploadApproval & {
         fileName: string;
         direction: TransferDirection;
         sourcePath: string;
@@ -41,6 +45,9 @@ export type TransferAction =
       }>;
     }
   | { type: "START"; id: string }
+  | { type: "WAIT"; id: string }
+  | { type: "COMMIT"; id: string }
+  | { type: "SKIP"; id: string }
   | {
       type: "PROGRESS";
       id: string;
@@ -48,10 +55,11 @@ export type TransferAction =
       bytesTransferred: number;
       speed: number;
     }
-  | { type: "COMPLETE"; id: string }
+  | { type: "COMPLETE"; id: string; destinationPath?: string; committed?: boolean }
   | { type: "FAIL"; id: string; error: string }
   | { type: "CANCEL"; id: string }
   | { type: "RETRY"; id: string }
+  | { type: 'EXPIRE_APPROVALS'; connectionId: string }
   | { type: "CLEAR_COMPLETED" }
   | { type: "CLEAR_ALL" };
 
@@ -74,13 +82,14 @@ export function transferQueueReducer(
   switch (action.type) {
     case "ENQUEUE": {
       const newItems: TransferItem[] = action.items.map((item) => ({
+        ...item,
         ...(item.connectionId ? { connectionId: item.connectionId } : {}),
         id: generateTransferId(),
         fileName: item.fileName,
         direction: item.direction,
         sourcePath: item.sourcePath,
         destinationPath: item.destinationPath,
-        status: "queued" as const,
+        status: item.skip ? "skipped" as const : "queued" as const,
         progress: 0,
         bytesTransferred: 0,
         totalBytes: item.totalBytes,
@@ -91,15 +100,22 @@ export function transferQueueReducer(
 
     case "START": {
       return state.map((item) =>
-        item.id === action.id
+        item.id === action.id && (item.status === 'queued' || item.status === 'waiting')
           ? { ...item, status: "transferring" as const, startedAt: Date.now() }
           : item,
       );
     }
 
+    case "WAIT":
+    case "COMMIT":
+    case "SKIP": {
+      return state.map(item => item.id === action.id && (item.status === 'transferring' || item.status === 'waiting')
+        ? { ...item, status: action.type === 'WAIT' ? 'waiting' : action.type === 'COMMIT' ? 'committing' : 'skipped' } : item);
+    }
+
     case "PROGRESS": {
       return state.map((item) =>
-        item.id === action.id && item.status === "transferring"
+        item.id === action.id && (item.status === "transferring" || item.status === 'committing')
           ? {
               ...item,
               progress: action.progress,
@@ -114,11 +130,12 @@ export function transferQueueReducer(
       return state.map((item) =>
         // A cancelled request may still resolve after the UI cancellation.
         // Never let that late completion resurrect it as a successful transfer.
-        item.id === action.id && item.status === "transferring"
+        item.id === action.id && (item.status === "transferring" || item.status === 'committing' || item.status === 'cancelled' && action.committed === true)
           ? {
               ...item,
               status: "completed" as const,
               progress: 100,
+              ...(action.destinationPath ? { destinationPath: action.destinationPath, fileName: action.destinationPath.split('/').pop() ?? item.fileName } : {}),
               completedAt: Date.now(),
             }
           : item,
@@ -127,7 +144,7 @@ export function transferQueueReducer(
 
     case "FAIL": {
       return state.map((item) =>
-        item.id === action.id && item.status === "transferring"
+        item.id === action.id && ['transferring', 'waiting', 'committing'].includes(item.status)
           ? {
               ...item,
               status: "failed" as const,
@@ -140,7 +157,7 @@ export function transferQueueReducer(
 
     case "CANCEL": {
       return state.map((item) =>
-        item.id === action.id && item.status !== "completed"
+        item.id === action.id && item.status !== "completed" && item.status !== 'committing'
           ? { ...item, status: "cancelled" as const, completedAt: Date.now() }
           : item,
       );
@@ -157,6 +174,9 @@ export function transferQueueReducer(
               bytesTransferred: 0,
               speed: 0,
               error: undefined,
+              expectedTarget: undefined,
+              conflictPolicy: 'ask',
+              skip: false,
               startedAt: undefined,
               completedAt: undefined,
             }
@@ -164,18 +184,23 @@ export function transferQueueReducer(
       );
     }
 
+    case 'EXPIRE_APPROVALS': {
+      return state.map(item => item.connectionId === action.connectionId && item.direction === 'upload' && item.status === 'queued'
+        ? { ...item, expectedTarget: undefined, conflictPolicy: 'ask' } : item);
+    }
+
     case "CLEAR_COMPLETED": {
       return state.filter(
         (item) =>
           item.status !== "completed" &&
           item.status !== "failed" &&
-          item.status !== "cancelled",
+          item.status !== "cancelled" && item.status !== 'skipped',
       );
     }
 
     case "CLEAR_ALL": {
       // Only keep items that are currently transferring
-      return state.filter((item) => item.status === "transferring");
+      return state.filter((item) => item.status === "transferring" || item.status === 'committing');
     }
 
     default:
@@ -187,7 +212,7 @@ export function transferQueueReducer(
 
 export function getActiveTransferCount(state: TransferItem[]): number {
   return state.filter(
-    (item) => item.status === "queued" || item.status === "transferring",
+    (item) => ['queued', 'transferring', 'waiting', 'committing'].includes(item.status),
   ).length;
 }
 
@@ -195,7 +220,7 @@ export function getNextQueuedTransfer(
   state: TransferItem[],
 ): TransferItem | undefined {
   const hasTransferring = state.some(
-    (item) => item.status === "transferring",
+    (item) => item.status === "transferring" || item.status === 'committing',
   );
   if (hasTransferring) return undefined;
   return state.find((item) => item.status === "queued");
