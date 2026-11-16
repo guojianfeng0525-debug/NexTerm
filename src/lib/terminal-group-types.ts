@@ -22,6 +22,11 @@ export interface TerminalTab {
   editorFilePath?: string;
   /** For editor tabs: the SSH connectionId used to read/write the file */
   editorConnectionId?: string;
+  /** Last OSC 7-reported working directory before the connection dropped.
+   *  A full reconnect starts the new shell here so the user returns to where
+   *  they were instead of the connection's initial directory. In-memory only
+   *  (not persisted with the layout). */
+  lastWorkingDirectory?: string;
   /** For tools tabs: the Toolbox view to show (apps/vault/tunnels/services/notes) */
   toolsTabView?: import('./toolbox/toolbox-types').ToolboxViewId;
 }
@@ -59,6 +64,7 @@ export type TerminalGroupAction =
   | { type: 'UPDATE_TAB_STATUS'; tabId: string; status: 'connected' | 'connecting' | 'disconnected' | 'pending' }
   | { type: 'UPDATE_TAB_NAME'; tabId: string; name: string }
   | { type: 'UPDATE_TAB_TYPE'; tabId: string; tabType: TerminalTab['tabType'] }
+  | { type: 'UPDATE_TAB_WORKING_DIRECTORY'; tabId: string; directory: string | null }
   | { type: 'UPDATE_TOOLS_VIEW'; tabId: string; view: import('./toolbox/toolbox-types').ToolboxViewId }
   | { type: 'RECONNECT_TAB'; tabId: string }
   | { type: 'UPDATE_GRID_SIZES'; path: number[]; sizes: number[] }

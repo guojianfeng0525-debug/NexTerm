@@ -110,6 +110,11 @@ function AppContent() {
   const [terminalWorkingDirectories, setTerminalWorkingDirectories] = useState<
     Record<string, { path: string; sequence: number }>
   >({});
+  // Mirror of terminalWorkingDirectories for long-lived callbacks
+  // (handleReconnect) that must read the LATEST cwd without re-creating on
+  // every OSC 7 report — it captures the directory the session was in when
+  // the connection dropped, so the reconnecting shell can cd back to it.
+  const terminalWorkingDirectoriesRef = useRef(terminalWorkingDirectories);
 
   const handleWorkingDirectoryChange = useCallback((connectionId: string, path: string | null) => {
     setTerminalWorkingDirectories((previous) => {
@@ -119,6 +124,12 @@ function AppContent() {
       return next;
     });
   }, []);
+
+  // Keep the ref mirror in sync after commits (the setState updater above
+  // must stay pure — never write refs inside it).
+  useEffect(() => {
+    terminalWorkingDirectoriesRef.current = terminalWorkingDirectories;
+  }, [terminalWorkingDirectories]);
 
   // Suggestion-context accessor: latest known cwd for a terminal instance.
   const getWorkingDirectory = useCallback(
@@ -1109,6 +1120,19 @@ function AppContent() {
         });
       } else {
         // SSH reconnect (existing behavior)
+
+        // Capture the last OSC 7-reported cwd BEFORE the old session is torn
+        // down: the reconnecting shell starts here, so the user returns to
+        // where they were instead of the connection's initial directory.
+        const preDisconnectDirectory = terminalWorkingDirectoriesRef.current[tabId]?.path;
+        if (preDisconnectDirectory) {
+          dispatch({
+            type: 'UPDATE_TAB_WORKING_DIRECTORY',
+            tabId,
+            directory: preDisconnectDirectory,
+          });
+        }
+
         try {
           await invoke('ssh_disconnect', { connectionId: tabId });
         } catch {

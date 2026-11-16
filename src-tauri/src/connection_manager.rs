@@ -1,3 +1,4 @@
+use crate::app_activity;
 use crate::desktop_protocol::{DesktopConnectRequest, DesktopEvent, DesktopProtocol};
 use crate::ftp_client::FtpClient;
 use crate::os_detect::OsInfoCache;
@@ -102,6 +103,9 @@ impl ConnectionManager {
 
         let mut connections = self.connections.write().await;
         connections.insert(connection_id, Arc::new(RwLock::new(client)));
+        // Remote sessions now exist: keep the process out of App Nap so the
+        // keepalive timers keep firing while the window is hidden.
+        app_activity::acquire();
 
         Ok(())
     }
@@ -135,14 +139,32 @@ impl ConnectionManager {
 
     pub async fn close_connection(&self, connection_id: &str) -> Result<()> {
         self.close_pty_connection(connection_id, None).await?;
-        let mut connections = self.connections.write().await;
-        if let Some(client) = connections.remove(connection_id) {
-            let mut client = client.write().await;
-            client.disconnect().await?;
+        {
+            let mut connections = self.connections.write().await;
+            if let Some(client) = connections.remove(connection_id) {
+                let mut client = client.write().await;
+                client.disconnect().await?;
+            }
         }
         // Clean up cached OS info for this connection
         self.os_info_cache.remove(connection_id).await;
+        self.release_activity_if_idle().await;
         Ok(())
+    }
+
+    /// Drop the App Nap guard once the last remote connection of any kind is
+    /// gone, so a fully idle app can be napped normally again.
+    ///
+    /// Callers must NOT hold any of the four map locks — this takes read
+    /// locks on all of them.
+    async fn release_activity_if_idle(&self) {
+        let ssh_empty = self.connections.read().await.is_empty();
+        let sftp_empty = self.sftp_connections.read().await.is_empty();
+        let ftp_empty = self.ftp_connections.read().await.is_empty();
+        let desktop_empty = self.desktop_connections.read().await.is_empty();
+        if ssh_empty && sftp_empty && ftp_empty && desktop_empty {
+            app_activity::release();
+        }
     }
 
     /// Access the OS info cache (for distro-aware monitoring commands).
@@ -371,6 +393,7 @@ impl ConnectionManager {
         sftp_connections.insert(connection_id.clone(), client);
         let mut types = self.connection_types.write().await;
         types.insert(connection_id, "SFTP".to_string());
+        app_activity::acquire();
         Ok(())
     }
 
@@ -379,12 +402,15 @@ impl ConnectionManager {
     }
 
     pub async fn close_sftp_connection(&self, connection_id: &str) -> Result<()> {
-        let mut sftp_connections = self.sftp_connections.write().await;
-        if let Some(mut client) = sftp_connections.remove(connection_id) {
-            client.disconnect().await?;
+        {
+            let mut sftp_connections = self.sftp_connections.write().await;
+            if let Some(mut client) = sftp_connections.remove(connection_id) {
+                client.disconnect().await?;
+            }
         }
         let mut types = self.connection_types.write().await;
         types.remove(connection_id);
+        self.release_activity_if_idle().await;
         Ok(())
     }
 
@@ -400,6 +426,7 @@ impl ConnectionManager {
         ftp_connections.insert(connection_id.clone(), client);
         let mut types = self.connection_types.write().await;
         types.insert(connection_id, "FTP".to_string());
+        app_activity::acquire();
         Ok(())
     }
 
@@ -408,12 +435,15 @@ impl ConnectionManager {
     }
 
     pub async fn close_ftp_connection(&self, connection_id: &str) -> Result<()> {
-        let mut ftp_connections = self.ftp_connections.write().await;
-        if let Some(mut client) = ftp_connections.remove(connection_id) {
-            client.disconnect().await?;
+        {
+            let mut ftp_connections = self.ftp_connections.write().await;
+            if let Some(mut client) = ftp_connections.remove(connection_id) {
+                client.disconnect().await?;
+            }
         }
         let mut types = self.connection_types.write().await;
         types.remove(connection_id);
+        self.release_activity_if_idle().await;
         Ok(())
     }
 
@@ -451,6 +481,7 @@ impl ConnectionManager {
 
         let mut types = self.connection_types.write().await;
         types.insert(connection_id, protocol);
+        app_activity::acquire();
 
         Ok((w, h))
     }
@@ -466,13 +497,16 @@ impl ConnectionManager {
 
     /// Close and remove a desktop connection.
     pub async fn close_desktop_connection(&self, connection_id: &str) -> Result<()> {
-        let mut desktop = self.desktop_connections.write().await;
-        if let Some(client) = desktop.remove(connection_id) {
-            let mut client = client.write().await;
-            client.disconnect().await?;
+        {
+            let mut desktop = self.desktop_connections.write().await;
+            if let Some(client) = desktop.remove(connection_id) {
+                let mut client = client.write().await;
+                client.disconnect().await?;
+            }
         }
         let mut types = self.connection_types.write().await;
         types.remove(connection_id);
+        self.release_activity_if_idle().await;
         Ok(())
     }
 

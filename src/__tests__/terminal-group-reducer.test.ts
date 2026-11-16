@@ -642,3 +642,50 @@ describe('tabToGroupMap consistency', () => {
     expect(next.tabToGroupMap['b']).not.toBe('1');
   });
 });
+
+// ── UPDATE_TAB_WORKING_DIRECTORY (pre-disconnect cwd capture) ──
+
+describe('UPDATE_TAB_WORKING_DIRECTORY', () => {
+  it('stores the pre-disconnect directory on the tab', () => {
+    const state = stateWithTabs('1', [makeTab('a')]);
+    const next = terminalGroupReducer(state, {
+      type: 'UPDATE_TAB_WORKING_DIRECTORY',
+      tabId: 'a',
+      directory: '/srv/release files',
+    });
+    expect(next.groups['1'].tabs[0].lastWorkingDirectory).toBe('/srv/release files');
+  });
+
+  it('overwrites the previous capture on every report', () => {
+    let state = stateWithTabs('1', [makeTab('a')]);
+    state = terminalGroupReducer(state, { type: 'UPDATE_TAB_WORKING_DIRECTORY', tabId: 'a', directory: '/tmp' });
+    state = terminalGroupReducer(state, { type: 'UPDATE_TAB_WORKING_DIRECTORY', tabId: 'a', directory: '/var/log' });
+    expect(state.groups['1'].tabs[0].lastWorkingDirectory).toBe('/var/log');
+  });
+
+  it('null clears a stale capture', () => {
+    let state = stateWithTabs('1', [makeTab('a')]);
+    state = terminalGroupReducer(state, { type: 'UPDATE_TAB_WORKING_DIRECTORY', tabId: 'a', directory: '/tmp' });
+    state = terminalGroupReducer(state, { type: 'UPDATE_TAB_WORKING_DIRECTORY', tabId: 'a', directory: null });
+    expect(state.groups['1'].tabs[0].lastWorkingDirectory).toBeUndefined();
+  });
+
+  it('RECONNECT_TAB preserves the captured directory for the new shell', () => {
+    let state = stateWithTabs('1', [makeTab('a')]);
+    state = terminalGroupReducer(state, { type: 'UPDATE_TAB_WORKING_DIRECTORY', tabId: 'a', directory: '/srv/work' });
+    state = terminalGroupReducer(state, { type: 'RECONNECT_TAB', tabId: 'a' });
+    const tab = state.groups['1'].tabs[0];
+    expect(tab.lastWorkingDirectory).toBe('/srv/work');
+    expect(tab.reconnectCount).toBe(1);
+  });
+
+  it('unknown tab id is a no-op', () => {
+    const state = stateWithTabs('1', [makeTab('a')]);
+    const next = terminalGroupReducer(state, {
+      type: 'UPDATE_TAB_WORKING_DIRECTORY',
+      tabId: 'ghost',
+      directory: '/tmp',
+    });
+    expect(next).toBe(state);
+  });
+});

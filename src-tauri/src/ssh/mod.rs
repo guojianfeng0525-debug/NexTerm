@@ -36,10 +36,28 @@ pub static PREFERRED_HOST_KEY_ALGOS: &[keys::Algorithm] = &[
     keys::Algorithm::Rsa { hash: None },
 ];
 
-const BASH_VERSION_PROBE: &str = r#"printf '__NEXTERM_BASH_VERSION__%s' "${BASH_VERSION-}""#;
-const BASH_VERSION_MARKER: &str = "__NEXTERM_BASH_VERSION__";
-// Bash shell-integration (OSC 7 cwd reporting).
-const BASH_SHELL_INTEGRATION_PREFIX: &str = r#" stty echo; __nexterm_report_cwd(){ local p=${PWD//%/%25}; p=${p// /%20}; p=${p//#/%23}; p=${p//\?/%3F}; printf '\033]7;file://%s%s\033\\' "${HOSTNAME:-localhost}" "$p"; }; "#;
+/// Detect the login shell and (when it is bash) its version in ONE round
+/// trip. `$SHELL` is always exported by sshd; the plain `$VAR` spelling (no
+/// `${VAR-default}`) is deliberate so the command is also valid fish syntax —
+/// `${...}` is a hard syntax error there and would break shell detection for
+/// fish users.
+const SHELL_PROBE: &str = r#"printf '__NEXTERM_SHELL_PROBE__%s|%s' "$SHELL" "$BASH_VERSION""#;
+const SHELL_PROBE_MARKER: &str = "__NEXTERM_SHELL_PROBE__";
+// Bash shell-integration (OSC 7 cwd reporting + OSC 7777 executed-command
+// reporting). The command hook runs from PROMPT_COMMAND AFTER the command
+// executed and reads the newest entry via `builtin history 1` (multi-line
+// safe). HISTORY-NUMBER MONOTONICITY is what makes it correct: the disk
+// history loaded at startup also answers `history 1`, so comparing command
+// TEXT would mis-report the previous session's tail as this session's first
+// command. The first hook invocation only records the baseline number;
+// afterwards an entry is reported exactly when its number grows — new
+// commands AND history-recalled re-executions — while empty prompts (number
+// unchanged) and HISTCONTROL-excluded entries (never numbered) stay silent.
+// The command text is base64-encoded so it cannot break the OSC framing.
+const BASH_SHELL_INTEGRATION_PREFIX: &str = concat!(
+    r#" stty echo; __nexterm_report_cwd(){ local p=${PWD//%/%25}; p=${p// /%20}; p=${p//#/%23}; p=${p//\?/%3F}; printf '\033]7;file://%s%s\033\\' "${HOSTNAME:-localhost}" "$p"; }; "#,
+    r#"__nexterm_report_cmd(){ local h n c; h=$(HISTTIMEFORMAT= builtin history 1 2>/dev/null) || return; h=${h#"${h%%[![:space:]]*}"}; n=${h%% *}; case "$n" in ''|*[!0-9]*) return;; esac; if [ -z "${__nexterm_last_no:-}" ]; then __nexterm_last_no=$n; return; fi; [ "$n" -gt "$__nexterm_last_no" ] || return; __nexterm_last_no=$n; c=${h#* }; c=${c#"${c%%[![:space:]]*}"}; [ -n "$c" ] || return; printf '\033]7777;%s\033\\' "$(printf %s "$c" | base64 | tr -d '\n')"; }; "#
+);
 const BASH_SHELL_INTEGRATION_SUFFIX: &str = "printf '\\r\\033[2K'\n";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -48,19 +66,69 @@ pub(crate) struct BashVersion {
     pub(crate) minor: u32,
 }
 
-pub(crate) fn bash_version_from_probe(output: &str) -> Option<BashVersion> {
-    let version = output.rsplit_once(BASH_VERSION_MARKER)?.1.trim();
-    let mut parts = version.split('.');
+/// The interactive shell that will serve a PTY session. Drives which OSC 7
+/// cwd-reporting integration gets injected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ShellKind {
+    Bash,
+    Zsh,
+    Fish,
+    /// Unrecognised shell (or probe failure): plain `request_shell`, no
+    /// directory reporting — the file browser cannot follow the terminal.
+    Generic,
+}
+
+/// Parse `major.minor` from the front of `text`; trailing components
+/// (`5.2.15(1)-release`) and junk after them are ignored.
+pub(crate) fn parse_major_minor(text: &str) -> Option<BashVersion> {
+    let mut parts = text.trim().split('.');
     let major = parts.next()?.parse().ok()?;
     let minor = parts.next()?.parse().ok()?;
     Some(BashVersion { major, minor })
 }
 
-pub(crate) fn bash_shell_integration_command(version: BashVersion) -> Vec<u8> {
-    let prompt_command = if version >= (BashVersion { major: 5, minor: 1 }) {
-        r#"if declare -p PROMPT_COMMAND &>/dev/null; then PROMPT_COMMAND=("${PROMPT_COMMAND[@]}" __nexterm_report_cwd); else PROMPT_COMMAND=(__nexterm_report_cwd); fi; "#
+pub(crate) fn shell_kind_from_path(path: &str) -> ShellKind {
+    let name = path.rsplit('/').next().unwrap_or("");
+    if name.contains("bash") {
+        ShellKind::Bash
+    } else if name.contains("zsh") {
+        ShellKind::Zsh
+    } else if name.contains("fish") {
+        ShellKind::Fish
     } else {
-        r#"if [[ -n ${PROMPT_COMMAND-} ]]; then PROMPT_COMMAND+=$'\n__nexterm_report_cwd'; else PROMPT_COMMAND=__nexterm_report_cwd; fi; "#
+        ShellKind::Generic
+    }
+}
+
+/// Parse the combined `$SHELL|$BASH_VERSION` probe output. Junk before the
+/// marker (login banners) is tolerated via `rsplit_once`.
+pub(crate) fn shell_probe_results(output: &str) -> (ShellKind, Option<BashVersion>) {
+    let Some(rest) = output.rsplit_once(SHELL_PROBE_MARKER) else {
+        return (ShellKind::Generic, None);
+    };
+    let (shell_path, bash_text) = rest.1.split_once('|').unwrap_or((rest.1, ""));
+    (
+        shell_kind_from_path(shell_path.trim()),
+        parse_major_minor(bash_text.trim()),
+    )
+}
+
+/// Embed `payload` inside a single-quoted string that works in POSIX shells
+/// AND fish (both treat `'\''` as close-quote/escaped-quote/reopen).
+pub(crate) fn sh_single_quote(payload: &str) -> String {
+    if payload.is_empty() {
+        return "''".to_string();
+    }
+    format!("'{}'", payload.replace('\'', "'\\''"))
+}
+
+pub(crate) fn bash_shell_integration_command(version: BashVersion) -> Vec<u8> {
+    // report_cmd must run AFTER the command executed (PROMPT_COMMAND fires
+    // post-execution, when `fc -ln -1` already resolves to the new entry).
+    let prompt_command = if version >= (BashVersion { major: 5, minor: 1 }) {
+        r#"if declare -p PROMPT_COMMAND &>/dev/null; then PROMPT_COMMAND=("${PROMPT_COMMAND[@]}" __nexterm_report_cwd __nexterm_report_cmd); else PROMPT_COMMAND=(__nexterm_report_cwd __nexterm_report_cmd); fi; "#
+    } else {
+        r#"if [[ -n ${PROMPT_COMMAND-} ]]; then PROMPT_COMMAND+=$'\n__nexterm_report_cwd\n__nexterm_report_cmd'; else PROMPT_COMMAND=$'__nexterm_report_cwd\n__nexterm_report_cmd'; fi; "#
     };
 
     format!(
@@ -82,8 +150,12 @@ pub(crate) fn bash_startup_command(version: BashVersion, directory: Option<&str>
          unset __nexterm_profile; ",
     );
     if let Some(directory) = directory.map(str::trim).filter(|path| !path.is_empty()) {
+        // A missing directory must not kill the shell: the pre-disconnect
+        // cwd (reconnect restore) or a configured startup directory can be
+        // gone by the time the session starts — degrade to the login
+        // directory instead of exiting into a reconnect loop.
         startup.push_str(&format!(
-            "cd -- '{}' || exit; ",
+            "cd -- '{}' 2>/dev/null || true; ",
             directory.replace('\'', "'\\''")
         ));
     }
@@ -91,6 +163,100 @@ pub(crate) fn bash_startup_command(version: BashVersion, directory: Option<&str>
     format!(
         "exec \"${{SHELL:-/bin/bash}}\" --rcfile <(printf '%s' '{}') -i",
         startup.replace('\'', "'\\''")
+    )
+}
+
+/// zsh OSC 7 cwd reporting via a `precmd_functions` hook.
+///
+/// zsh has no `--rcfile`; the VS Code-style ZDOTDIR proxy is used instead: a
+/// temp directory holds `.zshenv`/`.zprofile`/`.zshrc`/`.zlogin` shims that
+/// source the user's real files in their native order, so login-shell
+/// semantics are preserved exactly. The shim directory is removed from a
+/// `zshexit` hook.
+pub(crate) fn zsh_startup_command(directory: Option<&str>) -> String {
+    let directory = directory.map(str::trim).filter(|path| !path.is_empty());
+    let mut zshrc = String::from(
+        r#"__nexterm_zdot_dir="${ZDOTDIR:-}"; [[ -r "$HOME/.zshrc" ]] && source "$HOME/.zshrc"; "#,
+    );
+    if let Some(directory) = directory {
+        // Missing directory degrades to the login directory (never exit —
+        // a vanished pre-disconnect cwd must not kill the restored shell).
+        zshrc.push_str(&format!(
+            "cd -- {} 2>/dev/null || true; ",
+            sh_single_quote(directory)
+        ));
+    }
+    zshrc.push_str(
+        // Patterns are double-quoted: in zsh an unquoted `%` or leading `#`
+        // in `${p//pat/repl}` is misparsed (`//#` becomes a start-anchor
+        // with an EMPTY pattern, i.e. prepend; a bare `%` inserts instead of
+        // replacing; `"\?"` fails to match while `"?"` matches the literal
+        // character). Quoting makes all four substitutions behave exactly
+        // like the bash hook. `${PWD//"%"/%25}` runs first so the % introduced
+        // by later escapes is not double-escaped (same order as bash).
+        // (r## — the pattern "#"/%23 would terminate a one-hash raw string.)
+        r##"__nexterm_report_cwd() { emulate -L zsh; local p=${PWD//"%"/%25}; p=${p//" "/"%20"}; p=${p//"#"/%23}; p=${p//"?"/%3F}; printf '\033]7;file://%s%s\033\\' "${HOST:-localhost}" "$p"; }; "##,
+    );
+    zshrc.push_str(
+        r#"typeset -ga precmd_functions; precmd_functions+=(__nexterm_report_cwd); "#,
+    );
+    // Executed-command reporting: `zshaddhistory` receives the COMPLETE
+    // command line (multi-line included) exactly as submitted, before any
+    // HIST_* filtering — far more reliable than scraping the terminal line.
+    zshrc.push_str(
+        r#"__nexterm_report_cmd() { emulate -L zsh; local c="${1:-}"; c=${c%$'\n'}; [[ -n "$c" ]] || return; printf '\033]7777;%s\033\\' "$(printf %s "$c" | base64 | tr -d '\n')"; }; typeset -ga zshaddhistory_functions; zshaddhistory_functions+=(__nexterm_report_cmd); "#,
+    );
+    zshrc.push_str(
+        r#"__nexterm_cleanup() { emulate -L zsh; [[ -n "${__nexterm_zdot_dir:-}" && "${__nexterm_zdot_dir}" == */nexterm-zsh.* && -d "${__nexterm_zdot_dir}" ]] && rm -rf -- "${__nexterm_zdot_dir}"; }; zshexit_functions+=(__nexterm_cleanup); "#,
+    );
+    let zshenv = r#"[[ -r "$HOME/.zshenv" ]] && source "$HOME/.zshenv""#;
+    let zprofile = r#"[[ -r "$HOME/.zprofile" ]] && source "$HOME/.zprofile""#;
+    let zlogin = r#"[[ -r "$HOME/.zlogin" ]] && source "$HOME/.zlogin""#;
+    format!(
+        concat!(
+            r#"__nexterm_zdot=$(mktemp -d "${{TMPDIR:-/tmp}}/nexterm-zsh.XXXXXXXXXX") || exit 1; "#,
+            r#"printf '%s' {zshenv} > "$__nexterm_zdot/.zshenv"; "#,
+            r#"printf '%s' {zprofile} > "$__nexterm_zdot/.zprofile"; "#,
+            r#"printf '%s' {zshrc} > "$__nexterm_zdot/.zshrc"; "#,
+            r#"printf '%s' {zlogin} > "$__nexterm_zdot/.zlogin"; "#,
+            r#"export ZDOTDIR="$__nexterm_zdot"; exec "${{SHELL:-/bin/zsh}}" -l -i"#,
+        ),
+        zshenv = sh_single_quote(zshenv),
+        zprofile = sh_single_quote(zprofile),
+        zshrc = sh_single_quote(&zshrc),
+        zlogin = sh_single_quote(zlogin),
+    )
+}
+
+/// fish OSC 7 cwd reporting. `fish -C` runs init commands after the user's
+/// config, so the hook rides in without touching any config file. The whole
+/// command must itself be fish syntax — sshd runs it with the user's (fish)
+/// login shell.
+pub(crate) fn fish_startup_command(directory: Option<&str>) -> String {
+    let directory = directory.map(str::trim).filter(|path| !path.is_empty());
+    let mut init = String::new();
+    if let Some(directory) = directory {
+        // Missing directory degrades to the login directory (never exit —
+        // a vanished pre-disconnect cwd must not kill the restored shell).
+        init.push_str(&format!("cd -- {}; or true; ", sh_single_quote(directory)));
+    }
+    // In fish single quotes `\\` collapses to `\`, so printf needs `\\\\` to
+    // receive `\\` (ESC + ST terminator).
+    init.push_str(
+        r#"function __nexterm_report_cwd --on-event fish_prompt; printf '\033]7;file://%s%s\033\\\\' $hostname (string replace --all '?' '%3F' (string replace --all '#' '%23' (string replace --all ' ' '%20' (string replace --all '%' '%25' $PWD)))); end"#,
+    );
+    // Executed-command reporting: fish_preexec gets the full command line on
+    // every submission (base64 keeps the OSC payload framing-safe; string
+    // join unwraps GNU base64's 76-column folding without quoting hazards).
+    init.push_str(
+        r#"; function __nexterm_report_cmd --on-event fish_preexec; printf '\033]7777;%s\033\\\\' (printf %s $argv[1] | base64 | string join ''); end"#,
+    );
+    format!(
+        concat!(
+            r#"set -l __nexterm_shell fish; test -n "$SHELL"; and set -l __nexterm_shell $SHELL; "#,
+            r#"exec $__nexterm_shell -i -C {init}"#,
+        ),
+        init = sh_single_quote(&init),
     )
 }
 
@@ -935,25 +1101,41 @@ impl SshClient {
         default_directory: Option<&str>,
     ) -> Result<PtySession> {
         if let Some(session) = &self.session {
-            let bash_version = tokio::time::timeout(
+            // Detect the login shell (and, for bash, its version) so the
+            // right OSC 7 cwd-reporting integration can be injected. Probe
+            // failures degrade to a plain shell request.
+            let (shell_kind, bash_version) = tokio::time::timeout(
                 Duration::from_secs(2),
-                self.execute_command(BASH_VERSION_PROBE),
+                self.execute_command(SHELL_PROBE),
             )
             .await
-            .inspect_err(|_| tracing::debug!("[ssh] bash version probe timed out"))
+            .inspect_err(|_| tracing::debug!("[ssh] shell probe timed out"))
             .ok()
             .and_then(|r| {
                 if let Err(e) = &r {
-                    tracing::debug!("[ssh] bash version probe failed: {e}");
+                    tracing::debug!("[ssh] shell probe failed: {e}");
                 }
                 r.ok()
             })
-            .and_then(|output| bash_version_from_probe(&output));
+            .map(|output| shell_probe_results(&output))
+            .unwrap_or((ShellKind::Generic, None));
 
             // Open a new SSH channel
             let mut channel = session.channel_open_session().await.map_err(|e| {
                 anyhow::anyhow!("Failed to open PTY channel (session may have dropped): {e}")
             })?;
+            // Propagate a UTF-8 locale like the OpenSSH client does
+            // (`SendEnv LANG LC_*`). Without it servers default to the C
+            // locale and zsh mangles multi-byte input — CJK paths typed in
+            // the terminal arrive as `?` on the remote side. Best-effort:
+            // servers without `AcceptEnv LANG` ignore the request.
+            let locale = std::env::var("LC_ALL")
+                .or_else(|_| std::env::var("LC_CTYPE"))
+                .or_else(|_| std::env::var("LANG"))
+                .ok()
+                .filter(|value| value.contains("UTF-8"))
+                .unwrap_or_else(|| "C.UTF-8".to_string());
+            let _ = channel.set_env(false, "LANG", &locale).await;
             // Request PTY with terminal type and dimensions
             // Similar to ttyd's approach: xterm-256color terminal
             channel
@@ -971,15 +1153,23 @@ impl SshClient {
 
             // A `cd` written after request_shell goes through readline and is
             // therefore saved in the remote shell's Up-arrow history. For
-            // Bash sessions start the login shell through an exec request
-            // after changing directory instead: the setup command never
-            // reaches readline, while ~/.bash_profile semantics are retained.
+            // known shells start the login shell through an exec request
+            // instead: the setup command never reaches readline, profile
+            // semantics are retained, and the OSC 7 cwd hook is installed so
+            // the file browser can follow the terminal's directory.
             let default_directory = default_directory
                 .map(str::trim)
                 .filter(|dir| !dir.is_empty());
-            if let Some(version) = bash_version {
+            let startup_command = match shell_kind {
+                ShellKind::Bash => bash_version
+                    .map(|version| bash_startup_command(version, default_directory)),
+                ShellKind::Zsh => Some(zsh_startup_command(default_directory)),
+                ShellKind::Fish => Some(fish_startup_command(default_directory)),
+                ShellKind::Generic => None,
+            };
+            if let Some(command) = startup_command {
                 channel
-                    .exec(true, bash_startup_command(version, default_directory))
+                    .exec(true, command)
                     .await
                     .map_err(|e| {
                         anyhow::anyhow!("Failed to start shell in default directory: {e}")

@@ -140,6 +140,17 @@ const OUTPUT_FLUSH_INTERVAL_MS: u128 = 10;
 /// the message-dispatch loop.  Output frames use blocking sends instead.
 const CONTROL_SEND_TIMEOUT_MS: u64 = 100;
 
+/// Server-side WebSocket heartbeat interval.  Pings keep localhost and
+/// proxy-intermediated transports from being reaped as idle.
+const WS_HEARTBEAT: Duration = Duration::from_secs(15);
+
+/// Maximum silence tolerated on an established transport: three heartbeat
+/// windows without ANY inbound frame (a healthy browser answers pings at the
+/// native layer even while its JS is suspended, so real silence means the
+/// socket is dead).  Closing promptly lets the frontend's resume path reattach
+/// the same remote shell instead of hanging on a corpse connection.
+const WS_READ_DEADLINE: Duration = Duration::from_secs(45);
+
 /// Command byte that identifies a binary PTY output frame sent to the frontend.
 const BINARY_OUTPUT_CMD: u8 = 0x01;
 
@@ -309,6 +320,13 @@ impl WebSocketServer {
         WEBSOCKET_PORT.store(bound_port, Ordering::SeqCst);
         tracing::info!("WebSocket port stored: {}", bound_port);
 
+        self.serve_listener(listener).await
+    }
+
+    /// Accept loop over an already-bound listener. Split from [`Self::start`]
+    /// so live tests can serve on an ephemeral port instead of the fixed
+    /// 9001-9010 range.
+    pub async fn serve_listener(self: Arc<Self>, listener: TcpListener) -> Result<()> {
         loop {
             match listener.accept().await {
                 Ok((stream, addr)) => {
@@ -342,7 +360,7 @@ impl WebSocketServer {
         // Forward messages from the bounded channel to the WebSocket.
         let sender_cancel = transport_cancel.clone();
         let ws_sender_task = tokio::spawn(async move {
-            let mut heartbeat = tokio::time::interval(Duration::from_secs(15));
+            let mut heartbeat = tokio::time::interval(WS_HEARTBEAT);
             heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             heartbeat.tick().await;
             loop {
@@ -358,11 +376,24 @@ impl WebSocketServer {
             }
         });
 
-        // Handle incoming WebSocket messages
+        // Handle incoming WebSocket messages.  The read side is bounded by
+        // WS_READ_DEADLINE so a silently-dead peer (no pong, no FIN) is
+        // detected within three heartbeat windows instead of hanging until
+        // TCP gives up on its own.
         loop {
             let msg = tokio::select! {
                 _ = transport_cancel.cancelled() => break,
-                msg = ws_receiver.next() => match msg { Some(msg) => msg, None => break },
+                msg = tokio::time::timeout(WS_READ_DEADLINE, ws_receiver.next()) => match msg {
+                    Ok(Some(msg)) => msg,
+                    Ok(None) => break,
+                    Err(_) => {
+                        tracing::warn!(
+                            "WebSocket transport silent for {}s (no pong); closing for reattach",
+                            WS_READ_DEADLINE.as_secs()
+                        );
+                        break;
+                    }
+                },
             };
             match msg {
                 Ok(Message::Binary(data)) => {

@@ -557,6 +557,35 @@ export function terminalGroupReducer(
       };
     }
 
+    case 'UPDATE_TAB_WORKING_DIRECTORY': {
+      const { tabId, directory } = action;
+      const groupId = state.tabToGroupMap[tabId];
+      if (!groupId) return state;
+
+      const group = state.groups[groupId];
+      if (!group) return state;
+
+      const tabIndex = group.tabs.findIndex((t) => t.id === tabId);
+      if (tabIndex === -1) return state;
+
+      const newTabs = [...group.tabs];
+      // `null` clears a stale directory (e.g. the path no longer applies);
+      // every OSC 7 report overwrites the previous value.
+      const updated: TerminalTab = { ...newTabs[tabIndex] };
+      if (directory === null) delete updated.lastWorkingDirectory;
+      else updated.lastWorkingDirectory = directory;
+      newTabs[tabIndex] = updated;
+
+      return {
+        ...state,
+        groups: {
+          ...state.groups,
+          [groupId]: { ...group, tabs: newTabs },
+        },
+      };
+    }
+
+
     case 'RECONNECT_TAB': {
       const { tabId } = action;
       const groupId = state.tabToGroupMap[tabId];

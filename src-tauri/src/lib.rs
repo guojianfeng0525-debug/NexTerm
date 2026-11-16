@@ -1,7 +1,10 @@
+mod app_activity;
 mod clipboard_files;
 mod commands;
 mod config_archive;
-mod connection_manager;
+/// Public for live integration tests (`tests/keepalive_live.rs`) that drive
+/// the real connection + PTY pipeline against Docker SSH fixtures.
+pub mod connection_manager;
 pub mod db;
 /// Desktop (RDP/VNC) protocol layer. Public for live integration tests
 /// (`tests/rdp_live.rs`) that exercise the real connection pipeline.
@@ -28,7 +31,9 @@ pub mod ssh;
 mod toolbox;
 mod upload;
 pub mod vnc_client;
-mod websocket_server;
+/// Public for live integration tests (`tests/keepalive_live.rs`) that drive
+/// the full PTY-over-WebSocket stack against Docker SSH fixtures.
+pub mod websocket_server;
 
 pub mod builder;
 pub mod compile;

@@ -24,6 +24,7 @@ import { useTerminalCallbacks } from '../lib/terminal-callbacks-context';
 import { prefGet } from '../lib/preferences';
 import { APP_SETTINGS_STORAGE_KEY, APP_SETTINGS_CHANGED_EVENT } from '@/lib/keyboard-shortcuts';
 import { registerTerminalWorkingDirectoryHandler } from '../lib/terminal-working-directory';
+import { createOscCommandExtractor } from '../lib/terminal-command-report';
 import { TERMINAL_COMMAND_EVENT, type TerminalCommandDetail } from '../lib/terminal-commands';
 import { SCOPE_GLOBAL } from '../lib/suggestion/types';
 import { isAlternateBuffer, isInputInPromptContext, isPasteStart, isPasteEnd, normalizeSuggestionDebounceMs } from '../lib/suggestion/gate';
@@ -432,6 +433,16 @@ export function PtyTerminal({
   /** How long to wait after a full-reconnect call before assuming it failed
    *  and scheduling the next backoff attempt (ms). */
   const RECONNECT_PROBE_MS = 15_000;
+
+  // ── executed-command recording ────────────────────────────────────────────
+  // Preferred source: the remote shell integration reports every submitted
+  // command via OSC 7777 (exact text — multi-line, pasted, history-recalled).
+  // The legacy keystroke-replay path below stays only as a fallback for
+  // shells without integration; it mis-records on ↑ history recall, pastes,
+  // tab completion and soft-wrapped lines.
+  const oscCommandReportingRef = React.useRef(false);
+  const commandExtractorRef = React.useRef<ReturnType<typeof createOscCommandExtractor> | null>(null);
+  const recordCommandRef = React.useRef<((command: string) => void) | null>(null);
   
   // Auto-reconnect attempt counter (kept across the backoff loop; only
   // informational — the loop never stops on its own).
@@ -591,6 +602,9 @@ export function PtyTerminal({
       /* suggestion learning must never break the terminal */
     }
   };
+  // Keep the OSC 7777 extractor able to call the latest recordCommand
+  // (it is recreated every render and captured by a long-lived effect).
+  recordCommandRef.current = recordCommand;
 
   /** Curated static options for the current command (from COMMAND_CANDIDATES). */
   const curatedOptionsFor = (input: string): string[] => {
@@ -643,8 +657,13 @@ export function PtyTerminal({
       }
 
       if (ch === '\r' || ch === '\n') {
-        // Command submitted — remember it for future suggestions.
-        recordCommand(inputBufferRef.current);
+        // Command submitted. When the remote shell reports executed commands
+        // via OSC 7777, that stream is authoritative (exact text incl.
+        // history recall / pastes / multi-line); this keystroke replay is
+        // only the fallback for shells without integration.
+        if (!oscCommandReportingRef.current) {
+          recordCommand(inputBufferRef.current);
+        }
         inputBufferRef.current = '';
         setSuggestionsVisible(false);
         suggestionsVisibleRef.current = false;
@@ -914,6 +933,13 @@ export function PtyTerminal({
       term.parser,
       (path) => onWorkingDirectoryChange?.(connectionId, path),
     );
+    // Strip + decode OSC 7777 executed-command reports from the output
+    // stream before they reach xterm. First report flips the terminal into
+    // hook mode, disabling the keystroke-replay recording fallback.
+    commandExtractorRef.current = createOscCommandExtractor((command) => {
+      oscCommandReportingRef.current = true;
+      recordCommandRef.current?.(command);
+    });
 
     const fitAddon = new FitAddon();
     const webLinks = new WebLinksAddon();
@@ -1564,7 +1590,14 @@ export function PtyTerminal({
           if (frameConnectionId !== connectionId) return;
           const payload = data.subarray(payloadOffset);
           if (payload.length === 0) return;
-          enqueueOutput(outputDecoder.decode(payload, { stream: true }));
+          const decoded = outputDecoder.decode(payload, { stream: true });
+          const extractor = commandExtractorRef.current;
+          if (!extractor) {
+            enqueueOutput(decoded);
+            return;
+          }
+          const cleaned = extractor.push(decoded);
+          if (cleaned) enqueueOutput(cleaned);
           return;
         }
 
@@ -1597,6 +1630,13 @@ export function PtyTerminal({
                 }
                 ptyGenerationRef.current = msg.generation;
                 console.log(`[PTY Terminal] [${connectionId}] PTY generation: ${msg.generation}`);
+                // Fresh shell: drop any stale OSC 7777 state and re-probe
+                // whether the new session reports executed commands.
+                oscCommandReportingRef.current = false;
+                commandExtractorRef.current = createOscCommandExtractor((command) => {
+                  oscCommandReportingRef.current = true;
+                  recordCommandRef.current?.(command);
+                });
                 signalReady(connectionId);
                 // Credit-based flow control: seed the pipeline with initial
                 // credits so the PTY reader can start sending immediately.
@@ -1889,6 +1929,7 @@ export function PtyTerminal({
       document.removeEventListener('visibilitychange', handleVisibilityChange);
       window.removeEventListener('focus', recoverFromOcclusion);
       recoverRendererRef.current = null;
+      commandExtractorRef.current = null;
       resizeObserver.disconnect();
       if (selectionDoc) {
         selectionDoc.removeEventListener('mousedown', trackSelectionDragStart, true);

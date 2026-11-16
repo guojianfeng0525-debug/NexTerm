@@ -182,38 +182,138 @@ mod ssh_contract_tests {
 mod shell_integration_tests {
     use crate::sftp_client::list_sftp_dir;
     use crate::ssh::{
-        bash_shell_integration_command, bash_startup_command, bash_version_from_probe, AuthMethod,
-        BashVersion, PtySession, SshClient, SshConfig,
+        bash_shell_integration_command, bash_startup_command, fish_startup_command,
+        parse_major_minor, shell_kind_from_path, shell_probe_results, sh_single_quote,
+        zsh_startup_command, AuthMethod, BashVersion, PtySession, SshClient, SshConfig,
     };
     use std::time::Duration;
     use tokio::time::{timeout, Instant};
 
     #[test]
     fn parses_major_and_minor_from_bash_probe_results() {
-        assert_eq!(
-            bash_version_from_probe("__NEXTERM_BASH_VERSION__5.2.37(1)-release"),
-            Some(BashVersion { major: 5, minor: 2 })
-        );
-        assert_eq!(
-            bash_version_from_probe("profile output\n__NEXTERM_BASH_VERSION__4.4.20(1)-release"),
-            Some(BashVersion { major: 4, minor: 4 })
-        );
-        assert_eq!(
-            bash_version_from_probe("__NEXTERM_BASH_VERSION__5.1.0"),
-            Some(BashVersion { major: 5, minor: 1 })
-        );
+        assert_eq!(parse_major_minor("5.2.37(1)-release"), Some(BashVersion { major: 5, minor: 2 }));
+        assert_eq!(parse_major_minor("4.4.20(1)-release"), Some(BashVersion { major: 4, minor: 4 }));
+        assert_eq!(parse_major_minor("5.1.0"), Some(BashVersion { major: 5, minor: 1 }));
     }
 
     #[test]
     fn rejects_missing_or_malformed_bash_probe_results() {
-        for output in [
-            "__NEXTERM_BASH_VERSION__",
-            "__NEXTERM_BASH_VERSION__five.two",
-            "__NEXTERM_BASH_VERSION__5",
-            "5.2.37",
-        ] {
-            assert_eq!(bash_version_from_probe(output), None, "output: {output:?}");
+        for text in ["", "five.two", "5", "junk"] {
+            assert_eq!(parse_major_minor(text), None, "text: {text:?}");
         }
+    }
+
+    #[test]
+    fn shell_probe_classifies_shells_and_versions() {
+        use crate::ssh::ShellKind::*;
+        assert_eq!(
+            shell_probe_results("__NEXTERM_SHELL_PROBE__/bin/bash|5.2.37(1)-release"),
+            (Bash, Some(BashVersion { major: 5, minor: 2 }))
+        );
+        assert_eq!(
+            shell_probe_results("banner noise\n__NEXTERM_SHELL_PROBE__/usr/bin/zsh|"),
+            (Zsh, None)
+        );
+        assert_eq!(
+            shell_probe_results("__NEXTERM_SHELL_PROBE__/usr/bin/fish|"),
+            (Fish, None)
+        );
+        // No marker at all (probe failed / exotic shell): degrade to generic.
+        assert_eq!(shell_probe_results("connection closed"), (Generic, None));
+    }
+
+    #[test]
+    fn shell_kind_matches_login_shell_basenames() {
+        use crate::ssh::ShellKind::*;
+        assert_eq!(shell_kind_from_path("/bin/bash"), Bash);
+        assert_eq!(shell_kind_from_path("/usr/local/bin/bash"), Bash);
+        assert_eq!(shell_kind_from_path("/bin/zsh"), Zsh);
+        assert_eq!(shell_kind_from_path("/usr/bin/fish"), Fish);
+        assert_eq!(shell_kind_from_path("/bin/sh"), Generic);
+        assert_eq!(shell_kind_from_path("/bin/tcsh"), Generic);
+        assert_eq!(shell_kind_from_path(""), Generic);
+    }
+
+    #[test]
+    fn single_quote_escaping_covers_posix_and_fish() {
+        assert_eq!(sh_single_quote("plain"), "'plain'");
+        assert_eq!(sh_single_quote(""), "''");
+        assert_eq!(sh_single_quote("it's"), "'it'\\''s'");
+        // Embedded payloads stay inside one POSIX/fish-compatible unit.
+        assert!(sh_single_quote("a'b'c").starts_with('\''));
+        assert!(sh_single_quote("a'b'c").ends_with('\''));
+    }
+
+    #[test]
+    fn zsh_startup_command_structure() {
+        let command = zsh_startup_command(Some("/srv/release files"));
+        assert!(command.contains("mktemp -d"), "must stage a ZDOTDIR proxy dir");
+        assert!(command.contains(r#""$__nexterm_zdot/.zshrc""#), "must write a .zshrc shim");
+        assert!(command.contains(".zshenv"));
+        assert!(command.contains(".zprofile"));
+        assert!(command.contains(".zlogin"));
+        assert!(command.contains(r#"precmd_functions+=(__nexterm_report_cwd)"#));
+        assert!(command.contains(r#""${SHELL:-/bin/zsh}" -l -i"#));
+        assert!(command.contains("/srv/release files"), "default directory must be embedded");
+        assert!(command.contains("zshexit_functions+=(__nexterm_cleanup)"));
+        // No default directory: no cd, everything else stays.
+        let bare = zsh_startup_command(None);
+        assert!(!bare.contains("cd --"));
+        assert!(bare.contains("precmd_functions+="));
+    }
+
+    #[test]
+    fn fish_startup_command_structure() {
+        let command = fish_startup_command(Some("/srv/release files"));
+        assert!(command.contains(r#"exec $__nexterm_shell -i -C"#));
+        assert!(command.contains("--on-event fish_prompt"));
+        // The ST terminator needs printf to see "\\": fish single quotes
+        // collapse "\\\\" to "\\".
+        assert!(command.contains(r#"'\033]7;file://%s%s\033\\\\'"#));
+        // The init payload sits inside an outer single-quoted string, so the
+        // inner quotes around the directory are escaped as '\''.
+        assert!(command.contains("cd --"));
+        assert!(command.contains("/srv/release files"));
+        // cd failure degrades to the login directory — never `or exit`
+        // (a vanished pre-disconnect cwd must not kill the restored shell).
+        assert!(command.contains("or true"));
+        // A directory containing a single quote must survive the double
+        // quoting (inner -C payload + outer command string); exact runtime
+        // behaviour is verified by the docker live test.
+        let bare = fish_startup_command(Some("it's dir"));
+        assert!(bare.contains("it") && bare.contains("s dir"));
+        assert!(!fish_startup_command(None).contains("cd --"));
+    }
+
+    #[test]
+    fn all_shells_report_executed_commands_via_osc_7777() {
+        // bash: PROMPT_COMMAND must run BOTH hooks, and the command hook
+        // reads the executed entry via fc (multi-line + HISTCONTROL-safe).
+        for version in [
+            BashVersion { major: 4, minor: 4 },
+            BashVersion { major: 5, minor: 2 },
+        ] {
+            let command = String::from_utf8(bash_shell_integration_command(version)).unwrap();
+            let has_both_hooks = command.contains("__nexterm_report_cwd __nexterm_report_cmd")
+                || command.contains("\\n__nexterm_report_cwd\\n__nexterm_report_cmd");
+            assert!(has_both_hooks, "PROMPT_COMMAND must include the command hook: {command:?}");
+            assert!(command.contains("builtin history 1"));
+            assert!(command.contains("__nexterm_last_no"));
+            assert!(command.contains("]7777;"));
+            assert!(command.contains("| base64"));
+        }
+
+        // zsh: zshaddhistory receives the exact submitted line.
+        let zsh = zsh_startup_command(None);
+        assert!(zsh.contains("zshaddhistory_functions+=(__nexterm_report_cmd)"));
+        assert!(zsh.contains("]7777;"));
+        assert!(zsh.contains("| base64"));
+
+        // fish: fish_preexec receives the exact submitted line.
+        let fish = fish_startup_command(None);
+        assert!(fish.contains("--on-event fish_preexec"));
+        assert!(fish.contains("]7777;"));
+        assert!(fish.contains("| base64"));
     }
 
     #[test]
@@ -224,7 +324,10 @@ mod shell_integration_tests {
             BashVersion { major: 5, minor: 0 },
         ] {
             let command = String::from_utf8(bash_shell_integration_command(version)).unwrap();
-            assert!(command.contains("PROMPT_COMMAND+=$'\\n__nexterm_report_cwd'"));
+            assert!(
+                command
+                    .contains("PROMPT_COMMAND+=$'\\n__nexterm_report_cwd\\n__nexterm_report_cmd'")
+            );
             assert!(!command.contains("PROMPT_COMMAND=(\"${PROMPT_COMMAND[@]}\""));
         }
     }
@@ -238,7 +341,9 @@ mod shell_integration_tests {
         ] {
             let command = String::from_utf8(bash_shell_integration_command(version)).unwrap();
             assert!(
-                command.contains("PROMPT_COMMAND=(\"${PROMPT_COMMAND[@]}\" __nexterm_report_cwd)")
+                command.contains(
+                    "PROMPT_COMMAND=(\"${PROMPT_COMMAND[@]}\" __nexterm_report_cwd __nexterm_report_cmd)"
+                )
             );
         }
     }
@@ -319,6 +424,106 @@ mod shell_integration_tests {
         assert!(!history.contains("__nexterm_report_cwd"));
         assert!(!history.contains("--rcfile"));
         assert!(!stderr.contains("syntax error"));
+    }
+
+    /// Extract the path from an OSC 7 report: `...file://<host><path>ESC \`.
+    /// Hostnames never contain `/`, so the path starts at the first `/`
+    /// after `file://`. Returns every reported path in order.
+    fn osc7_paths(output: &str) -> Vec<String> {
+        let mut paths = Vec::new();
+        let mut rest = output;
+        while let Some(idx) = rest.find("]7;file://") {
+            rest = &rest[idx + "]7;file://".len()..];
+            let Some(end) = rest.find('\x1b') else { break };
+            let report = &rest[..end];
+            if let Some(slash) = report.find('/') {
+                paths.push(report[slash..].to_string());
+            }
+            rest = &rest[end..];
+        }
+        paths
+    }
+
+    /// Percent-escape a path the way the shell hooks do (% first, then the
+    /// characters the escapes introduce).
+    fn osc7_escape(path: &str) -> String {
+        path.replace('%', "%25")
+            .replace(' ', "%20")
+            .replace('#', "%23")
+            .replace('?', "%3F")
+    }
+
+    #[test]
+    #[cfg(all(unix, target_os = "macos"))]
+    fn zsh_startup_reports_directory_preserves_profile_and_cleans_up() {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+        let fixture = tempfile::tempdir().unwrap();
+        let tmp_root = fixture.path().join("tmp");
+        std::fs::create_dir(&tmp_root).unwrap();
+        let history = fixture.path().join("history");
+        let working = fixture.path().join("release files'测试");
+        std::fs::create_dir(&working).unwrap();
+        std::fs::write(
+            fixture.path().join(".zshrc"),
+            format!(
+                "HISTFILE='{}'; SAVEHIST=100; PS1='fixture> '; printf 'profile-hook\\n';",
+                history.display()
+            ),
+        )
+        .unwrap();
+        let mut command = zsh_startup_command(working.to_str());
+        command = command.replace("${SHELL:-/bin/zsh}", "/bin/zsh");
+        let mut child = Command::new("/bin/zsh")
+            .arg("-c")
+            .arg(command)
+            .env("HOME", fixture.path())
+            .env("TMPDIR", &tmp_root)
+            .env("SHELL", "/bin/zsh")
+            .env_remove("ZDOTDIR")
+            .env_remove("HISTFILE")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"printf 'user-command\\n'\nhistory\nexit\n")
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("]7;file://"), "OSC 7 sequence missing");
+        let reported = osc7_paths(&stdout);
+        assert!(
+            reported.contains(&osc7_escape(working.to_str().unwrap())),
+            "OSC 7 must report the default directory exactly; got {reported:?}"
+        );
+        assert!(
+            !reported.iter().any(|path| path.starts_with("%")),
+            "zsh substitutions must not misparse (leading % escape): {reported:?}"
+        );
+        assert!(stdout.contains("profile-hook"), "user .zshrc must be sourced");
+        let history = std::fs::read_to_string(&history).unwrap_or_default();
+        assert!(!history.contains("__nexterm_report_cwd"));
+        assert!(!history.contains("ZDOTDIR"));
+        // The ZDOTDIR staging directory must be removed by the zshexit hook.
+        let leftovers: Vec<_> = std::fs::read_dir(&tmp_root)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("nexterm-zsh."))
+            .collect();
+        assert!(leftovers.is_empty(), "ZDOTDIR staging dirs must be cleaned");
     }
 
     async fn read_until(pty: &PtySession, needle: &[u8]) -> Vec<u8> {

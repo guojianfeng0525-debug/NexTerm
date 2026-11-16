@@ -19,9 +19,12 @@ import { FileBrowserView } from '../file-browser-view';
 import { DesktopViewer } from '../desktop-viewer';
 import { FileEditorView } from '../file-editor-view';
 
-/** Default directory for a tab: read from the saved connection (fall back to
- *  the tab id itself, which is the original connection id for normal tabs). */
-function defaultDirectoryForTab(tab: TerminalTab): string | undefined {
+/** Default directory for a tab: the pre-disconnect cwd wins (session restore
+ *  semantics — a reconnecting shell goes back to where the user was), then
+ *  the saved connection's configured directory (fall back to the tab id
+ *  itself, which is the original connection id for normal tabs). */
+export function defaultDirectoryForTab(tab: TerminalTab): string | undefined {
+  if (tab.lastWorkingDirectory) return tab.lastWorkingDirectory;
   const sourceId = tab.originalConnectionId || tab.id;
   const connection = ConnectionStorageManager.getConnection(sourceId);
   return connection?.terminalStartupMode === 'disabled' ? undefined : connection?.defaultDirectory;

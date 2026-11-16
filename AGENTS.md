@@ -284,6 +284,54 @@ VS Code-like resizable panel layout with presets:
     must be handled through an explicit trust/CA flow if that feature is added,
     not through a silent global bypass.
 
+20. **Keepalive only works while the process is awake** (`app_activity.rs`): on
+    macOS, App Nap freezes ALL of a hidden app's timers — including the tokio
+    runtime that drives russh's `keepalive_interval` and the WS heartbeat.
+    Servers with `ClientAliveInterval` (or NAT middleboxes) then reap the idle
+    TCP connection and the user sees a surprise reconnect ("保活没生效" while the
+    code was simply frozen). `ConnectionManager` holds an
+    `NSProcessInfo.beginActivity(UserInitiatedAllowingIdleSystemSleep)` token
+    while any SSH/SFTP/FTP/desktop connection exists. Two invariants:
+    `release_activity_if_idle()` takes read locks on all four connection maps —
+    callers must NOT hold any of those map write locks when calling it (a
+    write-then-read on the same tokio RwLock self-deadlocks, which once hung
+    `close_connection` forever); and the WS read loop enforces a 45s pong
+    deadline so a silently-dead transport is closed for reattach instead of
+    hanging until TCP gives up.
+
+21. **PTY shell integration is per-shell and locale-sensitive**
+    (`ssh/mod.rs`): OSC 7 cwd reporting (what the file browser's
+    follow-terminal-directory feature consumes) AND OSC 7777 executed-command
+    reporting (what the command-history/record feature consumes) are injected
+    via a probe + exec-startup: bash (`--rcfile`), zsh (ZDOTDIR temp-dir proxy
+    with .zshenv/.zprofile/.zshrc/.zlogin shims + `precmd_functions` +
+    `zshaddhistory` hooks + zshexit cleanup), fish (`-C` init + `--on-event
+    fish_prompt` + `--on-event fish_preexec`). Hard-won constraints:
+    (a) the shell probe must use plain `$SHELL`/`$BASH_VERSION` syntax —
+    `${VAR-default}` is a fish syntax error and breaks detection; (b) zsh
+    `${p//pat/repl}` misparses bash-style unquoted patterns (`//#` becomes a
+    start-anchor with an EMPTY pattern i.e. prepend, a bare `%` inserts
+    instead of replacing, `"\?"` never matches) — always double-quote the
+    pattern: `${p//"%"/%25}`, `${p//" "/"%20"}`, `${p//"#"/%23}`,
+    `${p//"?"/%3F}`; (c) `create_pty_session` propagates a UTF-8 client locale
+    via channel `set_env("LANG", …)` (OpenSSH `SendEnv` semantics) — without
+    it zsh runs in the C locale and CJK path input arrives as `?` on the
+    server. Command reporting details: bash reads `builtin history 1` from
+    PROMPT_COMMAND and gates on HISTORY-NUMBER monotonicity — comparing
+    command TEXT would mis-report the disk `.bash_history` tail (loaded at
+    startup) as this session's first command, and `fc -ln -1` has the same
+    trap; the number gate also makes the hook follow the user's HISTCONTROL
+    (`ignoredups`/`ignorespace` entries are never numbered, so they stay
+    silent). zsh uses `zshaddhistory` (exact submitted line) and fish uses
+    `fish_preexec`. Payloads are base64 (never percent) so arbitrary command
+    bytes cannot break the OSC framing; the frontend strips/parses OSC 7777
+    from the output stream BEFORE xterm (`terminal-command-report.ts`) and
+    only falls back to the legacy keystroke-replay recorder (which mis-records
+    on ↑ recall/paste/tab-completion/soft-wrap) for shells without
+    integration. Live tests: `tests/keepalive_live.rs` against
+    `e2e/fixtures/ssh-idle` (bash/zsh/fish users + aggressive-ClientAlive
+    sshd + socat idle-killer middlebox).
+
 ---
 
 ## Debugging
