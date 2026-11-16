@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.20.0] - 2026-11-16
+
+### 🔖 NexTerm 2.20.0 — 连接可靠性、命令记录与目录恢复
+
+### Changed
+
+- 有任一 SSH/SFTP/FTP/远程桌面连接时，macOS 下持有系统活动令牌阻止 App Nap 冻结进程：保活心跳（SSH 协议级 + WebSocket 15 秒）在窗口隐藏时照常发送，空闲会话不再被服务器 ClientAliveInterval 或 NAT 静默回收；全部连接断开后自动释放令牌，不影响合盖睡眠。
+- WebSocket 传输增加 45 秒 Pong 看门狗：对端静默死亡时快速关闭传输，由前端已有的“会话保留”机制原地重挂同一远程 shell，而不是挂到 TCP 超时。
+- 终端会话按 OpenSSH 惯例向服务器传递 UTF-8 语言环境（LANG）：zsh 不再因 C 语言环境把中文路径输入变成 `?`。
+- 终端命令记录改为 shell 端上报真实提交的命令行（OSC 7777 + Base64）：多行、粘贴、Tab 补全、上下键调历史执行均原样记录；bash 经 history 编号单调门控自动跟随用户 HISTCONTROL（ignoredups/ignorespace 不误记、不重记），zsh 使用 zshaddhistory、fish 使用 fish_preexec。无 shell 集成的环境保留按键回放作为回退。
+
+### Fixed
+
+- 修复空闲一段时间后连接自动断开重连、保活“配置了但没生效”的问题（根因是 App Nap 冻结整个进程导致保活定时器停摆）；同时修复由此引入路径上的关闭连接自死锁——此前断开连接可能永久卡死。
+- 文件管理器目录跟随扩展到 zsh 与 fish 服务器：自动探测登录 shell 并注入对应的 OSC 7 目录上报（zsh 经 ZDOTDIR 代理保留全部启动文件语义并自动清理，fish 经 `-C` 初始化），修复此前仅 bash 生效导致的“目录不联动”。
+- 修复命令记录截断与内容错误：旧实现靠前端模拟 readline 缓冲，↑↓ 调历史、粘贴、Tab 补全、长命令软换行四类场景必然记空或记偏。
+- 断线完全重连后自动回到断线前所在目录（而非连接初始目录）；断线期间远程目录若已被删除，降级回登录目录而不是杀死新 shell（避免重连死循环）。
+
+### Validation
+
+- 新增 Docker 真实容器测试 `tests/keepalive_live.rs`（fixture `e2e/fixtures/ssh-idle`：bash/zsh/fish 用户 + ClientAliveInterval=5 攻击性 sshd + socat 空闲杀手中间件），10 项全部通过：含 45 秒空闲存活、空闲杀手中间件下 5 秒保活存活（对照组验证无保活确实被杀）、全栈（ConnectionManager + WebSocket + SSH）40 秒空闲后同一 shell 仍可交互、三种 shell 的目录上报/命令上报精确断言、消失目录降级。
+- 前端单元测试 1384 项通过、ESLint 0 错误；Rust 单元测试 436 项通过；翻译键一致性检查通过。
+
+### Contributors
+
+- [@guojianfeng0525-debug](https://github.com/guojianfeng0525-debug)
+
 ## [2.19.6] - 2026-10-14
 
 ### 🔖 NexTerm 2.19.6 — 文件管理与上传确认修复

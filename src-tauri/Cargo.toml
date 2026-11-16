@@ -1,6 +1,6 @@
 [package]
 name = "nexterm"
-version = "2.19.6"
+version = "2.20.0"
 description = "A Tauri App"
 authors = ["you"]
 edition = "2021"
